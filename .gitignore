@@ -1,0 +1,22 @@
+# Rust
+/target
+Cargo.lock
+
+# libgpod binaries are platform-specific and large
+/vendor/libgpod/bin/*.dll
+/vendor/libgpod/bin/*.pdb
+
+# Build artifacts
+*.exe
+*.pdb
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Project state (manifest lives in %APPDATA%, but be safe)
+/manifest.json

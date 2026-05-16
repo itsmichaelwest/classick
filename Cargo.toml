@@ -1,0 +1,16 @@
+[package]
+name = "ipod-sync"
+version = "0.0.1"
+edition = "2021"
+description = "Windows-native FLAC-to-iPod-Classic sync with on-the-fly ALAC transcoding"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "ipod-sync"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+
+[build-dependencies]
+bindgen = "0.69"
