@@ -18,6 +18,29 @@ Forward-looking capture of enhancements identified during the Phase 2 build. Not
 
 ---
 
+## Phase 3.x — Metadata-only smart-update
+
+**Scope:** when a source file's tags or embedded album art change but the audio itself is identical, skip the full re-transcode + re-copy and instead update only the iPod-side metadata + thumbnails in place.
+
+**Effort:** ~1-2 days.
+
+**Why it matters:** today's diff logic uses BLAKE3 of the first 1 MiB of the FLAC file as the fingerprint. FLAC's METADATA blocks (tags + PICTURE) live at the start of the file, well within that window — so any tag or art edit changes the fingerprint and forces a full `Modify` action (delete iPod track → re-transcode audio → re-cp_track → re-thumbnail). For a single file that's ~7 seconds wasted. For a batch metadata cleanup (e.g. fixing Plex-written bad art across 50+ tracks, surfaced during Phase 2 Gate C verification), it adds up to many minutes of pointless audio re-encoding when the audio frames haven't changed a single bit.
+
+**Design:**
+- Add `audio_fingerprint: String` field to `ManifestEntry` (additive, backwards-compat via `#[serde(default)]`).
+- New `source::audio_fingerprint(path)` helper: parse the FLAC structure via `claxon` or `metaflac`, hash ONLY the audio payload (skipping METADATA blocks).
+- Diff gains a new branch: when the file fingerprint differs from the manifest's file fingerprint BUT the audio fingerprint matches the manifest's audio fingerprint → emit `Action::MetadataOnly(SourceEntry, ManifestEntry)` instead of `Action::Modify`.
+- New `OwnedDb::update_track_metadata(dbid, tags, art) -> Result<()>` method: find existing track by dbid, call `apply_tags` for new tags + `itdb_track_set_thumbnails_from_data` for new art. No file copy, no track delete + re-add.
+- Orchestrator handles `MetadataOnly` as a fast cheap action: ~<1 sec per track instead of ~7 sec.
+
+**Migration:** existing Phase 2 manifests have no `audio_fingerprint`. First time the diff hits a slow-path-Modify on a Phase 2 manifest entry, it computes both fingerprints and writes the audio one into the updated manifest entry. Steady state achieved after one Modify per track.
+
+**Sequencing note:** Phase 3.x is independent of Phase 3 (format/encoder), Phase 4 (multi-iPod), and Phase 5 (daemon). Can slot in anywhere — possibly even BEFORE Phase 3 if the user is doing active source-library metadata cleanup (Phase 2 Gate C exposed exactly this need). My current lean: do Phase 3.x first, then Phase 3 (formats+encoder), then Phase 4 (multi-iPod), then Phase 5/6 in their existing order. But this is the user's call.
+
+**Out of scope for Phase 3.x:** retroactively re-fingerprinting the entire existing manifest on first run (would defeat the no-changes <5s fast-path). The migration is lazy — only files that are about to be Modify-ed anyway get audio-fingerprinted.
+
+---
+
 ## Phase 4 — Multiple iPods
 
 **Scope:** allow the tool to manage more than one iPod from the same machine. Each iPod gets its own manifest (keyed by serial), its own per-device exclude list / sync settings, and is identified by a user-chosen nickname plus the FirewireGuid-derived serial.

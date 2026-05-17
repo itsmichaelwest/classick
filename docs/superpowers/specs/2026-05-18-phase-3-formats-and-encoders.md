@@ -196,6 +196,7 @@ The existing `--ffmpeg <PATH>` stays unchanged.
 
 - **Piping intermediates** (ffmpeg stdout → refalac stdin) — Phase 4+ investigation per roadmap.
 - **Smart-playlist / play-count / ratings sync** — still SPEC §7 out of scope.
+- **Metadata-only smart-update** (tag or art edited but audio unchanged → skip re-encode + re-copy, just update iPod-side tags + thumbnails in place) — separate Phase 3.x in the roadmap. Adjacent to Phase 3's diff-logic changes but conceptually distinct enough to warrant its own spec + plan. Recommended to ship BEFORE Phase 3 if the user is actively cleaning up source-library metadata (Phase 2 Gate C exposed this need). See `2026-05-18-post-v1-roadmap.md` § "Phase 3.x — Metadata-only smart-update".
 - **Multi-iPod** — Phase 4.
 - **Daemon / tray / auto-sync** — Phase 5.
 - **GUI** — Phase 6.
