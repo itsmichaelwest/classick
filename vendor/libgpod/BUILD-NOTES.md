@@ -166,6 +166,14 @@ using VS Community 18 (Build Tools 14.51) at
 `C:\Program Files\Microsoft Visual Studio\18\Community`. Source the
 matching `vcvars64.bat` first so `dumpbin` and `lib` are on PATH.
 
+Note on the "18": Visual Studio 18 is the successor to VS 2022
+(internal version 17); it ships the MSVC 14.5x toolchain (vs 14.3x
+in VS 17). The `.lib` archive format produced by `lib /def` is
+unchanged from 14.3x, so this import library is compatible with any
+MSVC 14.x consumer -- a Rust crate built with the
+`x86_64-pc-windows-msvc` target on either VS 2022 or VS 18 will link
+against it without rebuilding.
+
 - 244 symbols exported from `bin/gpod.dll`
 - All four required spike symbols present: `itdb_parse`, `itdb_parse_file`, `itdb_free`, `itdb_track_new`, plus `itdb_write` and `itdb_write_file`
 - `lib/gpod.lib` machine type: `8664 (x64)`

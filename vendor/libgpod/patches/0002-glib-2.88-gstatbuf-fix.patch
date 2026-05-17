@@ -1,6 +1,23 @@
---- /c/src/libgpod-patches-orig/src/db-parse-context.c	2026-05-17 01:37:42.894474000 +0100
-+++ /c/src/libgpod/src/db-parse-context.c	2026-05-17 01:37:42.915002100 +0100
-@@ -180,7 +180,7 @@
+From: ipod-sync vendoring
+Subject: [PATCH 2/2] Fix struct stat -> GStatBuf for GLib 2.88's g_stat()
+
+Modern GLib (2.88) types g_stat()'s second parameter as GStatBuf*
+(= struct _stat64* on MinGW64), not struct stat*. Two call sites
+in libgpod 0.8.0 declared the local as struct stat, which now
+fails to compile with an incompatible-pointer-type error.
+
+Fix is one-line per file: change "struct stat stat_buf;" to
+"GStatBuf stat_buf;". The .st_size field is identical between the
+two structs on MinGW, so no other changes are needed.
+
+Apply with: cd <libgpod-src> && patch -p1 < 0002-*.patch
+        or: cd <libgpod-src> && git apply 0002-*.patch
+---
+diff --git a/src/db-parse-context.c b/src/db-parse-context.c
+index 88009c9..f4d4fe8 100644
+--- a/src/db-parse-context.c
++++ b/src/db-parse-context.c
+@@ -180,7 +180,7 @@ db_parse_context_new_from_file (const char *filename, Itdb_DB *db)
  	Itdb_Device *device;
  	GError* error;
  	GMappedFile* mapped_file;
@@ -9,9 +26,11 @@
  
  	ctx = NULL;
  	error = NULL;
---- /c/src/libgpod-patches-orig/src/itdb_tzinfo.c	2026-05-17 01:38:09.579945300 +0100
-+++ /c/src/libgpod/src/itdb_tzinfo.c	2026-05-17 01:38:09.600479600 +0100
-@@ -243,7 +243,7 @@
+diff --git a/src/itdb_tzinfo.c b/src/itdb_tzinfo.c
+index ded4dd2..6305090 100644
+--- a/src/itdb_tzinfo.c
++++ b/src/itdb_tzinfo.c
+@@ -243,7 +243,7 @@ G_GNUC_INTERNAL void itdb_device_set_timezone_info (Itdb_Device *device)
      gint16 raw_timezone;
      gint timezone = 0;
      gboolean result;

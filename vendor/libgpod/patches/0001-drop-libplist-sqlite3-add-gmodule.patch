@@ -1,6 +1,44 @@
---- /c/src/libgpod-patches-orig/configure.ac	2026-05-17 01:32:26.367107400 +0100
-+++ /c/src/libgpod/configure.ac	2026-05-17 01:38:49.028893300 +0100
-@@ -42,7 +42,7 @@
+From: ipod-sync vendoring
+Subject: [PATCH 1/2] Drop libplist + sqlite3 deps, add gmodule-2.0, stub itdb_sqlite.c
+
+MSYS2 ships only libplist 2.x; libgpod 0.8.0 uses the libplist 1.x
+API (plist_dict_insert_item, etc.) which was removed in 2.0. The
+only consumer is src/itdb_sqlite.c, which generates the iTunesCDB
+used by iPod nano 5G / Touch / iPhone -- all out of scope per
+SPEC section 7 (we target iPod Classic 7G, which uses the original
+iTunesDB handled by itdb_itunesdb.c).
+
+Changes:
+  * configure.ac: PKG_CHECK_MODULES(LIBGPOD, ...) -- drop sqlite3
+    and libplist; add gmodule-2.0 (itdb_hashAB.c uses GModule but
+    the fadingred branch's pkg-config line omitted it).
+  * Makefile.am: drop the tools/ subdir from SUBDIRS (its sole
+    binary ipod-read-sysinfo-extended pulls in libplist 1.x via
+    ipod-lockdown.c and we don't ship tools).
+  * src/Makefile.am: drop itdb_sqlite_queries.h from noinst_HEADERS.
+  * src/itdb_sqlite.c: replaced with a no-op stub that returns 0
+    from itdb_sqlite_generate_itdbs() so itdb_write() still links
+    and reports success. Comment documents how to revert if
+    nano5G/iOS support is restored.
+
+Apply with: cd <libgpod-src> && patch -p1 < 0001-*.patch
+        or: cd <libgpod-src> && git apply 0001-*.patch
+---
+diff --git a/Makefile.am b/Makefile.am
+index 14c4d1d..ea7cbba 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -1,4 +1,4 @@
+-SUBDIRS=src tools tests po m4 docs bindings 
++SUBDIRS=src tests po m4 docs bindings 
+ 
+ # build documentation when doing a distcheck.
+ DISTCHECK_CONFIGURE_FLAGS = --enable-gtk-doc		\
+diff --git a/configure.ac b/configure.ac
+index a52ac3a..e8e9eac 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -42,7 +42,7 @@ AC_CHECK_FUNCS([localtime_r])
  AC_CHECK_MEMBERS([struct tm.tm_gmtoff],,,[#include <time.h>])
  dnl sqlite3 is needed for newer ipod models (nano5g), and libplist is needed 
  dnl by libgpod sqlite code
@@ -9,17 +47,11 @@
  
  dnl **************************************************
  dnl we've copied gchecksum from glib 2.16. Only use the
---- /c/src/libgpod-patches-orig/Makefile.am	2026-05-17 01:32:26.387126900 +0100
-+++ /c/src/libgpod/Makefile.am	2026-05-17 01:32:56.986836800 +0100
-@@ -1,4 +1,4 @@
--SUBDIRS=src tools tests po m4 docs bindings 
-+SUBDIRS=src tests po m4 docs bindings 
- 
- # build documentation when doing a distcheck.
- DISTCHECK_CONFIGURE_FLAGS = --enable-gtk-doc		\
---- /c/src/libgpod-patches-orig/src/Makefile.am	2026-05-17 01:32:26.408147600 +0100
-+++ /c/src/libgpod/src/Makefile.am	2026-05-17 01:33:08.586959500 +0100
-@@ -49,7 +49,6 @@
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 59ae346..ac63c2c 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -49,7 +49,6 @@ noinst_HEADERS = 		\
  	itdb_endianness.h 	\
  	itdb_plist.h		\
  	itdb_private.h   	\
@@ -27,8 +59,10 @@
  	itdb_sysinfo_extended_parser.h \
  	itdb_thumb.h		\
  	itdb_tzinfo_data.h 	\
---- /c/src/libgpod-patches-orig/src/itdb_sqlite.c	2026-05-17 01:32:26.429670000 +0100
-+++ /c/src/libgpod/src/itdb_sqlite.c	2026-05-17 01:33:33.785305600 +0100
+diff --git a/src/itdb_sqlite.c b/src/itdb_sqlite.c
+index 6c920f4..498a9bd 100644
+--- a/src/itdb_sqlite.c
++++ b/src/itdb_sqlite.c
 @@ -1,2330 +1,30 @@
  /*
 -|  Copyright (C) 2009 Nikias Bassen <nikias@gmx.li>
@@ -70,7 +104,7 @@
 + * Upstream libgpod uses libplist 1.x + sqlite3 here to generate the
 + * iTunesCDB used by the iPod nano 5G, iPod Touch, iPhone, etc.
 + *
-+ * SPEC ?7 declares those devices out of scope for v1 ? only iPod
++ * SPEC §7 declares those devices out of scope for v1 - only iPod
 + * Classic 7G is supported, which uses the original iTunesDB format
 + * (handled entirely in itdb_itunesdb.c). The libplist 1.x API was
 + * removed in libplist 2.0 (only 2.x is in MSYS2), and we have no
@@ -2379,8 +2413,6 @@
 -    }
 -
 -    return res;
--}
 +    (void)fexp;
 +    return 0;
-+}
-\ No newline at end of file
+ }
