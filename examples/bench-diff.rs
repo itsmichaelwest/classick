@@ -37,24 +37,43 @@ fn main() -> Result<()> {
     println!("walk source:   {:.3}s ({} files)", t_walk.as_secs_f64(), sources.len());
 
     let mut fp_calls = 0usize;
+    let mut audio_fp_calls = 0usize;
     let t2 = Instant::now();
-    let actions = manifest::diff(&manifest, &sources, |p| {
-        fp_calls += 1;
-        source::fingerprint(p)
-    })?;
+    let actions = manifest::diff(
+        &manifest,
+        &sources,
+        |p| {
+            fp_calls += 1;
+            source::fingerprint(p)
+        },
+        |p| {
+            audio_fp_calls += 1;
+            source::audio_fingerprint(p)
+        },
+    )?;
     let t_diff = t2.elapsed();
-    println!("diff:          {:.3}s ({} fingerprint reads)", t_diff.as_secs_f64(), fp_calls);
+    println!(
+        "diff:          {:.3}s ({} fingerprint reads, {} audio-fp reads)",
+        t_diff.as_secs_f64(),
+        fp_calls,
+        audio_fp_calls,
+    );
 
-    let mut add = 0; let mut modify = 0; let mut remove = 0; let mut unchanged = 0;
+    let mut add = 0;
+    let mut modify = 0;
+    let mut metadata_only = 0;
+    let mut remove = 0;
+    let mut unchanged = 0;
     for a in &actions {
         match a {
             manifest::Action::Add(_) => add += 1,
             manifest::Action::Modify(_, _) => modify += 1,
+            manifest::Action::MetadataOnly { .. } => metadata_only += 1,
             manifest::Action::Remove(_) => remove += 1,
             manifest::Action::Unchanged(_) => unchanged += 1,
         }
     }
-    println!("plan: Add={add} Modify={modify} Remove={remove} Unchanged={unchanged}");
+    println!("plan: Add={add} Modify={modify} MetadataOnly={metadata_only} Remove={remove} Unchanged={unchanged}");
 
     let total = t0.elapsed();
     println!("total (load+walk+diff): {:.3}s", total.as_secs_f64());

@@ -51,7 +51,12 @@ fn run(config: &Config) -> Result<()> {
     // 4. Diff. Pass `source::fingerprint` as the slow-path hash callback;
     //    it only fires for entries whose (mtime, size) doesn't match the
     //    manifest, so the steady-state "nothing changed" run is stat-only.
-    let actions = manifest::diff(&manifest, &sources, source::fingerprint)?;
+    let actions = manifest::diff(
+        &manifest,
+        &sources,
+        source::fingerprint,
+        source::audio_fingerprint,
+    )?;
     let (add, modify, remove, unchanged) = count_actions(&actions);
 
     // Start the progress handle now that we know the action counts.
@@ -144,6 +149,17 @@ fn run(config: &Config) -> Result<()> {
                     let (handle, fp) = add_one(&db, &src)?;
                     manifest.tracks.push(entry_from(&src, &handle, &fp));
                     progress.track_done();
+                }
+                Action::MetadataOnly { .. } => {
+                    // TODO(Phase 3.x Task 5): wire the in-place tag+art update
+                    // via OwnedDb::update_track_metadata. Until then, hitting
+                    // this branch is a programmer error — the diff would only
+                    // emit MetadataOnly when a manifest entry has a populated
+                    // audio_fingerprint, which today is only produced by
+                    // Task 5's add_one extension. So in practice this is
+                    // unreachable on the current code path; we panic loudly
+                    // to surface the gap if it ever fires.
+                    unimplemented!("Action::MetadataOnly handling — Task 5 of Phase 3.x");
                 }
             }
         }
@@ -254,11 +270,15 @@ fn parse_year(s: &str) -> Option<i32> {
 }
 
 fn count_actions(actions: &[Action]) -> (usize, usize, usize, usize) {
+    // Task 5 of Phase 3.x will widen this to surface MetadataOnly counts
+    // separately; for now we fold them into `modify` so the existing summary
+    // still adds up to the action total.
     let mut add = 0; let mut modify = 0; let mut remove = 0; let mut unchanged = 0;
     for a in actions {
         match a {
             Action::Add(_) => add += 1,
             Action::Modify(_, _) => modify += 1,
+            Action::MetadataOnly { .. } => modify += 1,
             Action::Remove(_) => remove += 1,
             Action::Unchanged(_) => unchanged += 1,
         }

@@ -52,6 +52,14 @@ pub enum Action {
     Modify(SourceEntry, ManifestEntry),
     Remove(ManifestEntry),
     Unchanged(ManifestEntry),
+    /// File fingerprint changed (e.g. tag/art edit) but the audio frames are
+    /// bit-identical to what's already on the iPod. The orchestrator updates
+    /// the iPod-side tags + thumbnails in place without re-transcoding or
+    /// re-copying the audio file (Phase 3.x fast path).
+    MetadataOnly {
+        source: SourceEntry,
+        entry: ManifestEntry,
+    },
 }
 
 /// Diff a manifest against the current source state. See SPEC §4.3 / §6 #2.
@@ -64,11 +72,16 @@ pub enum Action {
 /// Slow path: if mtime or size differs, we compute the fingerprint and
 /// compare against the manifest. If it matches AND size matches (paranoia
 /// guard against a truncated file whose first MiB happens to match), the
-/// entry is Unchanged (mtime was merely touched). Otherwise it's Modify.
+/// entry is Unchanged (mtime was merely touched). Otherwise, if the manifest
+/// has a stored `audio_fingerprint`, we compute the source's current audio
+/// fingerprint via `compute_audio_fingerprint`; matching values mean tags
+/// or art changed without touching the audio frames → `MetadataOnly`.
+/// Anything else falls through to `Modify`.
 pub fn diff(
     manifest: &Manifest,
     sources: &[SourceEntry],
     mut compute_fingerprint: impl FnMut(&Path) -> Result<String>,
+    mut compute_audio_fingerprint: impl FnMut(&Path) -> Result<String>,
 ) -> Result<Vec<Action>> {
     let manifest_by_path: HashMap<&PathBuf, &ManifestEntry> = manifest
         .tracks
@@ -98,7 +111,25 @@ pub fn diff(
                     if content_unchanged {
                         // mtime was touched but content is identical.
                         actions.push(Action::Unchanged((*entry).clone()));
+                    } else if !entry.audio_fingerprint.is_empty() {
+                        // Phase 3.x path: file fingerprint differs, but the
+                        // manifest has a stored audio-only fingerprint to
+                        // compare against. If the source's current audio
+                        // fingerprint matches, it's a tag/art edit only.
+                        let audio_fp = compute_audio_fingerprint(&src.path)?;
+                        if audio_fp == entry.audio_fingerprint {
+                            actions.push(Action::MetadataOnly {
+                                source: src.clone(),
+                                entry: (*entry).clone(),
+                            });
+                        } else {
+                            actions.push(Action::Modify(src.clone(), (*entry).clone()));
+                        }
                     } else {
+                        // Bootstrap path: Phase 2 manifest entry with no
+                        // stored audio_fingerprint to compare against — must
+                        // fall through to Modify so the orchestrator
+                        // populates audio_fingerprint on the rewrite.
                         actions.push(Action::Modify(src.clone(), (*entry).clone()));
                     }
                 }
@@ -189,6 +220,19 @@ mod tests {
         move |_| Ok(fp.to_string())
     }
 
+    /// Audio-fingerprint callback that always returns the given value.
+    fn returns_audio(fp: &'static str) -> impl FnMut(&Path) -> Result<String> {
+        move |_| Ok(fp.to_string())
+    }
+
+    /// Audio-fingerprint callback that panics if invoked. Use when the test
+    /// scenario must NOT reach the audio-fingerprint branch (e.g. fast-path
+    /// stat-match, bootstrap entries with empty audio_fingerprint, removes,
+    /// etc.).
+    fn never_called_audio() -> impl FnMut(&Path) -> Result<String> {
+        |_| panic!("audio fingerprint callback should not be called in this scenario")
+    }
+
     #[test]
     fn roundtrip_known_fixture() {
         const FIXTURE: &str = include_str!("../tests/fixtures/sample-manifest.json");
@@ -230,7 +274,7 @@ mod tests {
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
-        let actions = diff(&manifest, &sources, never_called()).unwrap();
+        let actions = diff(&manifest, &sources, never_called(), never_called_audio()).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
     }
@@ -240,7 +284,7 @@ mod tests {
         // Add path doesn't go through the fingerprint callback either.
         let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![] };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
-        let actions = diff(&manifest, &sources, never_called()).unwrap();
+        let actions = diff(&manifest, &sources, never_called(), never_called_audio()).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Add(_)));
     }
@@ -248,7 +292,9 @@ mod tests {
     #[test]
     fn diff_classifies_modified_when_fingerprint_changes() {
         // Bump mtime so stat doesn't match → slow path runs. Callback
-        // returns a fingerprint that differs from the manifest → Modify.
+        // returns a fingerprint that differs from the manifest. Manifest
+        // entry has empty audio_fingerprint (sample_entry default) so the
+        // bootstrap branch emits Modify without invoking the audio callback.
         let manifest = Manifest {
             version: 1, ipod_serial: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
@@ -256,7 +302,7 @@ mod tests {
         let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
         src.mtime = 1700099999;
         let sources = vec![src];
-        let actions = diff(&manifest, &sources, returns("blake3:bb")).unwrap();
+        let actions = diff(&manifest, &sources, returns("blake3:bb"), never_called_audio()).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)));
     }
@@ -265,13 +311,14 @@ mod tests {
     fn diff_classifies_modified_when_size_changes() {
         // Size differs → stat fails, callback fires once. Even if first-MiB
         // fingerprint matches, the size guard demotes to Modify (truncated
-        // file scenario).
+        // file scenario). Manifest entry has empty audio_fingerprint so the
+        // bootstrap branch fires — no audio callback invocation.
         let manifest = Manifest {
             version: 1, ipod_serial: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 200)];
-        let actions = diff(&manifest, &sources, returns("blake3:aa")).unwrap();
+        let actions = diff(&manifest, &sources, returns("blake3:aa"), never_called_audio()).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)));
     }
@@ -284,7 +331,7 @@ mod tests {
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![];
-        let actions = diff(&manifest, &sources, never_called()).unwrap();
+        let actions = diff(&manifest, &sources, never_called(), never_called_audio()).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Remove(_)));
     }
@@ -295,21 +342,102 @@ mod tests {
         entry.source_known = false;  // from --rebuild-manifest
         let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
         let sources = vec![];  // no sources present
-        let actions = diff(&manifest, &sources, never_called()).unwrap();
+        let actions = diff(&manifest, &sources, never_called(), never_called_audio()).unwrap();
         assert_eq!(actions.len(), 0, "unknown-source entries are NOT removed when source is absent");
     }
 
     #[test]
     fn diff_unchanged_after_touch_but_same_content() {
         // mtime differs from manifest, sizes equal, fingerprint still matches.
-        // Slow path runs, callback fires, but result is Unchanged.
+        // Slow path runs, callback fires, but result is Unchanged (file
+        // fingerprint matched → audio callback not consulted).
         let manifest = Manifest {
             version: 1, ipod_serial: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let mut src = sample_source(r"C:\a.flac", "blake3:aa", 100);
         src.mtime = 1700099999;  // touched
-        let actions = diff(&manifest, &[src], returns("blake3:aa")).unwrap();
+        let actions = diff(&manifest, &[src], returns("blake3:aa"), never_called_audio()).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Unchanged(_)));
+    }
+
+    #[test]
+    fn diff_classifies_metadata_only_when_audio_matches() {
+        // Manifest has a stored audio_fingerprint; source's file fingerprint
+        // differs (tags edited) but the audio_fingerprint matches → MetadataOnly.
+        let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
+        entry.audio_fingerprint = "blake3-audio:zz".to_string();
+        let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
+        // Bump mtime so stat doesn't match → slow path runs.
+        let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
+        src.mtime = 1700099999;
+        let sources = vec![src];
+        let actions = diff(
+            &manifest,
+            &sources,
+            returns("blake3:bb"),
+            returns_audio("blake3-audio:zz"),
+        ).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::MetadataOnly { .. }),
+            "got {:?}", actions[0]);
+    }
+
+    #[test]
+    fn diff_falls_back_to_modify_when_manifest_has_no_audio_fingerprint() {
+        // Phase 2 manifest entry — audio_fingerprint is empty string.
+        let entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
+        assert_eq!(entry.audio_fingerprint, "",
+            "test premise: sample_entry produces empty audio_fingerprint");
+        let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
+        let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
+        src.mtime = 1700099999;
+        let sources = vec![src];
+        let actions = diff(
+            &manifest,
+            &sources,
+            returns("blake3:bb"),
+            never_called_audio(),  // audio callback MUST NOT fire — nothing to compare to
+        ).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Modify(_, _)),
+            "bootstrap path: missing audio_fingerprint in manifest forces Modify, got {:?}", actions[0]);
+    }
+
+    #[test]
+    fn diff_classifies_modify_when_audio_actually_changed() {
+        let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
+        entry.audio_fingerprint = "blake3-audio:zz".to_string();
+        let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
+        // Source: file fingerprint changed AND audio actually differs.
+        let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
+        src.mtime = 1700099999;
+        let sources = vec![src];
+        let actions = diff(
+            &manifest,
+            &sources,
+            returns("blake3:bb"),
+            returns_audio("blake3-audio:different"),
+        ).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Modify(_, _)));
+    }
+
+    #[test]
+    fn diff_skips_audio_fingerprint_when_stat_matches() {
+        // Even with a populated audio_fingerprint on the manifest, the fast
+        // stat-match path must short-circuit before either callback fires.
+        let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
+        entry.audio_fingerprint = "blake3-audio:zz".to_string();
+        let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
+        let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
+        let actions = diff(
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+        ).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
     }
