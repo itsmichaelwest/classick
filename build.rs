@@ -16,6 +16,10 @@ fn main() {
     let header = vendor.join("include").join("gpod").join("itdb.h");
     println!("cargo:rerun-if-changed={}", header.display());
     println!("cargo:rerun-if-changed=build.rs");
+    println!(
+        "cargo:rerun-if-changed={}",
+        vendor.join("lib").join("gpod.lib").display()
+    );
 
     // GLib headers ship with the MSYS2 MinGW64 toolchain used to build libgpod.
     // bindgen needs them because itdb.h includes <glib.h> / <glib-object.h>.
@@ -40,26 +44,37 @@ fn main() {
         .generate()
         .expect("bindgen failed to generate libgpod bindings");
 
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("libgpod_bindings.rs");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out_path = out_dir.join("libgpod_bindings.rs");
     bindings
         .write_to_file(&out_path)
         .expect("failed to write bindings");
 
-    // Ensure the DLL is alongside the exe for `cargo run`
-    let dll_src = vendor.join("bin").join("gpod.dll");
-    let target_dir = manifest_dir
-        .join("target")
-        .join(env::var("PROFILE").unwrap());
-    if dll_src.exists() {
-        let _ = std::fs::create_dir_all(&target_dir);
-        let _ = std::fs::copy(&dll_src, target_dir.join("gpod.dll"));
-        // Copy GLib runtime deps too
-        if let Ok(entries) = std::fs::read_dir(vendor.join("bin")) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("dll") {
-                    let _ = std::fs::copy(&path, target_dir.join(path.file_name().unwrap()));
-                }
+    // Ensure the DLLs are alongside the exe for `cargo run`.
+    // Derive target_dir from OUT_DIR so CARGO_TARGET_DIR is honored:
+    // OUT_DIR = <real_target>/<profile>/build/<pkg>-<hash>/out
+    let target_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .expect("OUT_DIR should have at least 3 ancestors")
+        .to_path_buf();
+
+    let bin_dir = vendor.join("bin");
+    if bin_dir.exists() {
+        std::fs::create_dir_all(&target_dir).unwrap_or_else(|e| {
+            panic!("failed to create target dir {}: {}", target_dir.display(), e)
+        });
+        let entries = std::fs::read_dir(&bin_dir).unwrap_or_else(|e| {
+            panic!("failed to read vendor bin dir {}: {}", bin_dir.display(), e)
+        });
+        for entry in entries {
+            let entry = entry.expect("failed to read directory entry in vendor/libgpod/bin");
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("dll") {
+                let dest = target_dir.join(path.file_name().unwrap());
+                std::fs::copy(&path, &dest).unwrap_or_else(|e| {
+                    panic!("failed to copy {} -> {}: {}", path.display(), dest.display(), e)
+                });
             }
         }
     }
