@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod config_file;
 pub mod ffi;
 pub mod ipod;
 pub mod logging;

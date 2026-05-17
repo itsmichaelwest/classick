@@ -1,0 +1,5 @@
+source = "\\\\<host>\\data\\media\\music"
+ipod = "G:"
+ffmpeg = "ffmpeg"
+no_delete = false
+no_tui = false
