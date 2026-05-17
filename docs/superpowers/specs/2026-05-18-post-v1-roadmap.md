@@ -41,6 +41,46 @@ Forward-looking capture of enhancements identified during the Phase 2 build. Not
 
 ---
 
+## Phase 3.z — TUI-first error UX
+
+**Scope:** every user-facing interaction — including errors, validation failures, and recoverable mid-sync issues — surfaces through the TUI rather than as bare stderr or anyhow output. Daily usage becomes "open ipod-sync, everything you need to see or decide happens in this window."
+
+**Effort:** ~2-3 days
+
+**Why now:** Phase 3.y shipped the interactive UX layer (config, wizard, review). The remaining UX gap is error handling — today's tool drops out of the TUI cleanly on success but exits with bare error text on failure. For a daily-use tool the inconsistency is jarring. Phase 3.z closes the loop: if the tool can render a screen, errors get a screen.
+
+**Specific error surfaces to cover:**
+
+- **Pre-sync setup errors** (before `Progress::start`):
+  - ffmpeg / ffprobe missing on PATH → TUI screen with install hint (`winget install Gyan.FFmpeg`) + retry button
+  - iPod not mounted → TUI screen with "plug in iPod and press Enter" + auto-detect retry
+  - Source path unreachable (SMB share down) → TUI screen with retry / change-source / quit options
+  - Invalid TOML in config.toml → TUI screen with line/column + offer to "open in editor" or "reset to defaults"
+- **Mid-sync errors** (today: stop-on-first-error per SPEC §8 row 5):
+  - Per-track ffmpeg failure → TUI dialog: skip this track / abort run / retry. Skip would record the track as failed and continue.
+  - libgpod write failure with `Play Counts.bak` race → auto-retry once after delete, prompt only if second attempt fails
+  - Network glitch mid-walk over SMB → retry the file, prompt only if N consecutive failures
+- **Validation errors** (config-time):
+  - Invalid `--source` path → TUI prompt to correct or browse
+  - Invalid `--ipod` drive letter → list available iPod-looking drives and let user pick
+
+**Architectural changes anticipated:**
+
+- Promote `Progress::start` to launch FIRST in `main`, even before `config::resolve`. All errors after that point route through Progress's existing `error` channel. Pre-Progress errors (e.g. terminal setup itself failing) are the only bare-stderr cases remaining.
+- New `ProgressEvent::Prompt { message, options: Vec<String> }` variant + `PromptDecision` back-channel (extends the Phase 3.y review-decision pattern).
+- Refactor `run` to wrap each fail-able step (resolve, mount, walk, diff, apply-per-track) in a `try_with_prompt` helper that surfaces errors to the TUI and gets a decision back.
+- Wizard generalizes — the source-picker is one instance of a "TUI form" pattern. Extract a small `tui_form` helper crate-internal that handles label + input + validation + save.
+
+**Out of scope for Phase 3.z:**
+
+- Mouse interaction (keyboard only, like today)
+- Configurable retry counts / backoff for SMB glitches (would land as Phase 4 polish)
+- Reading log files in-TUI (just shows live errors; for history users `tail` the tracing log)
+
+**Sequencing note:** Phase 3.z is independent of Phase 3 (formats/encoder), Phase 3.x (metadata-only smart-update), and Phase 4 (multi-iPod). Sequencing-wise I'd put it after Phase 3 (more error surfaces to cover once we add pass-through + refalac) and before Phase 5 (daemon, which inherits all these UX wins for the rare cases the daemon needs user input).
+
+---
+
 ## Phase 4 — Multiple iPods
 
 **Scope:** allow the tool to manage more than one iPod from the same machine. Each iPod gets its own manifest (keyed by serial), its own per-device exclude list / sync settings, and is identified by a user-chosen nickname plus the FirewireGuid-derived serial.
