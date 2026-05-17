@@ -27,19 +27,26 @@ pub struct Tags {
 }
 
 impl OwnedDb {
-    /// Parse the iTunesDB at `<ipod_mount>\iPod_Control\iTunes\iTunesDB`.
+    /// Parse the iTunesDB at `<ipod_mount>\iPod_Control\iTunes\iTunesDB` and
+    /// wire the mountpoint into the DB so libgpod write helpers (itdb_cp_track_to_ipod,
+    /// itdb_filename_on_ipod, etc.) know where to put files on disk.
     pub fn open(ipod_mount: &Path) -> Result<Self> {
         let db_path = ipod_mount
             .join("iPod_Control")
             .join("iTunes")
             .join("iTunesDB");
         let path_c = path_to_cstring(&db_path)?;
+        let mount_c = path_to_cstring(ipod_mount)?;
         unsafe {
             let mut err: *mut ffi::GError = ptr::null_mut();
             let db = ffi::itdb_parse_file(path_c.as_ptr(), &mut err);
             if db.is_null() {
                 return Err(gerror_to_anyhow("itdb_parse_file", err));
             }
+            // itdb_parse_file does NOT set the mountpoint (it only knows about the
+            // DB file). Subsequent libgpod helpers that need to write files onto the
+            // iPod (e.g. itdb_cp_track_to_ipod) assert on the mountpoint being set.
+            ffi::itdb_set_mountpoint(db, mount_c.as_ptr());
             Ok(OwnedDb(db))
         }
     }
@@ -81,14 +88,19 @@ impl OwnedDb {
             }
             apply_tags(track, tags);
 
+            // itdb_cp_track_to_ipod requires track->itdb to be set; that back-pointer
+            // is wired by itdb_track_add. (Without this, libgpod aborts with
+            // "assertion 'track->itdb' failed".) Add to DB first, then copy the file.
+            ffi::itdb_track_add(self.0, track, -1);
+
             let mut err: *mut ffi::GError = ptr::null_mut();
             if ffi::itdb_cp_track_to_ipod(track, alac_c.as_ptr(), &mut err) == 0 {
-                // The track was not added to the DB; we own it and must free.
+                // cp failed: unlink from DB (does not free) and free ourselves.
+                ffi::itdb_track_unlink(track);
                 ffi::itdb_track_free(track);
                 return Err(gerror_to_anyhow("itdb_cp_track_to_ipod", err));
             }
-            // cp_track adds the track to db.tracks; we still need to add it to
-            // the master playlist for it to show in the iPod's Songs menu.
+            // Track is in db.tracks; add to master playlist so it shows in Songs menu.
             let master = ffi::itdb_playlist_mpl(self.0);
             if master.is_null() {
                 return Err(anyhow!(
