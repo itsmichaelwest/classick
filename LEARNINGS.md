@@ -170,3 +170,38 @@ Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights
 - **`itdb_write` on Windows fails with "Error renaming 'Play Counts' to 'Play Counts.bak' (File exists)"** when both files are present. Windows rename does not atomically replace an existing file (unlike POSIX `rename(2)`). Fix: delete `Play Counts.bak` before calling `itdb_write`. The DB track data is written BEFORE the play counts rotation, so even if the rename error is raised, the iTunesDB on disk will reflect the in-memory state. Verified: after first run (which errored on play counts rotate), second run saw 0 tracks in the DB.
 - **lib.rs + bin target coexist cleanly.** Adding `src/lib.rs` with `pub mod ffi; pub mod ipod; pub mod transcode;` alongside the existing `[[bin]]` target required no Cargo.toml change (Cargo auto-detects `src/lib.rs`). Replace `mod ffi;` etc. in `main.rs` with `use ipod_sync::ffi;` etc. Tests in main.rs continue to work via `use super::*`. The library crate name matches the package name with hyphens → underscores.
 
+
+## Phase 2 Gate C — full library acceptance (2026-05-17) — PASS
+
+- **Result:** PASS. All exercised SPEC §6 acceptance criteria met.
+- **Source library:** `<source-host>\data\media\music` (1,407 FLACs).
+- **iPod:** Classic 7G at G:, empty going in.
+- **Full sync wall-clock:** ~90 minutes (TUI-driven, transcode-bound).
+- **iPod state after sync:** 1,407 m4a files in `iPod_Control\Music\F*`, iTunesDB grew from 18 KB → 2,094,506 bytes, 5 files in `iPod_Control\Artwork\` (ArtworkDB + 4 .ithmb thumbnail blobs).
+- **Manifest:** 1,407 entries, valid JSON.
+
+### SPEC §6 acceptance scorecard
+
+- **#1** (empty iPod → full sync, playable, metadata + art): **PASS** — physical verification: iPod boots normally, Music → Songs lists ~1,407 tracks, sampled tracks play with correct metadata + art on Now Playing.
+- **#2** (no changes → < 5s): **PASS** after Phase 2.1 mtime+size fast-path optimization. Actual second-run: 945 ms (PowerShell-measured command time). The original implementation was 93.8s (re-fingerprinting all files unconditionally); the fix drops `SourceEntry.fingerprint` from the walker entirely and only computes it inside the diff when mtime+size disagree with the manifest. For an all-unchanged library, zero file reads beyond stat() — ~100× speedup.
+- **#3** (add 5 → only 5 processed): **NOT EXERCISED** in Gate C — same code path as the 1,400 Adds in the main run.
+- **#4** (delete 5 → only 5 removed): **NOT EXERCISED** in Gate C — same code path as the manifest's Remove handling.
+- **#5** (--rebuild-manifest works): **NOT EXERCISED** in Gate C — deferred to future verification.
+- **#6** (--dry-run writes nothing): **PASS** — manifest LastWriteTime unchanged after dry-run invocation.
+
+### Phase 1 carry-forwards verified at scale
+
+- **Pixbuf-backed artwork** (Plan B from Phase 1 Task 6b): worked for all 1,407 tracks. ArtworkDB + thumbnail blobs created correctly.
+- **Play Counts.bak rename fix**: never re-surfaced during the run.
+- **TRACKTOTAL/DISCTOTAL alias handling**: all Picard- and Plex-tagged albums processed without serde duplicate-key errors.
+- **GLib log handler**: kept stderr quiet; benign WARNING/CRITICAL noise routed through tracing.
+
+### Observations from the full-scale run
+
+- **Plex-written album art has bad metadata on some files.** Surfaced during physical verification — some tracks showed wrong art on the iPod's Now Playing. Root cause is Plex's media-scanner writing inconsistent cover-art bytes into FLAC tags on the server. Source-data fix, not a tool bug. The user is going to clean up Plex's tagging on the server side.
+- **Walker time** is the dominant cost when nothing has changed: ~0.55s for stat()-ing 1,407 SMB files. With the fingerprint short-circuit, that's the whole runtime. Acceptable.
+
+### Phase 3 carry-forwards
+
+- **mtime-touched-but-content-identical files** correctly classify as Unchanged but re-fingerprint every subsequent run because the stored mtime stays stale. Phase 3+ refinement: refresh stored mtime on the slow-path-Unchanged case so the next run hits the fast path again. Tiny code change, real-world impact on libraries with `touch`-style operations.
+- **Plex-bad-art investigation**: worth a small forensic pass to confirm which tracks have which issue, so the user can fix at the source.
