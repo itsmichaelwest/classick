@@ -42,6 +42,8 @@ fn main() {
         .allowlist_var("ITDB_.*")
         // GError handling is needed by Task 6's spike
         .allowlist_function("g_error_.*")
+        .allowlist_function("g_strdup")
+        .allowlist_function("g_free")
         .allowlist_type("GError")
         .allowlist_type("GList")
         .layout_tests(false)
