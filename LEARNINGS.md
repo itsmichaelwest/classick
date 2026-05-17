@@ -124,6 +124,11 @@ Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights
   Install a `g_log_set_handler` in Phase 2 to suppress (or reformat) these so they don't clutter user output.
 - **Cleanup orphan tracks if write fails mid-way.** Currently if `itdb_cp_track_to_ipod` succeeds but `itdb_write` fails, the .m4a is orphaned on the iPod. `--rebuild-manifest` recovers from this; document the failure mode in the user-facing error message.
 
+## Phase 2 Task 1 — scaffold + carry-forwards (2026-05-18)
+
+- **`itdb_get_mountpoint` IS in bindgen output** (line 722 of `libgpod_bindings.rs`): `pub fn itdb_get_mountpoint(itdb: *mut Itdb_iTunesDB) -> *const gchar`. So the Play Counts.bak fix used the FFI-based approach (read mount from the DB pointer at write time) rather than the stored-mount-path fallback. No `OwnedDb` field addition was needed.
+- **`build.rs` loaders.cache regen at build time confirmed working.** `target/debug/pixbuf-loaders/loaders.cache` now references `F:/repos/ipod-sync/target/debug/pixbuf-loaders/libpixbufloader-*.dll` (staged paths) instead of vendor absolute paths. Generated via `C:\msys64\mingw64\bin\gdk-pixbuf-query-loaders.exe` passed the staged DLL list as args; tool writes a header `Created by gdk-pixbuf-query-loaders from gdk-pixbuf-2.44.6`. Fallback to vendor cache copy still in place for envs without MSYS2.
+
 ## wipe-tracks dev utility (2026-05-17)
 
 - **`itdb_playlist_remove_track(NULL, track)` with a null playlist removes the track from every playlist** — confirmed working for the wipe case. Do not call `itdb_track_unlink` separately; `itdb_track_remove` covers the DB tracks list removal and struct free in one call.

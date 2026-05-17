@@ -1,3 +1,9 @@
+pub mod cli;
+pub mod config;
 pub mod ffi;
 pub mod ipod;
+pub mod logging;
+pub mod manifest;
+pub mod progress;
+pub mod source;
 pub mod transcode;

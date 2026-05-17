@@ -43,20 +43,34 @@ pub struct ProbeTags {
         default,
         alias = "TRACK",
         alias = "Track",
-        alias = "track",
         alias = "tracknumber",
         alias = "TRACKNUMBER"
     )]
     pub track: Option<String>,
     #[serde(
         default,
+        alias = "TRACKTOTAL",
+        alias = "TOTALTRACKS",
+        alias = "tracktotal",
+        alias = "totaltracks"
+    )]
+    pub track_total: Option<String>,
+    #[serde(
+        default,
         alias = "DISC",
         alias = "Disc",
-        alias = "disc",
         alias = "discnumber",
         alias = "DISCNUMBER"
     )]
     pub disc: Option<String>,
+    #[serde(
+        default,
+        alias = "DISCTOTAL",
+        alias = "TOTALDISCS",
+        alias = "disctotal",
+        alias = "totaldiscs"
+    )]
+    pub disc_total: Option<String>,
     #[serde(default, alias = "GENRE", alias = "Genre")]
     pub genre: Option<String>,
     #[serde(default, alias = "COMPOSER", alias = "Composer")]
@@ -232,8 +246,10 @@ mod tests {
         assert_eq!(tags.album.as_deref(), Some("Sea Change"));
         assert_eq!(tags.album_artist.as_deref(), Some("Beck"));
         assert_eq!(tags.date.as_deref(), Some("2002-09-24"));
-        assert_eq!(tags.track.as_deref(), Some("9/12"));
-        assert_eq!(tags.disc.as_deref(), Some("1/1"));
+        assert_eq!(tags.track.as_deref(), Some("9"));
+        assert_eq!(tags.track_total.as_deref(), Some("12"));
+        assert_eq!(tags.disc.as_deref(), Some("1"));
+        assert_eq!(tags.disc_total.as_deref(), Some("1"));
         assert_eq!(tags.genre.as_deref(), Some("Alternative"));
     }
 

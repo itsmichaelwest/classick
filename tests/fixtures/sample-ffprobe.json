@@ -114,8 +114,10 @@
             "ALBUM": "Sea Change",
             "album_artist": "Beck",
             "DATE": "2002-09-24",
-            "track": "9/12",
-            "disc": "1/1",
+            "track": "9",
+            "TRACKTOTAL": "12",
+            "disc": "1",
+            "DISCTOTAL": "1",
             "GENRE": "Alternative",
             "encoder": "Lavf62.3.100"
         }

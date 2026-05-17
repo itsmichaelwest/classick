@@ -120,6 +120,38 @@ fn main() {
             }
         }
     }
+    // Regenerate loaders.cache pointing at the staged loaders dir (not the vendor
+    // absolute paths). gdk-pixbuf-query-loaders.exe lives in MSYS2's mingw64 bin.
+    let query_exe = std::path::Path::new(r"C:\msys64\mingw64\bin\gdk-pixbuf-query-loaders.exe");
+    if query_exe.exists() {
+        // Pass each staged loader DLL as an arg; the tool emits the cache to stdout.
+        let loader_dlls: Vec<_> = std::fs::read_dir(&dst_loaders)
+            .expect("read staged loaders")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map_or(false, |e| e == "dll"))
+            .collect();
+        let output = std::process::Command::new(query_exe)
+            .args(&loader_dlls)
+            .output()
+            .expect("run gdk-pixbuf-query-loaders");
+        if !output.status.success() {
+            panic!(
+                "gdk-pixbuf-query-loaders failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::write(dst_loaders.join("loaders.cache"), &output.stdout)
+            .expect("write staged loaders.cache");
+    } else {
+        // Fall back to the vendored cache (dev-tree paths) if MSYS2's query tool
+        // isn't available. This is the previous Phase 1 behavior.
+        let src_cache = src_loaders.join("loaders.cache");
+        let dst_cache = dst_loaders.join("loaders.cache");
+        if src_cache.exists() {
+            std::fs::copy(&src_cache, &dst_cache).expect("copy vendor loaders.cache");
+        }
+    }
     println!(
         "cargo:rustc-env=PIXBUF_LOADERS_CACHE={}",
         dst_loaders.join("loaders.cache").display()

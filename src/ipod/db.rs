@@ -63,7 +63,22 @@ impl OwnedDb {
     /// Persist DB to the iPod. After this returns Ok, the iPod's stored DB on
     /// disk reflects the in-memory state (track adds, file copies, etc.).
     pub fn write(&self) -> Result<()> {
+        // libgpod's itdb_write renames `<mount>\iPod_Control\iTunes\Play Counts`
+        // to `Play Counts.bak` via POSIX rename(). On Windows, rename() fails
+        // (silently to libgpod, surfaced as a vague GError) if the target exists.
+        // Pre-delete the stale .bak so the rename always has a clean target.
+        // Discovered while building examples/wipe-tracks.rs on 2026-05-17.
         unsafe {
+            let mount_c = ffi::itdb_get_mountpoint(self.0);
+            if !mount_c.is_null() {
+                let mount = CStr::from_ptr(mount_c).to_string_lossy();
+                let bak = Path::new(mount.as_ref())
+                    .join("iPod_Control")
+                    .join("iTunes")
+                    .join("Play Counts.bak");
+                let _ = std::fs::remove_file(&bak); // ignore NotFound; surface other errors via the subsequent write
+            }
+
             let mut err: *mut ffi::GError = ptr::null_mut();
             if ffi::itdb_write(self.0, &mut err) == 0 {
                 return Err(gerror_to_anyhow("itdb_write", err));
