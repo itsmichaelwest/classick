@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "ipod_serial": "EXAMPLE1234",
+  "tracks": [
+    {
+      "source_path": "\\\\MUSICHOST\\data\\media\\music\\Beck\\Sea Change\\1-09 Already Dead.flac",
+      "source_mtime": 1700000000,
+      "source_size": 28349123,
+      "source_fingerprint": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+      "ipod_dbid": 12345678901234,
+      "ipod_relpath": "iPod_Control\\Music\\F12\\KLMN.m4a",
+      "source_known": true
+    },
+    {
+      "source_path": "",
+      "source_mtime": 0,
+      "source_size": 0,
+      "source_fingerprint": "",
+      "ipod_dbid": 98765432109876,
+      "ipod_relpath": "iPod_Control\\Music\\F01\\ABCD.m4a",
+      "source_known": false
+    }
+  ]
+}
