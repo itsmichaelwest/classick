@@ -5,6 +5,7 @@ use ipod_sync::config::{self, Config};
 use ipod_sync::ipod::db::{OwnedDb, Tags, TrackHandle};
 use ipod_sync::ipod::{device, detect_ipod_mount};
 use ipod_sync::manifest::{self, Action, Manifest, ManifestEntry};
+use ipod_sync::progress::Progress;
 use ipod_sync::source::{self, SourceEntry};
 use ipod_sync::transcode::{self, has_embedded_art, ProbeOutput, ProbeTags};
 use std::path::Path;
@@ -19,9 +20,6 @@ fn main() -> Result<()> {
 }
 
 fn run(config: &Config) -> Result<()> {
-    println!("Source  : {}", config.source.display());
-    println!("Manifest: {}", config.manifest_path.display());
-
     transcode::verify_tools_available()?;
 
     // 1. Resolve iPod mount.
@@ -35,45 +33,56 @@ fn run(config: &Config) -> Result<()> {
         }
         None => detect_ipod_mount()?,
     };
-    println!("iPod    : {mount}");
 
     // 2. Walk source.
-    println!("Walking source...");
     let sources = source::walk(&config.source)?;
-    println!("  {} FLAC file(s)", sources.len());
 
     // 3. Load (or rebuild) manifest.
     let mut manifest = if config.rebuild_manifest {
-        println!("Rebuilding manifest from iPod (--rebuild-manifest)...");
         let db = OwnedDb::open(Path::new(&mount))?;
         let rebuilt = build_rebuild_manifest(&db);
-        println!("  {} existing iPod track(s) recorded as source-unknown", rebuilt.tracks.len());
         // Save eagerly so a crash after this point doesn't lose the rebuild.
         manifest::save_atomic(&config.manifest_path, &rebuilt)?;
         rebuilt
     } else {
-        let m = manifest::load_or_default(&config.manifest_path)?;
-        println!("Loaded {} existing manifest entries", m.tracks.len());
-        m
+        manifest::load_or_default(&config.manifest_path)?
     };
 
     // 4. Diff.
     let actions = manifest::diff(&manifest, &sources);
     let (add, modify, remove, unchanged) = count_actions(&actions);
-    println!();
-    println!("Action plan:");
-    println!("  Add      : {add}");
-    println!("  Modify   : {modify}");
-    println!("  Remove   : {remove}{}", if config.no_delete { " (--no-delete; skipped)" } else { "" });
-    println!("  Unchanged: {unchanged}");
+
+    // Start the progress handle now that we know the action counts.
+    let progress = Progress::start(config.use_tui)?;
+    progress.header(
+        config.source.display().to_string(),
+        mount.clone(),
+        config.manifest_path.display().to_string(),
+    );
+
+    if config.rebuild_manifest {
+        progress.log(format!(
+            "Rebuilt manifest from iPod: {} track(s) recorded as source-unknown",
+            manifest.tracks.len()
+        ));
+    } else {
+        progress.log(format!("Loaded {} existing manifest entries", manifest.tracks.len()));
+    }
+    progress.log(format!("Source: {} FLAC file(s)", sources.len()));
+
+    let effective_remove = if config.no_delete { 0 } else { remove };
+    let total_planned = add + modify + effective_remove;
+    progress.summary(add, modify, remove, unchanged, total_planned);
 
     if config.dry_run {
-        println!("\nDry run; nothing was written.");
+        progress.log("Dry run; nothing was written.");
+        progress.finish();
         return Ok(());
     }
 
     if add == 0 && modify == 0 && (remove == 0 || config.no_delete) {
-        println!("\nNothing to do.");
+        progress.log("Nothing to do.");
+        progress.finish();
         return Ok(());
     }
 
@@ -85,23 +94,32 @@ fn run(config: &Config) -> Result<()> {
         device::set_firewire_guid(device_ptr, &guid)?;
     }
 
-    let total = actions.len();
     let mut i = 0usize;
     for action in actions {
-        i += 1;
         match action {
-            Action::Unchanged(_) => {}  // no-op
+            Action::Unchanged(_) => continue,
             Action::Remove(entry) => {
                 if config.no_delete {
                     continue;
                 }
-                println!("[{i}/{total}] REMOVE {} (dbid {})", entry.source_path.display(), entry.ipod_dbid);
+                i += 1;
+                progress.track_start(
+                    i,
+                    total_planned,
+                    format!("REMOVE {} (dbid {})", entry.source_path.display(), entry.ipod_dbid),
+                );
                 db.delete_track(entry.ipod_dbid)
                     .with_context(|| format!("delete dbid {}", entry.ipod_dbid))?;
                 manifest.tracks.retain(|e| e.ipod_dbid != entry.ipod_dbid);
+                progress.track_done();
             }
             Action::Modify(src, old) => {
-                println!("[{i}/{total}] MODIFY {}", src.path.display());
+                i += 1;
+                progress.track_start(
+                    i,
+                    total_planned,
+                    format!("MODIFY {}", src.path.display()),
+                );
                 if !config.no_delete {
                     db.delete_track(old.ipod_dbid)
                         .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))?;
@@ -109,22 +127,30 @@ fn run(config: &Config) -> Result<()> {
                 }
                 let handle = add_one(&db, &src)?;
                 manifest.tracks.push(entry_from(&src, &handle));
+                progress.track_done();
             }
             Action::Add(src) => {
-                println!("[{i}/{total}] ADD {}", src.path.display());
+                i += 1;
+                progress.track_start(
+                    i,
+                    total_planned,
+                    format!("ADD {}", src.path.display()),
+                );
                 let handle = add_one(&db, &src)?;
                 manifest.tracks.push(entry_from(&src, &handle));
+                progress.track_done();
             }
         }
     }
 
     // 6. Commit DB + manifest. NEITHER is persisted unless we got this far.
-    println!("\nWriting iPod DB...");
+    progress.log("Writing iPod DB...");
     db.write()?;
-    println!("Writing manifest...");
+    progress.log("Writing manifest...");
     manifest::save_atomic(&config.manifest_path, &manifest)?;
 
-    println!("\nDone. Eject the iPod before unplugging.");
+    progress.log("Done. Eject the iPod before unplugging.");
+    progress.finish();
     Ok(())
 }
 
