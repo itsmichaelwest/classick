@@ -14,6 +14,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let config = config::resolve(cli)?;
+    ipod_sync::logging::init(config.verbose);
     run(&config)
 }
 

@@ -44,6 +44,10 @@ fn main() {
         .allowlist_function("g_error_.*")
         .allowlist_function("g_strdup")
         .allowlist_function("g_free")
+        // Task 11: route libgpod's GLib WARNING/CRITICAL messages through tracing.
+        .allowlist_function("g_log_.*")
+        .allowlist_type("GLogLevelFlags")
+        .allowlist_var("G_LOG_.*")
         .allowlist_type("GError")
         .allowlist_type("GList")
         .layout_tests(false)
