@@ -1,6 +1,5 @@
 # Rust
 /target
-Cargo.lock
 
 # libgpod binaries are platform-specific and large
 /vendor/libgpod/bin/*.dll
