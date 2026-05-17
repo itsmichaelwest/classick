@@ -27,6 +27,17 @@ pub struct Cli {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Skip the interactive review and apply the action plan immediately.
+    /// Useful for scripts/CI. Mutually exclusive with --dry-run.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// After the run completes, persist the effective settings (including any
+    /// one-shot CLI flag overrides from this invocation) to
+    /// %APPDATA%\ipod-sync\config.toml.
+    #[arg(long)]
+    pub save_config: bool,
+
     /// Never remove tracks from iPod, even if removed from source.
     #[arg(long)]
     pub no_delete: bool,
@@ -90,5 +101,24 @@ mod tests {
     #[test]
     fn rejects_unknown_flag() {
         assert!(Cli::try_parse_from(["ipod-sync", "--invented-flag"]).is_err());
+    }
+
+    #[test]
+    fn parses_apply_flag() {
+        let cli = Cli::try_parse_from(["ipod-sync", "--apply"]).unwrap();
+        assert!(cli.apply, "expected --apply to set the apply field");
+    }
+
+    #[test]
+    fn parses_save_config_flag() {
+        let cli = Cli::try_parse_from(["ipod-sync", "--save-config"]).unwrap();
+        assert!(cli.save_config, "expected --save-config to set the save_config field");
+    }
+
+    #[test]
+    fn apply_and_save_config_default_false() {
+        let cli = Cli::try_parse_from(["ipod-sync"]).unwrap();
+        assert!(!cli.apply);
+        assert!(!cli.save_config);
     }
 }
