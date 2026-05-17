@@ -8,3 +8,4 @@ pub mod manifest;
 pub mod progress;
 pub mod source;
 pub mod transcode;
+pub mod wizard;
