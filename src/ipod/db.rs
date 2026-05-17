@@ -79,7 +79,12 @@ impl OwnedDb {
     /// On failure mid-way (file copied but playlist add fails), the file is
     /// left on the iPod orphaned — Phase 2's `--rebuild-manifest` recovers
     /// from this kind of state. Phase 1 just surfaces the error.
-    pub fn add_track_with_file(&self, source_alac: &Path, tags: &Tags) -> Result<()> {
+    pub fn add_track_with_file(
+        &self,
+        source_alac: &Path,
+        tags: &Tags,
+        art: Option<&[u8]>,
+    ) -> Result<()> {
         let alac_c = path_to_cstring(source_alac)?;
         unsafe {
             let track = ffi::itdb_track_new();
@@ -87,6 +92,24 @@ impl OwnedDb {
                 return Err(anyhow!("itdb_track_new returned NULL"));
             }
             apply_tags(track, tags);
+
+            // Plan B (SPEC §8 row 3): write artwork via libgpod's ArtworkDB+ithmb
+            // thumbnail system. The iPod Classic UI ignores embedded MP4 cover
+            // atoms — it reads from iPod_Control\Artwork. Done before
+            // itdb_track_add so a failure here doesn't leave a half-attached
+            // track in the DB.
+            if let Some(bytes) = art {
+                let ok = ffi::itdb_track_set_thumbnails_from_data(
+                    track,
+                    bytes.as_ptr(),
+                    bytes.len() as _,
+                );
+                if ok == 0 {
+                    // Track isn't yet attached to db, so we own it.
+                    ffi::itdb_track_free(track);
+                    return Err(anyhow!("itdb_track_set_thumbnails_from_data failed"));
+                }
+            }
 
             // itdb_cp_track_to_ipod requires track->itdb to be set; that back-pointer
             // is wired by itdb_track_add. (Without this, libgpod aborts with

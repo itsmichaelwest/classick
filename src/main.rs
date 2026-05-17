@@ -22,6 +22,20 @@ fn main() -> Result<()> {
         if has_embedded_art(&probe_data) { "yes" } else { "no" }
     );
 
+    let art_bytes: Option<Vec<u8>> = if has_embedded_art(&probe_data) {
+        let art_path = transcode::temp_art_path();
+        std::fs::create_dir_all(art_path.parent().unwrap())?;
+        println!("Extracting cover art to {} ...", art_path.display());
+        transcode::extract_cover_art(&source, &art_path)?;
+        let bytes = std::fs::read(&art_path)?;
+        println!("  art size: {} bytes", bytes.len());
+        let _ = std::fs::remove_file(&art_path);
+        Some(bytes)
+    } else {
+        println!("No embedded art; track will have no thumbnail.");
+        None
+    };
+
     let tags = tags_from_probe(&probe_data);
     println!("Title       : {}", tags.title.as_deref().unwrap_or("<none>"));
     println!("Artist      : {}", tags.artist.as_deref().unwrap_or("<none>"));
@@ -45,7 +59,7 @@ fn main() -> Result<()> {
     }
 
     println!("Adding track to DB...");
-    db.add_track_with_file(&temp, &tags)?;
+    db.add_track_with_file(&temp, &tags, art_bytes.as_deref())?;
 
     println!("Writing DB to iPod (this signs the hashed iTunesDB)...");
     db.write()?;

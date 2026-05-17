@@ -165,6 +165,36 @@ pub fn temp_alac_path() -> PathBuf {
     p
 }
 
+/// Build the path to the Phase 1 cover-art temp file.
+pub fn temp_art_path() -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push("ipod-sync");
+    p.push(format!("ipod-sync-art-{}.jpg", std::process::id()));
+    p
+}
+
+/// Extract the first video stream (assumed to be the attached_pic / cover art)
+/// from `src` to `dst` as a single still image. Assumes the source actually
+/// has an attached_pic stream — caller should check via `has_embedded_art`
+/// before calling.
+pub fn extract_cover_art(src: &Path, dst: &Path) -> Result<()> {
+    let status = Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-y"])
+        .args(["-i"])
+        .arg(src)
+        .args(["-an", "-c:v", "copy", "-map", "0:v:0", "-frames:v", "1"])
+        .arg(dst)
+        .status()
+        .map_err(|e| anyhow!("failed to spawn ffmpeg for art extract: {e}"))?;
+    if !status.success() {
+        return Err(anyhow!(
+            "ffmpeg cover-art extract failed (exit {:?})",
+            status.code()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
