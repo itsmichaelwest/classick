@@ -86,72 +86,85 @@ fn run(config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    // 5. Apply actions.
-    let db = OwnedDb::open(Path::new(&mount))?;
-    let guid = device::read_firewire_guid(Path::new(&mount))?;
-    unsafe {
-        let device_ptr = (*db.as_ptr()).device;
-        device::set_firewire_guid(device_ptr, &guid)?;
-    }
+    // 5. Apply actions + 6. Commit DB + manifest.
+    // Wrapped in a closure so that any mid-sync error can be paired with a
+    // recovery hint before bubbling up, and progress.finish() is always called.
+    let sync_result: Result<()> = (|| -> Result<()> {
+        let db = OwnedDb::open(Path::new(&mount))?;
+        let guid = device::read_firewire_guid(Path::new(&mount))?;
+        unsafe {
+            let device_ptr = (*db.as_ptr()).device;
+            device::set_firewire_guid(device_ptr, &guid)?;
+        }
 
-    let mut i = 0usize;
-    for action in actions {
-        match action {
-            Action::Unchanged(_) => continue,
-            Action::Remove(entry) => {
-                if config.no_delete {
-                    continue;
+        let mut i = 0usize;
+        for action in actions {
+            match action {
+                Action::Unchanged(_) => continue,
+                Action::Remove(entry) => {
+                    if config.no_delete {
+                        continue;
+                    }
+                    i += 1;
+                    progress.track_start(
+                        i,
+                        total_planned,
+                        format!("REMOVE {} (dbid {})", entry.source_path.display(), entry.ipod_dbid),
+                    );
+                    db.delete_track(entry.ipod_dbid)
+                        .with_context(|| format!("delete dbid {}", entry.ipod_dbid))?;
+                    manifest.tracks.retain(|e| e.ipod_dbid != entry.ipod_dbid);
+                    progress.track_done();
                 }
-                i += 1;
-                progress.track_start(
-                    i,
-                    total_planned,
-                    format!("REMOVE {} (dbid {})", entry.source_path.display(), entry.ipod_dbid),
-                );
-                db.delete_track(entry.ipod_dbid)
-                    .with_context(|| format!("delete dbid {}", entry.ipod_dbid))?;
-                manifest.tracks.retain(|e| e.ipod_dbid != entry.ipod_dbid);
-                progress.track_done();
-            }
-            Action::Modify(src, old) => {
-                i += 1;
-                progress.track_start(
-                    i,
-                    total_planned,
-                    format!("MODIFY {}", src.path.display()),
-                );
-                if !config.no_delete {
-                    db.delete_track(old.ipod_dbid)
-                        .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))?;
-                    manifest.tracks.retain(|e| e.ipod_dbid != old.ipod_dbid);
+                Action::Modify(src, old) => {
+                    i += 1;
+                    progress.track_start(
+                        i,
+                        total_planned,
+                        format!("MODIFY {}", src.path.display()),
+                    );
+                    if !config.no_delete {
+                        db.delete_track(old.ipod_dbid)
+                            .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))?;
+                        manifest.tracks.retain(|e| e.ipod_dbid != old.ipod_dbid);
+                    }
+                    let handle = add_one(&db, &src)?;
+                    manifest.tracks.push(entry_from(&src, &handle));
+                    progress.track_done();
                 }
-                let handle = add_one(&db, &src)?;
-                manifest.tracks.push(entry_from(&src, &handle));
-                progress.track_done();
-            }
-            Action::Add(src) => {
-                i += 1;
-                progress.track_start(
-                    i,
-                    total_planned,
-                    format!("ADD {}", src.path.display()),
-                );
-                let handle = add_one(&db, &src)?;
-                manifest.tracks.push(entry_from(&src, &handle));
-                progress.track_done();
+                Action::Add(src) => {
+                    i += 1;
+                    progress.track_start(
+                        i,
+                        total_planned,
+                        format!("ADD {}", src.path.display()),
+                    );
+                    let handle = add_one(&db, &src)?;
+                    manifest.tracks.push(entry_from(&src, &handle));
+                    progress.track_done();
+                }
             }
         }
+
+        // 6. Commit DB + manifest. NEITHER is persisted unless we got this far.
+        progress.log("Writing iPod DB...");
+        db.write()?;
+        progress.log("Writing manifest...");
+        manifest::save_atomic(&config.manifest_path, &manifest)?;
+
+        progress.log("Done. Eject the iPod before unplugging.");
+        Ok(())
+    })();
+
+    if let Err(e) = &sync_result {
+        progress.error(format!("Sync failed: {e}"));
+        progress.error("The iPod may now contain orphan track files (added but not".to_string());
+        progress.error("in the iTunesDB), and the manifest has NOT been updated.".to_string());
+        progress.error("To recover: re-run with --rebuild-manifest, which will read the iPod's".to_string());
+        progress.error("current DB and create a fresh manifest. Then run normally.".to_string());
     }
-
-    // 6. Commit DB + manifest. NEITHER is persisted unless we got this far.
-    progress.log("Writing iPod DB...");
-    db.write()?;
-    progress.log("Writing manifest...");
-    manifest::save_atomic(&config.manifest_path, &manifest)?;
-
-    progress.log("Done. Eject the iPod before unplugging.");
     progress.finish();
-    Ok(())
+    sync_result
 }
 
 /// Transcode + add one source file. Returns the iPod-side handle.
