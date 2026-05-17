@@ -63,6 +63,75 @@ pub unsafe fn set_firewire_guid(
     Ok(())
 }
 
+/// Enumerate Windows drive letters A-Z, find drives that look like an iPod
+/// (have `iPod_Control\iTunes\iTunesDB`), and return the unique mount.
+pub fn detect_ipod_mount() -> Result<String> {
+    let candidates = candidate_drives()
+        .into_iter()
+        .filter(looks_like_ipod)
+        .collect();
+    pick_mount(candidates)
+}
+
+/// Return all currently-existing drive letters A:\\ through Z:\\.
+fn candidate_drives() -> Vec<String> {
+    ('A'..='Z')
+        .map(|c| format!("{c}:\\"))
+        .filter(|d| std::path::Path::new(d).exists())
+        .collect()
+}
+
+/// True if `drive` looks like a mounted iPod (has iTunesDB).
+fn looks_like_ipod(drive: &String) -> bool {
+    std::path::Path::new(drive)
+        .join("iPod_Control")
+        .join("iTunes")
+        .join("iTunesDB")
+        .exists()
+}
+
+/// Given a set of iPod-looking mounts, return the unique one or an error.
+fn pick_mount(mounts: Vec<String>) -> Result<String> {
+    match mounts.len() {
+        0 => Err(anyhow!(
+            "no iPod found mounted on any drive. Plug in the iPod (or pass --ipod <drive>)."
+        )),
+        1 => Ok(mounts.into_iter().next().unwrap()),
+        _ => Err(anyhow!(
+            "multiple iPod-like drives found: {}. Pass --ipod <drive> to disambiguate.",
+            mounts.join(", ")
+        )),
+    }
+}
+
+#[cfg(test)]
+mod detection_tests {
+    use super::*;
+
+    #[test]
+    fn pick_mount_single_match() {
+        let mounts = vec!["G:\\".to_string()];
+        let mount = pick_mount(mounts).unwrap();
+        assert_eq!(mount, "G:\\");
+    }
+
+    #[test]
+    fn pick_mount_no_match_errors() {
+        let err = pick_mount(vec![]).unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("no ipod"));
+    }
+
+    #[test]
+    fn pick_mount_multiple_matches_errors() {
+        let mounts = vec!["E:\\".to_string(), "G:\\".to_string()];
+        let err = pick_mount(mounts).unwrap_err();
+        assert!(err.to_string().contains("E:") && err.to_string().contains("G:"),
+            "error message must enumerate the candidates");
+        assert!(err.to_string().contains("--ipod"),
+            "error must hint at --ipod flag");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
