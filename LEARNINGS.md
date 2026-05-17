@@ -205,3 +205,17 @@ Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights
 
 - **mtime-touched-but-content-identical files** correctly classify as Unchanged but re-fingerprint every subsequent run because the stored mtime stays stale. Phase 3+ refinement: refresh stored mtime on the slow-path-Unchanged case so the next run hits the fast path again. Tiny code change, real-world impact on libraries with `touch`-style operations.
 - **Plex-bad-art investigation**: worth a small forensic pass to confirm which tracks have which issue, so the user can fix at the source.
+
+## Phase 3.y gate (2026-05-17) — PASS
+
+- **Result:** PASS — UX layer ships.
+- **Wizard:** launches when no source set; saves to `%APPDATA%\ipod-sync\config.toml`; orchestrator continues after Enter.
+- **Review state:** action plan renders correctly; `t` toggles `--no-delete` and flips the Remove count display; `d` exits cleanly with "Dry run; nothing was written"; `q` quits without changes; `a` proceeds to apply.
+- **--apply flag:** skips review, applies immediately. Validated in no-change run (~1s).
+- **--dry-run flag:** skips review, exits after summary.
+- **--save-config:** persists effective config (tested implicitly via wizard write — explicit `--save-config` flag still standing for future ad-hoc persist cases).
+- **Non-TTY rejection:** confirmed errors clearly when `--no-tui` is set without explicit `--apply` or `--dry-run`.
+
+### Phase 3.z carry-forward
+
+User flagged: "we might want to make the UX a bit more interactive so that all interactions are done in the TUI (even errors, etc.)" — captured as discrete roadmap item "Phase 3.z — TUI-first error UX" in `docs/superpowers/specs/2026-05-18-post-v1-roadmap.md`.
