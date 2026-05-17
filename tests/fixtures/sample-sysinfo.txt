@@ -1,0 +1,2 @@
+FirewireGuid: 0x000A27002138B0A8
+ModelNumStr: MB029
