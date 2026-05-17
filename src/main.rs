@@ -1,3 +1,7 @@
+mod ffi;
+
 fn main() {
-    println!("ipod-sync — Phase 0 spike (not yet implemented)");
+    // Sanity check that bindings compiled.
+    println!("ipod-sync build.rs + bindgen wired up");
+    println!("size of Itdb_Track: {}", std::mem::size_of::<ffi::Itdb_Track>());
 }
