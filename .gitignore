@@ -5,6 +5,9 @@
 /vendor/libgpod/bin/*.dll
 /vendor/libgpod/bin/*.pdb
 
+# lib.exe /def byproducts
+/vendor/libgpod/lib/*.exp
+
 # Build artifacts
 *.exe
 *.pdb
