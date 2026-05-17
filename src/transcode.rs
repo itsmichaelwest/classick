@@ -18,63 +18,66 @@ pub struct ProbeFormat {
 }
 
 /// FLAC tag names are case-insensitive but ffprobe preserves the on-disk casing.
-/// Common encoders use uppercase (TITLE, ARTIST, ...) but ffmpeg's Lavf muxer
-/// normalizes some (`ALBUMARTIST` → `album_artist`, `TRACK` → `track`,
-/// `DISC` → `disc`). We accept all common variants via serde aliases so the
-/// parser doesn't fight the encoder.
-#[derive(Debug, Default, Deserialize)]
+/// Worse, the SAME field can appear under multiple synonymous keys in one file
+/// (e.g. `TRACKTOTAL` and `TOTALTRACKS` both populated by MusicBrainz Picard).
+/// Serde's `#[serde(alias = ...)]` rejects this as a duplicate-field error,
+/// so we deserialize manually: lowercase every incoming key, dispatch via the
+/// canonical-name table below, and use first-write-wins when synonyms collide.
+#[derive(Debug, Default)]
 pub struct ProbeTags {
-    #[serde(default, alias = "TITLE", alias = "Title")]
     pub title: Option<String>,
-    #[serde(default, alias = "ARTIST", alias = "Artist")]
     pub artist: Option<String>,
-    #[serde(default, alias = "ALBUM", alias = "Album")]
     pub album: Option<String>,
-    #[serde(
-        default,
-        alias = "ALBUMARTIST",
-        alias = "album_artist",
-        alias = "AlbumArtist"
-    )]
     pub album_artist: Option<String>,
-    #[serde(default, alias = "DATE", alias = "Date", alias = "year", alias = "YEAR")]
     pub date: Option<String>,
-    #[serde(
-        default,
-        alias = "TRACK",
-        alias = "Track",
-        alias = "tracknumber",
-        alias = "TRACKNUMBER"
-    )]
     pub track: Option<String>,
-    #[serde(
-        default,
-        alias = "TRACKTOTAL",
-        alias = "TOTALTRACKS",
-        alias = "tracktotal",
-        alias = "totaltracks"
-    )]
     pub track_total: Option<String>,
-    #[serde(
-        default,
-        alias = "DISC",
-        alias = "Disc",
-        alias = "discnumber",
-        alias = "DISCNUMBER"
-    )]
     pub disc: Option<String>,
-    #[serde(
-        default,
-        alias = "DISCTOTAL",
-        alias = "TOTALDISCS",
-        alias = "disctotal",
-        alias = "totaldiscs"
-    )]
     pub disc_total: Option<String>,
-    #[serde(default, alias = "GENRE", alias = "Genre")]
     pub genre: Option<String>,
-    #[serde(default, alias = "COMPOSER", alias = "Composer")]
     pub composer: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ProbeTags {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Visit the JSON object as a free-form map of String -> serde_json::Value
+        // so duplicate keys don't blow up. ffprobe values are always strings, but
+        // accept Value to be forgiving (e.g. numeric DATE).
+        let raw: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::deserialize(d)?;
+        let mut out = ProbeTags::default();
+        for (key, value) in raw {
+            let s = match value {
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => continue,  // skip arrays/objects/bools/null
+            };
+            if s.is_empty() {
+                continue;
+            }
+            // Canonical lowercase mapping. Aliases share a target.
+            let slot: Option<&mut Option<String>> = match key.to_ascii_lowercase().as_str() {
+                "title" => Some(&mut out.title),
+                "artist" => Some(&mut out.artist),
+                "album" => Some(&mut out.album),
+                "album_artist" | "albumartist" => Some(&mut out.album_artist),
+                "date" | "year" => Some(&mut out.date),
+                "track" | "tracknumber" => Some(&mut out.track),
+                "tracktotal" | "totaltracks" => Some(&mut out.track_total),
+                "disc" | "discnumber" => Some(&mut out.disc),
+                "disctotal" | "totaldiscs" => Some(&mut out.disc_total),
+                "genre" => Some(&mut out.genre),
+                "composer" => Some(&mut out.composer),
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                if slot.is_none() {
+                    *slot = Some(s);
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,6 +260,32 @@ mod tests {
     fn probe_output_detects_embedded_art() {
         let probe: ProbeOutput = serde_json::from_str(SAMPLE).unwrap();
         assert!(has_embedded_art(&probe));
+    }
+
+    #[test]
+    fn probe_output_handles_duplicate_synonymous_keys() {
+        // Real-world Picard-tagged FLAC: TRACKTOTAL and TOTALTRACKS coexist.
+        // Serde's derive(Deserialize) with aliases rejected this; our manual
+        // impl picks first-write-wins.
+        let json = r#"{
+            "streams":[{"codec_type":"audio"}],
+            "format":{"tags":{
+                "TITLE":"X",
+                "TRACKTOTAL":"12",
+                "TOTALTRACKS":"12",
+                "DISCTOTAL":"1",
+                "TOTALDISCS":"1",
+                "track":"1",
+                "disc":"1"
+            }}
+        }"#;
+        let probe: ProbeOutput = serde_json::from_str(json).unwrap();
+        let tags = probe.format.tags.expect("has tags");
+        assert_eq!(tags.title.as_deref(), Some("X"));
+        assert_eq!(tags.track.as_deref(), Some("1"));
+        assert_eq!(tags.track_total.as_deref(), Some("12"));
+        assert_eq!(tags.disc.as_deref(), Some("1"));
+        assert_eq!(tags.disc_total.as_deref(), Some("1"));
     }
 
     #[test]
