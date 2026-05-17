@@ -1,8 +1,10 @@
 //! Recursive FLAC walker + BLAKE3 fingerprint (first 1 MiB).
 //!
 //! Per SPEC §4.2: case-insensitive `*.flac`, skip `_excluded` and `.unwanted`
-//! subdirs. Fingerprint is BLAKE3 of the first 1 MiB; size is captured
-//! separately so the diff can use (fingerprint, size) as the change signal.
+//! subdirs. Walker is stat-only — no file content reads — so a 1,400-file
+//! tree over SMB stays in the seconds range. The fingerprint (BLAKE3 of the
+//! first 1 MiB) is exposed as a standalone function the diff invokes lazily
+//! only when mtime+size don't match the manifest (SPEC §6 #2).
 
 use anyhow::{anyhow, Result};
 use std::io::Read;
@@ -10,14 +12,13 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// One FLAC discovered by the walker. Cheap to clone (a few hundred bytes).
+/// Stat-only — no fingerprint here; see [`fingerprint`] for the on-demand hash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceEntry {
     pub path: PathBuf,
     /// Unix epoch seconds.
     pub mtime: i64,
     pub size: u64,
-    /// `blake3:<64-hex-chars>`.
-    pub fingerprint: String,
 }
 
 const FINGERPRINT_PREFIX_BYTES: usize = 1024 * 1024;
@@ -82,8 +83,7 @@ fn build_source_entry(path: &Path) -> Result<SourceEntry> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let fingerprint = fingerprint(path)?;
-    Ok(SourceEntry { path: path.to_path_buf(), mtime, size, fingerprint })
+    Ok(SourceEntry { path: path.to_path_buf(), mtime, size })
 }
 
 /// Hash up to the first 1 MiB of a file with BLAKE3.
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn fingerprint_unchanged_when_only_bytes_beyond_first_mib_differ() {
         let tmp = tempdir_under_target();
-        let mut payload_a = vec![0u8; 1024 * 1024 + 100];
+        let payload_a = vec![0u8; 1024 * 1024 + 100];
         let mut payload_b = payload_a.clone();
         for i in (1024 * 1024)..payload_b.len() {
             payload_b[i] = 0xFF;

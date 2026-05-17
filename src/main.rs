@@ -48,8 +48,10 @@ fn run(config: &Config) -> Result<()> {
         manifest::load_or_default(&config.manifest_path)?
     };
 
-    // 4. Diff.
-    let actions = manifest::diff(&manifest, &sources);
+    // 4. Diff. Pass `source::fingerprint` as the slow-path hash callback;
+    //    it only fires for entries whose (mtime, size) doesn't match the
+    //    manifest, so the steady-state "nothing changed" run is stat-only.
+    let actions = manifest::diff(&manifest, &sources, source::fingerprint)?;
     let (add, modify, remove, unchanged) = count_actions(&actions);
 
     // Start the progress handle now that we know the action counts.
@@ -128,8 +130,8 @@ fn run(config: &Config) -> Result<()> {
                             .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))?;
                         manifest.tracks.retain(|e| e.ipod_dbid != old.ipod_dbid);
                     }
-                    let handle = add_one(&db, &src)?;
-                    manifest.tracks.push(entry_from(&src, &handle));
+                    let (handle, fp) = add_one(&db, &src)?;
+                    manifest.tracks.push(entry_from(&src, &handle, &fp));
                     progress.track_done();
                 }
                 Action::Add(src) => {
@@ -139,8 +141,8 @@ fn run(config: &Config) -> Result<()> {
                         total_planned,
                         format!("ADD {}", src.path.display()),
                     );
-                    let handle = add_one(&db, &src)?;
-                    manifest.tracks.push(entry_from(&src, &handle));
+                    let (handle, fp) = add_one(&db, &src)?;
+                    manifest.tracks.push(entry_from(&src, &handle, &fp));
                     progress.track_done();
                 }
             }
@@ -167,8 +169,12 @@ fn run(config: &Config) -> Result<()> {
     sync_result
 }
 
-/// Transcode + add one source file. Returns the iPod-side handle.
-fn add_one(db: &OwnedDb, src: &SourceEntry) -> Result<TrackHandle> {
+/// Transcode + add one source file. Returns the iPod-side handle plus the
+/// freshly-computed source fingerprint. The fingerprint is computed here
+/// (not by the walker) because Add/Modify are the only code paths that need
+/// it for the manifest entry — the steady-state Unchanged path stays
+/// stat-only.
+fn add_one(db: &OwnedDb, src: &SourceEntry) -> Result<(TrackHandle, String)> {
     let probe = transcode::probe(&src.path)
         .with_context(|| format!("probe {}", src.path.display()))?;
     let tags = tags_from_probe(&probe);
@@ -194,7 +200,10 @@ fn add_one(db: &OwnedDb, src: &SourceEntry) -> Result<TrackHandle> {
         .with_context(|| format!("add_track_with_file for {}", src.path.display()))?;
 
     let _ = std::fs::remove_file(&temp);
-    Ok(handle)
+
+    let fingerprint = source::fingerprint(&src.path)
+        .with_context(|| format!("fingerprint {}", src.path.display()))?;
+    Ok((handle, fingerprint))
 }
 
 fn tags_from_probe(p: &ProbeOutput) -> Tags {
@@ -257,12 +266,12 @@ fn count_actions(actions: &[Action]) -> (usize, usize, usize, usize) {
     (add, modify, remove, unchanged)
 }
 
-fn entry_from(src: &SourceEntry, handle: &TrackHandle) -> ManifestEntry {
+fn entry_from(src: &SourceEntry, handle: &TrackHandle, fingerprint: &str) -> ManifestEntry {
     ManifestEntry {
         source_path: src.path.clone(),
         source_mtime: src.mtime,
         source_size: src.size,
-        source_fingerprint: src.fingerprint.clone(),
+        source_fingerprint: fingerprint.to_string(),
         ipod_dbid: handle.dbid,
         ipod_relpath: handle.ipod_relpath.clone(),
         source_known: true,

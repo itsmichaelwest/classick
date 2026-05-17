@@ -149,6 +149,15 @@ Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights
 - **Action plan:** Add=1407, Modify=0, Remove=0, Unchanged=0 (expected — no manifest yet).
 - **Notes:** Count lines up with SPEC §11's "≈1,400" target. SMB walk + first-MiB BLAKE3 read across 1,407 files completed in 80s — comfortably inside the 30-180s window. No hangs, no errors, no warnings. `cargo build --release` from a clean release tree took 27.5s (dep graph compile); subsequent re-link inside the `cargo run` invocation was 0.16s. Bare-walk elapsed (excluding cargo's already-built check) is dominated by SMB I/O, not Rust work.
 
+## Phase 2 §6 #2 stat-only diff fast path (2026-05-18)
+
+- **Result:** PASS — 1,407-file no-op second run drops from 93.8s to ~0.55s (~170× speedup, ~9× under the 5s SPEC §6 #2 budget).
+- **Design:** `SourceEntry` is now stat-only (path/mtime/size, no fingerprint). `manifest::diff` takes `impl FnMut(&Path) -> Result<String>` and only invokes it on the slow path — when stored (mtime, size) doesn't match. New `diff_unchanged_after_touch_but_same_content` test plus `never_called()` callback helper assert the fast path doesn't read file content.
+- **Bench-diff example (`examples/bench-diff.rs`):** lets us measure walk + diff time against the real manifest without the iPod plugged in. Source = `\\HOST\data\media\music`. Reproducible target for any future I/O regression.
+- **Live numbers (release, SMB):** load manifest 0.001s; walk 1407 files 0.548s; diff 0.002s with 0 fingerprint reads. Pure SMB stat alone is the floor; we're already on it.
+- **Fingerprint computation moved to `add_one`:** `add_one(&db, &src) -> Result<(TrackHandle, String)>` — the orchestrator computes the fingerprint once per Add/Modify and threads it into `entry_from(&src, &handle, &fp)`. Walker never reads file content anymore.
+- **mtime-touched-but-content-identical case** correctly classified as Unchanged for Phase 2 (slow path runs once, callback returns matching fp). Acceptable mild inefficiency: next run still re-fingerprints because the manifest's stored mtime is stale. Refreshing stored mtime to suppress that is Phase 3+.
+
 ## Phase 2 Task 1 — scaffold + carry-forwards (2026-05-18)
 
 - **`itdb_get_mountpoint` IS in bindgen output** (line 722 of `libgpod_bindings.rs`): `pub fn itdb_get_mountpoint(itdb: *mut Itdb_iTunesDB) -> *const gchar`. So the Play Counts.bak fix used the FFI-based approach (read mount from the DB pointer at write time) rather than the stored-mount-path fallback. No `OwnedDb` field addition was needed.

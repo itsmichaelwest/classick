@@ -1,0 +1,62 @@
+//! Benchmark for the steady-state walk+diff path (SPEC §6 #2).
+//!
+//! Runs the same code path as `main.rs` up to the diff, against the real
+//! manifest at `%APPDATA%\ipod-sync\manifest.json`, but does NOT need the
+//! iPod plugged in. Used to verify the Phase 2 optimization
+//! (stat-only walker + lazy fingerprint callback) brings the no-op second
+//! run under the 5-second SPEC target.
+//!
+//! Usage:
+//!   $env:IPOD_SYNC_SOURCE = "\\HOST\data\media\music"
+//!   cargo run --release --example bench-diff
+
+use anyhow::{anyhow, Result};
+use ipod_sync::manifest;
+use ipod_sync::source;
+use std::path::PathBuf;
+use std::time::Instant;
+
+fn main() -> Result<()> {
+    let source_root = std::env::var("IPOD_SYNC_SOURCE")
+        .map_err(|_| anyhow!("set IPOD_SYNC_SOURCE to the music root"))?;
+    let manifest_path: PathBuf = std::env::var_os("APPDATA")
+        .map(|a| PathBuf::from(a).join("ipod-sync").join("manifest.json"))
+        .ok_or_else(|| anyhow!("APPDATA not set"))?;
+
+    println!("source    = {source_root}");
+    println!("manifest  = {}", manifest_path.display());
+
+    let t0 = Instant::now();
+    let manifest = manifest::load_or_default(&manifest_path)?;
+    let t_load = t0.elapsed();
+    println!("load manifest: {:.3}s ({} tracks)", t_load.as_secs_f64(), manifest.tracks.len());
+
+    let t1 = Instant::now();
+    let sources = source::walk(std::path::Path::new(&source_root))?;
+    let t_walk = t1.elapsed();
+    println!("walk source:   {:.3}s ({} files)", t_walk.as_secs_f64(), sources.len());
+
+    let mut fp_calls = 0usize;
+    let t2 = Instant::now();
+    let actions = manifest::diff(&manifest, &sources, |p| {
+        fp_calls += 1;
+        source::fingerprint(p)
+    })?;
+    let t_diff = t2.elapsed();
+    println!("diff:          {:.3}s ({} fingerprint reads)", t_diff.as_secs_f64(), fp_calls);
+
+    let mut add = 0; let mut modify = 0; let mut remove = 0; let mut unchanged = 0;
+    for a in &actions {
+        match a {
+            manifest::Action::Add(_) => add += 1,
+            manifest::Action::Modify(_, _) => modify += 1,
+            manifest::Action::Remove(_) => remove += 1,
+            manifest::Action::Unchanged(_) => unchanged += 1,
+        }
+    }
+    println!("plan: Add={add} Modify={modify} Remove={remove} Unchanged={unchanged}");
+
+    let total = t0.elapsed();
+    println!("total (load+walk+diff): {:.3}s", total.as_secs_f64());
+    Ok(())
+}

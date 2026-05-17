@@ -48,11 +48,22 @@ pub enum Action {
     Unchanged(ManifestEntry),
 }
 
-/// Diff a manifest against the current source state. See SPEC §4.3 for the
-/// classification rules; this is "fingerprint + size determines unchanged",
-/// not the spec's mention of mtime (mtime is captured but not used in the
-/// comparison — it's unreliable across filesystems).
-pub fn diff(manifest: &Manifest, sources: &[SourceEntry]) -> Vec<Action> {
+/// Diff a manifest against the current source state. See SPEC §4.3 / §6 #2.
+///
+/// Fast path: if a manifest entry exists for the path AND `(mtime, size)`
+/// match what the walker stat'd, we trust the stored fingerprint and emit
+/// `Unchanged` WITHOUT calling `compute_fingerprint`. This keeps the no-op
+/// second run stat-only across thousands of files on slow filesystems (SMB).
+///
+/// Slow path: if mtime or size differs, we compute the fingerprint and
+/// compare against the manifest. If it matches AND size matches (paranoia
+/// guard against a truncated file whose first MiB happens to match), the
+/// entry is Unchanged (mtime was merely touched). Otherwise it's Modify.
+pub fn diff(
+    manifest: &Manifest,
+    sources: &[SourceEntry],
+    mut compute_fingerprint: impl FnMut(&Path) -> Result<String>,
+) -> Result<Vec<Action>> {
     let manifest_by_path: HashMap<&PathBuf, &ManifestEntry> = manifest
         .tracks
         .iter()
@@ -68,12 +79,22 @@ pub fn diff(manifest: &Manifest, sources: &[SourceEntry]) -> Vec<Action> {
         match manifest_by_path.get(&src.path) {
             None => actions.push(Action::Add(src.clone())),
             Some(entry) => {
-                let unchanged = entry.source_fingerprint == src.fingerprint
+                let stat_matches = entry.source_mtime == src.mtime
                     && entry.source_size == src.size;
-                if unchanged {
+                if stat_matches {
+                    // FAST PATH — no fingerprint read.
                     actions.push(Action::Unchanged((*entry).clone()));
                 } else {
-                    actions.push(Action::Modify(src.clone(), (*entry).clone()));
+                    // Slow path: hash the first MiB and compare.
+                    let fp = compute_fingerprint(&src.path)?;
+                    let content_unchanged = fp == entry.source_fingerprint
+                        && src.size == entry.source_size;
+                    if content_unchanged {
+                        // mtime was touched but content is identical.
+                        actions.push(Action::Unchanged((*entry).clone()));
+                    } else {
+                        actions.push(Action::Modify(src.clone(), (*entry).clone()));
+                    }
                 }
             }
         }
@@ -88,7 +109,7 @@ pub fn diff(manifest: &Manifest, sources: &[SourceEntry]) -> Vec<Action> {
         }
     }
 
-    actions
+    Ok(actions)
 }
 
 /// Read the manifest from disk; return an empty manifest if the file doesn't exist.
@@ -142,13 +163,23 @@ mod tests {
         }
     }
 
-    fn sample_source(path: &str, fp: &str, size: u64) -> SourceEntry {
+    fn sample_source(path: &str, _fp: &str, size: u64) -> SourceEntry {
         SourceEntry {
             path: PathBuf::from(path),
             mtime: 1700000000,
             size,
-            fingerprint: fp.to_string(),
         }
+    }
+
+    /// Fingerprint callback that panics if called. Used to assert the fast
+    /// path (no fingerprint computation) is taken.
+    fn never_called() -> impl FnMut(&Path) -> Result<String> {
+        |_| panic!("fingerprint callback should not be called when stat matches")
+    }
+
+    /// Fingerprint callback that always returns the given value.
+    fn returns(fp: &'static str) -> impl FnMut(&Path) -> Result<String> {
+        move |_| Ok(fp.to_string())
     }
 
     #[test]
@@ -185,57 +216,68 @@ mod tests {
 
     #[test]
     fn diff_classifies_unchanged() {
+        // mtime + size both match the manifest → FAST PATH; callback must
+        // NOT fire. `never_called()` asserts that invariant for us.
         let manifest = Manifest {
             version: 1, ipod_serial: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
-        let actions = diff(&manifest, &sources);
+        let actions = diff(&manifest, &sources, never_called()).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
     }
 
     #[test]
     fn diff_classifies_new() {
+        // Add path doesn't go through the fingerprint callback either.
         let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![] };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
-        let actions = diff(&manifest, &sources);
+        let actions = diff(&manifest, &sources, never_called()).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Add(_)));
     }
 
     #[test]
     fn diff_classifies_modified_when_fingerprint_changes() {
+        // Bump mtime so stat doesn't match → slow path runs. Callback
+        // returns a fingerprint that differs from the manifest → Modify.
         let manifest = Manifest {
             version: 1, ipod_serial: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
-        let sources = vec![sample_source(r"C:\a.flac", "blake3:bb", 100)];
-        let actions = diff(&manifest, &sources);
+        let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
+        src.mtime = 1700099999;
+        let sources = vec![src];
+        let actions = diff(&manifest, &sources, returns("blake3:bb")).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)));
     }
 
     #[test]
     fn diff_classifies_modified_when_size_changes() {
+        // Size differs → stat fails, callback fires once. Even if first-MiB
+        // fingerprint matches, the size guard demotes to Modify (truncated
+        // file scenario).
         let manifest = Manifest {
             version: 1, ipod_serial: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 200)];
-        let actions = diff(&manifest, &sources);
+        let actions = diff(&manifest, &sources, returns("blake3:aa")).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)));
     }
 
     #[test]
     fn diff_classifies_removed() {
+        // No source list → Remove emitted without any callback work.
         let manifest = Manifest {
             version: 1, ipod_serial: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![];
-        let actions = diff(&manifest, &sources);
+        let actions = diff(&manifest, &sources, never_called()).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Remove(_)));
     }
@@ -246,7 +288,22 @@ mod tests {
         entry.source_known = false;  // from --rebuild-manifest
         let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
         let sources = vec![];  // no sources present
-        let actions = diff(&manifest, &sources);
+        let actions = diff(&manifest, &sources, never_called()).unwrap();
         assert_eq!(actions.len(), 0, "unknown-source entries are NOT removed when source is absent");
+    }
+
+    #[test]
+    fn diff_unchanged_after_touch_but_same_content() {
+        // mtime differs from manifest, sizes equal, fingerprint still matches.
+        // Slow path runs, callback fires, but result is Unchanged.
+        let manifest = Manifest {
+            version: 1, ipod_serial: None,
+            tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
+        };
+        let mut src = sample_source(r"C:\a.flac", "blake3:aa", 100);
+        src.mtime = 1700099999;  // touched
+        let actions = diff(&manifest, &[src], returns("blake3:aa")).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Unchanged(_)));
     }
 }
