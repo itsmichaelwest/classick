@@ -57,7 +57,7 @@ fn run(config: &Config) -> Result<()> {
         source::fingerprint,
         source::audio_fingerprint,
     )?;
-    let (add, modify, remove, unchanged) = count_actions(&actions);
+    let (add, modify, metadata_only, remove, unchanged) = count_actions(&actions);
 
     // Start the progress handle now that we know the action counts.
     let progress = Progress::start(config.use_tui)?;
@@ -78,8 +78,11 @@ fn run(config: &Config) -> Result<()> {
     progress.log(format!("Source: {} FLAC file(s)", sources.len()));
 
     let effective_remove = if config.no_delete { 0 } else { remove };
-    let total_planned = add + modify + effective_remove;
+    let total_planned = add + modify + metadata_only + effective_remove;
     progress.summary(add, modify, remove, unchanged, total_planned);
+    progress.log(format!(
+        "action plan: add={add} modify={modify} metadata={metadata_only} remove={remove} unchanged={unchanged}"
+    ));
 
     if config.dry_run {
         progress.log("Dry run; nothing was written.");
@@ -87,7 +90,11 @@ fn run(config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    if add == 0 && modify == 0 && (remove == 0 || config.no_delete) {
+    if add == 0
+        && modify == 0
+        && metadata_only == 0
+        && (remove == 0 || config.no_delete)
+    {
         progress.log("Nothing to do.");
         progress.finish();
         return Ok(());
@@ -135,8 +142,8 @@ fn run(config: &Config) -> Result<()> {
                             .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))?;
                         manifest.tracks.retain(|e| e.ipod_dbid != old.ipod_dbid);
                     }
-                    let (handle, fp) = add_one(&db, &src)?;
-                    manifest.tracks.push(entry_from(&src, &handle, &fp));
+                    let (handle, fp, audio_fp) = add_one(&db, &src)?;
+                    manifest.tracks.push(entry_from(&src, &handle, &fp, &audio_fp));
                     progress.track_done();
                 }
                 Action::Add(src) => {
@@ -146,20 +153,54 @@ fn run(config: &Config) -> Result<()> {
                         total_planned,
                         format!("ADD {}", src.path.display()),
                     );
-                    let (handle, fp) = add_one(&db, &src)?;
-                    manifest.tracks.push(entry_from(&src, &handle, &fp));
+                    let (handle, fp, audio_fp) = add_one(&db, &src)?;
+                    manifest.tracks.push(entry_from(&src, &handle, &fp, &audio_fp));
                     progress.track_done();
                 }
-                Action::MetadataOnly { .. } => {
-                    // TODO(Phase 3.x Task 5): wire the in-place tag+art update
-                    // via OwnedDb::update_track_metadata. Until then, hitting
-                    // this branch is a programmer error — the diff would only
-                    // emit MetadataOnly when a manifest entry has a populated
-                    // audio_fingerprint, which today is only produced by
-                    // Task 5's add_one extension. So in practice this is
-                    // unreachable on the current code path; we panic loudly
-                    // to surface the gap if it ever fires.
-                    unimplemented!("Action::MetadataOnly handling — Task 5 of Phase 3.x");
+                Action::MetadataOnly { source, entry } => {
+                    i += 1;
+                    progress.track_start(
+                        i,
+                        total_planned,
+                        format!("METADATA {}", source.path.display()),
+                    );
+                    let probe = transcode::probe(&source.path)
+                        .with_context(|| format!("probe {}", source.path.display()))?;
+                    let tags = tags_from_probe(&probe);
+                    let art = if has_embedded_art(&probe) {
+                        let art_path = transcode::temp_art_path();
+                        transcode::extract_cover_art(&source.path, &art_path)?;
+                        let bytes = std::fs::read(&art_path)?;
+                        let _ = std::fs::remove_file(&art_path);
+                        Some(bytes)
+                    } else {
+                        None
+                    };
+                    db.update_track_metadata(entry.ipod_dbid, &tags, art.as_deref())
+                        .with_context(|| format!(
+                            "update_track_metadata dbid {} for {}",
+                            entry.ipod_dbid,
+                            source.path.display()
+                        ))?;
+
+                    // Refresh the manifest entry — same iPod identity, new
+                    // source fingerprint + mtime/size from the touched file.
+                    // audio_fingerprint is unchanged (we verified it matched
+                    // the manifest's value in the diff).
+                    let new_file_fp = source::fingerprint(&source.path)
+                        .with_context(|| format!("fingerprint {}", source.path.display()))?;
+                    manifest.tracks.retain(|e| e.ipod_dbid != entry.ipod_dbid);
+                    manifest.tracks.push(ManifestEntry {
+                        source_path: source.path.clone(),
+                        source_mtime: source.mtime,
+                        source_size: source.size,
+                        source_fingerprint: new_file_fp,
+                        ipod_dbid: entry.ipod_dbid,
+                        ipod_relpath: entry.ipod_relpath.clone(),
+                        source_known: true,
+                        audio_fingerprint: entry.audio_fingerprint.clone(),
+                    });
+                    progress.track_done();
                 }
             }
         }
@@ -186,11 +227,12 @@ fn run(config: &Config) -> Result<()> {
 }
 
 /// Transcode + add one source file. Returns the iPod-side handle plus the
-/// freshly-computed source fingerprint. The fingerprint is computed here
-/// (not by the walker) because Add/Modify are the only code paths that need
-/// it for the manifest entry — the steady-state Unchanged path stays
-/// stat-only.
-fn add_one(db: &OwnedDb, src: &SourceEntry) -> Result<(TrackHandle, String)> {
+/// freshly-computed source fingerprint AND audio-only fingerprint. Both
+/// fingerprints are computed here (not by the walker) because Add/Modify are
+/// the only code paths that need them for the manifest entry — the
+/// steady-state Unchanged path stays stat-only. The audio fingerprint lets
+/// future runs detect tag-only edits and take the MetadataOnly fast path.
+fn add_one(db: &OwnedDb, src: &SourceEntry) -> Result<(TrackHandle, String, String)> {
     let probe = transcode::probe(&src.path)
         .with_context(|| format!("probe {}", src.path.display()))?;
     let tags = tags_from_probe(&probe);
@@ -219,7 +261,9 @@ fn add_one(db: &OwnedDb, src: &SourceEntry) -> Result<(TrackHandle, String)> {
 
     let fingerprint = source::fingerprint(&src.path)
         .with_context(|| format!("fingerprint {}", src.path.display()))?;
-    Ok((handle, fingerprint))
+    let audio_fp = source::audio_fingerprint(&src.path)
+        .with_context(|| format!("audio_fingerprint {}", src.path.display()))?;
+    Ok((handle, fingerprint, audio_fp))
 }
 
 fn tags_from_probe(p: &ProbeOutput) -> Tags {
@@ -269,24 +313,30 @@ fn parse_year(s: &str) -> Option<i32> {
     s.split('-').next()?.trim().parse().ok()
 }
 
-fn count_actions(actions: &[Action]) -> (usize, usize, usize, usize) {
-    // Task 5 of Phase 3.x will widen this to surface MetadataOnly counts
-    // separately; for now we fold them into `modify` so the existing summary
-    // still adds up to the action total.
-    let mut add = 0; let mut modify = 0; let mut remove = 0; let mut unchanged = 0;
+fn count_actions(actions: &[Action]) -> (usize, usize, usize, usize, usize) {
+    let mut add = 0;
+    let mut modify = 0;
+    let mut metadata_only = 0;
+    let mut remove = 0;
+    let mut unchanged = 0;
     for a in actions {
         match a {
             Action::Add(_) => add += 1,
             Action::Modify(_, _) => modify += 1,
-            Action::MetadataOnly { .. } => modify += 1,
+            Action::MetadataOnly { .. } => metadata_only += 1,
             Action::Remove(_) => remove += 1,
             Action::Unchanged(_) => unchanged += 1,
         }
     }
-    (add, modify, remove, unchanged)
+    (add, modify, metadata_only, remove, unchanged)
 }
 
-fn entry_from(src: &SourceEntry, handle: &TrackHandle, fingerprint: &str) -> ManifestEntry {
+fn entry_from(
+    src: &SourceEntry,
+    handle: &TrackHandle,
+    fingerprint: &str,
+    audio_fingerprint: &str,
+) -> ManifestEntry {
     ManifestEntry {
         source_path: src.path.clone(),
         source_mtime: src.mtime,
@@ -295,7 +345,7 @@ fn entry_from(src: &SourceEntry, handle: &TrackHandle, fingerprint: &str) -> Man
         ipod_dbid: handle.dbid,
         ipod_relpath: handle.ipod_relpath.clone(),
         source_known: true,
-        audio_fingerprint: String::new(),
+        audio_fingerprint: audio_fingerprint.to_string(),
     }
 }
 
