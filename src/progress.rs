@@ -14,10 +14,33 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// Snapshot of the action plan sent to the TUI for the Review state.
+#[derive(Debug, Clone, Copy)]
+pub struct ActionPlanSummary {
+    pub add: usize,
+    pub modify: usize,
+    pub metadata_only: usize,
+    pub remove: usize,
+    pub unchanged: usize,
+}
+
+/// User's decision from the Review state. Sent from the TUI thread back to
+/// the main thread via the decision channel.
+#[derive(Debug, Clone, Copy)]
+pub enum ReviewDecision {
+    /// Proceed with the apply loop. `no_delete` carries the user's possibly-toggled value.
+    Apply { no_delete: bool },
+    /// Skip the apply loop and exit cleanly (effectively a one-shot --dry-run).
+    DryRun,
+    /// Exit cleanly without applying anything or saving any state.
+    Quit,
+}
+
 /// Events sent from the main thread to the progress thread.
 pub enum ProgressEvent {
     Header { source: String, ipod: String, manifest: String },
     Summary { add: usize, modify: usize, remove: usize, unchanged: usize, total_planned: usize },
+    Review { summary: ActionPlanSummary, no_delete: bool },
     TrackStart { current: usize, total: usize, label: String },
     TrackDone,
     Log(String),
@@ -31,20 +54,24 @@ pub struct Progress {
 }
 
 impl Progress {
-    pub fn start(use_tui: bool) -> Result<Self> {
+    pub fn start(use_tui: bool) -> Result<(Self, Receiver<ReviewDecision>)> {
         let is_tty = std::io::stdout().is_terminal();
         let active_tui = use_tui && is_tty;
-        let (tx, rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let (decision_tx, decision_rx) = mpsc::channel();
         let thread = std::thread::spawn(move || {
             if active_tui {
-                if let Err(e) = run_tui(rx) {
+                if let Err(e) = run_tui(event_rx, decision_tx) {
                     eprintln!("TUI failure: {e}; falling back to plain mode is not possible mid-run");
                 }
             } else {
-                run_plain(rx);
+                run_plain(event_rx, decision_tx);
             }
         });
-        Ok(Self { sender: tx, thread: Some(thread) })
+        Ok((
+            Self { sender: event_tx, thread: Some(thread) },
+            decision_rx,
+        ))
     }
 
     pub fn header(&self, source: String, ipod: String, manifest: String) {
@@ -52,6 +79,11 @@ impl Progress {
     }
     pub fn summary(&self, add: usize, modify: usize, remove: usize, unchanged: usize, total_planned: usize) {
         let _ = self.sender.send(ProgressEvent::Summary { add, modify, remove, unchanged, total_planned });
+    }
+    /// Send the action plan to the TUI for interactive Review. The caller
+    /// must then `recv()` on the decision channel to await the user's choice.
+    pub fn review(&self, summary: ActionPlanSummary, no_delete: bool) {
+        let _ = self.sender.send(ProgressEvent::Review { summary, no_delete });
     }
     pub fn track_start(&self, current: usize, total: usize, label: String) {
         let _ = self.sender.send(ProgressEvent::TrackStart { current, total, label });
@@ -76,7 +108,7 @@ impl Progress {
 }
 
 /// Plain mode: dump events as lines. Stdout for normal stuff, stderr for errors.
-fn run_plain(rx: Receiver<ProgressEvent>) {
+fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<ReviewDecision>) {
     for event in rx {
         match event {
             ProgressEvent::Header { source, ipod, manifest } => {
@@ -87,6 +119,14 @@ fn run_plain(rx: Receiver<ProgressEvent>) {
             ProgressEvent::Summary { add, modify, remove, unchanged, .. } => {
                 println!();
                 println!("Action plan: add={add} modify={modify} remove={remove} unchanged={unchanged}");
+            }
+            ProgressEvent::Review { .. } => {
+                // Non-TTY can't interactively review. The orchestrator should
+                // have errored at startup if neither --dry-run nor --apply
+                // was set; this is a safety net.
+                eprintln!("ERROR: interactive Review is not supported in plain mode; \
+                          pass --dry-run or --apply explicitly.");
+                let _ = decision_tx.send(ReviewDecision::Quit);
             }
             ProgressEvent::TrackStart { current, total, label } => {
                 println!("[{current}/{total}] {label}");
@@ -114,6 +154,14 @@ struct TuiState {
     current_total: usize,
     started_at: Instant,
     log_tail: VecDeque<String>,
+    /// When Some, we're in the Review state — pause the normal apply-progress
+    /// rendering and show the action plan + key hints instead.
+    review: Option<ReviewState>,
+}
+
+struct ReviewState {
+    summary: ActionPlanSummary,
+    no_delete: bool,
 }
 
 impl TuiState {
@@ -125,6 +173,7 @@ impl TuiState {
             current_index: 0, current_total: 0,
             started_at: Instant::now(),
             log_tail: VecDeque::with_capacity(LOG_TAIL_CAPACITY),
+            review: None,
         }
     }
 
@@ -153,7 +202,7 @@ impl TuiState {
 
 const LOG_TAIL_CAPACITY: usize = 12;
 
-fn run_tui(rx: Receiver<ProgressEvent>) -> Result<()> {
+fn run_tui(rx: Receiver<ProgressEvent>, decision_tx: Sender<ReviewDecision>) -> Result<()> {
     let mut state = TuiState::new();
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -181,7 +230,9 @@ fn run_tui(rx: Receiver<ProgressEvent>) -> Result<()> {
         // Allow Ctrl+C / 'q' to bail out of the TUI (caller still owns sync flow).
         if crossterm::event::poll(Duration::from_millis(80))? {
             if let Event::Key(key) = crossterm::event::read()? {
-                if key.code == KeyCode::Char('q') {
+                if state.review.is_some() {
+                    handle_review_key(&mut state, key, &decision_tx);
+                } else if key.code == KeyCode::Char('q') {
                     // 'q' is a request-stop; we just exit the draw loop. The sync
                     // thread keeps running until it next sends an event and finds
                     // the channel closed.
@@ -200,6 +251,36 @@ fn run_tui(rx: Receiver<ProgressEvent>) -> Result<()> {
     Ok(())
 }
 
+fn handle_review_key(
+    state: &mut TuiState,
+    key: crossterm::event::KeyEvent,
+    decision_tx: &Sender<ReviewDecision>,
+) {
+    let review = match state.review.as_mut() {
+        Some(r) => r,
+        None => return,
+    };
+    match key.code {
+        KeyCode::Char('a') => {
+            let _ = decision_tx.send(ReviewDecision::Apply { no_delete: review.no_delete });
+            // Exit Review state so subsequent track progress can render.
+            state.review = None;
+        }
+        KeyCode::Char('d') => {
+            let _ = decision_tx.send(ReviewDecision::DryRun);
+            // Caller will send Finish next.
+        }
+        KeyCode::Char('t') => {
+            review.no_delete = !review.no_delete;
+            // Re-render happens on next loop iteration; no decision sent yet.
+        }
+        KeyCode::Char('q') => {
+            let _ = decision_tx.send(ReviewDecision::Quit);
+        }
+        _ => {}
+    }
+}
+
 fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) {
     match event {
         ProgressEvent::Header { source, ipod, manifest } => {
@@ -209,6 +290,9 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
             state.add = add; state.modify = modify; state.remove = remove;
             state.unchanged = unchanged; state.total_planned = total_planned;
             state.started_at = Instant::now();  // reset clock for ETA
+        }
+        ProgressEvent::Review { summary, no_delete } => {
+            state.review = Some(ReviewState { summary, no_delete });
         }
         ProgressEvent::TrackStart { current, total, label } => {
             state.current_index = current; state.current_total = total;
@@ -222,6 +306,10 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
 }
 
 fn render(f: &mut ratatui::Frame, state: &TuiState) {
+    if let Some(review) = &state.review {
+        render_review(f, state, review);
+        return;
+    }
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -284,6 +372,65 @@ fn render(f: &mut ratatui::Frame, state: &TuiState) {
     );
 
     let _ = progress_lines;  // silence unused-warning if future refactor drops plan_line
+}
+
+fn render_review(f: &mut ratatui::Frame, state: &TuiState, review: &ReviewState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6), // header (source/ipod/manifest + no_delete state)
+            Constraint::Length(8), // plan
+            Constraint::Min(3),    // key legend
+        ])
+        .split(f.area());
+
+    let no_delete_str = if review.no_delete { "ON (Removes skipped)" } else { "OFF" };
+    let header_text = vec![
+        Line::from(format!("Source     : {}", state.source)),
+        Line::from(format!("iPod       : {}", state.ipod)),
+        Line::from(format!("Manifest   : {}", state.manifest)),
+        Line::from(format!("--no-delete: {no_delete_str}")),
+    ];
+    f.render_widget(
+        Paragraph::new(header_text)
+            .block(Block::default().borders(Borders::ALL).title(" ipod-sync — review ")),
+        chunks[0],
+    );
+
+    let effective_remove = if review.no_delete { 0 } else { review.summary.remove };
+    let plan_text = vec![
+        Line::from(format!("Add          : {}", review.summary.add)),
+        Line::from(format!("Modify       : {}", review.summary.modify)),
+        Line::from(format!("MetadataOnly : {}", review.summary.metadata_only)),
+        Line::from(format!(
+            "Remove       : {}{}",
+            effective_remove,
+            if review.no_delete && review.summary.remove > 0 {
+                format!(" ({} suppressed by --no-delete)", review.summary.remove)
+            } else {
+                String::new()
+            },
+        )),
+        Line::from(format!("Unchanged    : {}", review.summary.unchanged)),
+        Line::from(""),
+        Line::from(format!(
+            "Total to apply: {}",
+            review.summary.add + review.summary.modify + review.summary.metadata_only + effective_remove
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(plan_text)
+            .block(Block::default().borders(Borders::ALL).title(" action plan ")),
+        chunks[1],
+    );
+
+    let legend = "[a] apply   [d] dry-run (exit)   [t] toggle --no-delete   [q] quit";
+    f.render_widget(
+        Paragraph::new(legend)
+            .style(Style::default().add_modifier(Modifier::BOLD))
+            .block(Block::default().borders(Borders::ALL).title(" keys ")),
+        chunks[2],
+    );
 }
 
 fn format_duration(d: Duration) -> String {

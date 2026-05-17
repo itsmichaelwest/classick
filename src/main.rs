@@ -60,7 +60,7 @@ fn run(config: &Config) -> Result<()> {
     let (add, modify, metadata_only, remove, unchanged) = count_actions(&actions);
 
     // Start the progress handle now that we know the action counts.
-    let progress = Progress::start(config.use_tui)?;
+    let (progress, _decision_rx) = Progress::start(config.use_tui)?;
     progress.header(
         config.source.display().to_string(),
         mount.clone(),
