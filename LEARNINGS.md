@@ -100,3 +100,27 @@ Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights
 - **`itdb_device_set_sysinfo` is the correct FFI symbol for pushing FirewireGuid.** Confirmed present in bindgen output at line 777. Signature: `fn itdb_device_set_sysinfo(device: *mut Itdb_Device, field: *const gchar, value: *const gchar)`. Called with `"FirewireGuid"` as the field key — matching case exactly as it appears in SysInfo.
 - **`iPod_Control` is a hidden directory on Windows** — `Get-ChildItem` needs `-Force` to list it, but `Test-Path` and `Copy-Item` work without it.
 - **SysInfo fixture committed at `tests/fixtures/sample-sysinfo.txt`.** Real hardware value: `FirewireGuid: 0x000A27002138B0A8`, `ModelNumStr: MB029`. Not a secret (hardware-bound, like a MAC address).
+
+## Phase 1 gate (2026-05-17) — PASS
+
+- **Result:** PASS — all five acceptance criteria met (boot, both pre-existing tracks present, new track plays, metadata correct, album art on Now Playing).
+- **Test track:** Big Wild — Superdream — "City of Sound" (\MUSICHOST\data\media\music\Big Wild\Superdream\01 - City of Sound.flac, 232 sec FLAC, 28 MB, embedded 1000×1000 JPG art, rich MusicBrainz tags).
+- **iPod state before Phase 1:** 1 track (Beck "Colors" from Phase 0).
+- **iPod state after Phase 1:** 3 tracks (Beck "Colors", Big Wild "City of Sound" without art from first attempt, Big Wild "City of Sound" with art from Plan B retest). The duplicate is a known artifact — libgpod doesn't dedup, Phase 2 manifest will.
+- **iTunesDB write (signed):** PASS — itdb_write succeeded twice; DB length grew 21046 → 22718 → 24130 bytes; LastWriteTime updated each run.
+- **FirewireGuid wiring:** required and worked — read from `G:\iPod_Control\Device\SysInfo` (flat-text format, not SysInfoExtended XML) and pushed via `itdb_device_set_sysinfo`. Hashed-DB-signing risk SPEC §8 row 2 → **retired** for both read and write paths.
+- **Album art Plan A (ffmpeg in-band MP4 atom):** **rejected by iPod Classic UI** — the in-band cover atom is present in the .m4a file but Classic firmware doesn't read it; ArtworkDB + ithmb blobs are the only path. SPEC §8 row 3 risk materialized as expected.
+- **Album art Plan B (libgpod itdb_track_set_thumbnails_from_data):** initially failed because the Phase 0 libgpod build lacked gdk-pixbuf (functions exported but no-op). Rebuilt libgpod with gdk-pixbuf + image-format deps (libpng/libjpeg-turbo/libtiff) + vendored pixbuf loader plugins with a GDK_PIXBUF_MODULE_FILE env var wired through build.rs. Verified: 4 new .ithmb blob files (F1055/F1060/F1061/F1068 — multiple iPod display sizes) plus ArtworkDB grew by ~1KB per write. Art shows correctly on Now Playing.
+- **iPod post-eject boot:** boots normally, plays all three tracks, art displays on the Plan B Big Wild track.
+
+### Issues to address in Phase 2
+
+- **No deduplication.** libgpod allows the same source to be added repeatedly; right now the iPod has two Big Wild "City of Sound" tracks. SPEC §4.3's manifest-diff logic will handle this — modified tracks are delete-and-add, not duplicate.
+- **TRACKTOTAL/DISCTOTAL aliases not handled.** ffprobe extracts `track: "1"` (lone number, not "1/12") + separate `TRACKTOTAL: "12"`. Current `split_pair` loses the total. Add aliases for TRACKTOTAL/TOTALTRACKS/DISCTOTAL/TOTALDISCS in `ProbeTags` and fold them into `Tags.tracks` / `Tags.discs` in `tags_from_probe`.
+- **`loaders.cache` contains dev-tree absolute paths.** Works on this machine; breaks for distribution and on a fresh checkout. Fix in build.rs: regenerate the cache at build time by invoking `gdk-pixbuf-query-loaders.exe` against the staged `target/<profile>/pixbuf-loaders/` directory.
+- **Two benign GLib warnings during write** that are noisy but not failures:
+  - `WARNING: Error parsing recent playcounts` — iPod's `PlayCounts.plist` isn't always present on freshly-restored devices.
+  - `CRITICAL: itdb_splr_validate: assertion 'at != ITDB_SPLAT_UNKNOWN' failed` — libgpod's smart-playlist validator walking pre-existing empty/unrecognized rules.
+  Install a `g_log_set_handler` in Phase 2 to suppress (or reformat) these so they don't clutter user output.
+- **Cleanup orphan tracks if write fails mid-way.** Currently if `itdb_cp_track_to_ipod` succeeds but `itdb_write` fails, the .m4a is orphaned on the iPod. `--rebuild-manifest` recovers from this; document the failure mode in the user-facing error message.
+
