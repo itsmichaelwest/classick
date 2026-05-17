@@ -1,8 +1,9 @@
 //! ffprobe metadata extraction + ffmpeg FLAC→ALAC transcoding.
-//!
-//! ffmpeg / ffprobe invocations are implemented in Task 3.
 
+use anyhow::{anyhow, Result};
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Deserialize)]
 pub struct ProbeOutput {
@@ -88,11 +89,109 @@ pub fn has_embedded_art(probe: &ProbeOutput) -> bool {
     })
 }
 
+/// Build the ffmpeg argument vector for FLAC→ALAC with art passthrough.
+/// Extracted so we can unit-test the arg construction without spawning ffmpeg.
+pub fn ffmpeg_args(src: &Path, dst: &Path) -> Vec<String> {
+    vec![
+        "-loglevel".into(), "error".into(),
+        "-y".into(),  // overwrite output without prompting
+        "-i".into(), src.to_string_lossy().into_owned(),
+        "-map".into(), "0:a".into(),
+        "-map".into(), "0:v?".into(),  // optional video (attached pic) — `?` = don't error if absent
+        "-c:a".into(), "alac".into(),
+        "-c:v".into(), "copy".into(),
+        "-disposition:v".into(), "attached_pic".into(),
+        "-f".into(), "ipod".into(),
+        dst.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Spawn ffprobe on `src` and parse its JSON output into a `ProbeOutput`.
+pub fn probe(src: &Path) -> Result<ProbeOutput> {
+    let out = Command::new("ffprobe")
+        .args(["-loglevel", "error", "-of", "json", "-show_format", "-show_streams"])
+        .arg(src)
+        .output()
+        .map_err(|e| anyhow!("failed to spawn ffprobe (is it on PATH?): {e}"))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "ffprobe failed (exit {:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let parsed: ProbeOutput = serde_json::from_slice(&out.stdout)
+        .map_err(|e| anyhow!("ffprobe produced unparseable JSON: {e}"))?;
+    Ok(parsed)
+}
+
+/// Transcode `src` (FLAC) → `dst` (ALAC in MP4/ipod container, art passed through).
+pub fn transcode_to_alac(src: &Path, dst: &Path) -> Result<()> {
+    let status = Command::new("ffmpeg")
+        .args(ffmpeg_args(src, dst))
+        .status()
+        .map_err(|e| anyhow!("failed to spawn ffmpeg (is it on PATH?): {e}"))?;
+    if !status.success() {
+        return Err(anyhow!("ffmpeg transcode failed (exit {:?})", status.code()));
+    }
+    Ok(())
+}
+
+/// Verify ffmpeg and ffprobe are reachable via PATH. Call at startup so the user
+/// gets a clear error before we try anything else.
+pub fn verify_tools_available() -> Result<()> {
+    for tool in &["ffmpeg", "ffprobe"] {
+        let r = Command::new(tool).arg("-version").output();
+        match r {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => return Err(anyhow!(
+                "{tool} returned exit {:?}: {}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(_) => return Err(anyhow!(
+                "{tool} not found on PATH. Install ffmpeg (e.g. winget install Gyan.FFmpeg) and re-run."
+            )),
+        }
+    }
+    Ok(())
+}
+
+/// Build the path to the Phase 1 temp file: %TEMP%\ipod-sync\ipod-sync-<pid>.m4a.
+pub fn temp_alac_path() -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push("ipod-sync");
+    p.push(format!("ipod-sync-{}.m4a", std::process::id()));
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     const SAMPLE: &str = include_str!("../tests/fixtures/sample-ffprobe.json");
+
+    #[test]
+    fn ffmpeg_cmd_args_match_spec() {
+        let args = ffmpeg_args(
+            Path::new(r"C:\src\song.flac"),
+            Path::new(r"C:\tmp\out.m4a"),
+        );
+        // Order matters for ffmpeg — input flags before -i, output flags after.
+        let joined = args.join(" ");
+        assert!(joined.contains("-loglevel error"));
+        assert!(joined.contains("-y"));
+        assert!(joined.contains(r"-i C:\src\song.flac"));
+        assert!(joined.contains("-map 0:a"));
+        assert!(joined.contains("-map 0:v?"));
+        assert!(joined.contains("-c:a alac"));
+        assert!(joined.contains("-c:v copy"));
+        assert!(joined.contains("-disposition:v attached_pic"));
+        assert!(joined.contains("-f ipod"));
+        // The output path is the LAST arg.
+        assert_eq!(args.last().unwrap(), r"C:\tmp\out.m4a");
+    }
 
     #[test]
     fn probe_output_parses_format_tags() {
