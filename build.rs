@@ -84,4 +84,45 @@ fn main() {
             }
         }
     }
+
+    // Copy the gdk-pixbuf loader plugins into a `pixbuf-loaders/` subdir next
+    // to the exe, then bake the absolute path to loaders.cache into the binary
+    // as PIXBUF_LOADERS_CACHE so main.rs can set GDK_PIXBUF_MODULE_FILE at
+    // startup. libgpod's artwork code (itdb_track_set_thumbnails_from_data /
+    // ithumb-writer.c) calls gdk_pixbuf_new_from_*; pixbuf will silently
+    // return NULL if it can't locate a loader for the input format, which
+    // makes libgpod's artwork APIs no-op without any GError.
+    let src_loaders = vendor.join("pixbuf-loaders");
+    let dst_loaders = target_dir.join("pixbuf-loaders");
+    if src_loaders.exists() {
+        std::fs::create_dir_all(&dst_loaders).unwrap_or_else(|e| {
+            panic!(
+                "failed to create pixbuf-loaders dir {}: {}",
+                dst_loaders.display(),
+                e
+            )
+        });
+        let entries = std::fs::read_dir(&src_loaders).unwrap_or_else(|e| {
+            panic!(
+                "failed to read vendor pixbuf-loaders dir {}: {}",
+                src_loaders.display(),
+                e
+            )
+        });
+        for entry in entries {
+            let entry = entry.expect("failed to read pixbuf-loaders entry");
+            let path = entry.path();
+            if path.is_file() {
+                let dest = dst_loaders.join(path.file_name().unwrap());
+                std::fs::copy(&path, &dest).unwrap_or_else(|e| {
+                    panic!("failed to copy {} -> {}: {}", path.display(), dest.display(), e)
+                });
+            }
+        }
+    }
+    println!(
+        "cargo:rustc-env=PIXBUF_LOADERS_CACHE={}",
+        dst_loaders.join("loaders.cache").display()
+    );
+    println!("cargo:rerun-if-changed={}", src_loaders.display());
 }

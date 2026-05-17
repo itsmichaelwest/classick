@@ -1,0 +1,79 @@
+From: ipod-sync vendoring
+Subject: [PATCH 3/3] Fix pixbuf codepaths against modern GLib (artwork rebuild)
+
+Same two patterns as patch 0002 (struct stat -> GStatBuf) plus a
+modern-GLib g_object_ref cast issue, applied to the three translation
+units gated on HAVE_GDKPIXBUF. These weren't in the Phase 0 patch
+set because Phase 0 built without pixbuf, so configure.ac compiled
+them out. Once gdk-pixbuf2 was installed in MSYS2 and configure
+re-detected it, these failures appeared.
+
+Changes:
+  * src/itdb_artwork.c:155 - struct stat statbuf -> GStatBuf statbuf
+  * src/itdb_photoalbum.c:419 - same (tab-indented)
+  * src/ithumb-writer.c:1212 - same
+  * src/ithumb-writer.c:731 - wrap return value of g_object_ref with
+    GDK_PIXBUF(); modern GLib types g_object_ref to return GObject*
+    not gpointer.
+  * src/ithumb-writer.c:971 - same, but at assignment to local var.
+
+Apply with: cd <libgpod-src> && patch -p1 < 0003-*.patch
+        or: cd <libgpod-src> && git apply 0003-*.patch
+---
+diff --git a/src/itdb_artwork.c b/src/itdb_artwork.c
+index 2328840..80eac6b 100644
+--- a/src/itdb_artwork.c
++++ b/src/itdb_artwork.c
+@@ -152,7 +152,7 @@ itdb_artwork_set_thumbnail (Itdb_Artwork *artwork,
+ {
+ #ifdef HAVE_GDKPIXBUF
+ /* This operation doesn't make sense when we can't save thumbnail files */
+-    struct stat statbuf;
++    GStatBuf statbuf;
+     Itdb_Thumb *thumb;
+ 
+     g_return_val_if_fail (artwork, FALSE);
+diff --git a/src/itdb_photoalbum.c b/src/itdb_photoalbum.c
+index a2c8c29..ea00e4c 100644
+--- a/src/itdb_photoalbum.c
++++ b/src/itdb_photoalbum.c
+@@ -416,7 +416,7 @@ static Itdb_Artwork *itdb_photodb_add_photo_internal (Itdb_PhotoDB *db,
+     /* check if filename is valid */
+     if (filename)
+     {
+-	struct stat statbuf;
++	GStatBuf statbuf;
+ 	if (g_stat  (filename, &statbuf) != 0)
+ 	{
+ 	    g_set_error (error, 0, -1,
+diff --git a/src/ithumb-writer.c b/src/ithumb-writer.c
+index 6b47aa6..6ea9f1e 100644
+--- a/src/ithumb-writer.c
++++ b/src/ithumb-writer.c
+@@ -728,7 +728,7 @@ ithumb_writer_handle_rotation (GdkPixbuf *pixbuf, guint *rotation)
+   {
+       return gdk_pixbuf_rotate_simple (pixbuf, *rotation);
+   }
+-  return g_object_ref (G_OBJECT (pixbuf));
++  return GDK_PIXBUF (g_object_ref (G_OBJECT (pixbuf)));
+ }
+ 
+ /* On the iPhone, thumbnails are presented as squares in a grid.
+@@ -968,7 +968,7 @@ ithumb_writer_write_thumbnail (iThumbWriter *writer,
+     else if (thumb->data_type == ITDB_THUMB_TYPE_PIXBUF)
+     {
+         Itdb_Thumb_Pixbuf *thumb_pixbuf = (Itdb_Thumb_Pixbuf *)thumb;
+-        pixbuf = g_object_ref (G_OBJECT (thumb_pixbuf->pixbuf));
++        pixbuf = GDK_PIXBUF (g_object_ref (G_OBJECT (thumb_pixbuf->pixbuf)));
+     }
+ 
+     if (pixbuf == NULL)
+@@ -1209,7 +1209,7 @@ static gboolean ithumb_rearrange_thumbnail_file (gpointer _key,
+     gint fd = -1;
+     guint32 size = 0;
+     GList *gl;
+-    struct stat statbuf;
++    GStatBuf statbuf;
+     guint32 offset;
+     void *buf = NULL;
+ 

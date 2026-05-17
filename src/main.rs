@@ -12,6 +12,22 @@ use crate::transcode::{has_embedded_art, probe, transcode_to_alac, ProbeOutput, 
 const IPOD_MOUNT: &str = "G:\\";
 
 fn main() -> Result<()> {
+    // Tell gdk-pixbuf where to find its loader plugins. libgpod's artwork
+    // code (itdb_track_set_thumbnails_from_data -> ithumb-writer.c ->
+    // gdk_pixbuf_new_from_*) silently returns NULL if pixbuf can't locate a
+    // loader for the input format -- and libgpod swallows that as a no-op
+    // without setting GError, so we'd see itdb_track_set_thumbnails_from_data
+    // return FALSE with no diagnostic. The build.rs bakes the absolute path
+    // to the vendored loaders.cache into the binary; set the env var BEFORE
+    // any libgpod call so the first pixbuf init in this process sees it.
+    //
+    // SAFETY: set_var is `unsafe` in Rust 2024 because it races with other
+    // threads reading the environment. We're single-threaded here and this is
+    // the first statement in main, so there's nothing to race with.
+    unsafe {
+        std::env::set_var("GDK_PIXBUF_MODULE_FILE", env!("PIXBUF_LOADERS_CACHE"));
+    }
+
     let source = parse_arg()?;
     println!("Source FLAC : {}", source.display());
 

@@ -5,6 +5,10 @@
 /vendor/libgpod/bin/*.dll
 /vendor/libgpod/bin/*.pdb
 
+# gdk-pixbuf loader plugin DLLs (same reasoning as above; the loaders.cache
+# manifest IS committed since it's small text and documents what was vendored)
+/vendor/libgpod/pixbuf-loaders/*.dll
+
 # lib.exe /def byproducts
 /vendor/libgpod/lib/*.exp
 
