@@ -10,7 +10,8 @@ use std::path::PathBuf;
     about = "Sync a FLAC library to an iPod Classic via libgpod with on-the-fly ALAC transcoding."
 )]
 pub struct Cli {
-    /// Source library root. Defaults to <source-library-path>\.
+    /// Source library root. If omitted, falls back to the IPOD_SYNC_SOURCE
+    /// environment variable. Errors out if neither is set.
     #[arg(long)]
     pub source: Option<PathBuf>,
 

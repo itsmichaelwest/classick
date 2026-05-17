@@ -1,9 +1,19 @@
 use std::env;
 use std::path::PathBuf;
 
+/// Default MSYS2 install location. Overridable via the `MSYS2_ROOT` env var
+/// for users with a non-default install.
+const DEFAULT_MSYS2_ROOT: &str = r"C:\msys64";
+
+fn msys2_root() -> PathBuf {
+    PathBuf::from(env::var("MSYS2_ROOT").unwrap_or_else(|_| DEFAULT_MSYS2_ROOT.to_string()))
+}
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=MSYS2_ROOT");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let vendor = manifest_dir.join("vendor").join("libgpod");
+    let mingw64 = msys2_root().join("mingw64");
 
     // Link the import library
     println!(
@@ -27,15 +37,15 @@ fn main() {
 
     // GLib headers ship with the MSYS2 MinGW64 toolchain used to build libgpod.
     // bindgen needs them because itdb.h includes <glib.h> / <glib-object.h>.
-    let glib_include = "C:/msys64/mingw64/include/glib-2.0";
-    let glib_config_include = "C:/msys64/mingw64/lib/glib-2.0/include";
+    let glib_include = mingw64.join("include").join("glib-2.0");
+    let glib_config_include = mingw64.join("lib").join("glib-2.0").join("include");
 
     // Generate Rust bindings
     let bindings = bindgen::Builder::default()
         .header(header.to_str().unwrap())
         .clang_arg(format!("-I{}", vendor.join("include").display()))
-        .clang_arg(format!("-I{}", glib_include))
-        .clang_arg(format!("-I{}", glib_config_include))
+        .clang_arg(format!("-I{}", glib_include.display()))
+        .clang_arg(format!("-I{}", glib_config_include.display()))
         // libgpod surface
         .allowlist_function("itdb_.*")
         .allowlist_type("Itdb_.*")
@@ -126,7 +136,7 @@ fn main() {
     }
     // Regenerate loaders.cache pointing at the staged loaders dir (not the vendor
     // absolute paths). gdk-pixbuf-query-loaders.exe lives in MSYS2's mingw64 bin.
-    let query_exe = std::path::Path::new(r"C:\msys64\mingw64\bin\gdk-pixbuf-query-loaders.exe");
+    let query_exe = mingw64.join("bin").join("gdk-pixbuf-query-loaders.exe");
     if query_exe.exists() {
         // Pass each staged loader DLL as an arg; the tool emits the cache to stdout.
         let loader_dlls: Vec<_> = std::fs::read_dir(&dst_loaders)
@@ -135,7 +145,7 @@ fn main() {
             .map(|e| e.path())
             .filter(|p| p.extension().map_or(false, |e| e == "dll"))
             .collect();
-        let output = std::process::Command::new(query_exe)
+        let output = std::process::Command::new(&query_exe)
             .args(&loader_dlls)
             .output()
             .expect("run gdk-pixbuf-query-loaders");
