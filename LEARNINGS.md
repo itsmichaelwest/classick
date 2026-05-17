@@ -124,3 +124,10 @@ Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights
   Install a `g_log_set_handler` in Phase 2 to suppress (or reformat) these so they don't clutter user output.
 - **Cleanup orphan tracks if write fails mid-way.** Currently if `itdb_cp_track_to_ipod` succeeds but `itdb_write` fails, the .m4a is orphaned on the iPod. `--rebuild-manifest` recovers from this; document the failure mode in the user-facing error message.
 
+## wipe-tracks dev utility (2026-05-17)
+
+- **`itdb_playlist_remove_track(NULL, track)` with a null playlist removes the track from every playlist** — confirmed working for the wipe case. Do not call `itdb_track_unlink` separately; `itdb_track_remove` covers the DB tracks list removal and struct free in one call.
+- **`itdb_filename_on_ipod` returns a `g_strdup`'d path — must `g_free` it.** Returns `NULL` if the track has no on-disk path (can happen for tracks added without `itdb_cp_track_to_ipod`). Always null-check before use.
+- **`itdb_write` on Windows fails with "Error renaming 'Play Counts' to 'Play Counts.bak' (File exists)"** when both files are present. Windows rename does not atomically replace an existing file (unlike POSIX `rename(2)`). Fix: delete `Play Counts.bak` before calling `itdb_write`. The DB track data is written BEFORE the play counts rotation, so even if the rename error is raised, the iTunesDB on disk will reflect the in-memory state. Verified: after first run (which errored on play counts rotate), second run saw 0 tracks in the DB.
+- **lib.rs + bin target coexist cleanly.** Adding `src/lib.rs` with `pub mod ffi; pub mod ipod; pub mod transcode;` alongside the existing `[[bin]]` target required no Cargo.toml change (Cargo auto-detects `src/lib.rs`). Replace `mod ffi;` etc. in `main.rs` with `use ipod_sync::ffi;` etc. Tests in main.rs continue to work via `use super::*`. The library crate name matches the package name with hyphens → underscores.
+

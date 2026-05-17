@@ -1,13 +1,10 @@
-mod ffi;
-mod ipod;
-mod transcode;
-
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 
-use crate::ipod::db::{OwnedDb, Tags};
-use crate::ipod::device;
-use crate::transcode::{has_embedded_art, probe, transcode_to_alac, ProbeOutput, ProbeTags};
+use ipod_sync::ipod::db::{OwnedDb, Tags};
+use ipod_sync::ipod::device;
+use ipod_sync::transcode;
+use ipod_sync::transcode::{has_embedded_art, probe, transcode_to_alac, ProbeOutput, ProbeTags};
 
 const IPOD_MOUNT: &str = "G:\\";
 
