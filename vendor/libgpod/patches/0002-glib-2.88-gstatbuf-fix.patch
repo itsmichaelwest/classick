@@ -1,0 +1,22 @@
+--- /c/src/libgpod-patches-orig/src/db-parse-context.c	2026-05-17 01:37:42.894474000 +0100
++++ /c/src/libgpod/src/db-parse-context.c	2026-05-17 01:37:42.915002100 +0100
+@@ -180,7 +180,7 @@
+ 	Itdb_Device *device;
+ 	GError* error;
+ 	GMappedFile* mapped_file;
+-	struct stat stat_buf;
++	GStatBuf stat_buf;
+ 
+ 	ctx = NULL;
+ 	error = NULL;
+--- /c/src/libgpod-patches-orig/src/itdb_tzinfo.c	2026-05-17 01:38:09.579945300 +0100
++++ /c/src/libgpod/src/itdb_tzinfo.c	2026-05-17 01:38:09.600479600 +0100
+@@ -243,7 +243,7 @@
+     gint16 raw_timezone;
+     gint timezone = 0;
+     gboolean result;
+-    struct stat stat_buf;
++    GStatBuf stat_buf;
+     int status;
+     char *prefs_path;
+     guint offset;
