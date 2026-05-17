@@ -2,24 +2,67 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use ipod_sync::cli::Cli;
 use ipod_sync::config::{self, Config};
+use ipod_sync::config_file;
 use ipod_sync::ipod::db::{OwnedDb, Tags, TrackHandle};
 use ipod_sync::ipod::{device, detect_ipod_mount};
 use ipod_sync::manifest::{self, Action, Manifest, ManifestEntry};
-use ipod_sync::progress::Progress;
+use ipod_sync::progress::{ActionPlanSummary, Progress, ReviewDecision};
 use ipod_sync::source::{self, SourceEntry};
 use ipod_sync::transcode::{self, has_embedded_art, ProbeOutput, ProbeTags};
+use ipod_sync::wizard;
 use std::path::Path;
 
 fn main() -> Result<()> {
     unsafe { std::env::set_var("GDK_PIXBUF_MODULE_FILE", env!("PIXBUF_LOADERS_CACHE")); }
 
     let cli = Cli::parse();
+    ensure_source_or_wizard(&cli)?;
     let config = config::resolve(cli)?;
     ipod_sync::logging::init(config.verbose);
     run(&config)
 }
 
+/// If no source is resolvable from CLI/env/persisted config AND we're on a TTY
+/// AND --no-tui isn't set, launch the wizard. After it succeeds, the persisted
+/// config has a source and the subsequent config::resolve will succeed.
+///
+/// Non-TTY or --no-tui: do nothing (resolve will produce its standard error).
+fn ensure_source_or_wizard(cli: &Cli) -> Result<()> {
+    use std::io::IsTerminal;
+
+    // Quick check: if CLI provided source, we don't need anything.
+    if cli.source.is_some() {
+        return Ok(());
+    }
+    if std::env::var(ipod_sync::config::SOURCE_ENV).is_ok() {
+        return Ok(());
+    }
+    let config_path = config_file::default_path()?;
+    if let Some(persisted) = config_file::load(&config_path)? {
+        if persisted.source.is_some() {
+            return Ok(());
+        }
+    }
+    // No source from any layer. Check whether we can run the wizard.
+    if cli.no_tui || !std::io::stdout().is_terminal() {
+        return Ok(()); // resolve will error with the standard message
+    }
+    // Launch the wizard. On success it writes the source to config.toml.
+    let _saved = wizard::run()?;
+    Ok(())
+}
+
 fn run(config: &Config) -> Result<()> {
+    if config.dry_run && config.apply {
+        return Err(anyhow!("--dry-run and --apply are mutually exclusive"));
+    }
+    if !config.dry_run && !config.apply && !config.use_tui {
+        return Err(anyhow!(
+            "interactive review requires a TTY.\n\
+             Pass --apply to apply immediately, or --dry-run to preview without changes."
+        ));
+    }
+
     transcode::verify_tools_available()?;
 
     // 1. Resolve iPod mount.
@@ -60,7 +103,7 @@ fn run(config: &Config) -> Result<()> {
     let (add, modify, metadata_only, remove, unchanged) = count_actions(&actions);
 
     // Start the progress handle now that we know the action counts.
-    let (progress, _decision_rx) = Progress::start(config.use_tui)?;
+    let (progress, decision_rx) = Progress::start(config.use_tui)?;
     progress.header(
         config.source.display().to_string(),
         mount.clone(),
@@ -77,23 +120,66 @@ fn run(config: &Config) -> Result<()> {
     }
     progress.log(format!("Source: {} FLAC file(s)", sources.len()));
 
-    let effective_remove = if config.no_delete { 0 } else { remove };
-    let total_planned = add + modify + metadata_only + effective_remove;
-    progress.summary(add, modify, remove, unchanged, total_planned);
     progress.log(format!(
         "action plan: add={add} modify={modify} metadata={metadata_only} remove={remove} unchanged={unchanged}"
     ));
 
-    if config.dry_run {
+    let summary_struct = ActionPlanSummary {
+        add,
+        modify,
+        metadata_only,
+        remove,
+        unchanged,
+    };
+
+    // Decide effective no_delete based on dry-run / apply / interactive review.
+    let effective_no_delete: bool = if config.dry_run {
+        let effective_remove = if config.no_delete { 0 } else { remove };
+        let total_planned = add + modify + metadata_only + effective_remove;
+        progress.summary(add, modify, remove, unchanged, total_planned);
         progress.log("Dry run; nothing was written.");
         progress.finish();
         return Ok(());
-    }
+    } else if config.apply || !config.use_tui {
+        // Non-interactive: just apply with the configured no_delete.
+        let effective_remove = if config.no_delete { 0 } else { remove };
+        let total_planned = add + modify + metadata_only + effective_remove;
+        progress.summary(add, modify, remove, unchanged, total_planned);
+        config.no_delete
+    } else {
+        // Interactive review.
+        progress.review(summary_struct, config.no_delete);
+        match decision_rx.recv() {
+            Ok(ReviewDecision::Apply { no_delete }) => {
+                let effective_remove = if no_delete { 0 } else { remove };
+                let total_planned = add + modify + metadata_only + effective_remove;
+                progress.summary(add, modify, remove, unchanged, total_planned);
+                no_delete
+            }
+            Ok(ReviewDecision::DryRun) => {
+                progress.log("Dry run; nothing was written.");
+                progress.finish();
+                return Ok(());
+            }
+            Ok(ReviewDecision::Quit) => {
+                progress.log("Aborted; nothing was written.");
+                progress.finish();
+                return Ok(());
+            }
+            Err(_) => {
+                progress.finish();
+                return Err(anyhow!("review channel disconnected unexpectedly"));
+            }
+        }
+    };
+
+    let effective_remove = if effective_no_delete { 0 } else { remove };
+    let total_planned = add + modify + metadata_only + effective_remove;
 
     if add == 0
         && modify == 0
         && metadata_only == 0
-        && (remove == 0 || config.no_delete)
+        && (remove == 0 || effective_no_delete)
     {
         progress.log("Nothing to do.");
         progress.finish();
@@ -116,7 +202,7 @@ fn run(config: &Config) -> Result<()> {
             match action {
                 Action::Unchanged(_) => continue,
                 Action::Remove(entry) => {
-                    if config.no_delete {
+                    if effective_no_delete {
                         continue;
                     }
                     i += 1;
@@ -137,7 +223,7 @@ fn run(config: &Config) -> Result<()> {
                         total_planned,
                         format!("MODIFY {}", src.path.display()),
                     );
-                    if !config.no_delete {
+                    if !effective_no_delete {
                         db.delete_track(old.ipod_dbid)
                             .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))?;
                         manifest.tracks.retain(|e| e.ipod_dbid != old.ipod_dbid);
@@ -210,6 +296,12 @@ fn run(config: &Config) -> Result<()> {
         db.write()?;
         progress.log("Writing manifest...");
         manifest::save_atomic(&config.manifest_path, &manifest)?;
+
+        if config.save_config {
+            let config_path = config_file::default_path()?;
+            config_file::save(&config_path, &config.to_persisted())?;
+            progress.log(format!("config saved to {}", config_path.display()));
+        }
 
         progress.log("Done. Eject the iPod before unplugging.");
         Ok(())
