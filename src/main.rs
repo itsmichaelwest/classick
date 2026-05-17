@@ -275,6 +275,7 @@ fn entry_from(src: &SourceEntry, handle: &TrackHandle, fingerprint: &str) -> Man
         ipod_dbid: handle.dbid,
         ipod_relpath: handle.ipod_relpath.clone(),
         source_known: true,
+        audio_fingerprint: String::new(),
     }
 }
 
@@ -288,6 +289,7 @@ fn build_rebuild_manifest(db: &OwnedDb) -> Manifest {
         ipod_dbid: h.dbid,
         ipod_relpath: h.ipod_relpath,
         source_known: false,
+        audio_fingerprint: String::new(),
     }).collect();
     Manifest { version: 1, ipod_serial: None, tracks }
 }

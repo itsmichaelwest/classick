@@ -34,6 +34,12 @@ pub struct ManifestEntry {
     /// untouched (no Remove action emitted) and the orchestrator skips them.
     #[serde(default = "default_source_known")]
     pub source_known: bool,
+    /// BLAKE3 of just the FLAC audio frames (Phase 3.x). Empty string for
+    /// entries written by Phase 2 or earlier — those fall through the diff's
+    /// normal Modify path on first content change after upgrade, and the
+    /// orchestrator populates this field on the resulting re-write.
+    #[serde(default)]
+    pub audio_fingerprint: String,
 }
 
 fn default_source_known() -> bool { true }
@@ -160,6 +166,7 @@ mod tests {
             ipod_dbid: 12345678901234,
             ipod_relpath: r"iPod_Control\Music\F12\KLMN.m4a".to_string(),
             source_known: true,
+            audio_fingerprint: String::new(),
         }
     }
 
@@ -305,5 +312,36 @@ mod tests {
         let actions = diff(&manifest, &[src], returns("blake3:aa")).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
+    }
+
+    #[test]
+    fn manifest_entry_supports_optional_audio_fingerprint() {
+        // Old-shape JSON (Phase 2 manifest with no audio_fingerprint field):
+        let old = r#"{
+            "source_path": "C:\\a.flac",
+            "source_mtime": 1700000000,
+            "source_size": 100,
+            "source_fingerprint": "blake3:aa",
+            "ipod_dbid": 1234,
+            "ipod_relpath": "iPod_Control\\Music\\F01\\AAAA.m4a",
+            "source_known": true
+        }"#;
+        let entry: ManifestEntry = serde_json::from_str(old).unwrap();
+        assert_eq!(entry.audio_fingerprint, "",
+            "Phase 2 entries must deserialize with empty audio_fingerprint");
+
+        // New-shape JSON (Phase 3.x manifest):
+        let new = r#"{
+            "source_path": "C:\\b.flac",
+            "source_mtime": 1700000000,
+            "source_size": 200,
+            "source_fingerprint": "blake3:bb",
+            "ipod_dbid": 5678,
+            "ipod_relpath": "iPod_Control\\Music\\F02\\BBBB.m4a",
+            "source_known": true,
+            "audio_fingerprint": "blake3-audio:cc"
+        }"#;
+        let entry: ManifestEntry = serde_json::from_str(new).unwrap();
+        assert_eq!(entry.audio_fingerprint, "blake3-audio:cc");
     }
 }

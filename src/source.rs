@@ -7,7 +7,7 @@
 //! only when mtime+size don't match the manifest (SPEC §6 #2).
 
 use anyhow::{anyhow, Result};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -104,6 +104,58 @@ pub fn fingerprint(path: &Path) -> Result<String> {
     Ok(format!("blake3:{}", hash.to_hex()))
 }
 
+/// BLAKE3 of just the FLAC audio frames — bypasses METADATA_BLOCKs entirely so
+/// tag/art edits don't change the fingerprint.
+///
+/// FLAC spec: https://xiph.org/flac/format.html
+/// - 4-byte "fLaC" magic
+/// - Sequence of METADATA_BLOCKs (each: 1 byte last-flag+type, 3 bytes BE length, payload)
+/// - Audio frames until EOF
+///
+/// We walk past every metadata block (cheap — header + skip), then hash the rest.
+pub fn audio_fingerprint(path: &Path) -> Result<String> {
+    let mut f = std::fs::File::open(path)
+        .map_err(|e| anyhow!("open for audio fingerprint: {e}"))?;
+
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic)
+        .map_err(|e| anyhow!("read fLaC magic from {}: {e}", path.display()))?;
+    if &magic != b"fLaC" {
+        return Err(anyhow!(
+            "not a FLAC file (missing fLaC magic) at {}",
+            path.display()
+        ));
+    }
+
+    // Skip every metadata block to position the cursor at the start of audio frames.
+    loop {
+        let mut header = [0u8; 4];
+        f.read_exact(&mut header)
+            .map_err(|e| anyhow!("read metadata block header from {}: {e}", path.display()))?;
+        let is_last = (header[0] & 0x80) != 0;
+        // 24-bit big-endian payload length follows the type byte.
+        let length = u32::from_be_bytes([0, header[1], header[2], header[3]]);
+        f.seek(SeekFrom::Current(length as i64))
+            .map_err(|e| anyhow!("seek past metadata block in {}: {e}", path.display()))?;
+        if is_last {
+            break;
+        }
+    }
+
+    // Cursor is now at the start of audio frames. Stream-hash from here to EOF.
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf)
+            .map_err(|e| anyhow!("read audio frames from {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("blake3-audio:{}", hasher.finalize().to_hex()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +246,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base
+    }
+
+    #[test]
+    fn audio_fingerprint_invariant_across_tag_edits() {
+        let tmp = tempdir_under_target();
+        // Synthesize two FLACs with IDENTICAL audio but DIFFERENT metadata, via ffmpeg.
+        // Same lavfi sine source → bit-identical PCM → bit-identical FLAC audio frames.
+        let a = tmp.join("a.flac");
+        let b = tmp.join("b.flac");
+        ffmpeg_synth_flac(&a, "Title A", "Artist A");
+        ffmpeg_synth_flac(&b, "Title B", "Artist B");
+
+        let fa = audio_fingerprint(&a).unwrap();
+        let fb = audio_fingerprint(&b).unwrap();
+        assert_eq!(fa, fb,
+            "tag-only differences must not change the audio fingerprint");
+        assert!(fa.starts_with("blake3-audio:"),
+            "fingerprint must be prefixed to distinguish from file fingerprint");
+        assert_eq!(fa.len(), "blake3-audio:".len() + 64);
+
+        // Sanity: confirm the FILE fingerprints DO differ (tags changed the file bytes)
+        let file_a = fingerprint(&a).unwrap();
+        let file_b = fingerprint(&b).unwrap();
+        assert_ne!(file_a, file_b,
+            "file fingerprints SHOULD differ when tags differ — this confirms the test setup");
+    }
+
+    #[test]
+    fn audio_fingerprint_differs_when_audio_differs() {
+        let tmp = tempdir_under_target();
+        let a = tmp.join("a.flac");
+        let b = tmp.join("b.flac");
+        ffmpeg_synth_flac_with_freq(&a, "Same Title", 440.0);
+        ffmpeg_synth_flac_with_freq(&b, "Same Title", 880.0);  // different sine frequency
+        let fa = audio_fingerprint(&a).unwrap();
+        let fb = audio_fingerprint(&b).unwrap();
+        assert_ne!(fa, fb,
+            "different audio content must produce different audio fingerprints");
+    }
+
+    #[test]
+    fn audio_fingerprint_rejects_non_flac() {
+        let tmp = tempdir_under_target();
+        let p = tmp.join("not-a-flac.txt");
+        std::fs::write(&p, b"hello world").unwrap();
+        let err = audio_fingerprint(&p).unwrap_err();
+        assert!(err.to_string().contains("fLaC"),
+            "error message must mention the missing FLAC magic: {err}");
+    }
+
+    /// Helper: synthesize a 1-second 440Hz sine FLAC with the given title/artist tags via ffmpeg.
+    /// Used by audio_fingerprint tests.
+    fn ffmpeg_synth_flac(path: &std::path::Path, title: &str, artist: &str) {
+        ffmpeg_synth_flac_with_freq_and_tags(path, 440.0, title, artist);
+    }
+
+    fn ffmpeg_synth_flac_with_freq(path: &std::path::Path, title: &str, freq: f64) {
+        ffmpeg_synth_flac_with_freq_and_tags(path, freq, title, "Test Artist");
+    }
+
+    fn ffmpeg_synth_flac_with_freq_and_tags(
+        path: &std::path::Path,
+        freq: f64,
+        title: &str,
+        artist: &str,
+    ) {
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-loglevel", "error", "-y",
+                "-f", "lavfi",
+                "-i", &format!("sine=frequency={freq}:duration=1:sample_rate=44100"),
+                "-c:a", "flac",
+                "-metadata", &format!("TITLE={title}"),
+                "-metadata", &format!("ARTIST={artist}"),
+            ])
+            .arg(path)
+            .status()
+            .expect("spawn ffmpeg");
+        assert!(status.success(), "ffmpeg synth failed for {}", path.display());
     }
 }

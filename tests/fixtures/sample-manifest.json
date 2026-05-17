@@ -9,7 +9,8 @@
       "source_fingerprint": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
       "ipod_dbid": 12345678901234,
       "ipod_relpath": "iPod_Control\\Music\\F12\\KLMN.m4a",
-      "source_known": true
+      "source_known": true,
+      "audio_fingerprint": "blake3-audio:2222222222222222222222222222222222222222222222222222222222222222"
     },
     {
       "source_path": "",
@@ -18,7 +19,8 @@
       "source_fingerprint": "",
       "ipod_dbid": 98765432109876,
       "ipod_relpath": "iPod_Control\\Music\\F01\\ABCD.m4a",
-      "source_known": false
+      "source_known": false,
+      "audio_fingerprint": ""
     }
   ]
 }

@@ -198,6 +198,53 @@ impl OwnedDb {
         Ok(())
     }
 
+    /// Update an existing iPod track's tags + thumbnails without touching the
+    /// audio file. Used by the Phase 3.x MetadataOnly path: the source file's
+    /// audio is bit-identical to what's already on the iPod, so we just refresh
+    /// the metadata libgpod tracks for it.
+    ///
+    /// Does NOT call `itdb_write` — caller batches that at end of run.
+    /// Returns `Ok(())` even if the dbid isn't found (idempotent, matching
+    /// `delete_track`'s semantics).
+    pub fn update_track_metadata(
+        &self,
+        dbid: u64,
+        tags: &Tags,
+        art: Option<&[u8]>,
+    ) -> Result<()> {
+        unsafe {
+            let mut node = (*self.0).tracks;
+            let mut found: *mut ffi::Itdb_Track = std::ptr::null_mut();
+            while !node.is_null() {
+                let t = (*node).data as *mut ffi::Itdb_Track;
+                if !t.is_null() && (*t).dbid as u64 == dbid {
+                    found = t;
+                    break;
+                }
+                node = (*node).next;
+            }
+            if found.is_null() {
+                return Ok(()); // idempotent: track not present
+            }
+
+            apply_tags(found, tags);
+
+            if let Some(bytes) = art {
+                let ok = ffi::itdb_track_set_thumbnails_from_data(
+                    found,
+                    bytes.as_ptr(),
+                    bytes.len() as _,
+                );
+                if ok == 0 {
+                    return Err(anyhow!(
+                        "itdb_track_set_thumbnails_from_data failed for dbid {dbid}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Walk all tracks currently in the DB and return their handles.
     /// Used by `--rebuild-manifest` to populate a fresh manifest with
     /// `source_known = false` entries.
