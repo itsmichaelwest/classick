@@ -11,6 +11,10 @@ fn main() {
         vendor.join("lib").display()
     );
     println!("cargo:rustc-link-lib=dylib=gpod");
+    // GLib symbols (e.g. g_error_free) live in libglib-2.0-0.dll. We generated
+    // an MSVC-format import lib (glib.lib) from its export table so Rust can
+    // resolve those symbols at link time.
+    println!("cargo:rustc-link-lib=dylib=glib");
 
     // Re-run if the header changes
     let header = vendor.join("include").join("gpod").join("itdb.h");
