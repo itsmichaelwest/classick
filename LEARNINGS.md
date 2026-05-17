@@ -2,6 +2,18 @@
 
 Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+## Phase 2 Gate B (2026-05-17)
+
+- **Result:** PASS.
+- **Test subset:** `<source-library-path>\Big Wild\Superdream\` (12 FLACs).
+- **First-run action plan:** Add=12, Modify=0, Remove=0, Unchanged=0.
+- **First-run elapsed:** 23.7s (release build; ~2.0s per track including transcode + cp + DB add). Much faster than the plan's "a few minutes" estimate — release-mode transcode + a 12-track album fits comfortably under 30s on this hardware.
+- **Second-run action plan:** Add=0, Modify=0, Remove=0, Unchanged=12.
+- **Second-run elapsed:** 0.8s (walk + fingerprint + diff; no transcoding).
+- **Manifest persistence:** JSON valid, all 12 entries have non-zero `ipod_dbid`, backslashed `ipod_relpath` like `iPod_Control\Music\F08\libgpod712455.m4a`, `source_known=true`, full UNC `source_path`. Round-trips cleanly across the no-op second run.
+- **GLib noise observed:** `WARNING: Error parsing recent playcounts` (open) and `CRITICAL: itdb_splr_validate: assertion 'at != ITDB_SPLAT_UNKNOWN' failed` (write) — both benign and expected; Task 11 will route these through tracing.
+- **ffprobe duplicate-key bug surfaced and fixed:** Picard-tagged FLACs frequently emit BOTH `TRACKTOTAL` and `TOTALTRACKS` (and `DISCTOTAL`/`TOTALDISCS`). The original `#[derive(Deserialize)]` with `#[serde(alias = ...)]` rejects this as a duplicate field. Replaced with a manual `Deserialize` for `ProbeTags` that lowercases keys and applies first-write-wins. Added regression test `probe_output_handles_duplicate_synonymous_keys`.
+
 ## Phase 2 Task 4 — source walker + BLAKE3 fingerprint (2026-05-18)
 
 - **PID-based temp dir shared across parallel tests causes flaky failures.** The plan's `tempdir_under_target()` generates `walker-<pid>` — identical across all tests in one run. Rust test harness runs tests in parallel by default; tests clobber each other's files. Fix: add an `AtomicU32` counter to produce `walker-<pid>-<n>` (unique per test invocation). One-liner fix; zero API impact.
