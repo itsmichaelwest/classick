@@ -10,6 +10,15 @@ use std::ptr;
 /// (libgpod's parse loads the whole thing). All write operations are methods.
 pub struct OwnedDb(*mut ffi::Itdb_iTunesDB);
 
+/// Identifies a track on the iPod after add. Returned by `add_track_with_file`
+/// and `list_tracks_for_rebuild`; recorded in `ManifestEntry`.
+#[derive(Debug, Clone)]
+pub struct TrackHandle {
+    pub dbid: u64,
+    /// Relative path with Windows backslashes: `iPod_Control\Music\F41\libgpod079263.m4a`.
+    pub ipod_relpath: String,
+}
+
 /// The metadata fields we copy into `Itdb_Track`. Parsed from ffprobe by main.rs.
 #[derive(Debug, Default)]
 pub struct Tags {
@@ -99,7 +108,7 @@ impl OwnedDb {
         source_alac: &Path,
         tags: &Tags,
         art: Option<&[u8]>,
-    ) -> Result<()> {
+    ) -> Result<TrackHandle> {
         let alac_c = path_to_cstring(source_alac)?;
         unsafe {
             let track = ffi::itdb_track_new();
@@ -146,8 +155,68 @@ impl OwnedDb {
                 ));
             }
             ffi::itdb_playlist_add_track(master, track, -1);
+
+            // Read the assigned dbid + ipod_path from the now-attached track.
+            let dbid = (*track).dbid as u64;
+            let relpath = read_ipod_relpath(track);
+            Ok(TrackHandle { dbid, ipod_relpath: relpath })
+        }
+    }
+
+    /// Remove a track from the iPod by dbid. Idempotent (returns Ok if not present).
+    /// Does NOT call `itdb_write`; the caller batches multiple removes + adds
+    /// then calls `write` once.
+    pub fn delete_track(&self, dbid: u64) -> Result<()> {
+        unsafe {
+            // Find the track by walking the GList. libgpod doesn't expose a
+            // hashmap lookup; 1,400 tracks at ~30ns per pointer-chase is fine.
+            let mut node = (*self.0).tracks;
+            let mut found: *mut ffi::Itdb_Track = std::ptr::null_mut();
+            while !node.is_null() {
+                let t = (*node).data as *mut ffi::Itdb_Track;
+                if !t.is_null() && (*t).dbid as u64 == dbid {
+                    found = t;
+                    break;
+                }
+                node = (*node).next;
+            }
+            if found.is_null() {
+                return Ok(()); // already gone; idempotent
+            }
+
+            // Delete the on-iPod file via libgpod's path helper.
+            let fname_c = ffi::itdb_filename_on_ipod(found);
+            if !fname_c.is_null() {
+                let path_str = std::ffi::CStr::from_ptr(fname_c).to_string_lossy().into_owned();
+                let _ = std::fs::remove_file(std::path::Path::new(&path_str));
+                ffi::g_free(fname_c as *mut std::os::raw::c_void);
+            }
+            // Remove from all playlists, then remove + free the track.
+            ffi::itdb_playlist_remove_track(std::ptr::null_mut(), found);
+            ffi::itdb_track_remove(found);
         }
         Ok(())
+    }
+
+    /// Walk all tracks currently in the DB and return their handles.
+    /// Used by `--rebuild-manifest` to populate a fresh manifest with
+    /// `source_known = false` entries.
+    pub fn list_tracks_for_rebuild(&self) -> Vec<TrackHandle> {
+        let mut out = Vec::new();
+        unsafe {
+            let mut node = (*self.0).tracks;
+            while !node.is_null() {
+                let t = (*node).data as *mut ffi::Itdb_Track;
+                if !t.is_null() {
+                    out.push(TrackHandle {
+                        dbid: (*t).dbid as u64,
+                        ipod_relpath: read_ipod_relpath(t),
+                    });
+                }
+                node = (*node).next;
+            }
+        }
+        out
     }
 }
 
@@ -206,6 +275,18 @@ unsafe fn set_str(slot: *mut *mut std::os::raw::c_char, value: Option<&str>) {
         }
         None => ptr::null_mut(),
     };
+}
+
+/// Convert libgpod's colon-separated `ipod_path` to Windows backslashes,
+/// stripping the leading colon. libgpod stores e.g. `:iPod_Control:Music:F12:KLMN.m4a`;
+/// the manifest stores `iPod_Control\Music\F12\KLMN.m4a`.
+unsafe fn read_ipod_relpath(track: *mut ffi::Itdb_Track) -> String {
+    let p = (*track).ipod_path;
+    if p.is_null() {
+        return String::new();
+    }
+    let s = std::ffi::CStr::from_ptr(p).to_string_lossy();
+    s.trim_start_matches(':').replace(':', "\\")
 }
 
 fn path_to_cstring(p: &Path) -> Result<CString> {
