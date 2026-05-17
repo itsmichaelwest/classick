@@ -201,12 +201,7 @@ Steps for the implementer:
 
 ### 5.3 Open question — prebuilt libgpod for Windows
 
-The implementer should first search for an existing Windows build of libgpod before building from source. Candidates:
-- gtkpod's old Windows installers (may include libgpod.dll usable standalone)
-- MSYS2 packages (`mingw-w64-x86_64-libgpod` if it exists)
-- Builds from contributors on Linux audio forums or the Hydrogenaudio community
-
-If a usable prebuilt exists, skip §5.2.
+**Resolved 2026-05-17 (research recorded in `LEARNINGS.md`)**: no prebuilt libgpod for x64 Windows exists. MSYS2 has no package, gtkpod's last Windows touch was 2011, GitHub forks publish no releases, vcpkg has no port, and the most active Windows MSVC music-player project (Strawberry) explicitly disables libgpod support. There is no usable prebuilt path. Build from source is unavoidable, but §5.2's "meson + vcpkg's libgpod port" assumption is *also* wrong (no such port). See SPEC §12.7 for the revised build strategy.
 
 ## 6. Acceptance criteria
 
@@ -289,6 +284,23 @@ Decisions made during brainstorming, layered on top of §1–§11:
 3. **Album art path**: primary path is ffmpeg in-band passthrough (`-c:v copy -disposition:v attached_pic` inside `-f ipod`). Fallback to `itdb_track_set_thumbnails_from_data` *only* if device testing shows the in-band MP4 atom breaks playback. Build one path, hold the fallback in reserve — do not pre-implement both.
 5. **Transcoder choice**: ffmpeg is the primary. Reasons: single process per track (decode + encode + mux + art passthrough in one invocation), already a stated dependency. **refalac64** (from the qaac distribution — wraps Apple's reference ALAC encoder) is the documented fallback if Phase 1 device testing reveals the iPod Classic rejecting ffmpeg's ALAC output. The refalac path costs more orchestration: separate libFLAC dep, separate art-extraction step (`--artwork <file>`), two-step pipeline per track. Do not pre-implement both — switch only on evidence.
 6. **UI library — supersedes SPEC §2 table row "Progress UI"**: use **`ratatui`** + `crossterm` for an interactive TUI in Phase 2 (overall progress, current track, recent errors, log tail, throughput). The `indicatif` row in §2 is retired. Constraint: detect non-TTY stdout (e.g. `IsTerminal` from `std::io`) and fall back to plain `tracing` log output — never enter the alternate screen buffer when piped, redirected, or run under CI. A `--no-tui` flag should also force the plain path. TUI is irrelevant to Phase 0 (no UI) and likely irrelevant to Phase 1 (single track end-to-end); it lands in Phase 2.
+
+### 12.7 libgpod build strategy (revised, supersedes SPEC §5.2 and §5.3)
+
+The Task 2 research (logged in `LEARNINGS.md`) confirmed:
+- No prebuilt libgpod for x64 Windows MSVC exists anywhere.
+- libgpod is **not** a vcpkg port (the SPEC §5.2 path doesn't exist).
+- The Strawberry MSVC build chain explicitly disables libgpod.
+
+**v1 strategy — chosen 2026-05-17: build libgpod via MSYS2 / MinGW-w64 autotools (the well-trodden Unix path), and link the resulting DLL from MSVC-compiled Rust via a generated `.lib` import library.**
+
+Rationale: this is the only path where every step (`./configure`, `make`, GLib dep) has documented working precedent on Windows. Trade-off: the distribution will include MinGW runtime DLLs (`libgcc_s_seh-1.dll`, `libwinpthread-1.dll`) and the MinGW-flavored GLib runtime alongside `ipod-sync.exe` — approximately 5 MB of extra weight. This does not affect Rust's own MSVC compilation (we still build `ipod-sync.exe` with `x86_64-pc-windows-msvc`); only the libgpod DLL boundary uses MinGW.
+
+ABI safety: libgpod's public API exposes opaque pointers and primitive types only — no `FILE*`, no `errno`, no MSVC-vs-MinGW C runtime types crossing the boundary. The DLL's C ABI is safe to consume from MSVC.
+
+**Future migration (deferred — v2 or v3): write a pure-Rust port of the iTunesDB format**, replacing libgpod entirely. Removes MinGW runtime DLLs, gives us full control over the hashed-DB signing on iPod Classic 7G, and gives us a real test suite. Risk: the hashed-DB signing requires the FirewireGUID-derived HMAC algorithm reverse-engineered from libgpod sources. Out of scope until v1 ships and the device behavior is well-understood.
+
+**Replaces SPEC §5.2 step-by-step.** Tasks 3 and 4 of the Phase 0 plan are also superseded — see the revised single-task version in the plan document.
 4. **Repo path**: actual location is `F:\repos\ipod-sync\` (SPEC §10 said `F:\ipod-sync\`). Treat §10 layout as relative to the repo root.
 
 ### 12.1 Build sequence

@@ -214,189 +214,213 @@ git commit -m "docs: record libgpod Windows acquisition decision"
 
 ---
 
-## Task 3: Vendor a prebuilt libgpod (Branch A only)
+## Task 3: Build libgpod via MSYS2 / MinGW-w64 (revised 2026-05-17)
 
-Skip this task if Task 2 selected Branch B.
+**Supersedes the original Tasks 3 (prebuilt vendoring) and 4 (meson + vcpkg from-source build).** Both were predicated on assumptions that turned out to be false — see SPEC §12.7 and Task 2's LEARNINGS section.
 
-**Files:**
-- Create: `F:\repos\ipod-sync\vendor\libgpod\include\gpod\itdb.h` (and any sibling headers it includes)
-- Create: `F:\repos\ipod-sync\vendor\libgpod\lib\gpod.lib`
-- Create: `F:\repos\ipod-sync\vendor\libgpod\bin\gpod.dll`
-- Create: `F:\repos\ipod-sync\vendor\libgpod\README.md` (provenance)
+**Strategy:** build libgpod with its native autotools on MSYS2's MinGW64 toolchain, then vendor the resulting MinGW-flavored DLL alongside an MSVC-format `.lib` import library generated from the DLL's export table. The MSVC-built Rust binary links against the `.lib` (resolved at compile time) and loads the MinGW DLL at runtime. Trade-off: distribution must include the MinGW runtime DLLs (`libgcc_s_seh-1.dll`, `libwinpthread-1.dll`) and the MinGW-flavored GLib runtime — accepted per SPEC §12.7.
 
-- [ ] **Step 1: Create the vendor directory layout**
-
-```powershell
-New-Item -ItemType Directory -Force -Path F:\repos\ipod-sync\vendor\libgpod\include\gpod, F:\repos\ipod-sync\vendor\libgpod\lib, F:\repos\ipod-sync\vendor\libgpod\bin | Out-Null
-```
-
-- [ ] **Step 2: Extract the prebuilt package**
-
-From the candidate identified in Task 2: copy `libgpod.dll` → `vendor\libgpod\bin\gpod.dll`, the import lib → `vendor\libgpod\lib\gpod.lib`, and all `gpod/*.h` headers → `vendor\libgpod\include\gpod\`.
-
-If the prebuilt provides only `libgpod.dll` and no `.lib`, generate one via:
-```powershell
-dumpbin /exports vendor\libgpod\bin\gpod.dll > exports.txt
-# extract the function names into a .def file, then:
-lib /def:gpod.def /machine:x64 /out:vendor\libgpod\lib\gpod.lib
-```
-(Record the steps actually used in `LEARNINGS.md`.)
-
-- [ ] **Step 3: Copy GLib dependency DLLs if required**
-
-`dumpbin /dependents vendor\libgpod\bin\gpod.dll` will list its runtime deps. Likely candidates: `libglib-2.0-0.dll`, `libgobject-2.0-0.dll`, `libintl-8.dll`, `libiconv-2.dll`, `zlib1.dll`. Copy each into `vendor\libgpod\bin\` from the same source package.
-
-- [ ] **Step 4: Write `vendor\libgpod\README.md`**
-
-```markdown
-# libgpod (vendored)
-
-Source: <URL / package name / version from Task 2>
-Date acquired: 2026-05-17
-ABI: x86_64 Windows
-
-Files:
-- `include/gpod/itdb.h` (+ siblings) — public headers
-- `lib/gpod.lib` — MSVC import library
-- `bin/gpod.dll` — runtime library
-- `bin/lib*.dll` — GLib runtime dependencies (see `dumpbin /dependents`)
-
-To rebuild from source, see SPEC §5.2.
-```
-
-- [ ] **Step 5: Commit headers + import lib (DLL is gitignored)**
-
-```powershell
-git add vendor\libgpod\include vendor\libgpod\lib vendor\libgpod\README.md
-git commit -m "build: vendor prebuilt libgpod headers and import lib"
-```
-
-(DLLs are gitignored per Task 1 step 3. They live on disk locally but won't be committed. Distribution will copy them next to the exe at install time — out of scope for Phase 0.)
-
----
-
-## Task 4: Build libgpod from source (Branch B only)
-
-Skip this task if Task 2 selected Branch A.
-
-This task may take several hours and has the highest unknown-unknowns of any task in the plan. If it hasn't produced a linkable DLL after one focused day, treat that as Phase 0 failure and escalate per the gate criterion at the top of this document.
+**Gate:** if this task is not complete within one focused day, treat as Phase 0 failure and escalate per the top-of-document gate criterion (alternatives: native Rust port of iTunesDB, or TunesReloaded WASM via wasmtime — both bigger projects deferred to v2/v3).
 
 **Files:**
-- Create: `F:\repos\ipod-sync\vendor\libgpod\include\gpod\itdb.h` (and siblings)
-- Create: `F:\repos\ipod-sync\vendor\libgpod\lib\gpod.lib`
-- Create: `F:\repos\ipod-sync\vendor\libgpod\bin\gpod.dll` (+ GLib deps)
+- Create: `F:\repos\ipod-sync\vendor\libgpod\include\gpod\*.h`
+- Create: `F:\repos\ipod-sync\vendor\libgpod\lib\gpod.lib` (MSVC-format import lib generated from the MinGW DLL)
+- Create: `F:\repos\ipod-sync\vendor\libgpod\bin\gpod.dll` (the MinGW-built libgpod DLL)
+- Create: `F:\repos\ipod-sync\vendor\libgpod\bin\*.dll` (MinGW runtime + GLib + transitive deps)
 - Create: `F:\repos\ipod-sync\vendor\libgpod\BUILD-NOTES.md`
 
-- [ ] **Step 1: Install build prerequisites**
+- [ ] **Step 1: Check whether MSYS2 is installed**
 
-If not already present:
-- Visual Studio Build Tools 2022 with the "Desktop development with C++" workload (includes MSVC, Windows SDK, CMake).
-- Python 3 (for meson).
-- vcpkg: `git clone https://github.com/microsoft/vcpkg.git C:\vcpkg && C:\vcpkg\bootstrap-vcpkg.bat`.
-
-Verify:
+Run:
 ```powershell
-cl.exe /?    # MSVC compiler
-python --version
-C:\vcpkg\vcpkg.exe version
+Test-Path C:\msys64\msys2_shell.cmd
 ```
 
-- [ ] **Step 2: Install GLib via vcpkg**
+If `True`, skip Step 2.
+
+If `False`, **STOP** and report `BLOCKED` — MSYS2 installation requires admin elevation and an interactive installer. The controller will install it and resume. Installation reference: https://www.msys2.org/ — download `msys2-x86_64-*.exe`, run, accept defaults so it lands at `C:\msys64`.
+
+- [ ] **Step 2: Update MSYS2 packages**
+
+Run from PowerShell:
+```powershell
+C:\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+```
+This may take 1-2 minutes. If the package database itself was updated, MSYS2 prints a message asking to restart the shell — run the same command a second time to complete the upgrade.
+
+- [ ] **Step 3: Install MinGW64 toolchain + libgpod build deps**
+
+Run from PowerShell:
+```powershell
+C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-glib2 mingw-w64-x86_64-libxml2 mingw-w64-x86_64-libplist mingw-w64-x86_64-sqlite3 mingw-w64-x86_64-zlib mingw-w64-x86_64-libgcrypt mingw-w64-x86_64-pkgconf mingw-w64-x86_64-gettext mingw-w64-x86_64-intltool"
+```
+
+`libgcrypt` is load-bearing: libgpod uses it to compute the hashed iTunesDB signature for late-model Classics (which is the entire reason SPEC chose libgpod over a Rust reimplementation). Verify it installed:
+```powershell
+C:\msys64\usr\bin\bash.exe -lc "pacman -Q mingw-w64-x86_64-libgcrypt"
+```
+Expected: prints a package name + version.
+
+- [ ] **Step 4: Clone libgpod source**
+
+Inside an MSYS2 MinGW64 shell (note: `mingw64.exe`, not `msys2_shell.cmd`):
+```powershell
+C:\msys64\msys2_shell.cmd -mingw64 -no-start -defterm -here -c "cd /c && mkdir -p src && cd src && git clone https://github.com/fadingred/libgpod.git"
+```
+
+If `fadingred/libgpod` is gone, fall back: clone `https://github.com/gtkpod/libgpod.git` instead. Note in BUILD-NOTES.md which mirror you used and the commit SHA.
+
+- [ ] **Step 5: Configure and build via autotools**
+
+Inside the MinGW64 shell:
+```powershell
+C:\msys64\msys2_shell.cmd -mingw64 -no-start -defterm -here -c "cd /c/src/libgpod && NOCONFIGURE=1 ./autogen.sh && ./configure --prefix=/mingw64 --disable-static --without-hal --disable-gtk-doc --disable-introspection --without-python && make -j"
+```
+
+Expected: builds successfully, producing `src/.libs/libgpod-4.dll` (or similar libtool-versioned name) and `src/.libs/libgpod.dll.a` (MinGW import lib — note `.dll.a`, not `.lib`).
+
+If `./autogen.sh` fails complaining about missing `intltool` or `gtkdocize`, install with:
+```powershell
+C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm intltool gtk-doc"
+```
+and retry. Document anything added to BUILD-NOTES.md.
+
+If `./configure` complains about a missing dep, install the corresponding `mingw-w64-x86_64-<pkg>` and retry.
+
+If `make` fails on a specific compile error, capture the first error and report `BLOCKED` — patching libgpod source is a judgment call that should escalate.
+
+- [ ] **Step 6: Install libgpod into the MinGW64 prefix**
 
 ```powershell
-C:\vcpkg\vcpkg.exe install glib:x64-windows
-```
-Expected: completes successfully. The build artifacts live under `C:\vcpkg\installed\x64-windows\`.
-
-- [ ] **Step 3: Install meson and ninja**
-
-```powershell
-pip install meson ninja
-meson --version
-ninja --version
+C:\msys64\msys2_shell.cmd -mingw64 -no-start -defterm -here -c "cd /c/src/libgpod && make install"
 ```
 
-- [ ] **Step 4: Clone libgpod**
+Expected: places `libgpod-4.dll` in `C:\msys64\mingw64\bin\`, `libgpod.dll.a` in `C:\msys64\mingw64\lib\`, and headers in `C:\msys64\mingw64\include\gpod-1.0\gpod\`.
 
-```powershell
-git clone https://github.com/fadingred/libgpod.git C:\src\libgpod
-```
-(If that mirror is gone, fall back to the SourceForge tarball under https://sourceforge.net/projects/gtkpod/files/libgpod/ — extract to `C:\src\libgpod`.)
-
-- [ ] **Step 5: Configure with meson against vcpkg GLib**
-
-Open the **x64 Native Tools Command Prompt for VS 2022**, then:
-```cmd
-set PKG_CONFIG_PATH=C:\vcpkg\installed\x64-windows\lib\pkgconfig
-cd C:\src\libgpod
-meson setup build --buildtype=release --default-library=shared -Dwith-gtk=false -Dwith-python=false
-```
-
-Expected: configuration succeeds. If it fails because of missing dependencies (libxml2, sqlite3, etc.), `vcpkg install <pkg>:x64-windows` and re-run. Record each dep added in `vendor\libgpod\BUILD-NOTES.md`.
-
-If configuration fails for code reasons (MSVC vs GCC syntax), search the gtkpod-devel archives for a Windows patch; apply and document.
-
-- [ ] **Step 6: Build**
-
-```cmd
-meson compile -C build
-```
-Expected: produces `build\src\libgpod-1.0-8.dll` (or similar) plus an import lib.
-
-- [ ] **Step 7: Copy artifacts to `vendor/libgpod/`**
+- [ ] **Step 7: Create the vendor directory layout**
 
 ```powershell
 New-Item -ItemType Directory -Force -Path F:\repos\ipod-sync\vendor\libgpod\include\gpod, F:\repos\ipod-sync\vendor\libgpod\lib, F:\repos\ipod-sync\vendor\libgpod\bin | Out-Null
-Copy-Item C:\src\libgpod\src\itdb.h F:\repos\ipod-sync\vendor\libgpod\include\gpod\
-# Copy any other public headers referenced by itdb.h (e.g. itdb_device.h)
-Copy-Item C:\src\libgpod\build\src\*.dll F:\repos\ipod-sync\vendor\libgpod\bin\
-Copy-Item C:\src\libgpod\build\src\*.lib F:\repos\ipod-sync\vendor\libgpod\lib\
-# Copy GLib runtime DLLs from vcpkg
-Copy-Item C:\vcpkg\installed\x64-windows\bin\glib-*.dll F:\repos\ipod-sync\vendor\libgpod\bin\
-Copy-Item C:\vcpkg\installed\x64-windows\bin\gobject-*.dll F:\repos\ipod-sync\vendor\libgpod\bin\
-Copy-Item C:\vcpkg\installed\x64-windows\bin\intl-*.dll F:\repos\ipod-sync\vendor\libgpod\bin\
-Copy-Item C:\vcpkg\installed\x64-windows\bin\iconv-*.dll F:\repos\ipod-sync\vendor\libgpod\bin\
-Copy-Item C:\vcpkg\installed\x64-windows\bin\zlib1.dll F:\repos\ipod-sync\vendor\libgpod\bin\
 ```
 
-Rename the libgpod artifacts to `gpod.dll` / `gpod.lib` for predictable `build.rs` linkage:
-```powershell
-Get-ChildItem F:\repos\ipod-sync\vendor\libgpod\bin\libgpod*.dll | Rename-Item -NewName "gpod.dll"
-Get-ChildItem F:\repos\ipod-sync\vendor\libgpod\lib\libgpod*.lib | Rename-Item -NewName "gpod.lib"
-```
-
-- [ ] **Step 8: Verify exports**
+- [ ] **Step 8: Copy headers, DLL, and runtime deps into vendor/**
 
 ```powershell
-dumpbin /exports F:\repos\ipod-sync\vendor\libgpod\bin\gpod.dll | Select-String "itdb_parse"
-```
-Expected: shows `itdb_parse` and/or `itdb_parse_file`.
+# Headers
+Copy-Item C:\msys64\mingw64\include\gpod-1.0\gpod\*.h F:\repos\ipod-sync\vendor\libgpod\include\gpod\
 
-- [ ] **Step 9: Write `vendor\libgpod\BUILD-NOTES.md`**
+# libgpod DLL (libtool versioning yields e.g. libgpod-4.dll — rename to gpod.dll)
+$libgpodDll = Get-ChildItem C:\msys64\mingw64\bin\libgpod-*.dll | Select-Object -First 1
+Copy-Item $libgpodDll.FullName F:\repos\ipod-sync\vendor\libgpod\bin\gpod.dll
+
+# MinGW runtime deps required by every MinGW-built DLL
+Copy-Item C:\msys64\mingw64\bin\libgcc_s_seh-1.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libwinpthread-1.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libstdc++-6.dll F:\repos\ipod-sync\vendor\libgpod\bin\ -ErrorAction SilentlyContinue
+
+# GLib + transitive deps
+Copy-Item C:\msys64\mingw64\bin\libglib-2.0-0.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libgobject-2.0-0.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libgmodule-2.0-0.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libgthread-2.0-0.dll F:\repos\ipod-sync\vendor\libgpod\bin\ -ErrorAction SilentlyContinue
+Copy-Item C:\msys64\mingw64\bin\libintl-8.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libiconv-2.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libpcre2-8-0.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libxml2-2.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libplist-*.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libsqlite3-0.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\zlib1.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libgcrypt-*.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+Copy-Item C:\msys64\mingw64\bin\libgpg-error-*.dll F:\repos\ipod-sync\vendor\libgpod\bin\
+```
+
+Some of these may not exist on this MSYS2 version (libtool naming varies) — `-ErrorAction SilentlyContinue` is intentionally used on a few. After the copy, verify the complete dependency closure with the next step.
+
+- [ ] **Step 9: Discover and copy any missing transitive deps**
+
+Use `dumpbin /dependents` (from a VS 2022 Developer PowerShell, since `dumpbin` ships with MSVC):
+```powershell
+& "${env:VCINSTALLDIR}Auxiliary\Build\vcvars64.bat"  # (or open Developer PowerShell)
+dumpbin /dependents F:\repos\ipod-sync\vendor\libgpod\bin\gpod.dll
+```
+
+For each DLL listed in the output that does NOT start with a Windows system DLL (`KERNEL32.dll`, `msvcrt.dll`, `ADVAPI32.dll`, `USER32.dll`, etc.) AND does not yet exist in `F:\repos\ipod-sync\vendor\libgpod\bin\`, copy it from `C:\msys64\mingw64\bin\`. Repeat for each MinGW DLL already vendored (`dumpbin /dependents <each>.dll`) until the closure is complete.
+
+Final check:
+```powershell
+Get-ChildItem F:\repos\ipod-sync\vendor\libgpod\bin\*.dll | ForEach-Object { dumpbin /dependents $_.FullName } | Select-String "\.dll$" | Where-Object { $_ -notmatch "(KERNEL32|msvcrt|ADVAPI32|USER32|GDI32|ole32|OLEAUT32|WS2_32|SHELL32|IPHLPAPI|CRYPT32|bcrypt|api-ms-)" } | Sort-Object -Unique
+```
+Expected: only DLLs that already exist in `vendor\libgpod\bin\`. If anything else appears, copy it from `C:\msys64\mingw64\bin\` and re-check.
+
+- [ ] **Step 10: Generate an MSVC-format import library from the DLL**
+
+The MinGW build produced `libgpod.dll.a` — that's MinGW's GNU-format import lib and cannot be linked by MSVC. We need to generate a Microsoft-format `.lib` from the DLL's export table.
+
+From a VS 2022 Developer PowerShell:
+```powershell
+cd F:\repos\ipod-sync\vendor\libgpod\lib
+
+# Step A: extract exports to a .def file
+$exports = dumpbin /exports ..\bin\gpod.dll | Select-String "^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)" | ForEach-Object { $_.Matches[0].Groups[1].Value }
+"LIBRARY gpod.dll`r`nEXPORTS" | Out-File -Encoding ascii gpod.def
+$exports | ForEach-Object { $_ } | Out-File -Encoding ascii -Append gpod.def
+
+# Step B: lib.exe /def to produce gpod.lib
+lib /def:gpod.def /machine:x64 /out:gpod.lib
+```
+
+Expected: produces `gpod.lib` and `gpod.exp`. Verify:
+```powershell
+dumpbin /headers gpod.lib | Select-String "Machine" | Select-Object -First 1
+```
+Expected: `8664 machine (x64)`.
+
+- [ ] **Step 11: Smoke-test exports**
+
+```powershell
+dumpbin /exports F:\repos\ipod-sync\vendor\libgpod\bin\gpod.dll | Select-String "itdb_parse|itdb_write|itdb_free|itdb_track_new"
+```
+Expected: each of `itdb_parse`, `itdb_write`, `itdb_free`, `itdb_track_new` appears in the output. If any is missing, the libgpod build was incomplete — investigate before continuing.
+
+- [ ] **Step 12: Write `vendor\libgpod\BUILD-NOTES.md`**
 
 ```markdown
 # libgpod Windows build notes (2026-05-17)
 
-Source: <git repo + commit SHA>
-Build host: Windows 11 + VS 2022 Build Tools + vcpkg + meson <version>
+Built via MSYS2 / MinGW-w64 autotools per SPEC §12.7. Rust links against an MSVC import library generated from the MinGW DLL's export table.
 
-## vcpkg packages installed
-- glib:x64-windows
-- (others as needed)
+## Source
+- Repo: <git URL used in Step 4>
+- Commit SHA: <output of `git -C /c/src/libgpod rev-parse HEAD`>
+
+## Build host
+- Windows 11 + MSYS2 (version: output of `pacman -Q msys2-runtime`)
+- MinGW64 toolchain: <output of `pacman -Q mingw-w64-x86_64-gcc`>
+
+## MSYS2 packages installed
+(list everything in Step 3 plus anything added during build)
+
+## configure options
+`--prefix=/mingw64 --disable-static --without-hal --disable-gtk-doc --disable-introspection --without-python`
 
 ## Patches applied
-- (list any Windows compat patches and their source)
+(list any source patches needed, or "none")
 
-## Reproduction steps
-(paste the exact meson commands used)
+## Runtime DLLs vendored (in vendor/libgpod/bin/)
+(output of `Get-ChildItem vendor\libgpod\bin\*.dll | Select-Object Name`)
+
+## MSVC import library
+Generated via `dumpbin /exports` + `lib /def`. See Step 10 of Task 3 in the plan.
 ```
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 13: Commit headers, import lib, and BUILD-NOTES (DLLs are gitignored)**
 
 ```powershell
-git add vendor\libgpod\include vendor\libgpod\lib vendor\libgpod\BUILD-NOTES.md
-git commit -m "build: vendor libgpod headers and import lib (built from source)"
+git -C F:\repos\ipod-sync add vendor\libgpod\include vendor\libgpod\lib vendor\libgpod\BUILD-NOTES.md
+git -C F:\repos\ipod-sync commit -m "build: vendor libgpod headers and MSVC import lib (built via MSYS2/MinGW)"
 ```
+
+(DLLs are gitignored per Task 1 Step 3. They live on disk locally; distribution copies them next to the .exe at install time — out of scope for Phase 0.)
 
 ---
 
