@@ -2,6 +2,10 @@
 
 Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+## Phase 2 Task 4 — source walker + BLAKE3 fingerprint (2026-05-18)
+
+- **PID-based temp dir shared across parallel tests causes flaky failures.** The plan's `tempdir_under_target()` generates `walker-<pid>` — identical across all tests in one run. Rust test harness runs tests in parallel by default; tests clobber each other's files. Fix: add an `AtomicU32` counter to produce `walker-<pid>-<n>` (unique per test invocation). One-liner fix; zero API impact.
+
 ## Phase 0
 
 - **bindgen + libclang on Windows (Task 5):** VS18 Community ships `clang-format.exe` and `clang-tidy.exe` under `VC\Tools\Llvm\x64\bin` but does NOT include `clang.exe` or `libclang.dll`. bindgen 0.72 needs `libclang.dll` to parse C headers. Install the full LLVM toolchain via `winget install --id LLVM.LLVM` (drops it at `C:\Program Files\LLVM\`). Either add `C:\Program Files\LLVM\bin` to `PATH` or set `LIBCLANG_PATH=C:\Program Files\LLVM\bin` for cargo.
@@ -123,6 +127,15 @@ Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights
   - `CRITICAL: itdb_splr_validate: assertion 'at != ITDB_SPLAT_UNKNOWN' failed` — libgpod's smart-playlist validator walking pre-existing empty/unrecognized rules.
   Install a `g_log_set_handler` in Phase 2 to suppress (or reformat) these so they don't clutter user output.
 - **Cleanup orphan tracks if write fails mid-way.** Currently if `itdb_cp_track_to_ipod` succeeds but `itdb_write` fails, the .m4a is orphaned on the iPod. `--rebuild-manifest` recovers from this; document the failure mode in the user-facing error message.
+
+## Phase 2 Gate A (2026-05-18)
+
+- **Result:** PASS.
+- **Source:** `<source-library-path>\`
+- **FLACs found:** 1407
+- **Walk elapsed (release build, end-to-end `cargo run --release -- --dry-run`):** 80.3s
+- **Action plan:** Add=1407, Modify=0, Remove=0, Unchanged=0 (expected — no manifest yet).
+- **Notes:** Count lines up with SPEC §11's "≈1,400" target. SMB walk + first-MiB BLAKE3 read across 1,407 files completed in 80s — comfortably inside the 30-180s window. No hangs, no errors, no warnings. `cargo build --release` from a clean release tree took 27.5s (dep graph compile); subsequent re-link inside the `cargo run` invocation was 0.16s. Bare-walk elapsed (excluding cargo's already-built check) is dominated by SMB I/O, not Rust work.
 
 ## Phase 2 Task 1 — scaffold + carry-forwards (2026-05-18)
 
