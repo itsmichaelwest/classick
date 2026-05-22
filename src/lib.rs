@@ -8,4 +8,5 @@ pub mod manifest;
 pub mod progress;
 pub mod source;
 pub mod transcode;
+pub mod try_with_prompt;
 pub mod wizard;
