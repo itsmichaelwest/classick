@@ -10,16 +10,43 @@ use ipod_sync::progress::{ActionPlanSummary, Decision, Progress, ReviewDecision}
 use ipod_sync::source::{self, SourceEntry};
 use ipod_sync::transcode::{self, has_embedded_art, ProbeOutput, ProbeTags};
 use ipod_sync::wizard;
+use std::io::IsTerminal;
 use std::path::Path;
+use std::sync::mpsc::Receiver;
 
 fn main() -> Result<()> {
     unsafe { std::env::set_var("GDK_PIXBUF_MODULE_FILE", env!("PIXBUF_LOADERS_CACHE")); }
 
     let cli = Cli::parse();
-    ensure_source_or_wizard(&cli)?;
+
+    // Logging first (no TUI needed for tracing-subscriber). We use the raw
+    // verbose flag from the CLI since Config resolution may itself prompt
+    // through the TUI; we want tracing wired up before any of that.
+    ipod_sync::logging::init(cli.verbose);
+
+    // Pre-flight: decide if we're going TUI or plain. Mirrors the logic
+    // Config::resolve uses (--no-tui flag, stdout is a TTY).
+    let use_tui = !cli.no_tui && std::io::stdout().is_terminal();
+
+    let (progress, decision_rx) = Progress::start(use_tui)?;
+
+    // Everything else runs while the TUI is up. Any error from here on
+    // routes through progress.error / progress.prompt before exiting.
+    let result = orchestrate(cli, &progress, &decision_rx);
+
+    // Make sure the TUI tears down even on error. `finish` consumes `progress`,
+    // so it must run after `orchestrate` returns (which only borrows it).
+    progress.finish();
+
+    result
+}
+
+/// Renamed wrapper that contains all the post-Progress work. Errors bubble up
+/// through this and into main; progress.finish() runs unconditionally afterwards.
+fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<()> {
+    ensure_source_or_wizard(&cli, progress, decision_rx)?;
     let config = config::resolve(cli)?;
-    ipod_sync::logging::init(config.verbose);
-    run(&config)
+    run(&config, progress, decision_rx)
 }
 
 /// If no source is resolvable from CLI/env/persisted config AND we're on a TTY
@@ -27,9 +54,11 @@ fn main() -> Result<()> {
 /// config has a source and the subsequent config::resolve will succeed.
 ///
 /// Non-TTY or --no-tui: do nothing (resolve will produce its standard error).
-fn ensure_source_or_wizard(cli: &Cli) -> Result<()> {
-    use std::io::IsTerminal;
-
+fn ensure_source_or_wizard(
+    cli: &Cli,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<()> {
     // Quick check: if CLI provided source, we don't need anything.
     if cli.source.is_some() {
         return Ok(());
@@ -47,12 +76,13 @@ fn ensure_source_or_wizard(cli: &Cli) -> Result<()> {
     if cli.no_tui || !std::io::stdout().is_terminal() {
         return Ok(()); // resolve will error with the standard message
     }
-    // Launch the wizard. On success it writes the source to config.toml.
-    let _saved = wizard::run()?;
+    // Launch the wizard via the running Progress. On success it writes the
+    // source to config.toml; the subsequent config::resolve will pick it up.
+    let _saved = wizard::run(progress, decision_rx)?;
     Ok(())
 }
 
-fn run(config: &Config) -> Result<()> {
+fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<()> {
     if config.dry_run && config.apply {
         return Err(anyhow!("--dry-run and --apply are mutually exclusive"));
     }
@@ -102,8 +132,8 @@ fn run(config: &Config) -> Result<()> {
     )?;
     let (add, modify, metadata_only, remove, unchanged) = count_actions(&actions);
 
-    // Start the progress handle now that we know the action counts.
-    let (progress, decision_rx) = Progress::start(config.use_tui)?;
+    // Progress was started in main() and is borrowed here. Send the header now
+    // that we know what to display.
     progress.header(
         config.source.display().to_string(),
         mount.clone(),
@@ -138,7 +168,6 @@ fn run(config: &Config) -> Result<()> {
         let total_planned = add + modify + metadata_only + effective_remove;
         progress.summary(add, modify, remove, unchanged, total_planned);
         progress.log("Dry run; nothing was written.");
-        progress.finish();
         return Ok(());
     } else if config.apply || !config.use_tui {
         // Non-interactive: just apply with the configured no_delete.
@@ -158,23 +187,19 @@ fn run(config: &Config) -> Result<()> {
             }
             Ok(Decision::Review(ReviewDecision::DryRun)) => {
                 progress.log("Dry run; nothing was written.");
-                progress.finish();
                 return Ok(());
             }
             Ok(Decision::Review(ReviewDecision::Quit)) => {
                 progress.log("Aborted; nothing was written.");
-                progress.finish();
                 return Ok(());
             }
             Ok(Decision::Prompt { .. }) | Ok(Decision::Form { .. }) => {
                 // Unexpected at this stage (no try_with_prompt / wizard caller
-                // wired yet — Tasks 3-6 will do that). Return loudly rather
+                // wired yet — Tasks 5+6 will do that). Return loudly rather
                 // than silently swallowing a stray decision.
-                progress.finish();
                 return Err(anyhow!("unexpected prompt/form decision before any prompt was sent"));
             }
             Err(_) => {
-                progress.finish();
                 return Err(anyhow!("review channel disconnected unexpectedly"));
             }
         }
@@ -189,7 +214,6 @@ fn run(config: &Config) -> Result<()> {
         && (remove == 0 || effective_no_delete)
     {
         progress.log("Nothing to do.");
-        progress.finish();
         return Ok(());
     }
 
@@ -321,7 +345,7 @@ fn run(config: &Config) -> Result<()> {
         progress.error("To recover: re-run with --rebuild-manifest, which will read the iPod's".to_string());
         progress.error("current DB and create a fresh manifest. Then run normally.".to_string());
     }
-    progress.finish();
+    // progress.finish() is called by main() after this fn returns.
     sync_result
 }
 
