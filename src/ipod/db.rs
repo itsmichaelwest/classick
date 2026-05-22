@@ -71,12 +71,48 @@ impl OwnedDb {
 
     /// Persist DB to the iPod. After this returns Ok, the iPod's stored DB on
     /// disk reflects the in-memory state (track adds, file copies, etc.).
+    ///
+    /// Phase 3.z: if the first `itdb_write` fails, we cleanup the stale
+    /// Play Counts.bak (which may have been re-created between our pre-emptive
+    /// cleanup and itdb_write's rename attempt) and try one more time before
+    /// bubbling the error. The user only sees a failure if BOTH attempts fail.
     pub fn write(&self) -> Result<()> {
-        // libgpod's itdb_write renames `<mount>\iPod_Control\iTunes\Play Counts`
-        // to `Play Counts.bak` via POSIX rename(). On Windows, rename() fails
-        // (silently to libgpod, surfaced as a vague GError) if the target exists.
-        // Pre-delete the stale .bak so the rename always has a clean target.
-        // Discovered while building examples/wipe-tracks.rs on 2026-05-17.
+        // Pre-emptive .bak cleanup (existing Phase 2.1 fix).
+        self.cleanup_play_counts_bak();
+
+        unsafe {
+            let mut err: *mut ffi::GError = ptr::null_mut();
+            if ffi::itdb_write(self.0, &mut err) == 0 {
+                // Retry path: maybe .bak was created between our cleanup and
+                // itdb_write's internal rename. Clean it again and try once more.
+                self.cleanup_play_counts_bak();
+                let mut err2: *mut ffi::GError = ptr::null_mut();
+                if ffi::itdb_write(self.0, &mut err2) == 0 {
+                    // Both attempts failed. Free the first error (the second
+                    // is consumed by gerror_to_anyhow below) and surface the
+                    // retry failure as the canonical error.
+                    if !err.is_null() {
+                        ffi::g_error_free(err);
+                    }
+                    return Err(gerror_to_anyhow("itdb_write (after .bak retry)", err2));
+                }
+                // Success on retry: free the first error and continue.
+                if !err.is_null() {
+                    ffi::g_error_free(err);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete `<mount>\iPod_Control\iTunes\Play Counts.bak` if it exists.
+    ///
+    /// libgpod's itdb_write renames `<mount>\iPod_Control\iTunes\Play Counts`
+    /// to `Play Counts.bak` via POSIX rename(). On Windows, rename() fails
+    /// (silently to libgpod, surfaced as a vague GError) if the target exists.
+    /// Pre-delete the stale .bak so the rename always has a clean target.
+    /// Discovered while building examples/wipe-tracks.rs on 2026-05-17.
+    fn cleanup_play_counts_bak(&self) {
         unsafe {
             let mount_c = ffi::itdb_get_mountpoint(self.0);
             if !mount_c.is_null() {
@@ -85,15 +121,9 @@ impl OwnedDb {
                     .join("iPod_Control")
                     .join("iTunes")
                     .join("Play Counts.bak");
-                let _ = std::fs::remove_file(&bak); // ignore NotFound; surface other errors via the subsequent write
-            }
-
-            let mut err: *mut ffi::GError = ptr::null_mut();
-            if ffi::itdb_write(self.0, &mut err) == 0 {
-                return Err(gerror_to_anyhow("itdb_write", err));
+                let _ = std::fs::remove_file(&bak); // ignore NotFound; other errors surface on the subsequent write
             }
         }
-        Ok(())
     }
 
     /// Copy `source_alac` onto the iPod, attach metadata `tags`, add to the

@@ -359,9 +359,43 @@ fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision>) -
                         total_planned,
                         format!("REMOVE {} (dbid {})", entry.source_path.display(), entry.ipod_dbid),
                     );
-                    db.delete_track(entry.ipod_dbid)
-                        .with_context(|| format!("delete dbid {}", entry.ipod_dbid))?;
-                    manifest.tracks.retain(|e| e.ipod_dbid != entry.ipod_dbid);
+                    // Retry/Skip/Abort loop. Skip leaves the manifest entry
+                    // intact: the track is still on the iPod (delete failed),
+                    // so the manifest stays in sync with iPod state.
+                    let removed = loop {
+                        match db.delete_track(entry.ipod_dbid)
+                            .with_context(|| format!("delete dbid {}", entry.ipod_dbid))
+                        {
+                            Ok(()) => break true,
+                            Err(e) => {
+                                let msg = format!(
+                                    "Failed to remove {} (dbid {}):\n  {e}\n\nChoose:",
+                                    entry.source_path.display(),
+                                    entry.ipod_dbid
+                                );
+                                let outcome = await_prompt(
+                                    progress, decision_rx, msg,
+                                    &["Retry", "Skip this track", "Abort"],
+                                    &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                                )?;
+                                match outcome {
+                                    PromptOutcome::Retry => continue,
+                                    PromptOutcome::Skip => {
+                                        progress.log(format!(
+                                            "Skipped Remove for dbid {} ({})",
+                                            entry.ipod_dbid,
+                                            entry.source_path.display()
+                                        ));
+                                        break false;
+                                    }
+                                    _ => return Err(e),
+                                }
+                            }
+                        }
+                    };
+                    if removed {
+                        manifest.tracks.retain(|e| e.ipod_dbid != entry.ipod_dbid);
+                    }
                     progress.track_done();
                 }
                 Action::Modify(src, old) => {
@@ -371,13 +405,87 @@ fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision>) -
                         total_planned,
                         format!("MODIFY {}", src.path.display()),
                     );
+
+                    // First half: delete the old track. On failure, prompt;
+                    // Skip here means we never touched the iPod, so the
+                    // manifest entry stays as-is.
+                    let mut deleted = effective_no_delete;
                     if !effective_no_delete {
-                        db.delete_track(old.ipod_dbid)
-                            .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))?;
-                        manifest.tracks.retain(|e| e.ipod_dbid != old.ipod_dbid);
+                        deleted = loop {
+                            match db.delete_track(old.ipod_dbid)
+                                .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))
+                            {
+                                Ok(()) => break true,
+                                Err(e) => {
+                                    let msg = format!(
+                                        "Failed to delete old version of {} (dbid {}) before re-adding:\n  {e}\n\nChoose:",
+                                        src.path.display(),
+                                        old.ipod_dbid
+                                    );
+                                    let outcome = await_prompt(
+                                        progress, decision_rx, msg,
+                                        &["Retry", "Skip this track", "Abort"],
+                                        &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                                    )?;
+                                    match outcome {
+                                        PromptOutcome::Retry => continue,
+                                        PromptOutcome::Skip => {
+                                            progress.log(format!(
+                                                "Skipped Modify (delete failed) for {}",
+                                                src.path.display()
+                                            ));
+                                            break false;
+                                        }
+                                        _ => return Err(e),
+                                    }
+                                }
+                            }
+                        };
+                        if deleted {
+                            manifest.tracks.retain(|e| e.ipod_dbid != old.ipod_dbid);
+                        }
                     }
-                    let (handle, fp, audio_fp) = add_one(&db, &src)?;
-                    manifest.tracks.push(entry_from(&src, &handle, &fp, &audio_fp));
+
+                    // Second half: re-add. Only runs if delete succeeded
+                    // (or no_delete kept the old in place — in that case the
+                    // add still proceeds because Modify semantics treat the
+                    // delete as optional under --no-delete).
+                    if deleted || effective_no_delete {
+                        let added: Option<(TrackHandle, String, String)> = loop {
+                            match add_one(&db, &src) {
+                                Ok(triple) => break Some(triple),
+                                Err(e) => {
+                                    let msg = format!(
+                                        "Failed to add new version of {}:\n  {e}\n\nChoose:",
+                                        src.path.display()
+                                    );
+                                    let outcome = await_prompt(
+                                        progress, decision_rx, msg,
+                                        &["Retry", "Skip this track", "Abort"],
+                                        &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                                    )?;
+                                    match outcome {
+                                        PromptOutcome::Retry => continue,
+                                        PromptOutcome::Skip => {
+                                            // iPod state is "in-between": old
+                                            // track gone, new not added. Next
+                                            // run's diff will see the missing
+                                            // iPod entry and re-add naturally.
+                                            progress.log(format!(
+                                                "Skipped Modify after partial delete for {}",
+                                                src.path.display()
+                                            ));
+                                            break None;
+                                        }
+                                        _ => return Err(e),
+                                    }
+                                }
+                            }
+                        };
+                        if let Some((handle, fp, audio_fp)) = added {
+                            manifest.tracks.push(entry_from(&src, &handle, &fp, &audio_fp));
+                        }
+                    }
                     progress.track_done();
                 }
                 Action::Add(src) => {
@@ -387,8 +495,34 @@ fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision>) -
                         total_planned,
                         format!("ADD {}", src.path.display()),
                     );
-                    let (handle, fp, audio_fp) = add_one(&db, &src)?;
-                    manifest.tracks.push(entry_from(&src, &handle, &fp, &audio_fp));
+                    // Skip is clean here: no iPod state changes, no manifest update.
+                    let added: Option<(TrackHandle, String, String)> = loop {
+                        match add_one(&db, &src) {
+                            Ok(triple) => break Some(triple),
+                            Err(e) => {
+                                let msg = format!(
+                                    "Failed to add {}:\n  {e}\n\nChoose:",
+                                    src.path.display()
+                                );
+                                let outcome = await_prompt(
+                                    progress, decision_rx, msg,
+                                    &["Retry", "Skip this track", "Abort"],
+                                    &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                                )?;
+                                match outcome {
+                                    PromptOutcome::Retry => continue,
+                                    PromptOutcome::Skip => {
+                                        progress.log(format!("Skipped Add for {}", src.path.display()));
+                                        break None;
+                                    }
+                                    _ => return Err(e),
+                                }
+                            }
+                        }
+                    };
+                    if let Some((handle, fp, audio_fp)) = added {
+                        manifest.tracks.push(entry_from(&src, &handle, &fp, &audio_fp));
+                    }
                     progress.track_done();
                 }
                 Action::MetadataOnly { source, entry } => {
@@ -398,42 +532,42 @@ fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision>) -
                         total_planned,
                         format!("METADATA {}", source.path.display()),
                     );
-                    let probe = transcode::probe(&source.path)
-                        .with_context(|| format!("probe {}", source.path.display()))?;
-                    let tags = tags_from_probe(&probe);
-                    let art = if has_embedded_art(&probe) {
-                        let art_path = transcode::temp_art_path();
-                        transcode::extract_cover_art(&source.path, &art_path)?;
-                        let bytes = std::fs::read(&art_path)?;
-                        let _ = std::fs::remove_file(&art_path);
-                        Some(bytes)
-                    } else {
-                        None
+                    // Whole metadata-update sequence is bundled into
+                    // `do_metadata_only` so the retry loop has a single
+                    // fallible call to wrap. Skip leaves manifest as-is.
+                    let updated: Option<ManifestEntry> = loop {
+                        match do_metadata_only(&db, &source, &entry) {
+                            Ok(new_entry) => break Some(new_entry),
+                            Err(e) => {
+                                let msg = format!(
+                                    "Failed to update metadata for {}:\n  {e}\n\nChoose:",
+                                    source.path.display()
+                                );
+                                let outcome = await_prompt(
+                                    progress, decision_rx, msg,
+                                    &["Retry", "Skip this track", "Abort"],
+                                    &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                                )?;
+                                match outcome {
+                                    PromptOutcome::Retry => continue,
+                                    PromptOutcome::Skip => {
+                                        progress.log(format!(
+                                            "Skipped MetadataOnly for {}",
+                                            source.path.display()
+                                        ));
+                                        break None;
+                                    }
+                                    _ => return Err(e),
+                                }
+                            }
+                        }
                     };
-                    db.update_track_metadata(entry.ipod_dbid, &tags, art.as_deref())
-                        .with_context(|| format!(
-                            "update_track_metadata dbid {} for {}",
-                            entry.ipod_dbid,
-                            source.path.display()
-                        ))?;
-
-                    // Refresh the manifest entry — same iPod identity, new
-                    // source fingerprint + mtime/size from the touched file.
-                    // audio_fingerprint is unchanged (we verified it matched
-                    // the manifest's value in the diff).
-                    let new_file_fp = source::fingerprint(&source.path)
-                        .with_context(|| format!("fingerprint {}", source.path.display()))?;
-                    manifest.tracks.retain(|e| e.ipod_dbid != entry.ipod_dbid);
-                    manifest.tracks.push(ManifestEntry {
-                        source_path: source.path.clone(),
-                        source_mtime: source.mtime,
-                        source_size: source.size,
-                        source_fingerprint: new_file_fp,
-                        ipod_dbid: entry.ipod_dbid,
-                        ipod_relpath: entry.ipod_relpath.clone(),
-                        source_known: true,
-                        audio_fingerprint: entry.audio_fingerprint.clone(),
-                    });
+                    if let Some(new_entry) = updated {
+                        // Refresh the manifest entry — same iPod identity,
+                        // new source fingerprint + mtime/size.
+                        manifest.tracks.retain(|e| e.ipod_dbid != entry.ipod_dbid);
+                        manifest.tracks.push(new_entry);
+                    }
                     progress.track_done();
                 }
             }
@@ -464,6 +598,49 @@ fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision>) -
     }
     // progress.finish() is called by main() after this fn returns.
     sync_result
+}
+
+/// Run the full MetadataOnly path for one entry: probe + tag-extract +
+/// optional embedded-art extract + libgpod update + recompute source
+/// fingerprint. Returns the freshly-built ManifestEntry to push.
+///
+/// Bundled into one fallible call so the per-track retry/skip loop in `run`
+/// has a single closure to retry — anything failing inside re-runs the lot.
+fn do_metadata_only(
+    db: &OwnedDb,
+    source: &SourceEntry,
+    entry: &ManifestEntry,
+) -> Result<ManifestEntry> {
+    let probe = transcode::probe(&source.path)
+        .with_context(|| format!("probe {}", source.path.display()))?;
+    let tags = tags_from_probe(&probe);
+    let art = if has_embedded_art(&probe) {
+        let art_path = transcode::temp_art_path();
+        transcode::extract_cover_art(&source.path, &art_path)?;
+        let bytes = std::fs::read(&art_path)?;
+        let _ = std::fs::remove_file(&art_path);
+        Some(bytes)
+    } else {
+        None
+    };
+    db.update_track_metadata(entry.ipod_dbid, &tags, art.as_deref())
+        .with_context(|| format!(
+            "update_track_metadata dbid {} for {}",
+            entry.ipod_dbid,
+            source.path.display()
+        ))?;
+    let new_file_fp = source::fingerprint(&source.path)
+        .with_context(|| format!("fingerprint {}", source.path.display()))?;
+    Ok(ManifestEntry {
+        source_path: source.path.clone(),
+        source_mtime: source.mtime,
+        source_size: source.size,
+        source_fingerprint: new_file_fp,
+        ipod_dbid: entry.ipod_dbid,
+        ipod_relpath: entry.ipod_relpath.clone(),
+        source_known: true,
+        audio_fingerprint: entry.audio_fingerprint.clone(),
+    })
 }
 
 /// Transcode + add one source file. Returns the iPod-side handle plus the

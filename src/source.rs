@@ -50,12 +50,45 @@ pub fn walk(root: &Path) -> Result<Vec<SourceEntry>> {
         if !is_flac(entry.path()) {
             continue;
         }
-        match build_source_entry(entry.path()) {
-            Ok(e) => out.push(e),
-            Err(e) => tracing::warn!("skipping {}: {e}", entry.path().display()),
+        if let Some(e) = read_entry_with_retry(&entry, 3) {
+            out.push(e);
         }
     }
     Ok(out)
+}
+
+/// Try to build a `SourceEntry` for `entry`, retrying transient I/O failures
+/// up to `max_retries` times with exponential backoff (1s, 2s, 4s for the
+/// first three retries). Useful for SMB shares that occasionally glitch
+/// mid-walk. Returns `None` if every attempt fails — the walker logs and
+/// skips so the rest of the run can still complete.
+fn read_entry_with_retry(entry: &walkdir::DirEntry, max_retries: u32) -> Option<SourceEntry> {
+    let path = entry.path();
+    for attempt in 0..=max_retries {
+        match build_source_entry(path) {
+            Ok(e) => return Some(e),
+            Err(e) if attempt == max_retries => {
+                tracing::warn!(
+                    "walker: giving up on {} after {} retries: {e}",
+                    path.display(),
+                    max_retries
+                );
+                return None;
+            }
+            Err(e) => {
+                let backoff_secs = 1u64 << attempt; // 1, 2, 4
+                tracing::debug!(
+                    "walker: {} failed (attempt {}/{}); retrying in {}s: {e}",
+                    path.display(),
+                    attempt + 1,
+                    max_retries + 1,
+                    backoff_secs
+                );
+                std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+            }
+        }
+    }
+    None
 }
 
 fn is_skipped_dir(entry: &walkdir::DirEntry) -> bool {
