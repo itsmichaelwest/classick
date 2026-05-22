@@ -27,7 +27,11 @@ fn main() -> Result<()> {
 
     // Make sure the TUI tears down even on error. `finish` consumes `progress`,
     // so it must run after `orchestrate` returns (which only borrows it).
-    progress.finish();
+    // `finish` now returns Result so a panicked TUI thread (e.g. crossterm
+    // setup failure on an odd terminal) is surfaced instead of being silently
+    // swallowed. Prefer the orchestrator's error if both fail — that's the
+    // user's intent error; the TUI thread death is secondary.
+    let finish_result = progress.finish();
 
-    result
+    result.and(finish_result)
 }

@@ -151,6 +151,12 @@ pub fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision
     // 5. Apply actions + 6. Commit DB + manifest.
     // Wrapped in a closure so that any mid-sync error can be paired with a
     // recovery hint before bubbling up, and progress.finish() is always called.
+    //
+    // NOTE: save_config is intentionally NOT inside this closure (it used to
+    // be). A save-config failure happens AFTER db.write() + manifest::save have
+    // already succeeded, so there are no orphans to recover from — bubbling it
+    // out of this closure would trigger the misleading "orphan files /
+    // --rebuild-manifest" recovery block. Hoisted below.
     let sync_result: Result<()> = (|| -> Result<()> {
         let db = OwnedDb::open(Path::new(&mount))?;
         let guid = device::read_firewire_guid(Path::new(&mount))?;
@@ -376,8 +382,23 @@ pub fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision
                                 match outcome {
                                     PromptOutcome::Retry => continue,
                                     PromptOutcome::Skip => {
-                                        progress.log(format!(
-                                            "Skipped MetadataOnly for {}",
+                                        // KNOWN LIMITATION (Bug 5): if
+                                        // do_metadata_only failed AFTER
+                                        // apply_tags mutated the in-memory
+                                        // Itdb_Track (e.g. thumbnail update
+                                        // failed), the new tag values are
+                                        // already in the DB and will be
+                                        // flushed by the run-end db.write().
+                                        // The manifest entry stays at the
+                                        // OLD state, so the next run will
+                                        // see "Unchanged"/"MetadataOnly"
+                                        // while iTunesDB tags are mid-state.
+                                        // Surface this loudly so the user
+                                        // knows to eject + re-run.
+                                        progress.error(format!(
+                                            "Skipped MetadataOnly for {} — partial tag write \
+                                             may persist; recommended: eject the iPod and re-run \
+                                             after the underlying issue is resolved.",
                                             source.path.display()
                                         ));
                                         break None;
@@ -404,26 +425,56 @@ pub fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision
         progress.log("Writing manifest...");
         manifest::save_atomic(&config.manifest_path, &manifest)?;
 
-        if config.save_config {
-            let config_path = config_file::default_path()?;
-            config_file::save(&config_path, &config.to_persisted())?;
-            progress.log(format!("config saved to {}", config_path.display()));
-        }
-
         progress.log("Done. Eject the iPod before unplugging.");
         Ok(())
     })();
 
     if let Err(e) = &sync_result {
+        // While the TUI is up, push the recovery block into log_tail so users
+        // see it inline. The same text is ALSO attached to the bubbled error
+        // (see below) so it survives the TUI teardown that wipes log_tail.
         progress.error(format!("Sync failed: {e}"));
-        progress.error("The iPod may now contain orphan track files (added but not".to_string());
-        progress.error("in the iTunesDB), and the manifest has NOT been updated.".to_string());
-        progress.error("To recover: re-run with --rebuild-manifest, which will read the iPod's".to_string());
-        progress.error("current DB and create a fresh manifest. Then run normally.".to_string());
+        for line in RECOVERY_HINT_LINES {
+            progress.error((*line).to_string());
+        }
     }
-    // progress.finish() is called by main() after this fn returns.
-    sync_result
+
+    // save_config is independent of the sync closure: it only runs on success
+    // and a failure here is a warning (config-file write), not a reason to
+    // print the orphan-files recovery block.
+    if sync_result.is_ok() && config.save_config {
+        match config_file::default_path()
+            .and_then(|p| config_file::save(&p, &config.to_persisted()).map(|()| p))
+        {
+            Ok(config_path) => {
+                progress.log(format!("config saved to {}", config_path.display()));
+            }
+            Err(e) => {
+                progress.error(format!(
+                    "warning: sync succeeded but failed to save config: {e}"
+                ));
+            }
+        }
+    }
+
+    // progress.finish() is called by main() after this fn returns. Attach the
+    // recovery block to the error so that, once the alternate screen is torn
+    // down and log_tail is gone, the user still sees how to recover on stderr.
+    sync_result.map_err(|e| {
+        let hint = RECOVERY_HINT_LINES.join("\n  ");
+        anyhow!("sync failed: {e}\n\nRecovery:\n  {hint}")
+    })
 }
+
+/// Recovery instructions shown when the apply loop fails mid-sync. Kept as a
+/// const so both the in-TUI `progress.error` log and the bubbled error message
+/// stay in lock-step.
+const RECOVERY_HINT_LINES: &[&str] = &[
+    "The iPod may now contain orphan track files (added but not in the iTunesDB),",
+    "and the manifest has NOT been updated.",
+    "To recover: re-run with --rebuild-manifest, which will read the iPod's",
+    "current DB and create a fresh manifest. Then run normally.",
+];
 
 /// Run the full MetadataOnly path for one entry: probe + tag-extract +
 /// optional embedded-art extract + libgpod update + recompute source

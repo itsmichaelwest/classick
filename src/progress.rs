@@ -2,7 +2,7 @@
 //! plain log lines otherwise. Main thread sends events; a dedicated thread
 //! drains the channel and renders.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crossterm::event::{Event, KeyCode};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
@@ -149,11 +149,25 @@ impl Progress {
     }
 
     /// Drains the channel and joins the worker thread. Call once at the end.
-    pub fn finish(mut self) {
+    ///
+    /// Returns `Err` if the worker thread panicked (e.g. crossterm setup
+    /// failure on an odd terminal); previously the panic was swallowed by
+    /// `let _ = t.join()`, leaving the orchestrator silently writing to the
+    /// iPod with no visible UI. Per-event `send` failures are still ignored
+    /// (the channel is one-way and a closed channel is benign at teardown).
+    pub fn finish(mut self) -> Result<()> {
         let _ = self.sender.send(ProgressEvent::Finish);
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            t.join().map_err(|panic| {
+                let msg = panic
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                anyhow!("TUI thread panicked: {msg}")
+            })?;
         }
+        Ok(())
     }
 }
 
@@ -361,7 +375,9 @@ fn handle_review_key(
         }
         KeyCode::Char('d') => {
             let _ = decision_tx.send(Decision::Review(ReviewDecision::DryRun));
-            // Caller will send Finish next.
+            // Caller will send Finish next; clear review so a stray second
+            // recv() can't re-fire this branch with stale state.
+            state.review = None;
         }
         KeyCode::Char('t') => {
             review.no_delete = !review.no_delete;
@@ -369,6 +385,7 @@ fn handle_review_key(
         }
         KeyCode::Char('q') => {
             let _ = decision_tx.send(Decision::Review(ReviewDecision::Quit));
+            state.review = None;
         }
         _ => {}
     }

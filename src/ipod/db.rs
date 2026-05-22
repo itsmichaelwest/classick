@@ -180,6 +180,19 @@ impl OwnedDb {
             // Track is in db.tracks; add to master playlist so it shows in Songs menu.
             let master = ffi::itdb_playlist_mpl(self.0);
             if master.is_null() {
+                // Cleanup mirror of the itdb_cp_track_to_ipod failure path:
+                // the file is already on the iPod and the track is linked into
+                // the DB. Without cleanup, a Retry of the surrounding op
+                // re-copies the same source as a NEW file each time, leaving
+                // a trail of orphan .m4a blobs in iPod_Control\Music.
+                let fname_c = ffi::itdb_filename_on_ipod(track);
+                ffi::itdb_track_unlink(track);
+                ffi::itdb_track_free(track);
+                if !fname_c.is_null() {
+                    let path_str = CStr::from_ptr(fname_c).to_string_lossy().into_owned();
+                    let _ = std::fs::remove_file(Path::new(&path_str));
+                    ffi::g_free(fname_c as *mut std::os::raw::c_void);
+                }
                 return Err(anyhow!(
                     "master playlist missing on this iPod (corrupt DB?)"
                 ));
