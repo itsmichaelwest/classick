@@ -2,6 +2,19 @@
 
 Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+## Phase 3.z gate (2026-05-23) — PARTIAL PASS (driven scenarios PASS, TUI scenarios pending iPod)
+
+Driven via Bash pipe (forces plain mode since stdout is not a TTY). Plain mode exercises the error-wrapper *placement* and the *fall-through-to-Abort* path; visual TUI rendering still needs an interactive run with the iPod plugged in.
+
+- **Scenario 1 (ffmpeg-missing) PASS** — narrowed PATH to hide ffmpeg, `cargo run -- --dry-run --source <empty>` produced one prompt print and exited 1 with `Error: ffmpeg/ffprobe required; aborted`. Initial run revealed an **infinite retry loop** because plain mode's default `Decision::Prompt { choice: 0 }` mapped to `outcomes[0] = Retry`. Fix in commit `a7d58eb` — plain mode now sends `choice: usize::MAX` so `await_prompt` falls into its `unwrap_or(Abort)` branch.
+- **Scenario 2 (no iPod) PASS** — iPod was unplugged for this run. `cargo run -- --dry-run` produced one prompt print and exited 1 with `Error: iPod required; aborted`.
+- **Scenario 3 (source unreachable) PASS** — passed `--source "\\nonexistent-host\nope"` plus a fake `iPod_Control\iTunes\iTunesDB` file under `%TEMP%\fake-ipod\` to bypass mount detect; got the "Choose:" prompt and clean abort.
+- **Scenario 4 (corrupt config) PASS (after fix)** — corrupt `config.toml` triggered the orchestrate-level wrapper. First run silently **deleted** the user's config.toml because plain-mode `choice: 0` mapped to `Custom(0) = Reset`. Same root cause as Scenario 1; same fix (`a7d58eb`). Re-run confirmed config is preserved and the tool aborts with `Error: config parse failed; aborted`.
+- **Scenario 5 (per-track failure):** pending — needs iPod connected.
+- **Scenario 6 (SMB glitch):** deferred — no deterministic way to inject intermittent failures.
+- **Scenario 7 (wizard via Progress::Form):** plain-mode noop path verified (`ensure_source_or_wizard` correctly skips wizard when stdout is not a TTY, lets `config::resolve` produce its standard `no source library specified` error). Actual Form rendering needs an interactive run.
+- **Plain-mode default-abort gotcha:** original plan used `choice: 0` as the "default-abort" sentinel for plain mode. This is wrong whenever option index 0 isn't an inert/abort choice — Retry loops infinitely; destructive options (e.g. config Reset) fire silently. Lesson: rejecting an interactive prompt in a non-interactive context should NEVER map to a real option index. Use an out-of-range index so `outcomes.get(...).unwrap_or(Abort)` handles it generically.
+
 ## Phase 2 Gate B (2026-05-17)
 
 - **Result:** PASS.
