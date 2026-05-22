@@ -1,3 +1,4 @@
+pub mod apply_loop;
 pub mod cli;
 pub mod config;
 pub mod config_file;
@@ -5,8 +6,11 @@ pub mod ffi;
 pub mod ipod;
 pub mod logging;
 pub mod manifest;
+pub mod orchestrator;
+pub mod preflight;
 pub mod progress;
 pub mod source;
+pub mod tags;
 pub mod transcode;
 pub mod try_with_prompt;
 pub mod wizard;
