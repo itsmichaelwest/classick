@@ -386,7 +386,14 @@ fn handle_prompt_key(
     // can interact with at this moment).
     if let KeyCode::Char(c) = key.code {
         if let Some(digit) = c.to_digit(10) {
-            let choice = (digit as usize).saturating_sub(1);
+            // Options are 1-indexed in the on-screen UI ([1] foo, [2] bar).
+            // Ignore '0' — previously `0.saturating_sub(1) == 0` mapped to
+            // option[0], so a typo'd '0' could fire a destructive option
+            // (e.g. config Reset, retry on a fixed problem-state).
+            if digit == 0 {
+                return;
+            }
+            let choice = (digit as usize) - 1;
             if choice < prompt.options.len() {
                 let _ = decision_tx.send(Decision::Prompt { id: prompt.id, choice });
                 state.prompt = None; // exit prompt state; caller's next event takes over

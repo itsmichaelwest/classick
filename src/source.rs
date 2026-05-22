@@ -6,7 +6,7 @@
 //! first 1 MiB) is exposed as a standalone function the diff invokes lazily
 //! only when mtime+size don't match the manifest (SPEC §6 #2).
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -67,17 +67,17 @@ fn read_entry_with_retry(entry: &walkdir::DirEntry, max_retries: u32) -> Option<
     for attempt in 0..=max_retries {
         match build_source_entry(path) {
             Ok(e) => return Some(e),
-            Err(e) if attempt == max_retries => {
+            Err(e) if attempt == max_retries || !is_transient(&e) => {
                 tracing::warn!(
-                    "walker: giving up on {} after {} retries: {e}",
+                    "walker: giving up on {} after {} attempt(s): {e}",
                     path.display(),
-                    max_retries
+                    attempt + 1
                 );
                 return None;
             }
             Err(e) => {
                 let backoff_secs = 1u64 << attempt; // 1, 2, 4
-                tracing::debug!(
+                tracing::warn!(
                     "walker: {} failed (attempt {}/{}); retrying in {}s: {e}",
                     path.display(),
                     attempt + 1,
@@ -89,6 +89,41 @@ fn read_entry_with_retry(entry: &walkdir::DirEntry, max_retries: u32) -> Option<
         }
     }
     None
+}
+
+/// Returns true if the error looks worth retrying. NotFound/PermissionDenied
+/// won't recover within 7s of backoff — one stale symlink would waste 7s of
+/// blocking sleep per file. Only TimedOut/Interrupted/WouldBlock/UnexpectedEof
+/// are treated as transient (common SMB hiccups).
+///
+/// If we can't downcast to io::Error, we conservatively retry — this happens
+/// when the source isn't an io::Error at all (e.g. a future refactor where
+/// build_source_entry adds a non-io failure mode).
+fn is_transient(err: &anyhow::Error) -> bool {
+    if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+        return matches!(
+            io_err.kind(),
+            std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::UnexpectedEof
+        );
+    }
+    // Also check the chain — `with_context` wraps the original io::Error
+    // as a source, so the top-level downcast misses it but `.chain()` finds it.
+    for cause in err.chain() {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_err.kind(),
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+    // No io::Error in the chain — conservatively retry.
+    true
 }
 
 fn is_skipped_dir(entry: &walkdir::DirEntry) -> bool {
@@ -107,8 +142,11 @@ fn is_flac(p: &Path) -> bool {
 }
 
 fn build_source_entry(path: &Path) -> Result<SourceEntry> {
+    // `with_context` preserves the underlying io::Error in the anyhow chain
+    // so `is_transient` can downcast and skip retry for permanent kinds
+    // (NotFound, PermissionDenied, etc.).
     let meta = std::fs::metadata(path)
-        .map_err(|e| anyhow!("stat: {e}"))?;
+        .with_context(|| format!("stat {}", path.display()))?;
     let size = meta.len();
     let mtime = meta
         .modified()

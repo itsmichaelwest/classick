@@ -406,51 +406,62 @@ fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision>) -
                         format!("MODIFY {}", src.path.display()),
                     );
 
+                    // Under --no-delete we can't replace the existing track
+                    // without first removing it. Running only the Add half
+                    // would push a second manifest entry for the same
+                    // source_path while the original iPod track remains —
+                    // a permanent duplicate the next Remove pass can't reap.
+                    // Treat as Unchanged for this run; the user can re-run
+                    // without --no-delete to pick it up.
+                    if effective_no_delete {
+                        progress.log(format!(
+                            "Skipping MODIFY {} under --no-delete (would create duplicate)",
+                            src.path.display()
+                        ));
+                        progress.track_done();
+                        continue;
+                    }
+
                     // First half: delete the old track. On failure, prompt;
                     // Skip here means we never touched the iPod, so the
                     // manifest entry stays as-is.
-                    let mut deleted = effective_no_delete;
-                    if !effective_no_delete {
-                        deleted = loop {
-                            match db.delete_track(old.ipod_dbid)
-                                .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))
-                            {
-                                Ok(()) => break true,
-                                Err(e) => {
-                                    let msg = format!(
-                                        "Failed to delete old version of {} (dbid {}) before re-adding:\n  {e}\n\nChoose:",
-                                        src.path.display(),
-                                        old.ipod_dbid
-                                    );
-                                    let outcome = await_prompt(
-                                        progress, decision_rx, msg,
-                                        &["Retry", "Skip this track", "Abort"],
-                                        &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
-                                    )?;
-                                    match outcome {
-                                        PromptOutcome::Retry => continue,
-                                        PromptOutcome::Skip => {
-                                            progress.log(format!(
-                                                "Skipped Modify (delete failed) for {}",
-                                                src.path.display()
-                                            ));
-                                            break false;
-                                        }
-                                        _ => return Err(e),
+                    let deleted = loop {
+                        match db.delete_track(old.ipod_dbid)
+                            .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))
+                        {
+                            Ok(()) => break true,
+                            Err(e) => {
+                                let msg = format!(
+                                    "Failed to delete old version of {} (dbid {}) before re-adding:\n  {e}\n\nChoose:",
+                                    src.path.display(),
+                                    old.ipod_dbid
+                                );
+                                let outcome = await_prompt(
+                                    progress, decision_rx, msg,
+                                    &["Retry", "Skip this track", "Abort"],
+                                    &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                                )?;
+                                match outcome {
+                                    PromptOutcome::Retry => continue,
+                                    PromptOutcome::Skip => {
+                                        progress.log(format!(
+                                            "Skipped Modify (delete failed) for {}",
+                                            src.path.display()
+                                        ));
+                                        break false;
                                     }
+                                    _ => return Err(e),
                                 }
                             }
-                        };
-                        if deleted {
-                            manifest.tracks.retain(|e| e.ipod_dbid != old.ipod_dbid);
                         }
+                    };
+                    if deleted {
+                        manifest.tracks.retain(|e| e.ipod_dbid != old.ipod_dbid);
                     }
 
-                    // Second half: re-add. Only runs if delete succeeded
-                    // (or no_delete kept the old in place — in that case the
-                    // add still proceeds because Modify semantics treat the
-                    // delete as optional under --no-delete).
-                    if deleted || effective_no_delete {
+                    // Second half: re-add. Only runs if delete succeeded.
+                    // (The --no-delete short-circuit above already returned.)
+                    if deleted {
                         let added: Option<(TrackHandle, String, String)> = loop {
                             match add_one(&db, &src) {
                                 Ok(triple) => break Some(triple),
