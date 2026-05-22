@@ -53,8 +53,8 @@ pub fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decisio
     }
 
     ensure_source_or_wizard(&cli, progress, decision_rx)?;
-    let config = config::resolve(cli)?;
-    apply_loop::run(&config, progress, decision_rx)
+    let mut config = config::resolve(cli)?;
+    apply_loop::run(&mut config, progress, decision_rx)
 }
 
 /// If no source is resolvable from CLI/env/persisted config AND we're on a TTY

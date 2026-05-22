@@ -19,7 +19,7 @@ use crate::tags::tags_from_probe;
 use crate::transcode::{self, has_embedded_art};
 use crate::try_with_prompt::{await_prompt, PromptOutcome};
 
-pub fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<()> {
+pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<()> {
     if config.dry_run && config.apply {
         return Err(anyhow!("--dry-run and --apply are mutually exclusive"));
     }
@@ -34,12 +34,7 @@ pub fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision
     // Retry/Abort (or Retry/Change/Abort) prompt loop on failure.
     preflight::verify_ffmpeg(progress, decision_rx)?;
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
-    let sources = match preflight::walk_source(config, progress, decision_rx)? {
-        Some(s) => s,
-        // User picked "Change source path" — wizard wrote new source to
-        // config.toml; v1 limitation requires re-launch.
-        None => return Ok(()),
-    };
+    let sources = preflight::walk_source(config, progress, decision_rx)?;
 
     // 3. Load (or rebuild) manifest.
     let mut manifest = if config.rebuild_manifest {

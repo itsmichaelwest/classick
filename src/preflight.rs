@@ -49,9 +49,9 @@ pub fn verify_ffmpeg(progress: &Progress, decision_rx: &Receiver<Decision>) -> R
     }
 }
 
-/// Resolve the iPod mount path. Explicit `--ipod` keeps its early-return
-/// validation; auto-detect gets a retry loop so the user can plug in the
-/// device and retry without restarting.
+/// Resolve the iPod mount path. Both branches (explicit `--ipod` and
+/// auto-detect) wrap the fallible check in a Retry/Abort prompt loop so the
+/// user can plug in the device and retry without restarting.
 pub fn resolve_ipod_mount(
     config: &Config,
     progress: &Progress,
@@ -60,10 +60,26 @@ pub fn resolve_ipod_mount(
     match &config.ipod {
         Some(m) => {
             let p = ensure_trailing_backslash(m);
-            if !Path::new(&p).join("iPod_Control").join("iTunes").join("iTunesDB").exists() {
-                return Err(anyhow!("explicit --ipod {} does not contain iPod_Control\\iTunes\\iTunesDB", p));
+            loop {
+                if Path::new(&p).join("iPod_Control").join("iTunes").join("iTunesDB").exists() {
+                    return Ok(p);
+                }
+                let msg = format!(
+                    "Explicit --ipod {p} does not contain iPod_Control\\iTunes\\iTunesDB.\n\n\
+                     Make sure the iPod is mounted at {p} (or unplug + re-plug to re-mount), \
+                     then press [1] Retry, or [2] Abort to quit."
+                );
+                let outcome = await_prompt(
+                    progress,
+                    decision_rx,
+                    msg,
+                    &["Retry", "Abort"],
+                    &[PromptOutcome::Retry, PromptOutcome::Abort],
+                )?;
+                if outcome != PromptOutcome::Retry {
+                    return Err(anyhow!("iPod required; aborted"));
+                }
             }
-            Ok(p)
         }
         None => loop {
             match detect_ipod_mount() {
@@ -90,21 +106,18 @@ pub fn resolve_ipod_mount(
 
 /// Walk the source library with retry/change/abort prompting on failure.
 ///
-/// Returns:
-/// - `Ok(Some(entries))` — normal success.
-/// - `Ok(None)` — user picked "Change source path"; the wizard ran and wrote
-///   a new source to config.toml. The caller MUST short-circuit (return Ok)
-///   because the v1 limitation is that `Config` is borrowed immutably so we
-///   can't swap `config.source` mid-run; the user must re-launch.
-/// - `Err(_)` — user aborted, or a non-prompt error bubbled up.
+/// On "Change source path" the wizard runs, persists the new path to
+/// config.toml, AND writes it back into the in-memory `config.source` so the
+/// next loop iteration walks the new path in the SAME run (no re-launch).
+/// This is the only field on `Config` this function mutates.
 pub fn walk_source(
-    config: &Config,
+    config: &mut Config,
     progress: &Progress,
     decision_rx: &Receiver<Decision>,
-) -> Result<Option<Vec<SourceEntry>>> {
+) -> Result<Vec<SourceEntry>> {
     loop {
         match source::walk(&config.source) {
-            Ok(s) => return Ok(Some(s)),
+            Ok(s) => return Ok(s),
             Err(e) => {
                 let msg = format!(
                     "Source library unreachable at {}:\n  {e}\n\nChoose:",
@@ -120,16 +133,16 @@ pub fn walk_source(
                 match outcome {
                     PromptOutcome::Retry => continue,
                     PromptOutcome::Custom(1) => {
-                        // v1 limitation: Config is borrowed immutably in
-                        // apply_loop::run, so we can't swap config.source
-                        // mid-run. Persist the new source to config.toml via
-                        // the wizard and ask the user to re-launch.
+                        // Wizard persists the new source to config.toml AND
+                        // returns it; swap it into the live Config so the
+                        // next iteration's source::walk uses the new path.
                         let new_source = wizard::run(progress, decision_rx)?;
                         progress.log(format!(
-                            "Source updated to {}. Re-launch ipod-sync to use it.",
+                            "Source updated to {}; retrying walk...",
                             new_source.display()
                         ));
-                        return Ok(None);
+                        config.source = new_source;
+                        continue;
                     }
                     _ => return Err(anyhow!("source unreachable; aborted")),
                 }
