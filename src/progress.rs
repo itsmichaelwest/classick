@@ -181,8 +181,12 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
             ProgressEvent::Prompt(req) => {
                 eprintln!("ERROR: interactive prompt is not supported in plain mode.");
                 eprintln!("  {}", req.message);
-                // Send Choice(0) as a default-abort so callers don't block forever.
-                let _ = decision_tx.send(Decision::Prompt { id: req.id, choice: 0 });
+                // Send an out-of-range choice so await_prompt's
+                // outcomes.get(choice).unwrap_or(Abort) falls back to Abort —
+                // choice: 0 would have mapped to whichever PromptOutcome the
+                // caller put first, triggering retries (infinite loop) or
+                // destructive side-effects (e.g. config reset).
+                let _ = decision_tx.send(Decision::Prompt { id: req.id, choice: usize::MAX });
             }
             ProgressEvent::Form(req) => {
                 eprintln!("ERROR: interactive form is not supported in plain mode.");
