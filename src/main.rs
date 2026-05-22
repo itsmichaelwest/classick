@@ -9,6 +9,7 @@ use ipod_sync::manifest::{self, Action, Manifest, ManifestEntry};
 use ipod_sync::progress::{ActionPlanSummary, Decision, Progress, ReviewDecision};
 use ipod_sync::source::{self, SourceEntry};
 use ipod_sync::transcode::{self, has_embedded_art, ProbeOutput, ProbeTags};
+use ipod_sync::try_with_prompt::{await_prompt, PromptOutcome};
 use ipod_sync::wizard;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -44,6 +45,41 @@ fn main() -> Result<()> {
 /// Renamed wrapper that contains all the post-Progress work. Errors bubble up
 /// through this and into main; progress.finish() runs unconditionally afterwards.
 fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<()> {
+    // Surface config.toml parse errors with a TUI prompt + reset option BEFORE
+    // anything else touches the persisted config (ensure_source_or_wizard
+    // itself calls config_file::load and would otherwise blow up on a corrupt
+    // file). Loop so a successful reset-then-retry continues the run.
+    let config_path = config_file::default_path()?;
+    loop {
+        match config_file::load(&config_path) {
+            Ok(_) => break,
+            Err(e) => {
+                let msg = format!(
+                    "Could not parse {}:\n  {e}\n\n\
+                     [1] Reset config to defaults (deletes the file)\n\
+                     [2] Abort and fix it manually",
+                    config_path.display()
+                );
+                let outcome = await_prompt(
+                    progress,
+                    decision_rx,
+                    msg,
+                    &["Reset to defaults", "Abort"],
+                    &[PromptOutcome::Custom(0), PromptOutcome::Abort],
+                )?;
+                match outcome {
+                    PromptOutcome::Custom(0) => {
+                        std::fs::remove_file(&config_path)
+                            .map_err(|e| anyhow!("remove {}: {e}", config_path.display()))?;
+                        progress.log("config reset; retrying load...".to_string());
+                        continue;
+                    }
+                    _ => return Err(anyhow!("config parse failed; aborted")),
+                }
+            }
+        }
+    }
+
     ensure_source_or_wizard(&cli, progress, decision_rx)?;
     let config = config::resolve(cli)?;
     run(&config, progress, decision_rx)
@@ -93,9 +129,35 @@ fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision>) -
         ));
     }
 
-    transcode::verify_tools_available()?;
+    // ffmpeg/ffprobe gate — surface a TUI prompt with Retry/Abort instead
+    // of bailing to stderr if the tools aren't on PATH yet.
+    loop {
+        match transcode::verify_tools_available() {
+            Ok(()) => break,
+            Err(e) => {
+                let msg = format!(
+                    "ffmpeg or ffprobe was not found on PATH:\n  {e}\n\n\
+                     Install via: winget install Gyan.FFmpeg\n\
+                     Then retry."
+                );
+                let outcome = await_prompt(
+                    progress,
+                    decision_rx,
+                    msg,
+                    &["Retry", "Abort"],
+                    &[PromptOutcome::Retry, PromptOutcome::Abort],
+                )?;
+                match outcome {
+                    PromptOutcome::Retry => continue,
+                    _ => return Err(anyhow!("ffmpeg/ffprobe required; aborted")),
+                }
+            }
+        }
+    }
 
-    // 1. Resolve iPod mount.
+    // 1. Resolve iPod mount. The explicit --ipod branch keeps its early-return
+    //    validation; auto-detect gets a retry loop so the user can plug in
+    //    the device and retry without restarting the process.
     let mount = match &config.ipod {
         Some(m) => {
             let p = ensure_trailing_backslash(m);
@@ -104,11 +166,66 @@ fn run(config: &Config, progress: &Progress, decision_rx: &Receiver<Decision>) -
             }
             p
         }
-        None => detect_ipod_mount()?,
+        None => loop {
+            match detect_ipod_mount() {
+                Ok(m) => break m,
+                Err(e) => {
+                    let msg = format!(
+                        "{e}\n\nPlug in your iPod and press [1] Retry, or [2] Abort to quit."
+                    );
+                    let outcome = await_prompt(
+                        progress,
+                        decision_rx,
+                        msg,
+                        &["Retry", "Abort"],
+                        &[PromptOutcome::Retry, PromptOutcome::Abort],
+                    )?;
+                    if outcome != PromptOutcome::Retry {
+                        return Err(anyhow!("iPod required; aborted"));
+                    }
+                }
+            }
+        },
     };
 
-    // 2. Walk source.
-    let sources = source::walk(&config.source)?;
+    // 2. Walk source. Wrap in retry loop so a transient SMB blip / wrong path
+    //    can be recovered without restarting (with an option to re-pick the
+    //    source via the wizard — see v1 limitation note below).
+    let sources = loop {
+        match source::walk(&config.source) {
+            Ok(s) => break s,
+            Err(e) => {
+                let msg = format!(
+                    "Source library unreachable at {}:\n  {e}\n\nChoose:",
+                    config.source.display()
+                );
+                let outcome = await_prompt(
+                    progress,
+                    decision_rx,
+                    msg,
+                    &["Retry", "Change source path", "Abort"],
+                    &[PromptOutcome::Retry, PromptOutcome::Custom(1), PromptOutcome::Abort],
+                )?;
+                match outcome {
+                    PromptOutcome::Retry => continue,
+                    PromptOutcome::Custom(1) => {
+                        // v1 limitation: Config is borrowed immutably here, so
+                        // we can't swap config.source mid-run. Persist the new
+                        // source to config.toml via the wizard and ask the
+                        // user to re-launch. Restructuring to a mutable Config
+                        // is deferred.
+                        let new_source = wizard::run(progress, decision_rx)?;
+                        progress.log(format!(
+                            "Source updated to {}. Re-launch ipod-sync to use it.",
+                            new_source.display()
+                        ));
+                        return Ok(());
+                    }
+                    _ => return Err(anyhow!("source unreachable; aborted")),
+                }
+            }
+        }
+    };
 
     // 3. Load (or rebuild) manifest.
     let mut manifest = if config.rebuild_manifest {
