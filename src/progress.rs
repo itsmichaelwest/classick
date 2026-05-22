@@ -25,7 +25,7 @@ pub struct ActionPlanSummary {
 }
 
 /// User's decision from the Review state. Sent from the TUI thread back to
-/// the main thread via the decision channel.
+/// the main thread via the decision channel, wrapped in `Decision::Review`.
 #[derive(Debug, Clone, Copy)]
 pub enum ReviewDecision {
     /// Proceed with the apply loop. `no_delete` carries the user's possibly-toggled value.
@@ -36,11 +36,43 @@ pub enum ReviewDecision {
     Quit,
 }
 
+/// Choice prompt for try_with_prompt and ad-hoc error dialogs.
+/// `id` correlates the request with the user's response on the back-channel.
+#[derive(Debug, Clone)]
+pub struct PromptRequest {
+    pub id: u64,
+    pub message: String,
+    pub options: Vec<String>,
+}
+
+/// Text-input prompt for ad-hoc user input (wizard, path edits, etc.)
+#[derive(Debug, Clone)]
+pub struct FormRequest {
+    pub id: u64,
+    pub label: String,
+    /// Pre-fills the input box; empty for fresh entries.
+    pub initial: String,
+    /// Shown below the input box.
+    pub hint: String,
+}
+
+/// Anything the TUI thread sends back to the orchestrator. The Phase 3.y
+/// ReviewDecision is folded in as `Decision::Review`; new variants land here too.
+#[derive(Debug, Clone)]
+pub enum Decision {
+    Review(ReviewDecision),
+    Prompt { id: u64, choice: usize },
+    /// `value: None` means the user aborted (Esc / Ctrl+C).
+    Form { id: u64, value: Option<String> },
+}
+
 /// Events sent from the main thread to the progress thread.
 pub enum ProgressEvent {
     Header { source: String, ipod: String, manifest: String },
     Summary { add: usize, modify: usize, remove: usize, unchanged: usize, total_planned: usize },
     Review { summary: ActionPlanSummary, no_delete: bool },
+    Prompt(PromptRequest),
+    Form(FormRequest),
     TrackStart { current: usize, total: usize, label: String },
     TrackDone,
     Log(String),
@@ -54,7 +86,7 @@ pub struct Progress {
 }
 
 impl Progress {
-    pub fn start(use_tui: bool) -> Result<(Self, Receiver<ReviewDecision>)> {
+    pub fn start(use_tui: bool) -> Result<(Self, Receiver<Decision>)> {
         let is_tty = std::io::stdout().is_terminal();
         let active_tui = use_tui && is_tty;
         let (event_tx, event_rx) = mpsc::channel();
@@ -85,6 +117,24 @@ impl Progress {
     pub fn review(&self, summary: ActionPlanSummary, no_delete: bool) {
         let _ = self.sender.send(ProgressEvent::Review { summary, no_delete });
     }
+    /// Show a choice prompt in the TUI. Returns immediately; caller awaits
+    /// the user's choice via the decision channel.
+    pub fn prompt(&self, request: PromptRequest) {
+        let _ = self.sender.send(ProgressEvent::Prompt(request));
+    }
+    /// Show a text-input form in the TUI. Returns immediately; caller awaits
+    /// the user's reply via the decision channel.
+    pub fn form(&self, request: FormRequest) {
+        let _ = self.sender.send(ProgressEvent::Form(request));
+    }
+    /// Allocates a fresh prompt id. Caller uses it when building a PromptRequest
+    /// (or FormRequest) and again when matching the response from the decision
+    /// channel.
+    pub fn next_prompt_id(&self) -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
     pub fn track_start(&self, current: usize, total: usize, label: String) {
         let _ = self.sender.send(ProgressEvent::TrackStart { current, total, label });
     }
@@ -108,7 +158,7 @@ impl Progress {
 }
 
 /// Plain mode: dump events as lines. Stdout for normal stuff, stderr for errors.
-fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<ReviewDecision>) {
+fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
     for event in rx {
         match event {
             ProgressEvent::Header { source, ipod, manifest } => {
@@ -126,7 +176,18 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<ReviewDecision>) {
                 // was set; this is a safety net.
                 eprintln!("ERROR: interactive Review is not supported in plain mode; \
                           pass --dry-run or --apply explicitly.");
-                let _ = decision_tx.send(ReviewDecision::Quit);
+                let _ = decision_tx.send(Decision::Review(ReviewDecision::Quit));
+            }
+            ProgressEvent::Prompt(req) => {
+                eprintln!("ERROR: interactive prompt is not supported in plain mode.");
+                eprintln!("  {}", req.message);
+                // Send Choice(0) as a default-abort so callers don't block forever.
+                let _ = decision_tx.send(Decision::Prompt { id: req.id, choice: 0 });
+            }
+            ProgressEvent::Form(req) => {
+                eprintln!("ERROR: interactive form is not supported in plain mode.");
+                eprintln!("  {}", req.label);
+                let _ = decision_tx.send(Decision::Form { id: req.id, value: None });
             }
             ProgressEvent::TrackStart { current, total, label } => {
                 println!("[{current}/{total}] {label}");
@@ -157,11 +218,24 @@ struct TuiState {
     /// When Some, we're in the Review state — pause the normal apply-progress
     /// rendering and show the action plan + key hints instead.
     review: Option<ReviewState>,
+    /// When Some, render a modal choice prompt instead of the normal screen.
+    prompt: Option<PromptRequest>,
+    /// When Some, render a text-input form instead of the normal screen.
+    form: Option<FormState>,
+    /// Flag set by the form keypress handler when it has just sent a decision,
+    /// so the post-handler can clear `form` after dispatch (avoids holding a
+    /// mutable borrow on `form` across the send).
+    form_done: bool,
 }
 
 struct ReviewState {
     summary: ActionPlanSummary,
     no_delete: bool,
+}
+
+struct FormState {
+    request: FormRequest,
+    input: String,
 }
 
 impl TuiState {
@@ -174,6 +248,9 @@ impl TuiState {
             started_at: Instant::now(),
             log_tail: VecDeque::with_capacity(LOG_TAIL_CAPACITY),
             review: None,
+            prompt: None,
+            form: None,
+            form_done: false,
         }
     }
 
@@ -202,7 +279,7 @@ impl TuiState {
 
 const LOG_TAIL_CAPACITY: usize = 12;
 
-fn run_tui(rx: Receiver<ProgressEvent>, decision_tx: Sender<ReviewDecision>) -> Result<()> {
+fn run_tui(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result<()> {
     let mut state = TuiState::new();
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -230,7 +307,14 @@ fn run_tui(rx: Receiver<ProgressEvent>, decision_tx: Sender<ReviewDecision>) -> 
         // Allow Ctrl+C / 'q' to bail out of the TUI (caller still owns sync flow).
         if crossterm::event::poll(Duration::from_millis(80))? {
             if let Event::Key(key) = crossterm::event::read()? {
-                if state.review.is_some() {
+                // Dispatch order matches render precedence: form first, then
+                // prompt, then review, then the global 'q' shortcut.
+                if let Some(form) = state.form.as_mut() {
+                    handle_form_key(form, key, &decision_tx, &mut state.form_done);
+                } else if let Some(prompt) = state.prompt.as_ref() {
+                    let prompt = prompt.clone();
+                    handle_prompt_key(&mut state, key, prompt, &decision_tx);
+                } else if state.review.is_some() {
                     handle_review_key(&mut state, key, &decision_tx);
                 } else if key.code == KeyCode::Char('q') {
                     // 'q' is a request-stop; we just exit the draw loop. The sync
@@ -238,6 +322,11 @@ fn run_tui(rx: Receiver<ProgressEvent>, decision_tx: Sender<ReviewDecision>) -> 
                     // the channel closed.
                     finished = true;
                 }
+            }
+            // Clear form state if it was just submitted/aborted.
+            if state.form_done {
+                state.form = None;
+                state.form_done = false;
             }
         }
     }
@@ -254,7 +343,7 @@ fn run_tui(rx: Receiver<ProgressEvent>, decision_tx: Sender<ReviewDecision>) -> 
 fn handle_review_key(
     state: &mut TuiState,
     key: crossterm::event::KeyEvent,
-    decision_tx: &Sender<ReviewDecision>,
+    decision_tx: &Sender<Decision>,
 ) {
     let review = match state.review.as_mut() {
         Some(r) => r,
@@ -262,12 +351,12 @@ fn handle_review_key(
     };
     match key.code {
         KeyCode::Char('a') => {
-            let _ = decision_tx.send(ReviewDecision::Apply { no_delete: review.no_delete });
+            let _ = decision_tx.send(Decision::Review(ReviewDecision::Apply { no_delete: review.no_delete }));
             // Exit Review state so subsequent track progress can render.
             state.review = None;
         }
         KeyCode::Char('d') => {
-            let _ = decision_tx.send(ReviewDecision::DryRun);
+            let _ = decision_tx.send(Decision::Review(ReviewDecision::DryRun));
             // Caller will send Finish next.
         }
         KeyCode::Char('t') => {
@@ -275,8 +364,58 @@ fn handle_review_key(
             // Re-render happens on next loop iteration; no decision sent yet.
         }
         KeyCode::Char('q') => {
-            let _ = decision_tx.send(ReviewDecision::Quit);
+            let _ = decision_tx.send(Decision::Review(ReviewDecision::Quit));
         }
+        _ => {}
+    }
+}
+
+fn handle_prompt_key(
+    state: &mut TuiState,
+    key: crossterm::event::KeyEvent,
+    prompt: PromptRequest,
+    decision_tx: &Sender<Decision>,
+) {
+    // Number keys '1'..='9' pick options[0..=8]. Other keys are ignored
+    // (callers should always include an explicit "Abort" option rather than
+    // relying on a magic Esc key, since the prompt is the only thing the user
+    // can interact with at this moment).
+    if let KeyCode::Char(c) = key.code {
+        if let Some(digit) = c.to_digit(10) {
+            let choice = (digit as usize).saturating_sub(1);
+            if choice < prompt.options.len() {
+                let _ = decision_tx.send(Decision::Prompt { id: prompt.id, choice });
+                state.prompt = None; // exit prompt state; caller's next event takes over
+            }
+        }
+    }
+}
+
+fn handle_form_key(
+    form: &mut FormState,
+    key: crossterm::event::KeyEvent,
+    decision_tx: &Sender<Decision>,
+    form_done: &mut bool,
+) {
+    use crossterm::event::KeyModifiers;
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
+            let _ = decision_tx.send(Decision::Form { id: form.request.id, value: None });
+            *form_done = true;
+        }
+        (KeyCode::Enter, _) => {
+            let trimmed = form.input.trim();
+            if !trimmed.is_empty() {
+                let _ = decision_tx.send(Decision::Form {
+                    id: form.request.id,
+                    value: Some(trimmed.to_string()),
+                });
+                *form_done = true;
+            }
+            // Empty input: ignore Enter (require either text or Esc).
+        }
+        (KeyCode::Backspace, _) => { form.input.pop(); }
+        (KeyCode::Char(c), _) => { form.input.push(c); }
         _ => {}
     }
 }
@@ -294,6 +433,15 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
         ProgressEvent::Review { summary, no_delete } => {
             state.review = Some(ReviewState { summary, no_delete });
         }
+        ProgressEvent::Prompt(req) => {
+            state.prompt = Some(req);
+        }
+        ProgressEvent::Form(req) => {
+            state.form = Some(FormState {
+                input: req.initial.clone(),
+                request: req,
+            });
+        }
         ProgressEvent::TrackStart { current, total, label } => {
             state.current_index = current; state.current_total = total;
             state.current_label = label;
@@ -306,6 +454,17 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
 }
 
 fn render(f: &mut ratatui::Frame, state: &TuiState) {
+    // Precedence: form > prompt > review > normal progress. A form is the
+    // most modal of the three (Phase 3.z wizard) and should win even if a
+    // prompt or review state happens to be set under it.
+    if let Some(form) = &state.form {
+        render_form(f, form);
+        return;
+    }
+    if let Some(prompt) = &state.prompt {
+        render_prompt(f, state, prompt);
+        return;
+    }
     if let Some(review) = &state.review {
         render_review(f, state, review);
         return;
@@ -428,6 +587,80 @@ fn render_review(f: &mut ratatui::Frame, state: &TuiState, review: &ReviewState)
     f.render_widget(
         Paragraph::new(legend)
             .style(Style::default().add_modifier(Modifier::BOLD))
+            .block(Block::default().borders(Borders::ALL).title(" keys ")),
+        chunks[2],
+    );
+}
+
+fn render_prompt(f: &mut ratatui::Frame, state: &TuiState, prompt: &PromptRequest) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),       // header
+            Constraint::Min(5),          // message
+            Constraint::Length(4 + prompt.options.len() as u16),  // options
+        ])
+        .split(f.area());
+
+    let header_text = vec![
+        Line::from(format!("Source     : {}", state.source)),
+        Line::from(format!("iPod       : {}", state.ipod)),
+    ];
+    f.render_widget(
+        Paragraph::new(header_text)
+            .block(Block::default().borders(Borders::ALL).title(" ipod-sync ")),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(prompt.message.as_str())
+            .style(Style::default().add_modifier(Modifier::BOLD))
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" attention ")),
+        chunks[1],
+    );
+
+    let mut option_lines: Vec<Line> = prompt.options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| Line::from(format!("[{}] {opt}", i + 1)))
+        .collect();
+    option_lines.push(Line::from(""));
+    option_lines.push(Line::from("Press the number key for your choice."));
+    f.render_widget(
+        Paragraph::new(option_lines)
+            .block(Block::default().borders(Borders::ALL).title(" options ")),
+        chunks[2],
+    );
+}
+
+fn render_form(f: &mut ratatui::Frame, form: &FormState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),  // label / header
+            Constraint::Length(3),  // input box
+            Constraint::Min(3),     // hint
+        ])
+        .split(f.area());
+
+    f.render_widget(
+        Paragraph::new(form.request.label.as_str())
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" ipod-sync ")),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(form.input.as_str())
+            .style(Style::default().add_modifier(Modifier::BOLD))
+            .block(Block::default().borders(Borders::ALL).title(" input ")),
+        chunks[1],
+    );
+
+    f.render_widget(
+        Paragraph::new(form.request.hint.as_str())
+            .style(Style::default().add_modifier(Modifier::DIM))
             .block(Block::default().borders(Borders::ALL).title(" keys ")),
         chunks[2],
     );

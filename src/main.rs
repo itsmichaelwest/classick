@@ -6,7 +6,7 @@ use ipod_sync::config_file;
 use ipod_sync::ipod::db::{OwnedDb, Tags, TrackHandle};
 use ipod_sync::ipod::{device, detect_ipod_mount};
 use ipod_sync::manifest::{self, Action, Manifest, ManifestEntry};
-use ipod_sync::progress::{ActionPlanSummary, Progress, ReviewDecision};
+use ipod_sync::progress::{ActionPlanSummary, Decision, Progress, ReviewDecision};
 use ipod_sync::source::{self, SourceEntry};
 use ipod_sync::transcode::{self, has_embedded_art, ProbeOutput, ProbeTags};
 use ipod_sync::wizard;
@@ -150,21 +150,28 @@ fn run(config: &Config) -> Result<()> {
         // Interactive review.
         progress.review(summary_struct, config.no_delete);
         match decision_rx.recv() {
-            Ok(ReviewDecision::Apply { no_delete }) => {
+            Ok(Decision::Review(ReviewDecision::Apply { no_delete })) => {
                 let effective_remove = if no_delete { 0 } else { remove };
                 let total_planned = add + modify + metadata_only + effective_remove;
                 progress.summary(add, modify, remove, unchanged, total_planned);
                 no_delete
             }
-            Ok(ReviewDecision::DryRun) => {
+            Ok(Decision::Review(ReviewDecision::DryRun)) => {
                 progress.log("Dry run; nothing was written.");
                 progress.finish();
                 return Ok(());
             }
-            Ok(ReviewDecision::Quit) => {
+            Ok(Decision::Review(ReviewDecision::Quit)) => {
                 progress.log("Aborted; nothing was written.");
                 progress.finish();
                 return Ok(());
+            }
+            Ok(Decision::Prompt { .. }) | Ok(Decision::Form { .. }) => {
+                // Unexpected at this stage (no try_with_prompt / wizard caller
+                // wired yet — Tasks 3-6 will do that). Return loudly rather
+                // than silently swallowing a stray decision.
+                progress.finish();
+                return Err(anyhow!("unexpected prompt/form decision before any prompt was sent"));
             }
             Err(_) => {
                 progress.finish();
