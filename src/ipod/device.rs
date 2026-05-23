@@ -63,6 +63,70 @@ pub unsafe fn set_firewire_guid(
     Ok(())
 }
 
+/// Detected iPod identity returned by drive-scan helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedIpod {
+    pub serial: String,
+    pub model_label: String,
+    pub drive: String,
+}
+
+/// Scan all Windows drive letters for an iPod (presence of
+/// iPod_Control\Device\SysInfo). Returns the first match.
+pub fn scan_for_ipod() -> Option<DetectedIpod> {
+    for letter in b'A'..=b'Z' {
+        let drive = format!("{}:\\", letter as char);
+        let drive_path = std::path::Path::new(&drive);
+        if !drive_path.exists() {
+            continue;
+        }
+        if let Some(detected) = scan_drive_for_ipod(drive_path) {
+            return Some(detected);
+        }
+    }
+    None
+}
+
+/// Test-friendly variant: check a specific drive (or any path) for the
+/// iPod_Control\Device\SysInfo file and read identity from it.
+pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
+    let sysinfo = drive.join("iPod_Control").join("Device").join("SysInfo");
+    if !sysinfo.exists() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&sysinfo).ok()?;
+    let serial = parse_sysinfo_field(&text, "FirewireGuid")?;
+    let model_num = parse_sysinfo_field(&text, "ModelNumStr").unwrap_or_default();
+    let model_label = describe_model(&model_num);
+    Some(DetectedIpod {
+        serial,
+        model_label,
+        drive: drive.to_string_lossy().into_owned(),
+    })
+}
+
+fn parse_sysinfo_field(text: &str, key: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(key) {
+            let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Best-effort human-friendly label from ModelNumStr. M5 will replace
+/// this with libgpod's full model lookup.
+fn describe_model(model_num: &str) -> String {
+    let upper = model_num.trim_start_matches('x').to_uppercase();
+    match upper.as_str() {
+        "MB029" | "MB147" | "MB565" => format!("iPod Classic 7G ({upper})"),
+        _ if !upper.is_empty() => format!("iPod ({upper})"),
+        _ => "iPod (model unknown)".to_string(),
+    }
+}
+
 /// Enumerate Windows drive letters A-Z, find drives that look like an iPod
 /// (have `iPod_Control\iTunes\iTunesDB`), and return the unique mount.
 pub fn detect_ipod_mount() -> Result<String> {
@@ -167,5 +231,28 @@ mod tests {
             extract_firewire_guid(sysinfo).unwrap(),
             "0x000A27002138B0A8"
         );
+    }
+
+    #[test]
+    fn scan_for_ipod_returns_none_when_no_drives_match() {
+        let tmp = std::env::temp_dir().join(format!("ipod-scan-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let result = scan_drive_for_ipod(&tmp);
+        assert!(result.is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scan_drive_for_ipod_detects_serial_when_sysinfo_present() {
+        let tmp = std::env::temp_dir().join(format!("ipod-scan-found-test-{}", std::process::id()));
+        let sysinfo_dir = tmp.join("iPod_Control").join("Device");
+        std::fs::create_dir_all(&sysinfo_dir).unwrap();
+        std::fs::write(
+            sysinfo_dir.join("SysInfo"),
+            "FirewireGuid: 0xEXAMPLE1234\nModelNumStr: xMB029\n",
+        ).unwrap();
+        let detected = scan_drive_for_ipod(&tmp).expect("should detect");
+        assert_eq!(detected.serial, "0xEXAMPLE1234");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
