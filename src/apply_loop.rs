@@ -7,7 +7,8 @@ use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 use std::sync::mpsc::Receiver;
 
-use crate::config::{Config};
+use crate::cli::EncoderChoice;
+use crate::config::Config;
 use crate::config_file;
 use crate::ipod::db::{OwnedDb, TrackHandle};
 use crate::ipod::device;
@@ -33,6 +34,16 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // Pre-resolve gates: ffmpeg, iPod mount, source walk. Each runs its own
     // Retry/Abort (or Retry/Change/Abort) prompt loop on failure.
     preflight::verify_ffmpeg(progress, decision_rx)?;
+    // Refalac is opt-in via --encoder refalac; only probe when the user asked
+    // for it (per Phase 3 addendum Change 4). The resolved version string is
+    // threaded into apply_loop so Wave 3 Task 6 can record it on each new
+    // ManifestEntry; for Wave 2 it's parked behind a TODO.
+    let refalac_version: Option<String> = if matches!(config.encoder, EncoderChoice::Refalac) {
+        Some(preflight::verify_refalac(config, progress, decision_rx)?)
+    } else {
+        None
+    };
+    let _ = refalac_version; // TODO Task 6: thread into entry_from / transcode_via_refalac.
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
     let sources = preflight::walk_source(config, progress, decision_rx)?;
 

@@ -12,6 +12,10 @@
 # lib.exe /def byproducts
 /vendor/libgpod/lib/*.exp
 
+# Refalac binaries (opt-in encoder; user obtains from qaac releases).
+# See docs/superpowers/specs/2026-05-23-phase-3-addendum.md for install instructions.
+vendor/refalac/
+
 # Build artifacts
 *.exe
 *.pdb

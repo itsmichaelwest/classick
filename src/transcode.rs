@@ -1,6 +1,6 @@
 //! ffprobe metadata extraction + ffmpeg FLAC→ALAC transcoding.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -162,6 +162,48 @@ pub fn transcode_to_alac(src: &Path, dst: &Path) -> Result<()> {
         return Err(anyhow!("ffmpeg transcode failed (exit {:?})", status.code()));
     }
     Ok(())
+}
+
+/// Probe for refalac64. Returns Ok(version_string) on success, Err on
+/// any failure (not on PATH, exec error, non-zero exit, weird output).
+/// Used by preflight only when the user has selected --encoder refalac.
+///
+/// The version string is best-effort: refalac prints its banner to stderr on
+/// `--help` and we grep for any line containing "refalac". If parsing fails
+/// we fall back to `"refalac (version unknown)"` — acceptable because the
+/// version field is forensic-only (manifest::diff's encoder-mismatch logic
+/// only compares the encoder name, not the version).
+pub fn verify_refalac_available(refalac_path: &Path) -> Result<String> {
+    let output = Command::new(refalac_path)
+        .arg("--help")
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke {}: is refalac64 installed and on PATH?",
+                refalac_path.display()
+            )
+        })?;
+    // refalac prints its version+banner to stderr on --help and exits 0 or 1.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stderr}{stdout}");
+    // Look for "refalac" anywhere in the output as a smoke test that we're
+    // talking to refalac and not some other binary that happened to share the name.
+    if !combined.to_lowercase().contains("refalac") {
+        return Err(anyhow!(
+            "{} ran but its output doesn't look like refalac. First 200 bytes: {}",
+            refalac_path.display(),
+            combined.chars().take(200).collect::<String>()
+        ));
+    }
+    // Try to parse a version string out — best-effort, falls back to "unknown"
+    // if the regex doesn't match. The version is recorded in ManifestEntry.encoder_version.
+    let version = combined
+        .lines()
+        .find(|l| l.to_lowercase().contains("refalac"))
+        .map(|l| l.trim().to_string())
+        .unwrap_or_else(|| "refalac (version unknown)".to_string());
+    Ok(version)
 }
 
 /// Verify ffmpeg and ffprobe are reachable via PATH. Call at startup so the user

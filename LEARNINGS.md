@@ -2,6 +2,22 @@
 
 Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+## Phase 3 Task 5 — refalac vendoring (2026-05-23)
+
+- **Vendor binaries are gitignored.** `vendor/refalac/` is in .gitignore;
+  build.rs gracefully skips the copy when the dir is empty. Users who
+  want `--encoder refalac` either drop `refalac64.exe` + `libFLAC.dll`
+  into `vendor/refalac/` (build.rs picks them up) or put `refalac64.exe`
+  on PATH (preflight finds it via `Config::refalac_path` default
+  `PathBuf::from("refalac64")`). Default encoder is ffmpeg, so most
+  users never touch refalac.
+- **refalac version-string parsing is best-effort.** `verify_refalac_available`
+  greps for "refalac" anywhere in the --help output; if it can't parse
+  a version line, records `"refalac (version unknown)"` in the manifest.
+  Acceptable because the version string is forensic-only — diff's
+  encoder-mismatch logic only compares the encoder name ("refalac" vs
+  "ffmpeg"), not the version.
+
 ## Phase 3.z Wave C — review fix limitations (2026-05-23)
 
 - **`do_metadata_only` Skip after partial tag write — v1 limitation.** `update_track_metadata` calls `apply_tags` (which `g_free`s the old tag pointers and overwrites them via `g_strdup`) BEFORE attempting the thumbnail update. If the thumbnail step fails and the user picks Skip in the retry prompt, the new tag values are already in the in-memory `Itdb_Track` and will be persisted by the run-end `db.write()` — but the manifest stays at the old state, so the next run sees "Unchanged"/"MetadataOnly" while iTunesDB tags are mid-state. A proper fix would snapshot the old `*mut gchar` tag pointers before mutation and restore them on Err, but the FFI ownership is fiddly (`set_str` calls `g_free` on the slot before overwriting, so a naive snapshot becomes a dangling pointer that the restore would double-free). For Wave C we surfaced the limitation via `progress.error` in the Skip branch ("partial tag write may persist; recommended: eject the iPod and re-run") and deferred the snapshot+restore work. If/when this gets revisited: don't reuse `set_str` on the restore path — write a separate `restore_str(slot, snapshotted_ptr)` that swaps without `g_free`-ing, and have the mutation path own the freeing of replaced pointers explicitly.

@@ -49,6 +49,46 @@ pub fn verify_ffmpeg(progress: &Progress, decision_rx: &Receiver<Decision>) -> R
     }
 }
 
+/// Loop on `transcode::verify_refalac_available` until refalac64 is reachable
+/// or the user aborts. Only invoked when `config.encoder == EncoderChoice::Refalac`
+/// (caller's responsibility — default ffmpeg encoder doesn't need this probe).
+///
+/// Returns the resolved version string on success; threaded through
+/// `apply_loop::run` so Wave 3 Task 6 can record it in `ManifestEntry.encoder_version`.
+pub fn verify_refalac(
+    config: &Config,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<String> {
+    loop {
+        match transcode::verify_refalac_available(&config.refalac_path) {
+            Ok(version) => return Ok(version),
+            Err(e) => {
+                let msg = format!(
+                    "refalac64 was not reachable at {}:\n  {e}\n\n\
+                     Either drop refalac64.exe + libFLAC.dll into vendor/refalac/ \
+                     (build.rs picks them up), put refalac64.exe on PATH, or pass \
+                     --refalac-path <path>.\n\n\
+                     See docs/superpowers/specs/2026-05-23-phase-3-addendum.md \
+                     for the install steps. Then retry.",
+                    config.refalac_path.display()
+                );
+                let outcome = await_prompt(
+                    progress,
+                    decision_rx,
+                    msg,
+                    &["Retry", "Abort"],
+                    &[PromptOutcome::Retry, PromptOutcome::Abort],
+                )?;
+                match outcome {
+                    PromptOutcome::Retry => continue,
+                    _ => return Err(anyhow!("refalac required; aborted")),
+                }
+            }
+        }
+    }
+}
+
 /// Resolve the iPod mount path. Both branches (explicit `--ipod` and
 /// auto-detect) wrap the fallible check in a Retry/Abort prompt loop so the
 /// user can plug in the device and retry without restarting.

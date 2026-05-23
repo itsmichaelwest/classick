@@ -171,4 +171,40 @@ fn main() {
         dst_loaders.join("loaders.cache").display()
     );
     println!("cargo:rerun-if-changed={}", src_loaders.display());
+
+    // -----------------------------------------------------------------------
+    // Phase 3 Task 5: copy vendored refalac64.exe + its DLLs alongside the exe
+    // when present. Gracefully skips when vendor/refalac/ is empty/missing
+    // (refalac is opt-in via --encoder refalac; default encoder is ffmpeg).
+    // Users who want refalac either drop the qaac binaries into vendor/refalac/
+    // (build.rs picks them up) OR put refalac64.exe on PATH (preflight finds
+    // it via Config::refalac_path).
+    // -----------------------------------------------------------------------
+    let refalac_dir = manifest_dir.join("vendor").join("refalac");
+    println!("cargo:rerun-if-changed={}", refalac_dir.display());
+    let refalac_exe = refalac_dir.join("refalac64.exe");
+    if refalac_exe.exists() {
+        let entries = std::fs::read_dir(&refalac_dir).unwrap_or_else(|e| {
+            panic!(
+                "failed to read vendor refalac dir {}: {}",
+                refalac_dir.display(),
+                e
+            )
+        });
+        for entry in entries {
+            let entry = entry.expect("failed to read directory entry in vendor/refalac");
+            let path = entry.path();
+            let ext = path.extension().and_then(|s| s.to_str());
+            if matches!(ext, Some("exe") | Some("dll")) {
+                let dest = target_dir.join(path.file_name().unwrap());
+                std::fs::copy(&path, &dest).unwrap_or_else(|e| {
+                    panic!("failed to copy {} -> {}: {}", path.display(), dest.display(), e)
+                });
+            }
+        }
+    } else {
+        println!(
+            "cargo:warning=vendor/refalac/ empty; refalac encoder unavailable unless refalac64.exe is on PATH"
+        );
+    }
 }
