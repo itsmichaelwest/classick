@@ -347,22 +347,13 @@ fn make_history_entry(
         .unwrap_or(0);
     let duration = now.saturating_sub(started_at_unix_secs);
     HistoryEntry {
-        timestamp: format_iso8601(now),
+        timestamp: crate::daemon::format::rfc3339(now),
         duration_secs: duration,
         trigger,
         outcome,
         error_message,
         summary,
     }
-}
-
-fn format_iso8601(unix_secs: u64) -> String {
-    // Minimal ISO8601 without a chrono dep; UTC.
-    use std::time::{Duration, UNIX_EPOCH};
-    let _ = UNIX_EPOCH + Duration::from_secs(unix_secs);
-    // Just emit the unix ts as a placeholder string. UI displays
-    // history.timestamp verbatim; M4 popover will format properly.
-    format!("@{unix_secs}")
 }
 
 fn broadcast_status(
