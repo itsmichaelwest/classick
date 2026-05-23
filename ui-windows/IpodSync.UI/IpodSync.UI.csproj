@@ -110,11 +110,13 @@
     <HasPackageAndPublishMenu>true</HasPackageAndPublishMenu>
   </PropertyGroup>
 
-  <!-- Publish Properties -->
-  <PropertyGroup>
-    <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
+  <!--
+    Publish properties. Gated on _IsPublishing so plain `dotnet build -c Release`
+    succeeds without the self-contained flag; trimming + R2R only kick in during
+    `dotnet publish`, where NETSDK1102 requires self-contained mode anyway.
+  -->
+  <PropertyGroup Condition="'$(_IsPublishing)' == 'true'">
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
-    <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
     <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
   </PropertyGroup>
 </Project>
