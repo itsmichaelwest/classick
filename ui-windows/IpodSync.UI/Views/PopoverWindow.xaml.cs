@@ -74,6 +74,12 @@ public sealed partial class PopoverWindow : Window
         catch (Exception ex) { Debug.WriteLine($"popover: trigger_sync failed: {ex}"); }
     }
 
+    private async void OnCancelSync(object sender, RoutedEventArgs e)
+    {
+        try { await _daemon.SendAsync(new CancelSyncCommand()); }
+        catch (Exception ex) { Debug.WriteLine($"popover: cancel_sync failed: {ex}"); }
+    }
+
     private void OnOpenSource(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrEmpty(_sourceFolder)) return;

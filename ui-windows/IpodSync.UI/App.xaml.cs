@@ -69,6 +69,7 @@ public partial class App : Application
         Router.HistoryUpdated += OnHistoryUpdated;
         Router.DeviceConnected += OnDeviceConnected;
         Router.DeviceDisconnected += OnDeviceDisconnected;
+        Router.IpcEventReceived += OnIpcEvent;
         Router.Start();
 
         // Notification service subscribes to router internally.
@@ -140,6 +141,13 @@ public partial class App : Application
             _                => (TrayState.Offline, "iPod not connected"),
         };
         Tray.SetState(state, tooltip);
+    }
+
+    private void OnIpcEvent(IpcEvent e)
+    {
+        // Forward live sync-subprocess progress to the popover so
+        // ProgressBar + CurrentTrackLabel update during a sync.
+        DispatcherQueue.TryEnqueue(() => _popover?.ViewModel.ApplyIpcProgress(e));
     }
 
     private void OnPopoverRequested()

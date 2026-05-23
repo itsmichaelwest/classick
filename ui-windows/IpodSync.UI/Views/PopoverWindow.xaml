@@ -40,10 +40,18 @@
         <!-- Footer actions -->
         <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8" Margin="0,12,0,0">
             <Button Click="OnSyncNow"
+                    Visibility="{x:Bind ViewModel.NotSyncing, Mode=OneWay}"
                     Style="{ThemeResource AccentButtonStyle}">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE895;" FontSize="14" />
                     <TextBlock Text="Sync now" />
+                </StackPanel>
+            </Button>
+            <Button Click="OnCancelSync"
+                    Visibility="{x:Bind ViewModel.Syncing, Mode=OneWay}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE711;" FontSize="14" />
+                    <TextBlock Text="Cancel" />
                 </StackPanel>
             </Button>
             <Button Click="OnOpenSource" ToolTipService.ToolTip="Open source folder">

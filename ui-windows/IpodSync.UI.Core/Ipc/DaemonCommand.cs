@@ -10,6 +10,7 @@ namespace IpodSync_UI.Ipc;
 [JsonDerivedType(typeof(GetHistoryCommand), "get_history")]
 [JsonDerivedType(typeof(SubscribeDeviceEventsCommand), "subscribe_device_events")]
 [JsonDerivedType(typeof(UnsubscribeDeviceEventsCommand), "unsubscribe_device_events")]
+[JsonDerivedType(typeof(CancelSyncCommand), "cancel_sync")]
 [JsonDerivedType(typeof(ShutdownCommand), "shutdown")]
 public abstract record DaemonCommand;
 
@@ -32,4 +33,5 @@ public sealed record GetHistoryCommand(
 
 public sealed record SubscribeDeviceEventsCommand : DaemonCommand;
 public sealed record UnsubscribeDeviceEventsCommand : DaemonCommand;
+public sealed record CancelSyncCommand : DaemonCommand;
 public sealed record ShutdownCommand : DaemonCommand;

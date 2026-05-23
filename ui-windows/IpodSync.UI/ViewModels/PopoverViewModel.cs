@@ -14,6 +14,12 @@ public partial class PopoverViewModel : ObservableObject
     [ObservableProperty] private int progressTotal;
     [ObservableProperty] private string currentTrackLabel = "";
 
+    /// <summary>Inverse of <see cref="Syncing"/>, exposed so XAML can bind
+    /// the Sync Now button's Visibility without needing a converter.</summary>
+    public bool NotSyncing => !Syncing;
+
+    partial void OnSyncingChanged(bool value) => OnPropertyChanged(nameof(NotSyncing));
+
     public ObservableCollection<HistoryEntryViewModel> Recent { get; } = new();
 
     public void Update(StatusUpdateEvent s)
