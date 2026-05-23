@@ -45,6 +45,8 @@ impl Config {
             passthrough_wav: Some(self.passthrough_wav),
             refalac_path: Some(self.refalac_path.clone()),
             force_reencode: Some(self.force_reencode),
+            daemon: None,
+            ipod_identity: None,
         }
     }
 }

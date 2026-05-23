@@ -6,6 +6,71 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncMode {
+    Review,
+    AutoApply,
+}
+
+impl Default for SyncMode {
+    fn default() -> Self { SyncMode::Review }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyLevel {
+    All,
+    ErrorsOnly,
+    None,
+}
+
+impl Default for NotifyLevel {
+    fn default() -> Self { NotifyLevel::All }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub autostart_with_windows: bool,
+    #[serde(default = "default_review_mode")]
+    pub first_sync_mode: SyncMode,
+    #[serde(default = "default_auto_apply_mode")]
+    pub subsequent_sync_mode: SyncMode,
+    #[serde(default = "default_schedule_minutes")]
+    pub schedule_minutes: u32,
+    #[serde(default)]
+    pub notify_on: NotifyLevel,
+}
+
+impl Default for DaemonSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            autostart_with_windows: false,
+            first_sync_mode: SyncMode::Review,
+            subsequent_sync_mode: SyncMode::AutoApply,
+            schedule_minutes: 30,
+            notify_on: NotifyLevel::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpodIdentity {
+    pub serial: String,
+    #[serde(default)]
+    pub model_label: String,
+}
+
+fn default_true() -> bool { true }
+fn default_review_mode() -> SyncMode { SyncMode::Review }
+fn default_auto_apply_mode() -> SyncMode { SyncMode::AutoApply }
+fn default_schedule_minutes() -> u32 { 30 }
+fn default_daemon_settings() -> Option<DaemonSettings> { Some(DaemonSettings::default()) }
+
 /// Persistent config. Every field is optional so a partial / missing TOML
 /// deserializes cleanly — the precedence logic in `config::resolve` decides
 /// what each None means.
@@ -29,6 +94,10 @@ pub struct PersistedConfig {
     pub refalac_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_reencode: Option<bool>,
+    #[serde(default = "default_daemon_settings", skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<DaemonSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipod_identity: Option<IpodIdentity>,
 }
 
 /// Default location of the persisted config: %APPDATA%\ipod-sync\config.toml.
@@ -137,6 +206,10 @@ mod tests {
             passthrough_wav: Some(true),
             refalac_path: Some(PathBuf::from(r"C:\bin\refalac64.exe")),
             force_reencode: Some(false),
+            // Mirror the synthesized default that load() will produce when
+            // [daemon] is absent from the TOML — keeps the roundtrip eq honest.
+            daemon: Some(DaemonSettings::default()),
+            ipod_identity: None,
         };
         save(&path, &cfg).unwrap();
         let loaded = load(&path).unwrap().unwrap();
@@ -159,6 +232,8 @@ mod tests {
             passthrough_wav: None,
             refalac_path: None,
             force_reencode: None,
+            daemon: None,
+            ipod_identity: None,
         };
         save(&path, &cfg).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
@@ -170,5 +245,45 @@ mod tests {
         assert!(!saved.contains("refalac_path"));
         assert!(!saved.contains("force_reencode"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn config_without_daemon_section_loads_with_defaults() {
+        let toml_text = r#"
+source = '\\HOST\share\music'
+encoder = "ffmpeg"
+"#;
+        let cfg: PersistedConfig = toml::from_str(toml_text).expect("parse");
+        let daemon = cfg.daemon.expect("daemon section synthesized via default");
+        assert!(daemon.enabled);
+        assert!(!daemon.autostart_with_windows);
+        assert_eq!(daemon.first_sync_mode, SyncMode::Review);
+        assert_eq!(daemon.subsequent_sync_mode, SyncMode::AutoApply);
+        assert_eq!(daemon.schedule_minutes, 30);
+        assert_eq!(daemon.notify_on, NotifyLevel::All);
+        assert!(cfg.ipod_identity.is_none());
+    }
+
+    #[test]
+    fn config_with_daemon_and_ipod_identity_round_trips() {
+        let cfg = PersistedConfig {
+            daemon: Some(DaemonSettings {
+                enabled: true,
+                autostart_with_windows: true,
+                first_sync_mode: SyncMode::AutoApply,
+                subsequent_sync_mode: SyncMode::AutoApply,
+                schedule_minutes: 60,
+                notify_on: NotifyLevel::ErrorsOnly,
+            }),
+            ipod_identity: Some(IpodIdentity {
+                serial: "EXAMPLE1234".to_string(),
+                model_label: "iPod Classic 7G".to_string(),
+            }),
+            ..PersistedConfig::default()
+        };
+
+        let toml_text = toml::to_string(&cfg).expect("serialize");
+        let parsed: PersistedConfig = toml::from_str(&toml_text).expect("round-trip");
+        assert_eq!(cfg, parsed);
     }
 }
