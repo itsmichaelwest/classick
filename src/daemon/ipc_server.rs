@@ -21,19 +21,33 @@ pub struct ClientCommand {
     pub reply: mpsc::UnboundedSender<DaemonEvent>,
 }
 
-/// Spawn the IPC server on a Tokio runtime. Returns:
-///   - a `broadcast::Sender<DaemonEvent>` the daemon uses to publish
-///     events to all connected clients
-///   - a `mpsc::UnboundedReceiver<ClientCommand>` the daemon's command
-///     handler drains to process incoming commands
+/// Test-friendly entry: creates a fresh broadcast channel.
 pub async fn spawn_server() -> Result<(
     broadcast::Sender<DaemonEvent>,
     mpsc::UnboundedReceiver<ClientCommand>,
 )> {
     let (event_tx, _) = broadcast::channel::<DaemonEvent>(256);
+    let (sender, cmd_rx, _new_client_rx) = spawn_server_full(event_tx.clone()).await?;
+    Ok((sender, cmd_rx))
+}
+
+/// Production entry: caller supplies the broadcast sender so it can
+/// be shared with the sync orchestrator (which also publishes to it).
+/// Returns an extra mpsc receiver that fires once per new client
+/// connection — the runtime uses this to publish a snapshot
+/// StatusUpdate so newly-connected UIs don't miss earlier broadcasts.
+pub async fn spawn_server_full(
+    event_tx: broadcast::Sender<DaemonEvent>,
+) -> Result<(
+    broadcast::Sender<DaemonEvent>,
+    mpsc::UnboundedReceiver<ClientCommand>,
+    mpsc::UnboundedReceiver<()>,
+)> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ClientCommand>();
+    let (new_client_tx, new_client_rx) = mpsc::unbounded_channel::<()>();
 
     let event_tx_clone = event_tx.clone();
+    let new_client_tx_clone = new_client_tx.clone();
     tokio::spawn(async move {
         let mut next_client_id: u64 = 1;
         // Create the first instance up-front.
@@ -70,11 +84,12 @@ pub async fn spawn_server() -> Result<(
             next_client_id += 1;
             let event_rx = event_tx_clone.subscribe();
             let cmd_tx = cmd_tx.clone();
-            tokio::spawn(handle_client(client_id, connected, event_rx, cmd_tx));
+            let new_client_tx = new_client_tx_clone.clone();
+            tokio::spawn(handle_client(client_id, connected, event_rx, cmd_tx, new_client_tx));
         }
     });
 
-    Ok((event_tx, cmd_rx))
+    Ok((event_tx, cmd_rx, new_client_rx))
 }
 
 async fn handle_client(
@@ -82,6 +97,7 @@ async fn handle_client(
     pipe: NamedPipeServer,
     mut event_rx: broadcast::Receiver<DaemonEvent>,
     cmd_tx: mpsc::UnboundedSender<ClientCommand>,
+    new_client_tx: mpsc::UnboundedSender<()>,
 ) {
     tracing::info!("ipc-server: client {client_id} connected");
     let (reader_half, mut writer_half) = tokio::io::split(pipe);
@@ -96,6 +112,11 @@ async fn handle_client(
     if write_event(&mut writer_half, &hello).await.is_err() {
         return;
     }
+
+    // Signal the runtime to broadcast a snapshot StatusUpdate so this
+    // newly-connected client sees current state without needing to
+    // race against any in-flight broadcasts.
+    let _ = new_client_tx.send(());
 
     let mut reader = BufReader::new(reader_half);
     let mut line_buf = String::new();

@@ -66,18 +66,6 @@ pub async fn run_daemon() -> Result<()> {
     run_daemon_with_deps(deps).await
 }
 
-/// T2 stub: forwards to the test `spawn_server` for now. T3 replaces
-/// this with the real impl that wires `ipc_server` with the supplied
-/// event_tx + the new-client signal channel.
-async fn spawn_server_with_event_tx(
-    _preset: broadcast::Sender<DaemonEvent>,
-) -> Result<(
-    broadcast::Sender<DaemonEvent>,
-    mpsc::UnboundedReceiver<ClientCommand>,
-)> {
-    spawn_server().await
-}
-
 /// Async closure that runs one sync to completion. Arc-wrapped so the
 /// runtime can clone it into a tokio::spawn'd task without consuming the
 /// daemon's only copy.
@@ -123,14 +111,16 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let mut connected: Option<DetectedIpod> = None;
     let configured_serial = deps.configured_serial;
 
-    let (event_tx, mut cmd_rx) = match deps.preset_event_tx {
-        Some(tx) => {
-            // Production: reuse the channel that spawn_sync already
-            // captured a clone of. ipc_server::spawn_server needs to
-            // share the same sender — pass it in.
-            spawn_server_with_event_tx(tx).await?
+    let (event_tx, mut cmd_rx, mut new_client_rx) = match deps.preset_event_tx {
+        Some(tx) => crate::daemon::ipc_server::spawn_server_full(tx).await?,
+        None => {
+            let (tx, rx) = spawn_server().await?;
+            // Test path: synthesize an empty new-client channel that
+            // never fires. The integration tests don't exercise snapshot
+            // semantics; production goes through spawn_server_full.
+            let (_dummy_tx, dummy_rx) = mpsc::unbounded_channel::<()>();
+            (tx, rx, dummy_rx)
         }
-        None => spawn_server().await?, // test path
     };
     let mut device_rx = deps.watcher.start();
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
@@ -181,6 +171,15 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
 
             Some(internal) = internal_rx.recv() => {
                 handle_internal_event(internal, &mut state, &event_tx, &history, &connected);
+            }
+
+            Some(()) = new_client_rx.recv() => {
+                // A fresh UI connected. Publish a snapshot StatusUpdate
+                // so the new subscriber's tray + popover initialize
+                // with current state, even if earlier broadcasts (e.g.
+                // DeviceConnected from polling at daemon startup) went
+                // out before they subscribed.
+                broadcast_status(&event_tx, &state, &connected, &config_path, &history);
             }
 
             _ = scheduler.tick() => {
