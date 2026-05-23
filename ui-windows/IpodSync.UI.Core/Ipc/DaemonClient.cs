@@ -128,6 +128,7 @@ public sealed class DaemonClient : IAsyncDisposable
     {
         "status_update", "config_update", "history_update",
         "device_connected", "device_disconnected", "sync_rejected",
+        "sync_event",
     };
 
     private static bool TryDeserialize(string line, out object? evt)

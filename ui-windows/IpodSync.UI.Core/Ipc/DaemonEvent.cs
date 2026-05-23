@@ -17,6 +17,7 @@ namespace IpodSync_UI.Ipc;
 [JsonDerivedType(typeof(DeviceConnectedEvent), "device_connected")]
 [JsonDerivedType(typeof(DeviceDisconnectedEvent), "device_disconnected")]
 [JsonDerivedType(typeof(SyncRejectedEvent), "sync_rejected")]
+[JsonDerivedType(typeof(SyncEventEnvelope), "sync_event")]
 public abstract record DaemonEvent;
 
 public sealed record StatusUpdateEvent(
@@ -49,6 +50,10 @@ public sealed record DeviceDisconnectedEvent(
 
 public sealed record SyncRejectedEvent(
     [property: JsonPropertyName("reason")] string Reason
+) : DaemonEvent;
+
+public sealed record SyncEventEnvelope(
+    [property: JsonPropertyName("line")] string Line
 ) : DaemonEvent;
 
 public sealed record DaemonSettings(
