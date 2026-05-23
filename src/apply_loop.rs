@@ -233,7 +233,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     progress.track_start(
                         i,
                         total_planned,
-                        format!("REMOVE {} (dbid {})", entry.source_path.display(), entry.ipod_dbid),
+                        format!("REMOVE {} (dbid {})", display_path(&entry.source_path), entry.ipod_dbid),
                     );
                     // Retry/Skip/Abort loop. Skip leaves the manifest entry
                     // intact: the track is still on the iPod (delete failed),
@@ -279,7 +279,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     progress.track_start(
                         i,
                         total_planned,
-                        format!("MODIFY {}", src.path.display()),
+                        format!("MODIFY {}", display_path(&src.path)),
                     );
 
                     // Under --no-delete we can't replace the existing track
@@ -380,7 +380,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     progress.track_start(
                         i,
                         total_planned,
-                        format!("ADD {}", src.path.display()),
+                        format!("ADD {}", display_path(&src.path)),
                     );
                     // Skip is clean here: no iPod state changes, no manifest update.
                     let added: Option<(TrackHandle, String, String)> = loop {
@@ -417,7 +417,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     progress.track_start(
                         i,
                         total_planned,
-                        format!("METADATA {}", source.path.display()),
+                        format!("METADATA {}", display_path(&source.path)),
                     );
                     // Whole metadata-update sequence is bundled into
                     // `do_metadata_only` so the retry loop has a single
@@ -616,6 +616,24 @@ pub(crate) fn add_one(db: &OwnedDb, src: &SourceEntry) -> Result<(TrackHandle, S
     let audio_fp = source::audio_fingerprint(&src.path)
         .with_context(|| format!("audio_fingerprint {}", src.path.display()))?;
     Ok((handle, fingerprint, audio_fp))
+}
+
+/// Take the last 2 path components for display ("Album\Track.flac"). Falls
+/// back to the full path if there's no parent. Used by track_start labels so
+/// long UNC paths don't overflow the TUI current-track panel width. The full
+/// path is still in the manifest and in earlier `progress.log` lines, just
+/// not in the live status line.
+fn display_path(p: &Path) -> String {
+    let parent = p.parent().and_then(|p| p.file_name());
+    let file = p.file_name();
+    match (parent, file) {
+        (Some(parent), Some(file)) => format!(
+            "{}\\{}",
+            parent.to_string_lossy(),
+            file.to_string_lossy()
+        ),
+        _ => p.display().to_string(),
+    }
 }
 
 pub(crate) fn count_actions(actions: &[Action]) -> (usize, usize, usize, usize, usize) {

@@ -10,14 +10,18 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Logging first (no TUI needed for tracing-subscriber). We use the raw
-    // verbose flag from the CLI since Config resolution may itself prompt
-    // through the TUI; we want tracing wired up before any of that.
-    ipod_sync::logging::init(cli.verbose);
-
     // Pre-flight: decide if we're going TUI or plain. Mirrors the logic
-    // Config::resolve uses (--no-tui flag, stdout is a TTY).
+    // Config::resolve uses (--no-tui flag, stdout is a TTY). Needs to be
+    // decided BEFORE logging::init so that, in TUI mode, tracing output is
+    // routed to io::sink() instead of stderr — otherwise GLib WARN lines
+    // (routed through tracing::warn!) leak past the alternate screen and
+    // corrupt the visible terminal below the TUI render.
     let use_tui = !cli.no_tui && std::io::stdout().is_terminal();
+
+    // Logging next. We use the raw verbose flag from the CLI since Config
+    // resolution may itself prompt through the TUI; we want tracing wired up
+    // before any of that.
+    ipod_sync::logging::init(cli.verbose, use_tui);
 
     let (progress, decision_rx) = Progress::start(use_tui)?;
 

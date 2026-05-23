@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use crossterm::event::{Event, KeyCode};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
 use std::collections::VecDeque;
 use std::io::IsTerminal;
@@ -527,18 +527,19 @@ fn render(f: &mut ratatui::Frame, state: &TuiState) {
         chunks[0],
     );
 
-    let pct = (state.fraction() * 100.0) as u16;
-    let eta = state.eta()
-        .map(|d| format!(" ETA {}", format_duration(d)))
-        .unwrap_or_default();
-    let progress_label = format!("{}/{} ({}%){}", state.done, state.total_planned, pct, eta);
-    let plan_line = Line::from(vec![
-        Span::raw(format!(
-            "add={} modify={} remove={} unchanged={}",
-            state.add, state.modify, state.remove, state.unchanged
-        )),
-    ]);
-    let progress_lines = vec![plan_line];
+    // Until the Summary event lands (i.e. between user pressing Apply and the
+    // orchestrator computing total_planned), total_planned is 0 and the gauge
+    // would otherwise render the confusing "0/0 (0%)". Show "(preparing...)"
+    // in that window so the user knows the apply phase is initializing.
+    let progress_label = if state.total_planned == 0 {
+        "(preparing...)".to_string()
+    } else {
+        let pct = (state.fraction() * 100.0) as u16;
+        let eta = state.eta()
+            .map(|d| format!(" ETA {}", format_duration(d)))
+            .unwrap_or_default();
+        format!("{}/{} ({}%){}", state.done, state.total_planned, pct, eta)
+    };
     f.render_widget(
         Gauge::default()
             .block(Block::default().borders(Borders::ALL).title(" progress "))
@@ -566,8 +567,6 @@ fn render(f: &mut ratatui::Frame, state: &TuiState) {
             .style(Style::default().add_modifier(Modifier::DIM)),
         chunks[3],
     );
-
-    let _ = progress_lines;  // silence unused-warning if future refactor drops plan_line
 }
 
 fn render_review(f: &mut ratatui::Frame, state: &TuiState, review: &ReviewState) {

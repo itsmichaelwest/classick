@@ -1,6 +1,6 @@
 //! Tracing-subscriber init + GLib log handler installation.
 //!
-//! Two concerns wired together so `main.rs` can do a single `logging::init(verbose)`:
+//! Two concerns wired together so `main.rs` can do a single `logging::init(verbose, use_tui)`:
 //!
 //! 1. `tracing-subscriber` with an `EnvFilter`. Honors `RUST_LOG` when set;
 //!    otherwise defaults to `ipod_sync=info` (or `ipod_sync=debug` with
@@ -17,18 +17,32 @@ use tracing_subscriber::filter::EnvFilter;
 
 /// Initialize tracing and install the GLib log handler. Call exactly once
 /// from `main` after config has been resolved.
-pub fn init(verbose: bool) {
+///
+/// `use_tui` controls where tracing output goes:
+/// - `false` (plain mode): tracing writes to stderr as normal.
+/// - `true`  (TUI mode): tracing writes to `io::sink()` (no-op) so that
+///   GLib `WARNING`/`CRITICAL` lines (which we route through `tracing::warn!`)
+///   don't leak past the alternate screen and corrupt the visible terminal
+///   below the TUI render. Trade-off: ALL tracing output is suppressed when
+///   the TUI is active. User-facing messages go through `progress.log` /
+///   `progress.error` instead. To see tracing on screen (e.g. with
+///   `--verbose` for debug sessions), pass `--no-tui`.
+pub fn init(verbose: bool, use_tui: bool) {
     let default = if verbose { "ipod_sync=debug,info" } else { "ipod_sync=info,warn" };
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
-    tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
-        .compact()
-        .init();
+        .compact();
+    if use_tui {
+        builder.with_writer(std::io::sink).init();
+    } else {
+        builder.init();
+    }
 
     install_glib_handler();
-    debug!("logging initialized (verbose={verbose})");
+    debug!("logging initialized (verbose={verbose}, use_tui={use_tui})");
 }
 
 extern "C" fn glib_log_handler(
