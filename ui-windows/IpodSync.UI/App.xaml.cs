@@ -114,6 +114,18 @@ public partial class App : Application
         {
             Window = null;
             WindowHandle = IntPtr.Zero;
+            // The wizard had exclusive read on the daemon event channel
+            // while open. Now that it's closed, kick off the tray loop so
+            // StatusUpdate / DeviceConnected events drive the tray state.
+            // Idempotent: if the user reaches here without configuring
+            // (cancelled wizard), the tray just stays Offline until they
+            // relaunch and finish setup.
+            StartTrayEventLoop();
+            _ = Task.Run(async () =>
+            {
+                try { if (Daemon is not null) await Daemon.SendAsync(new GetStatusCommand()); }
+                catch (Exception e) { Debug.WriteLine($"app: post-wizard GetStatus failed: {e}"); }
+            });
         };
         Window.Activate();
     }
