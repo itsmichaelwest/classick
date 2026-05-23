@@ -308,26 +308,32 @@ fn run_ipc(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
         let reader = BufReader::new(stdin.lock());
+        tracing::info!("ipc: stdin reader thread started");
         for line in reader.lines() {
             let line = match line {
                 Ok(l) => l,
-                Err(_) => break, // pipe broken / EOF: UI gone, just exit
+                Err(e) => {
+                    tracing::info!("ipc: stdin read returned error (likely EOF / pipe broken): {e}");
+                    break;
+                }
             };
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
+            tracing::info!("ipc: received line: {trimmed}");
             match serde_json::from_str::<IpcCommand>(trimmed) {
                 Ok(cmd) => {
+                    tracing::info!("ipc: parsed command: {cmd:?}");
                     if let Some(decision) = cmd.to_decision() {
+                        tracing::info!("ipc: dispatching decision: {decision:?}");
                         if cmd_tx.send(decision).is_err() {
-                            // Orchestrator dropped the receiver; further reads
-                            // are pointless.
+                            tracing::info!("ipc: decision channel closed, exiting reader");
                             break;
                         }
+                    } else {
+                        tracing::info!("ipc: command has no decision payload (e.g. Start); silently consumed");
                     }
-                    // None means a command without a decision payload (e.g.
-                    // Start in M1) — silently consumed.
                 }
                 Err(e) => {
                     // Per ipc-protocol §2: malformed input is not fatal.
@@ -336,20 +342,25 @@ fn run_ipc(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
                 }
             }
         }
+        tracing::info!("ipc: stdin reader thread exiting");
     });
 
     // 3. Event loop: drain internal channel, write each event as a JSON line.
     //    Loop ends when we see Finish (normal) or the channel closes (sender
     //    dropped without sending Finish — should not happen in practice).
+    tracing::info!("ipc: event loop entering");
     for event in rx {
         let is_finish = matches!(event, ProgressEvent::Finish { .. });
         if let Some(ipc_event) = IpcEvent::from_progress(&event) {
+            tracing::info!("ipc: emitting event: {ipc_event:?}");
             write_ipc_event(&ipc_event).context("ipc: event write failed")?;
         }
         if is_finish {
+            tracing::info!("ipc: received Finish event, exiting event loop");
             break;
         }
     }
+    tracing::info!("ipc: event loop exited (channel closed or Finish seen)");
 
     Ok(())
 }

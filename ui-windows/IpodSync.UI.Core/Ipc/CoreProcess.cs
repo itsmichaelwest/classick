@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using IpodSync_UI.Core;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -163,12 +164,12 @@ public sealed class CoreProcess : IAsyncDisposable
                     {
                         stderrLines.Add(line);
                     }
-                    Debug.WriteLine($"ipc-stderr: {line}");
+                    Diag.Log($"ipc-stderr: {line}");
                 }
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"ipc: stderr collector terminated: {ex.Message}");
+                Diag.Log($"ipc: stderr collector terminated: {ex.Message}");
             }
         });
 
@@ -195,17 +196,17 @@ public sealed class CoreProcess : IAsyncDisposable
                     {
                         // §2: unparseable from the core is a serious bug; log
                         // and keep reading — never abort the UI for this.
-                        Debug.WriteLine($"ipc: unparseable event line `{line}`: {jx.Message}");
+                        Diag.Log($"ipc: unparseable event line `{line}`: {jx.Message}");
                         continue;
                     }
 
                     if (evt is null)
                     {
-                        Debug.WriteLine($"ipc: deserializer returned null for line `{line}`");
+                        Diag.Log($"ipc: deserializer returned null for line `{line}`");
                         continue;
                     }
 
-                    Debug.WriteLine($"ipc-stdout: {line}");
+                    Diag.Log($"ipc-stdout: {line}");
                     try
                     {
                         await events.Writer.WriteAsync(evt, cts.Token).ConfigureAwait(false);
@@ -219,7 +220,7 @@ public sealed class CoreProcess : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"ipc: stdout reader terminated: {ex.Message}");
+                Diag.Log($"ipc: stdout reader terminated: {ex.Message}");
             }
             finally
             {
@@ -268,7 +269,7 @@ public sealed class CoreProcess : IAsyncDisposable
                 $"Unsupported core protocol version: {hello.ProtocolVersion}. UI supports {SupportedProtocolMajor}x.");
         }
 
-        Debug.WriteLine($"ipc: handshake OK (protocol={hello.ProtocolVersion}, core={hello.CoreVersion})");
+        Diag.Log($"ipc: handshake OK (protocol={hello.ProtocolVersion}, core={hello.CoreVersion})");
         return instance;
     }
 
@@ -281,7 +282,7 @@ public sealed class CoreProcess : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(command);
 
         var json = JsonSerializer.Serialize<IpcCommand>(command);
-        Debug.WriteLine($"ipc-stdin: {json}");
+        Diag.Log($"ipc-stdin: {json}");
         await _process.StandardInput.WriteLineAsync(json.AsMemory(), cancellationToken).ConfigureAwait(false);
         await _process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -317,7 +318,7 @@ public sealed class CoreProcess : IAsyncDisposable
             }
             catch (OperationCanceledException)
             {
-                Debug.WriteLine($"ipc: core did not exit within {ShutdownTimeout.TotalSeconds:0}s of cancel; killing");
+                Diag.Log($"ipc: core did not exit within {ShutdownTimeout.TotalSeconds:0}s of cancel; killing");
                 try
                 {
                     _process.Kill(entireProcessTree: true);

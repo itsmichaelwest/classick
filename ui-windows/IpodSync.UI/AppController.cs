@@ -5,6 +5,7 @@ using IpodSync_UI.Core;
 using IpodSync_UI.Dialogs;
 using IpodSync_UI.Ipc;
 using IpodSync_UI.Views;
+using static IpodSync_UI.Core.Diag;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -86,6 +87,7 @@ public sealed class AppController : IAsyncDisposable
     private async Task RunEventLoopAsync(CancellationToken cancellationToken)
     {
         if (_coreProcess is null) return;
+        Log("app: event loop starting");
         try
         {
             await foreach (var evt in _coreProcess.Events.ReadAllAsync(cancellationToken).ConfigureAwait(false))
@@ -93,8 +95,12 @@ public sealed class AppController : IAsyncDisposable
                 // Capture for the closure so the loop variable isn't reused
                 // before the dispatched lambda runs.
                 var captured = evt;
+                Log($"app: dispatching to UI thread: {captured.GetType().Name}");
                 await _dispatcher.EnqueueAsync(() => HandleEventOnUIThreadAsync(captured)).ConfigureAwait(false);
+                Log($"app: UI handler returned for: {captured.GetType().Name}");
             }
+
+            Log("app: event channel completed (core exited)");
 
             // Channel completed naturally — process exited. If we haven't
             // already shown a Finish UI, surface "core exited unexpectedly".
@@ -102,6 +108,7 @@ public sealed class AppController : IAsyncDisposable
             {
                 if (_progressPage?.ViewModel.IsFinished != true)
                 {
+                    Log("app: showing 'core exited unexpectedly' dialog");
                     await ShowErrorAsync(
                         "Core exited unexpectedly",
                         "The Rust core process closed its connection before sending a finish event. " +
@@ -111,10 +118,11 @@ public sealed class AppController : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            // Expected on DisposeAsync.
+            Log("app: event loop canceled (DisposeAsync)");
         }
         catch (Exception ex)
         {
+            Log($"app: event loop crashed: {ex}");
             await _dispatcher.EnqueueAsync(
                 () => ShowErrorAsync("IPC reader crashed", ex.Message)).ConfigureAwait(false);
         }
@@ -171,24 +179,34 @@ public sealed class AppController : IAsyncDisposable
 
     private void OnReview(ReviewEvent review)
     {
+        Log("app: OnReview entered; constructing ReviewPage");
         _reviewPage = new ReviewPage();
         _reviewPage.ViewModel.LoadFromEvent(review, _stashedHeader);
         _reviewPage.ViewModel.DecisionMade += async cmd =>
         {
+            Log($"app: ReviewViewModel.DecisionMade fired: {cmd}");
             if (_coreProcess is not null)
             {
                 try
                 {
+                    Log($"app: calling SendAsync({cmd.GetType().Name})");
                     await _coreProcess.SendAsync(cmd);
+                    Log($"app: SendAsync({cmd.GetType().Name}) returned");
                 }
                 catch (Exception ex)
                 {
+                    Log($"app: SendAsync threw: {ex}");
                     await _dispatcher.EnqueueAsync(
                         () => ShowErrorAsync("Failed to send decision", ex.Message));
                 }
             }
+            else
+            {
+                Log("app: DecisionMade but _coreProcess is null (already disposed?)");
+            }
         };
         _frame.Content = _reviewPage;
+        Log("app: ReviewPage navigation complete");
     }
 
     private void OnSummary(SummaryEvent summary)
