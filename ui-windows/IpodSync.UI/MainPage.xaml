@@ -8,23 +8,38 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Grid Padding="24" RowSpacing="12">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
-
-        <TextBlock
-            Grid.Row="0"
-            Text="ipod-sync"
-            Style="{StaticResource TitleTextBlockStyle}" />
-
-        <TextBlock
-            Grid.Row="1"
-            Text="Phase 6 M1 — IPC client coming next."
-            Opacity="0.7"
-            VerticalAlignment="Center"
+    <Grid Padding="32">
+        <StackPanel
+            Spacing="16"
+            MaxWidth="480"
             HorizontalAlignment="Center"
-            Style="{StaticResource BodyTextBlockStyle}" />
+            VerticalAlignment="Center">
+            <TextBlock
+                Text="ipod-sync"
+                Style="{StaticResource TitleLargeTextBlockStyle}"
+                HorizontalAlignment="Center" />
+            <TextBlock
+                TextWrapping="Wrap"
+                Opacity="0.7"
+                HorizontalAlignment="Center"
+                TextAlignment="Center">
+                Sync your FLAC library to an iPod Classic.
+                Plug in the device, then click Start.
+            </TextBlock>
+            <StackPanel
+                Orientation="Horizontal"
+                Spacing="12"
+                HorizontalAlignment="Center"
+                Margin="0,16,0,0">
+                <Button
+                    x:Name="StartButton"
+                    Content="Start sync"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Click="StartButton_Click" />
+                <Button
+                    Content="Quit"
+                    Click="QuitButton_Click" />
+            </StackPanel>
+        </StackPanel>
     </Grid>
 </Page>
