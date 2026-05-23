@@ -4,105 +4,90 @@ using System.IO;
 using System.IO.Pipes;
 using System.Threading.Tasks;
 using IpodSync_UI.Ipc;
+using IpodSync_UI.Notifications;
+using IpodSync_UI.ViewModels;
 using IpodSync_UI.Views;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 
 namespace IpodSync_UI;
 
-/// <summary>
-/// M2 application shell. Starts hidden in the system tray, probes/launches
-/// the ipod-sync daemon, connects via <see cref="DaemonClient"/>, then opens
-/// <see cref="WizardWindow"/> if the user hasn't picked an iPod identity yet.
-/// Otherwise stays hidden until tray menu / device events kick off a sync
-/// (M3 territory).
-/// </summary>
 public partial class App : Application
 {
-    /// <summary>
-    /// Currently displayed top-level window, if any. Null while the app sits
-    /// in the tray with no UI surface. Set to a <see cref="WizardWindow"/>
-    /// during first-run setup; M3 may swap in a progress / status window.
-    /// </summary>
     public static Window? Window { get; private set; }
-
-    /// <summary>
-    /// Native handle (HWND) of <see cref="Window"/>, used by interop callers
-    /// (file pickers, <c>InitializeWithWindow</c>). Zero while no window is open.
-    /// </summary>
     public static IntPtr WindowHandle { get; private set; }
-
-    /// <summary>
-    /// UI thread dispatcher. Fully qualified type avoids CS0104 ambiguity with
-    /// <c>Windows.System.DispatcherQueue</c>.
-    /// </summary>
     public static DispatcherQueue DispatcherQueue { get; private set; } = default!;
-
-    /// <summary>Persistent daemon connection, available after OnLaunched.</summary>
     public static DaemonClient? Daemon { get; private set; }
-
-    /// <summary>Tray icon owner. Always initialized; Quit menu wires through here.</summary>
+    public static DaemonEventRouter? Router { get; private set; }
     public static TrayIconController? Tray { get; private set; }
+    public static NotificationService? Notifications { get; private set; }
 
-    public App()
-    {
-        this.InitializeComponent();
-    }
+    /// <summary>Last ConfigUpdate seen from the daemon. Popover + settings read from this.</summary>
+    public static ConfigUpdateEvent? LatestConfig { get; private set; }
+    /// <summary>Latest StatusUpdate. Used to drive popover initial state.</summary>
+    public static StatusUpdateEvent? LatestStatus { get; private set; }
+    /// <summary>Latest HistoryUpdate. Used to seed popover activity feed.</summary>
+    public static HistoryUpdateEvent? LatestHistory { get; private set; }
+
+    private static PopoverWindow? _popover;
+    private static SettingsWindow? _settings;
+
+    public App() { InitializeComponent(); }
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
         DispatcherQueue = DispatcherQueue.GetForCurrentThread();
 
-        // 1. Set up tray icon early so something visible exists even if the
-        //    daemon connection takes a moment.
         Tray = new TrayIconController();
         Tray.Initialize();
         Tray.QuitRequested += OnQuitRequested;
         Tray.SyncNowRequested += OnSyncNowRequested;
+        Tray.SettingsRequested += OnSettingsRequested;
+        Tray.PopoverRequested += OnPopoverRequested;
 
-        // 2. Ensure daemon is running.
         if (!await IsDaemonRunningAsync())
         {
             SpawnDaemon();
-            // Give it a moment to create the pipe.
             await Task.Delay(500);
         }
 
-        // 3. Connect to daemon.
-        try
-        {
-            Daemon = await DaemonClient.ConnectAsync();
-        }
+        try { Daemon = await DaemonClient.ConnectAsync(); }
         catch (Exception e)
         {
             Debug.WriteLine($"app: failed to connect to daemon: {e}");
-            // Surface as a tray notification rather than a window pop.
-            // For now, just quit cleanly.
             Tray?.Dispose();
-            // Application.Current.Exit() doesn't reliably exit the process in
-            // windowless mode (H.NotifyIcon issue #66). Use Environment.Exit.
             Environment.Exit(0);
             return;
         }
 
-        // 4. Ask daemon for config status. If unconfigured, open the wizard.
-        await Daemon.SendAsync(new GetConfigCommand());
-        var first = await Daemon.Events.ReadAsync();
-        bool needsWizard = first is ConfigUpdateEvent cfg && cfg.Ipod is null;
+        // Start the router. All consumers (tray, popover, notifications,
+        // wizard) subscribe through it instead of reading the channel
+        // directly.
+        Router = new DaemonEventRouter(Daemon.Events);
+        Router.StatusUpdated += OnStatusUpdated;
+        Router.ConfigUpdated += OnConfigUpdated;
+        Router.HistoryUpdated += OnHistoryUpdated;
+        Router.DeviceConnected += OnDeviceConnected;
+        Router.DeviceDisconnected += OnDeviceDisconnected;
+        Router.Start();
 
-        if (needsWizard)
+        // Notification service subscribes to router internally.
+        Notifications = new NotificationService(Router,
+            getNotifyOn: () => LatestConfig?.Daemon?.NotifyOn ?? "all");
+        Notifications.Initialize();
+
+        // Ask for the initial config + status + history.
+        await Daemon.SendAsync(new GetConfigCommand());
+        await Daemon.SendAsync(new GetStatusCommand());
+        await Daemon.SendAsync(new GetHistoryCommand(Limit: 10));
+
+        // Open wizard if config has no iPod identity. The wizard also
+        // subscribes to the router (T14) so the channel-exclusivity
+        // hack from M3 goes away.
+        await Task.Delay(150);  // give the router time to populate LatestConfig
+        if (LatestConfig?.Ipod is null)
         {
             ShowWizard();
-            // Wizard owns the daemon event channel exclusively while
-            // open; the tray loop starts after wizard close.
-            // (M4: introduce a real event router so multiple consumers
-            //  can subscribe concurrently.)
-        }
-        else
-        {
-            // Configured: kick off tray event loop + ask for initial status.
-            StartTrayEventLoop();
-            await Daemon.SendAsync(new GetStatusCommand());
         }
     }
 
@@ -114,58 +99,35 @@ public partial class App : Application
         {
             Window = null;
             WindowHandle = IntPtr.Zero;
-            // The wizard had exclusive read on the daemon event channel
-            // while open. Now that it's closed, kick off the tray loop so
-            // StatusUpdate / DeviceConnected events drive the tray state.
-            // Idempotent: if the user reaches here without configuring
-            // (cancelled wizard), the tray just stays Offline until they
-            // relaunch and finish setup.
-            StartTrayEventLoop();
-            _ = Task.Run(async () =>
-            {
-                try { if (Daemon is not null) await Daemon.SendAsync(new GetStatusCommand()); }
-                catch (Exception e) { Debug.WriteLine($"app: post-wizard GetStatus failed: {e}"); }
-            });
         };
         Window.Activate();
     }
 
-    private void StartTrayEventLoop()
+    private void OnStatusUpdated(StatusUpdateEvent s)
     {
-        _ = Task.Run(async () =>
+        LatestStatus = s;
+        DispatcherQueue.TryEnqueue(() =>
         {
-            if (Daemon is null) return;
-            try
-            {
-                await foreach (var evt in Daemon.Events.ReadAllAsync())
-                {
-                    switch (evt)
-                    {
-                        case StatusUpdateEvent s:
-                            UpdateTrayFromStatus(s);
-                            break;
-                        case DeviceConnectedEvent dc:
-                            if (Tray is not null)
-                            {
-                                DispatcherQueue.TryEnqueue(() =>
-                                    Tray.SetState(TrayState.Idle, $"iPod connected ({dc.ModelLabel})"));
-                            }
-                            break;
-                        case DeviceDisconnectedEvent:
-                            if (Tray is not null)
-                            {
-                                DispatcherQueue.TryEnqueue(() =>
-                                    Tray.SetState(TrayState.Offline, "iPod not connected"));
-                            }
-                            break;
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.WriteLine($"app: tray event loop ended: {e}");
-            }
+            UpdateTrayFromStatus(s);
+            _popover?.ViewModel.Update(s);
         });
+    }
+
+    private void OnConfigUpdated(ConfigUpdateEvent c) => LatestConfig = c;
+    private void OnHistoryUpdated(HistoryUpdateEvent h)
+    {
+        LatestHistory = h;
+        DispatcherQueue.TryEnqueue(() => _popover?.ViewModel.ApplyHistory(h));
+    }
+    private void OnDeviceConnected(DeviceConnectedEvent dc)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+            Tray?.SetState(TrayState.Idle, $"iPod connected ({dc.ModelLabel})"));
+    }
+    private void OnDeviceDisconnected(DeviceDisconnectedEvent _)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+            Tray?.SetState(TrayState.Offline, "iPod not connected"));
     }
 
     private void UpdateTrayFromStatus(StatusUpdateEvent s)
@@ -173,11 +135,41 @@ public partial class App : Application
         if (Tray is null) return;
         var (state, tooltip) = (s.State, s.IpodConnected) switch
         {
-            ("syncing", _)   => (TrayState.Syncing, "Syncing..."),
+            ("syncing", _)   => (TrayState.Syncing, "Syncing iPod…"),
             (_,    true)     => (TrayState.Idle,    "iPod connected · idle"),
             _                => (TrayState.Offline, "iPod not connected"),
         };
-        DispatcherQueue.TryEnqueue(() => Tray.SetState(state, tooltip));
+        Tray.SetState(state, tooltip);
+    }
+
+    private void OnPopoverRequested()
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_popover is not null) { _popover.Activate(); return; }
+            var vm = new PopoverViewModel();
+            if (LatestStatus is not null) vm.Update(LatestStatus);
+            if (LatestHistory is not null) vm.ApplyHistory(LatestHistory);
+            _popover = new PopoverWindow(vm, Daemon!, LatestConfig?.Source ?? "");
+            _popover.Closed += (_, _) => _popover = null;
+            _popover.Activate();
+            _popover.AnchorAboveTray();
+        });
+    }
+
+    private void OnSettingsRequested() => RequestOpenSettings();
+
+    public static void RequestOpenSettings()
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_settings is not null) { _settings.Activate(); return; }
+            if (Daemon is null || Router is null || LatestConfig is null) return;
+            var vm = new SettingsViewModel(Daemon, Router, LatestConfig);
+            _settings = new SettingsWindow(vm);
+            _settings.Closed += (_, _) => _settings = null;
+            _settings.Activate();
+        });
     }
 
     private void OnSyncNowRequested()
@@ -185,14 +177,8 @@ public partial class App : Application
         DispatcherQueue.TryEnqueue(async () =>
         {
             if (Daemon is null) return;
-            try
-            {
-                await Daemon.SendAsync(new TriggerSyncCommand("manual"));
-            }
-            catch (Exception e)
-            {
-                Debug.WriteLine($"app: trigger_sync failed: {e}");
-            }
+            try { await Daemon.SendAsync(new TriggerSyncCommand("manual")); }
+            catch (Exception e) { Debug.WriteLine($"app: trigger_sync failed: {e}"); }
         });
     }
 
@@ -206,9 +192,8 @@ public partial class App : Application
                 catch { /* daemon may already be dead */ }
                 await Daemon.DisposeAsync();
             }
+            Router?.Stop();
             Tray?.Dispose();
-            // Application.Current.Exit() doesn't reliably exit the process in
-            // windowless mode (H.NotifyIcon issue #66). Use Environment.Exit.
             Environment.Exit(0);
         });
     }
@@ -222,15 +207,11 @@ public partial class App : Application
             await pipe.ConnectAsync(500);
             return true;
         }
-        catch
-        {
-            return false;
-        }
+        catch { return false; }
     }
 
     private static void SpawnDaemon()
     {
-        // Locate ipod-sync.exe (bundled alongside the UI exe).
         var uiDir = AppContext.BaseDirectory;
         var coreCandidates = new[]
         {
@@ -247,7 +228,6 @@ public partial class App : Application
             Debug.WriteLine("app: cannot find ipod-sync.exe to spawn daemon");
             return;
         }
-
         var psi = new ProcessStartInfo
         {
             FileName = corePath,

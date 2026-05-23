@@ -87,8 +87,7 @@ public sealed partial class PopoverWindow : Window
 
     private void OnOpenSettings(object sender, RoutedEventArgs e)
     {
-        // TODO(T13): replace with App.RequestOpenSettings() once wired in Wave 3.
-        Debug.WriteLine("settings open requested");
+        App.RequestOpenSettings();
         Close();
     }
 }
