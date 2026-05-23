@@ -677,3 +677,57 @@ and forwards every v1.0.0 IpcEvent (`header`, `summary`, `review`, `prompt`,
 `form`, `track_start`, `track_done`, `log`, `error`, `finish`) verbatim to
 subscribed UI clients. UI clients see daemon events and sync events on the
 same pipe and pattern-match on `type`.
+
+## M3 addendum (2026-05-25) — Device events go live, TooManyFailures reason
+
+### Device-event flow
+
+Starting in M3 (protocol still 1.1.0), the daemon broadcasts
+`device_connected` / `device_disconnected` events to ALL connected
+clients (not just those that sent `subscribe_device_events`). The
+Subscribe / Unsubscribe commands remain in the protocol as
+no-op handshakes; clients should still send `subscribe_device_events`
+for forward-compatibility — M4 may reintroduce per-client filtering.
+
+Production detection uses a 1.5s polling loop over Windows drive
+letters; expected first-event latency is therefore 0–1.5s from physical
+plug-in, +500ms debounce window. Tests that need different cadence
+inject a custom `DeviceWatcher` impl (see
+`src/daemon/device_watcher.rs`).
+
+### Sync orchestration
+
+When the daemon accepts a sync trigger (plug-in, scheduled, or
+manual), it spawns `ipod-sync.exe --ipc-mode --apply --ipod <drive>`.
+The subprocess speaks the M1 v1.0.0 stdio protocol; the daemon parses
+each line and (M4) will forward to UI clients. Throughout the sync,
+the daemon counts per-track `error` events. When
+`tracks_errored * 2 > total_planned` (strict greater-than, both > 0),
+the daemon sends `{"type":"cancel"}` to the subprocess stdin, starts a
+5-second force-kill timer, and emits:
+
+```json
+{"type":"sync_rejected","reason":"too_many_failures"}
+```
+
+The history entry for that run records `outcome: "aborted"` with
+`error_message: "too_many_failures: N of M tracks failed"`.
+
+### New SyncRejectReason
+
+| Reason | When |
+|---|---|
+| `already_syncing` | TriggerSync while state == Syncing |
+| `no_ipod` | TriggerSync while no device connected |
+| `not_configured` | TriggerSync while config.ipod_identity is None |
+| `too_many_failures` | Auto-bail from >50% per-track failure threshold (NEW M3) |
+
+### Mid-sync device-detach handling
+
+When `DeviceWatcher` fires `Disconnected` for the serial currently
+being synced, the daemon:
+1. Records a history entry with `outcome: "aborted"`, `error_message: "device_detached"`.
+2. Transitions state back to Idle.
+3. Lets the orchestrator subprocess error out naturally as libgpod
+   writes start failing. The subprocess's own Finish event arrives
+   later and is ignored (state is already Idle).
