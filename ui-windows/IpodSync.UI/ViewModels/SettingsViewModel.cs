@@ -94,18 +94,116 @@ public partial class SettingsGeneralViewModel : ObservableObject
 
 public partial class SettingsScheduleViewModel : ObservableObject
 {
-    public SettingsScheduleViewModel(ConfigUpdateEvent c) { /* T8 */ }
-    public int ScheduleMinutes { get; set; } = 30;
-    public bool AutostartWithWindows { get; set; }
-    public bool IsAnyDirty => false;  // T8
+    private readonly DaemonSettings? _originalDaemon;
+
+    public SettingsScheduleViewModel(ConfigUpdateEvent c)
+    {
+        _originalDaemon = c.Daemon;
+        ScheduleMinutes = (int)(c.Daemon?.ScheduleMinutes ?? 30);
+        AutostartWithWindows = c.Daemon?.AutostartWithWindows ?? false;
+    }
+
+    [ObservableProperty] private int scheduleMinutes = 30;
+    [ObservableProperty] private bool autostartWithWindows;
+
+    public bool IsAnyDirty =>
+        ScheduleMinutes != (int)(_originalDaemon?.ScheduleMinutes ?? 30) ||
+        AutostartWithWindows != (_originalDaemon?.AutostartWithWindows ?? false);
+
+    public string ScheduleLabel => ScheduleMinutes == 0
+        ? "Disabled"
+        : ScheduleMinutes < 60
+            ? $"Every {ScheduleMinutes} minutes"
+            : $"Every {ScheduleMinutes / 60.0:0.#} hours";
+
+    partial void OnScheduleMinutesChanged(int value) => OnPropertyChanged(nameof(ScheduleLabel));
 }
 
 public partial class SettingsHistoryViewModel : ObservableObject
 {
-    public SettingsHistoryViewModel(DaemonClient d, DaemonEventRouter r) { /* T9 */ }
+    private readonly DaemonClient _daemon;
+
+    public SettingsHistoryViewModel(DaemonClient daemon, DaemonEventRouter router)
+    {
+        _daemon = daemon;
+        router.HistoryUpdated += OnHistoryUpdated;
+        Entries = new System.Collections.ObjectModel.ObservableCollection<HistoryEntryViewModel>();
+        _ = LoadAsync();
+    }
+
+    public System.Collections.ObjectModel.ObservableCollection<HistoryEntryViewModel> Entries { get; }
+
+    private async Task LoadAsync()
+    {
+        try { await _daemon.SendAsync(new GetHistoryCommand(Limit: 50)); }
+        catch (Exception e) { System.Diagnostics.Debug.WriteLine($"history: load failed: {e}"); }
+    }
+
+    private void OnHistoryUpdated(HistoryUpdateEvent e)
+    {
+        // Dispatcher marshal happens in callers that need UI thread.
+        // The collection's CollectionChanged is fired on whatever
+        // thread invokes Add; SettingsHistoryPage marshals before
+        // calling into this method by binding-dispatcher contract.
+        // For safety we dispatch here.
+        App.DispatcherQueue.TryEnqueue(() =>
+        {
+            Entries.Clear();
+            // Reverse so newest is first.
+            for (int i = e.Entries.Count - 1; i >= 0; i--)
+            {
+                Entries.Add(new HistoryEntryViewModel(e.Entries[i]));
+            }
+        });
+    }
 }
 
 public partial class SettingsAboutViewModel : ObservableObject
 {
-    public SettingsAboutViewModel() { /* T10 */ }
+    public SettingsAboutViewModel()
+    {
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        UiVersion = asm.GetName().Version?.ToString() ?? "unknown";
+    }
+
+    public string UiVersion { get; }
+    public string LicenseText => "MIT OR Apache-2.0";
+    public string GitHubUrl => "https://github.com/itsmichaelwest/ipod-sync";
+}
+
+public partial class HistoryEntryViewModel : ObservableObject
+{
+    public HistoryEntryViewModel(HistoryEntry e)
+    {
+        Timestamp = e.Timestamp;
+        DurationSecs = e.DurationSecs;
+        Trigger = e.Trigger;
+        Outcome = e.Outcome;
+        ErrorMessage = e.ErrorMessage;
+        Summary = e.Summary;
+    }
+
+    public string Timestamp { get; }
+    public ulong DurationSecs { get; }
+    public string Trigger { get; }
+    public string Outcome { get; }
+    public string? ErrorMessage { get; }
+    public SyncSummary? Summary { get; }
+
+    public string OutcomeGlyph => Outcome switch
+    {
+        "ok"      => "✓",  // check
+        "error"   => "!",
+        "aborted" => "✗",  // cross
+        _         => "?",
+    };
+
+    public string SummaryText => Summary is null
+        ? (ErrorMessage ?? "")
+        : $"+{Summary.Add} ~{Summary.Modify} -{Summary.Remove}" +
+          (Summary.Skipped > 0 ? $", {Summary.Skipped} skipped" : "");
+
+    public string DurationText => DurationSecs < 60
+        ? $"{DurationSecs}s"
+        : $"{DurationSecs / 60}m {DurationSecs % 60}s";
 }
