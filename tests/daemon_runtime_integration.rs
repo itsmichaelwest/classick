@@ -55,6 +55,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
         watcher: Box::new(watcher),
         spawn_sync: Arc::new(spawn_fn),
         schedule_minutes: 0,
+        preset_event_tx: None,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 
@@ -105,6 +106,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
         watcher: Box::new(watcher),
         spawn_sync: Arc::new(spawn_fn),
         schedule_minutes: 0,
+        preset_event_tx: None,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 
@@ -162,6 +164,7 @@ async fn runtime_stays_responsive_during_long_sync() {
         watcher: Box::new(watcher),
         spawn_sync: Arc::new(spawn_fn),
         schedule_minutes: 0,
+        preset_event_tx: None,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 

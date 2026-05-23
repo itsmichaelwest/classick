@@ -56,10 +56,6 @@ pub async fn run(
     drive: String,
     event_tx: broadcast::Sender<DaemonEvent>,
 ) -> Result<OrchestratorOutcome> {
-    let _ = event_tx;  // Forwarding M1 IpcEvents over the daemon channel
-                       // is wired in Task 6 (runtime); for now this
-                       // orchestrator only emits DaemonEvent::SyncRejected
-                       // when bailing.
     let mut cmd = build_command(&exe, &drive);
     let mut child = cmd.spawn().with_context(|| format!("spawn {}", exe.display()))?;
     let stdout = child.stdout.take().context("child stdout missing")?;
@@ -71,6 +67,12 @@ pub async fn run(
     let mut finish_success: Option<bool> = None;
 
     while let Some(line) = reader.next_line().await? {
+        // Forward EVERY parseable line to the daemon's broadcast channel
+        // so UI clients see live sync progress. Wrapping the raw line in
+        // a SyncEvent envelope keeps the daemon protocol independent
+        // from M1 stdio-IPC semver.
+        let _ = event_tx.send(DaemonEvent::SyncEvent { line: line.clone() });
+
         let Some(value) = serde_json::from_str::<Value>(&line).ok() else { continue };
         let ty = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match ty {

@@ -42,17 +42,17 @@ pub async fn run_daemon() -> Result<()> {
         .map(|d| d.schedule_minutes)
         .unwrap_or(30);
 
+    // Build the broadcast event_tx FIRST so the spawn_sync closure can
+    // capture a clone — that way orchestrator events flow through the
+    // same channel UI clients are subscribed to.
+    let (event_tx, _) = broadcast::channel::<DaemonEvent>(256);
     let exe = std::env::current_exe()?;
+    let event_tx_for_spawn = event_tx.clone();
     let spawn_sync: SpawnFn = Arc::new(move |drive: String| {
         let exe = exe.clone();
-        // Wrap the daemon-orchestrator call. The broadcast tx for
-        // forwarding live IPC events is injected by run_daemon_with_deps
-        // via a closure in production; here we pass a dummy because the
-        // orchestrator currently doesn't actually forward in M3 (M4
-        // wires the full UI event stream).
+        let event_tx = event_tx_for_spawn.clone();
         Box::pin(async move {
-            let (tx, _rx) = broadcast::channel::<DaemonEvent>(1);
-            sync_orchestrator::run(exe, drive, tx).await
+            sync_orchestrator::run(exe, drive, event_tx).await
         })
     });
 
@@ -61,8 +61,21 @@ pub async fn run_daemon() -> Result<()> {
         watcher: Box::new(PollingDeviceWatcher::new_production()),
         spawn_sync,
         schedule_minutes,
+        preset_event_tx: Some(event_tx),
     };
     run_daemon_with_deps(deps).await
+}
+
+/// T2 stub: forwards to the test `spawn_server` for now. T3 replaces
+/// this with the real impl that wires `ipc_server` with the supplied
+/// event_tx + the new-client signal channel.
+async fn spawn_server_with_event_tx(
+    _preset: broadcast::Sender<DaemonEvent>,
+) -> Result<(
+    broadcast::Sender<DaemonEvent>,
+    mpsc::UnboundedReceiver<ClientCommand>,
+)> {
+    spawn_server().await
 }
 
 /// Async closure that runs one sync to completion. Arc-wrapped so the
@@ -79,6 +92,11 @@ pub struct DaemonDeps {
     pub watcher: Box<dyn DeviceWatcher>,
     pub spawn_sync: SpawnFn,
     pub schedule_minutes: u32,
+    /// If Some, the runtime uses this pre-built sender instead of
+    /// constructing its own. Production passes the same one it gave
+    /// to the spawn_sync closure so orchestrator events broadcast on
+    /// the same channel UI clients subscribe to.
+    pub preset_event_tx: Option<broadcast::Sender<DaemonEvent>>,
 }
 
 /// Internal events posted from background sync tasks back to the runtime
@@ -105,7 +123,15 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let mut connected: Option<DetectedIpod> = None;
     let configured_serial = deps.configured_serial;
 
-    let (event_tx, mut cmd_rx) = spawn_server().await?;
+    let (event_tx, mut cmd_rx) = match deps.preset_event_tx {
+        Some(tx) => {
+            // Production: reuse the channel that spawn_sync already
+            // captured a clone of. ipc_server::spawn_server needs to
+            // share the same sender — pass it in.
+            spawn_server_with_event_tx(tx).await?
+        }
+        None => spawn_server().await?, // test path
+    };
     let mut device_rx = deps.watcher.start();
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
     let spawn_sync = deps.spawn_sync;

@@ -49,6 +49,15 @@ pub enum DaemonEvent {
     SyncRejected {
         reason: SyncRejectReason,
     },
+    /// Forwarded sync-subprocess event. `line` is the raw JSON line
+    /// the subprocess emitted on its stdout, unparsed. UI clients
+    /// deserialize it as an M1 `IpcEvent`. Wrapping rather than
+    /// re-modeling keeps the daemon protocol decoupled from the M1
+    /// stdio protocol — bumping M1 doesn't bump daemon-protocol
+    /// semver.
+    SyncEvent {
+        line: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -146,6 +155,17 @@ mod tests {
         let json = r#"{"type":"trigger_sync","source":"manual"}"#;
         let cmd: DaemonCommand = serde_json::from_str(json).unwrap();
         assert!(matches!(cmd, DaemonCommand::TriggerSync { source: TriggerSource::Manual }));
+    }
+
+    #[test]
+    fn sync_event_serializes_with_line_field() {
+        let evt = DaemonEvent::SyncEvent {
+            line: r#"{"type":"track_done"}"#.to_string(),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(json.contains(r#""type":"sync_event""#));
+        assert!(json.contains(r#""line":"{\"type\":\"track_done\"}""#),
+                "got: {json}");
     }
 
     #[test]
