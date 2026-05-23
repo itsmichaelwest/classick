@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "IpodSync.UI (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "IpodSync.UI (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
