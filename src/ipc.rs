@@ -198,9 +198,13 @@ impl IpcEvent {
                 message: m.clone(),
                 recovery_hints: Vec::new(),
             },
-            // M1: reaching Finish naturally means success. Fatal failures
-            // bypass this path via early Err return + non-zero process exit.
-            PE::Finish => IpcEvent::Finish { success: true },
+            // ProgressEvent::Finish now carries the orchestrator's outcome
+            // (Ok → true, Err → false). main.rs is responsible for passing
+            // the right value to Progress::finish(); the IPC backend just
+            // mirrors it. A fatal failure should emit an `error` event first
+            // (so the UI gets the message) and then this `finish` with
+            // success: false; the process exits non-zero shortly after.
+            PE::Finish { success } => IpcEvent::Finish { success: *success },
         })
     }
 }

@@ -10,35 +10,51 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Pre-flight: decide if we're going TUI or plain. Mirrors the logic
-    // Config::resolve uses (--no-tui flag, stdout is a TTY). Needs to be
-    // decided BEFORE logging::init so that, in TUI mode, tracing output is
-    // routed to io::sink() instead of stderr — otherwise GLib WARN lines
-    // (routed through tracing::warn!) leak past the alternate screen and
-    // corrupt the visible terminal below the TUI render.
-    let use_tui = !cli.no_tui && std::io::stdout().is_terminal();
+    // Pre-flight: decide if we're going TUI, plain, or IPC. IPC mode always
+    // wins — when --ipc-mode is set, a GUI frontend owns the presentation
+    // layer and the Rust core just speaks JSON over stdio. TUI is suppressed
+    // regardless of --no-tui / TTY-ness in that case.
+    //
+    // This decision MUST happen BEFORE logging::init so that, in TUI mode,
+    // tracing output is routed to io::sink() instead of stderr (otherwise
+    // GLib WARN lines routed through tracing::warn! leak past the alternate
+    // screen and corrupt the visible terminal below the TUI render), and in
+    // IPC mode tracing goes to a file (stdout is the JSON wire and must
+    // stay clean).
+    let use_tui = !cli.no_tui && !cli.ipc_mode && std::io::stdout().is_terminal();
 
     // Logging next. We use the raw verbose flag from the CLI since Config
-    // resolution may itself prompt through the TUI; we want tracing wired up
-    // before any of that.
-    // NOTE: Wave 3 (Task 3 of Phase 6 M1) will replace these `false` literals
-    // with `cli.ipc_mode` and adjust `use_tui` to be suppressed when ipc_mode
-    // is set. Task 2 ships only the building blocks (signatures + IpcBackend).
-    ipod_sync::logging::init(cli.verbose, use_tui, false);
+    // resolution may itself prompt through the TUI/IPC; we want tracing
+    // wired up before any of that.
+    ipod_sync::logging::init(cli.verbose, use_tui, cli.ipc_mode);
 
-    let (progress, decision_rx) = Progress::start(use_tui, false)?;
+    let (progress, decision_rx) = Progress::start(use_tui, cli.ipc_mode)?;
 
-    // Everything else runs while the TUI is up. Any error from here on
-    // routes through progress.error / progress.prompt before exiting.
+    // Everything else runs while the TUI / IPC backend is up. Any error from
+    // here on routes through progress.error before we tear down. In IPC mode
+    // that becomes an `error` event on the wire; in TUI mode it lands in the
+    // log tail; in plain mode it goes to stderr.
     let result = orchestrator::orchestrate(cli, &progress, &decision_rx);
 
-    // Make sure the TUI tears down even on error. `finish` consumes `progress`,
-    // so it must run after `orchestrate` returns (which only borrows it).
-    // `finish` now returns Result so a panicked TUI thread (e.g. crossterm
-    // setup failure on an odd terminal) is surfaced instead of being silently
-    // swallowed. Prefer the orchestrator's error if both fail — that's the
-    // user's intent error; the TUI thread death is secondary.
-    let finish_result = progress.finish();
+    // On orchestrator failure: surface the full anyhow context chain as an
+    // `error` event BEFORE Finish so the UI has a useful message to display.
+    // `{:#}` formatting walks the context chain (e.g. "manifest write failed:
+    // disk full" instead of just "io error").
+    if let Err(e) = &result {
+        progress.error(format!("{e:#}"));
+    }
+
+    // Tear down the backend. `finish` consumes `progress` and now carries
+    // success so the IPC `finish.success` field agrees with the process exit
+    // code. anyhow's Termination impl maps `Err(_)` to exit code 1 already;
+    // this just makes sure the wire event tells the same story.
+    //
+    // `finish` returns Result so a panicked backend thread (e.g. crossterm
+    // setup failure on an odd terminal, or an IPC stdout write failing
+    // because the UI was killed) is surfaced. Prefer the orchestrator's
+    // error if both fail — that's the user's intent error; backend death is
+    // secondary.
+    let finish_result = progress.finish(result.is_ok());
 
     result.and(finish_result)
 }

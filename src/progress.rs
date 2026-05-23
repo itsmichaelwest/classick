@@ -77,7 +77,12 @@ pub enum ProgressEvent {
     TrackDone,
     Log(String),
     Error(String),
-    Finish,
+    /// Terminal event. `success` reflects whether the orchestrator returned
+    /// `Ok` (true) or `Err` (false). Used by the IPC backend to populate
+    /// `finish.success`, and by the process exit code in main (anyhow's
+    /// `Termination` impl on the Err path already maps to a non-zero exit;
+    /// this just makes sure the Finish event itself agrees).
+    Finish { success: bool },
 }
 
 pub struct Progress {
@@ -187,11 +192,11 @@ impl Progress {
     /// degraded visibly. Force-exit guarantees that "work done" leads to
     /// "process gone" inside a bounded window even if we don't fully
     /// understand the root cause.
-    pub fn finish(mut self) -> Result<()> {
+    pub fn finish(mut self, success: bool) -> Result<()> {
         const JOIN_DEADLINE: Duration = Duration::from_secs(5);
         const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-        let _ = self.sender.send(ProgressEvent::Finish);
+        let _ = self.sender.send(ProgressEvent::Finish { success });
         if let Some(t) = self.thread.take() {
             let deadline = Instant::now() + JOIN_DEADLINE;
             while !t.is_finished() {
@@ -261,7 +266,9 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
             ProgressEvent::TrackDone => {}  // already printed at start
             ProgressEvent::Log(s) => println!("{s}"),
             ProgressEvent::Error(s) => eprintln!("ERROR: {s}"),
-            ProgressEvent::Finish => break,
+            // success bool is ignored in plain mode (the process exit code
+            // conveys it; we don't print a banner either way).
+            ProgressEvent::Finish { .. } => break,
         }
     }
 }
@@ -335,7 +342,7 @@ fn run_ipc(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
     //    Loop ends when we see Finish (normal) or the channel closes (sender
     //    dropped without sending Finish — should not happen in practice).
     for event in rx {
-        let is_finish = matches!(event, ProgressEvent::Finish);
+        let is_finish = matches!(event, ProgressEvent::Finish { .. });
         if let Some(ipc_event) = IpcEvent::from_progress(&event) {
             write_ipc_event(&ipc_event).context("ipc: event write failed")?;
         }
@@ -629,7 +636,9 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
         ProgressEvent::TrackDone => { state.done += 1; }
         ProgressEvent::Log(s) => state.push_log(s),
         ProgressEvent::Error(s) => state.push_log(format!("ERROR: {s}")),
-        ProgressEvent::Finish => { *finished = true; }
+        // TUI doesn't surface success/failure directly here — the process
+        // exit code carries it. We just tear down the draw loop.
+        ProgressEvent::Finish { .. } => { *finished = true; }
     }
 }
 

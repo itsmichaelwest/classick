@@ -67,6 +67,17 @@ pub fn ensure_source_or_wizard(
     progress: &Progress,
     decision_rx: &Receiver<Decision>,
 ) -> Result<()> {
+    // In IPC mode, the GUI owns first-launch onboarding (M2). The core
+    // expects the source to already be resolvable from --source, the env
+    // var, or persisted config.toml; if it isn't, config::resolve will fail
+    // with its standard error which is then surfaced to the GUI as an
+    // `error` IPC event. Crucially, we MUST NOT call wizard::run here —
+    // it issues form prompts on the same channel the UI is driving, but
+    // the UI's first-launch dialog (CoreLocator / source picker in T8)
+    // isn't wired to reply to mid-orchestrate form events in M1.
+    if cli.ipc_mode {
+        return Ok(());
+    }
     // Quick check: if CLI provided source, we don't need anything.
     if cli.source.is_some() {
         return Ok(());
