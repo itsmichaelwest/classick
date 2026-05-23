@@ -145,19 +145,41 @@ public sealed class AppController : IAsyncDisposable
                 OnSummary(summary);
                 break;
             case TrackStartEvent ts:
+                // TrackStart only fires when real apply work begins. ProgressPage
+                // should already exist (created by OnSummary on a non-zero plan).
                 EnsureProgressPage().ViewModel.ApplyTrackStart(ts);
                 break;
             case TrackDoneEvent:
                 EnsureProgressPage().ViewModel.ApplyTrackDone();
                 break;
             case LogEvent log:
-                EnsureProgressPage().ViewModel.ApplyLog(log);
+                // Append to ProgressPage's log tail IF it exists. Don't create
+                // a blank ProgressPage just to host a log line — that's what
+                // the user perceived as "hang" on Quit/empty-Apply (the screen
+                // navigated away from Review to an empty-looking sync page).
+                if (_progressPage is not null)
+                {
+                    _progressPage.ViewModel.ApplyLog(log);
+                }
+                else
+                {
+                    Log($"app: dropping log (no ProgressPage): {log.Message}");
+                }
                 break;
             case ErrorEvent err:
-                EnsureProgressPage().ViewModel.ApplyError(err);
+                // Same rationale as LogEvent. M1: silently drop if no
+                // ProgressPage. M2 can route to a dialog when appropriate.
+                if (_progressPage is not null)
+                {
+                    _progressPage.ViewModel.ApplyError(err);
+                }
+                else
+                {
+                    Log($"app: dropping error (no ProgressPage): {err.Message}");
+                }
                 break;
             case FinishEvent fin:
-                EnsureProgressPage().ViewModel.ApplyFinish(fin);
+                await OnFinishAsync(fin);
                 break;
             case PromptEvent or FormEvent:
                 // M1 limitation: the UI does not render interactive prompts
@@ -174,6 +196,25 @@ public sealed class AppController : IAsyncDisposable
                     await _coreProcess.DisposeAsync();
                 }
                 break;
+        }
+    }
+
+    private async Task OnFinishAsync(FinishEvent fin)
+    {
+        if (_progressPage is not null)
+        {
+            // Real sync happened; show the done state. User clicks Close on
+            // ProgressPage to return to MainPage (handled in EnsureProgressPage's
+            // CloseRequested wiring).
+            _progressPage.ViewModel.ApplyFinish(fin);
+        }
+        else
+        {
+            // No sync work happened (Quit, DryRun, or Apply with empty plan).
+            // Skip the empty ProgressPage and return directly to MainPage.
+            Log($"app: Finish with no ProgressPage; navigating back to MainPage (success={fin.Success})");
+            await DisposeAsync();
+            _frame.Content = new MainPage();
         }
     }
 
@@ -211,6 +252,13 @@ public sealed class AppController : IAsyncDisposable
 
     private void OnSummary(SummaryEvent summary)
     {
+        if (summary.TotalPlanned == 0)
+        {
+            // No work to do. Don't navigate to ProgressPage; the imminent
+            // Finish event will route us back to MainPage cleanly.
+            Log("app: Summary with total_planned=0; skipping ProgressPage navigation");
+            return;
+        }
         var page = EnsureProgressPage();
         if (_stashedHeader is not null)
         {
