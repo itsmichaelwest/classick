@@ -2,9 +2,45 @@
 
 Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+## Phase 6 M2 gate (2026-05-24) — PASS
+
+- **Result:** PASS. All 4 M2 scenarios validated.
+- **Scenario M2-1 (fresh install + wizard):** Wizard opened, 3 steps completed cleanly, source folder + iPod identity persisted to `config.toml` under `[ipod_identity]` (serial + model_label).
+- **Scenario M2-2 (re-launch with config):** App started hidden in tray (no wizard window). Tray icon appeared in notification area. Right-click → Quit worked.
+- **Scenario M2-3 (Quit cleanly exits both processes):** After Quit, neither `IpodSync.UI.exe` nor `ipod-sync.exe` (daemon) remained in Task Manager.
+- **Scenario M2-4 (build + tests):** 129 Rust lib tests + 47 C# tests passing.
+- **One real bug found + fixed during gate:** First smoke run, app exited after wizard finished instead of settling into tray. Root cause: WinUI 3 lifetime gotcha (see next entry). Fix: commit `4e5c011`.
+
+## WinUI 3 tray-only lifetime: TaskbarIcon must be an XAML resource (2026-05-24)
+
+- **The trap:** WinUI 3 apps auto-exit when the last window closes UNLESS a long-lived lifetime anchor exists. Creating an `H.NotifyIcon.TaskbarIcon` in C# code (e.g. `new TaskbarIcon()` inside a controller's `Initialize()`) does NOT anchor the Application's lifetime. The tray icon appears briefly then the process exits.
+- **The fix:** Define the `TaskbarIcon` as an `<Application.Resources>` entry in `App.xaml` and pull it via `Application.Current.Resources["TrayIcon"]` + `ForceCreate()` in `OnLaunched`. Application-resource lifetime keeps the dispatcher alive. The canonical reference is the H.NotifyIcon "Windowless" sample (`HavenDV/H.NotifyIcon` repo, `src/apps/H.NotifyIcon.Apps.WinUI.Windowless/`).
+- **Two more gotchas from the same library:** (1) Use `ContextMenuMode="SecondWindow"` not `"PopupMenu"` — per their issue #66, PopupMenu mode leaks the process on Exit. (2) Use `Environment.Exit(0)` not `Application.Current.Exit()` to actually terminate — same issue #66.
+
+## Phase 6 M2 parallel-agent races: small-team gains from named-file staging (2026-05-24)
+
+- **Wave 2 (5 parallel implementers) hit two index races:** (a) T13's commit absorbed T3's already-staged files, mis-attributing them; (b) T2 was BLOCKED because the plan said "don't touch src/config.rs" but adding fields to `PersistedConfig` mechanically breaks `Config::to_persisted`'s field-by-field struct literal.
+- **Lessons:** (a) Named-file `git add` prevents agents from stealing *others'* files but doesn't prevent commits from absorbing your *own* staged files when another agent commits between your `add` and `commit`. A worktree-per-agent or commit-mutex would be the durable fix; for solo projects, accept the occasional mis-attribution and document in commit body. (b) Plans that constrain which files an agent can touch must verify the constraint is satisfiable — `PersistedConfig` couldn't grow without src/config.rs growing too. Best practice for plan authors: when adding a struct field, identify every literal that constructs the struct and include those files in the task scope.
+- **Wave structure that worked: 2 parallel implementers per wave is safe; 4-5 is risky.** Waves 3, 4, 5 of M2 (each 2 implementers) all completed without races.
+
+## Phase 6 M2 — intentional M2 limitations (carry-forward to M3)
+
+- **TriggerSync command:** returns `sync_rejected { reason: not_configured }` always. Real sync orchestration is M3.
+- **SubscribeDeviceEvents / UnsubscribeDeviceEvents commands:** no-op responses. The wizard uses C#-side drive-letter polling instead (via `ScanLocalDrives` in `WizardWindow.xaml.cs`). M3 adds the real `DeviceWatcher` trait + Windows impl (via `windows-rs` SetupDi notifications), then the daemon emits real `device_connected` events that subscribed clients receive.
+- **Tray icon states:** only Idle/Offline implemented; Syncing/Error placeholders point at `tray-idle.ico` (same file). M3 wires the state transitions; M4/M5 ship differentiated icons.
+- **Tray menu:** only Quit. Sync Now (M3), Settings (M4), Status popover (M4) come later.
+- **NotifyOn setting + notifications:** persisted but not consumed; toast wiring is M4 (`AppNotificationManager`).
+- **Schedule:** `schedule_minutes` persisted but no timer fires; SyncScheduler lands in M3.
+
 ## TUI thread join: bounded-time + force-exit (2026-05-24)
 
 - **`Progress::finish` now has a 5-second join deadline.** If the TUI thread doesn't reach a terminal state within that window after we send `ProgressEvent::Finish`, we `eprintln!` a warning and `std::process::exit(2)` instead of waiting forever. Driver: Phase 3.z Gate Scenario 5 produced a 2-hour zombie process (PID 39196, 60s CPU = idle, responsive but no window). The catastrophic 1275-remove apply loop completed, but the TUI thread never returned. Most likely crossterm's `LeaveAlternateScreen` or `disable_raw_mode` wedged on a Windows console handle after the gauge/panel rendering had visibly degraded earlier in the run. Couldn't reproduce safely (would mean wiping the iPod again) so we fixed defensively: poll `JoinHandle::is_finished()` with a 50ms tick, force-exit on timeout. If the warning fires repeatedly, the root cause matters and should be investigated; until then the bound is good insurance.
+
+## Phase 6 M1 Wave 3 — parallel-agent git index race (2026-05-24)
+
+- **Dispatched 4 agents simultaneously (T3 Rust, T6 ReviewVM, T7 ProgressVM, T8 CoreLocator); two of them collided on the git index.** T7 finished, ran `git add` for its 4 files, then went off to verify. Meanwhile T8 also ran `git add` of its 3 files and committed — sweeping T7's already-staged files into T8's commit. Net result: T7's ProgressViewModel + ProgressPage + tests live in commit `d3b966f` under T8's "CoreLocator" message. Code is correct, tests pass; only commit hygiene is wrong.
+- **Lesson: for 3+ parallel agents touching the same workspace, use git worktrees.** The `superpowers:using-git-worktrees` skill exists; future parallel waves should isolate each agent in its own worktree so the shared index can't race. The 2-agent waves we've run successfully (Wave 1, Wave 2) didn't hit this because the windows were narrow; 4-way fan-out widens the race.
+- **Wasn't worth rewriting history to fix.** Interactive rebase to split `d3b966f` would mutate 3 downstream commits and risks losing attribution worse than the original race. For a solo-developer project the cost-benefit isn't there. Documented here so a future audit can find Task 7's work.
 
 ## Phase 3 gate (2026-05-24) — PASS (5/6 driven; refalac optional)
 
