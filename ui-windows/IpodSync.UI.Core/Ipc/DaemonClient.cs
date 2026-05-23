@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -123,27 +124,51 @@ public sealed class DaemonClient : IAsyncDisposable
         finally { writer.TryComplete(); }
     }
 
+    private static readonly HashSet<string> DaemonEventDiscriminators = new(StringComparer.Ordinal)
+    {
+        "status_update", "config_update", "history_update",
+        "device_connected", "device_disconnected", "sync_rejected",
+    };
+
     private static bool TryDeserialize(string line, out object? evt)
     {
-        // Try the M1 IpcEvent hierarchy first (it owns Hello + all sync-
-        // subprocess events). Then try DaemonEvent (status/config/etc.).
-        try
-        {
-            evt = JsonSerializer.Deserialize<IpcEvent>(line);
-            if (evt is not null) return true;
-        }
-        catch (JsonException) { /* fall through */ }
-        try
-        {
-            evt = JsonSerializer.Deserialize<DaemonEvent>(line);
-            if (evt is not null) return true;
-        }
-        catch (JsonException jx)
-        {
-            Debug.WriteLine($"daemon-client: unparseable line `{line}`: {jx.Message}");
-        }
+        // Peek the `type` discriminator and route to the right polymorphic
+        // hierarchy. Trying one type then falling back via catch doesn't
+        // work cleanly: System.Text.Json throws NotSupportedException (not
+        // JsonException) on unknown JsonDerivedType discriminators, and
+        // an unhandled NotSupportedException would tear down the reader
+        // loop. Peek-then-dispatch is both faster and exception-safe.
         evt = null;
-        return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            if (!doc.RootElement.TryGetProperty("type", out var typeEl) ||
+                typeEl.ValueKind != JsonValueKind.String)
+            {
+                Debug.WriteLine($"daemon-client: line missing string `type`: {line}");
+                return false;
+            }
+            var discriminator = typeEl.GetString()!;
+            if (DaemonEventDiscriminators.Contains(discriminator))
+            {
+                evt = JsonSerializer.Deserialize<DaemonEvent>(line);
+            }
+            else
+            {
+                // Everything else (hello, header, summary, review, prompt,
+                // form, track_start, track_done, log, error, finish) is
+                // an M1 IpcEvent forwarded by the daemon from the sync
+                // subprocess. Unknown discriminators land here too and
+                // produce a debug log instead of a thrown exception.
+                evt = JsonSerializer.Deserialize<IpcEvent>(line);
+            }
+            return evt is not null;
+        }
+        catch (Exception e) when (e is JsonException or NotSupportedException)
+        {
+            Debug.WriteLine($"daemon-client: unparseable line `{line}`: {e.Message}");
+            return false;
+        }
     }
 
     public async Task SendAsync(DaemonCommand command, CancellationToken cancellationToken = default)
