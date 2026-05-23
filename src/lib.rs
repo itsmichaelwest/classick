@@ -2,6 +2,7 @@ pub mod apply_loop;
 pub mod cli;
 pub mod config;
 pub mod config_file;
+pub mod daemon;
 pub mod ffi;
 pub mod ipc;
 pub mod ipod;

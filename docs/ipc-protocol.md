@@ -636,3 +636,44 @@ Deliberately **not** in v1 — listed so they don't accidentally creep in:
 | 1.0.0    | 0.1.x        | 0.1.x      | Initial M1 | Windows-only UI; cross-platform TUI fallback remains. |
 
 Bumps will append rows here. Don't edit historical rows.
+
+---
+
+## v1.1.0 — Daemon extensions (UI ↔ daemon channel)
+
+When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows)
+or Unix domain socket `~/.ipod-sync/daemon.sock` (macOS/Linux), the
+daemon emits `hello` with `protocol_version = "1.1.0"`. The v1.0.0 envelope
+shape is unchanged; v1.1.0 only adds new event and command types.
+
+### New events (daemon → UI)
+
+| Type | Fields |
+|---|---|
+| `status_update` | `state` (idle/syncing), `configured` (bool), `ipod_connected` (bool), `last_sync` (HistoryEntry?), `next_scheduled_unix_secs` (u64?) |
+| `config_update` | `source` (str?), `daemon` (DaemonSettings?), `ipod` (IpodIdentity?) |
+| `history_update` | `entries` (HistoryEntry[]) |
+| `device_connected` | `serial` (str), `model_label` (str), `drive` (str) |
+| `device_disconnected` | `serial` (str) |
+| `sync_rejected` | `reason` ("already_syncing" | "no_ipod" | "not_configured") |
+
+### New commands (UI → daemon)
+
+| Type | Fields |
+|---|---|
+| `get_status` | (none) — replies with `status_update` |
+| `get_config` | (none) — replies with `config_update` |
+| `save_config` | `source?` (str), `daemon?` (DaemonSettings), `ipod?` (IpodIdentity) — replies with `config_update` |
+| `trigger_sync` | `source` ("manual"/"scheduled"/"plug_in") — replies with `sync_rejected` or nothing (sync proceeds, sync events forwarded) |
+| `get_history` | `limit` (default 10) — replies with `history_update` |
+| `subscribe_device_events` | (none) — daemon starts forwarding `device_connected` events for any iPod, not just configured |
+| `unsubscribe_device_events` | (none) |
+| `shutdown` | (none) — daemon exits cleanly after draining current sync |
+
+### Forwarded sync-subprocess events
+
+When the daemon is running a sync, it spawns `ipod-sync --ipc-mode --apply`
+and forwards every v1.0.0 IpcEvent (`header`, `summary`, `review`, `prompt`,
+`form`, `track_start`, `track_done`, `log`, `error`, `finish`) verbatim to
+subscribed UI clients. UI clients see daemon events and sync events on the
+same pipe and pattern-match on `type`.
