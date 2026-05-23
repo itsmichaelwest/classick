@@ -10,3 +10,5 @@ pub mod ipc_server;
 pub mod runtime;
 pub mod scheduler;
 pub mod state;
+#[cfg(windows)]
+pub mod sync_orchestrator;

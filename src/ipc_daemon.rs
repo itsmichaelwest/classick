@@ -64,6 +64,7 @@ pub enum SyncRejectReason {
     AlreadySyncing,
     NoIpod,
     NotConfigured,
+    TooManyFailures,
 }
 
 /// Commands from UI → daemon.
