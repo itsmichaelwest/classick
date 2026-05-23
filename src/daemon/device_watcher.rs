@@ -22,10 +22,11 @@ pub enum DeviceEvent {
 }
 
 /// Production-trait for device watchers. `start` consumes the watcher
-/// and returns a stream of events. Closing the receiver should stop
-/// the watcher (impl decides how).
+/// (via `Box<Self>` so the trait is object-safe) and returns a stream
+/// of events. Closing the receiver should stop the watcher (impl
+/// decides how).
 pub trait DeviceWatcher: Send + 'static {
-    fn start(self) -> mpsc::Receiver<DeviceEvent>;
+    fn start(self: Box<Self>) -> mpsc::Receiver<DeviceEvent>;
 }
 
 /// Wraps a `DeviceEvent` stream and suppresses duplicate Connected
@@ -89,15 +90,16 @@ impl PollingDeviceWatcher {
 }
 
 impl DeviceWatcher for PollingDeviceWatcher {
-    fn start(mut self) -> mpsc::Receiver<DeviceEvent> {
+    fn start(self: Box<Self>) -> mpsc::Receiver<DeviceEvent> {
         let (tx, rx) = mpsc::channel::<DeviceEvent>(32);
+        let mut me = *self;
         tokio::spawn(async move {
             let mut last: Option<DetectedIpod> = None;
-            let mut ticker = tokio::time::interval(self.interval);
+            let mut ticker = tokio::time::interval(me.interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
-                let current = (self.scan)();
+                let current = (me.scan)();
                 match (&last, &current) {
                     (None, Some(now)) => {
                         if tx.send(DeviceEvent::Connected(now.clone())).await.is_err() { return; }
@@ -205,7 +207,7 @@ mod tests {
             Box::new(scanner),
             Duration::from_millis(100),
         );
-        let mut rx = watcher.start();
+        let mut rx = Box::new(watcher).start();
         tokio::time::sleep(Duration::from_millis(150)).await;
         let event = rx.recv().await.expect("event");
         match event {
@@ -225,7 +227,7 @@ mod tests {
             Box::new(scanner),
             Duration::from_millis(100),
         );
-        let mut rx = watcher.start();
+        let mut rx = Box::new(watcher).start();
         // Drain Connected
         tokio::time::sleep(Duration::from_millis(150)).await;
         let first = rx.recv().await.unwrap();
@@ -249,7 +251,7 @@ mod tests {
             Box::new(scanner),
             Duration::from_millis(100),
         );
-        let mut rx = watcher.start();
+        let mut rx = Box::new(watcher).start();
         tokio::time::sleep(Duration::from_millis(150)).await;
         let first = rx.recv().await.unwrap();
         assert!(matches!(first, DeviceEvent::Connected(d) if d.serial == "0xABC"));
