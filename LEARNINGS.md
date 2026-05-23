@@ -301,3 +301,28 @@ Driven via Bash pipe (forces plain mode since stdout is not a TTY). Plain mode e
 ### Phase 3.z carry-forward
 
 User flagged: "we might want to make the UX a bit more interactive so that all interactions are done in the TUI (even errors, etc.)" — captured as discrete roadmap item "Phase 3.z — TUI-first error UX" in `docs/superpowers/specs/2026-05-18-post-v1-roadmap.md`.
+
+## Phase 6 M3 — paused mid-smoke (2026-05-25)
+
+- **Status:** Rust implementation complete (149 lib + 3 integration tests pass; PollingDeviceWatcher, SyncScheduler, SyncOrchestrator with >50% bail, runtime select! loop with auto-sync, manual TriggerSync, mid-sync detach Aborted, broadcast device events). C# side has the tray-state machine, Sync Now menu, wizard-via-daemon-events. NOT tagged `phase-6-m3-complete` — smoke surfaced UX bugs that are easier to debug once M4 lands the visible status surface (popover + toasts).
+- **Bugs caught + fixed during smoke (in order):**
+  1. `d451294` — `spawn_sync_session` emitted Syncing StatusUpdate but no Idle on completion; tooltip stuck on "Syncing...". Fixed by broadcasting Idle StatusUpdate at the end of the session.
+  2. `e88c6b9` — App.xaml.cs only started the tray event loop in the configured-no-wizard branch. After first-run wizard close the tray loop never started, so all subsequent daemon broadcasts went unread. Fixed by hooking `StartTrayEventLoop` into `WizardWindow.Closed`.
+  3. `e9a54a8` — DaemonClient.TryDeserialize tried `IpcEvent` first via JsonPolymorphic; System.Text.Json throws `NotSupportedException` (NOT `JsonException`) on unknown discriminators. The catch only caught JsonException, so the first daemon-only event killed the reader loop entirely. Fixed by peek-the-`type`-discriminator-then-dispatch.
+  4. `0aaee57` — `spawn_sync_session` was `.await`ed inline inside the runtime's `tokio::select!` loop, so the whole loop blocked for the duration of a sync (potentially hours for a real library). All client commands queued, all device events buffered, no broadcasts during sync. Fixed by fire-and-forget: orchestrator runs as a `tokio::spawn`'d task; completion ships back via a new `InternalEvent::SyncCompleted` mpsc channel; a 4th select arm handles state mutation + history append + post-sync Idle broadcast.
+- **Open M3 questions to verify when M4 lands:**
+  - Auto-sync on already-plugged-in iPod at daemon launch (initial broadcasts go out before UI subscribes; the M4 popover's GetStatus-on-open will paper over this for the user, and the new non-blocking runtime means GetStatus actually replies promptly).
+  - Mid-sync flap from polling watcher's transient SysInfo read failures (libgpod holds writes during sync; scan_drive_for_ipod returns None briefly). Without a visible status surface, hard to tell if flap is happening. M4's activity feed will make this immediately visible.
+  - tray-syncing.ico and tray-error.ico are M3 placeholders (copies of tray-idle.ico). Real artwork is M5 polish.
+  - `format_iso8601` in runtime.rs is a placeholder (`@{unix_secs}`). M4 popover formats timestamps for display, so swap in proper RFC3339 emission then.
+- **What works definitively:**
+  - Daemon detects iPod, spawns sync subprocess, sync writes real tracks to iPod (verified via my own probe-launch when the daemon synced a 1275-track library against the user's actual hardware mid-debug).
+  - Wizard subscribes to daemon DeviceConnected events and identifies the iPod when plugged in.
+  - 50% per-track failure bail-out logic is unit-tested.
+  - Runtime stays responsive during long-running syncs (new integration test).
+
+## Phase 6 — diagnostic helper: scripts/probe-daemon.ps1 (2026-05-25)
+
+- **Purpose:** Connect to `\.\pipe\ipod-sync`, dump every event, and probe with `get_status`. Bypasses the C# UI entirely so we can see exactly what the daemon emits on the wire.
+- **When to use:** Any time the UI seems to misrepresent daemon state — proves whether the bug is daemon-side or client-side.
+- **Usage:** `pwsh F:\repos\ipod-sync\scripts\probe-daemon.ps1`
