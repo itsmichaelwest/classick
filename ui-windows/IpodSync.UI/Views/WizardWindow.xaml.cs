@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 using IpodSync_UI.Ipc;
 using IpodSync_UI.ViewModels;
@@ -10,11 +11,11 @@ using WinRT.Interop;
 namespace IpodSync_UI.Views;
 
 /// <summary>
-/// M2 first-launch wizard. Hosts a <see cref="WizardViewModel"/> wired with:
+/// M3 first-launch wizard. Hosts a <see cref="WizardViewModel"/> wired with:
 /// <list type="bullet">
-///   <item><description>A local-drive scan func that mirrors <c>src/ipod/device.rs::scan_for_ipod</c>
-///     on the C# side. M2 uses in-process polling; M3 will replace this with
-///     daemon-emitted device events.</description></item>
+///   <item><description>A device-wait func that subscribes to daemon
+///     <see cref="SubscribeDeviceEventsCommand"/> and awaits the next
+///     <see cref="DeviceConnectedEvent"/> from <see cref="DaemonClient.Events"/>.</description></item>
 ///   <item><description>A save-config func that sends a <see cref="SaveConfigCommand"/>
 ///     through the persistent <c>App.Daemon</c> client.</description></item>
 /// </list>
@@ -32,79 +33,52 @@ public sealed partial class WizardWindow : Window
     public WizardWindow()
     {
         ViewModel = new WizardViewModel(
-            scanFunc: ScanForIpodViaDaemon,
-            sendConfigFunc: SaveConfigViaDaemon);
-        ViewModel.WizardFinished += OnWizardFinished;
+            waitForDeviceFunc: WaitForDeviceFromDaemonAsync,
+            sendConfigFunc: SendSaveConfigAsync);
+        // Note: WinUI 3 Window does not have a DataContext property.
+        // The XAML uses x:Bind ViewModel.* which references the
+        // public ViewModel property on this code-behind directly.
+        ViewModel.WizardFinished += () => DispatcherQueue.TryEnqueue(Close);
+        this.Closed += (_, _) => ViewModel.CancelWait();
         this.InitializeComponent();
     }
 
-    private IpodIdentityCandidate? ScanForIpodViaDaemon()
+    private async Task<IpodIdentityCandidate?> WaitForDeviceFromDaemonAsync(CancellationToken ct)
     {
-        // M2: synchronous polling via the daemon. The wizard sends a
-        // SubscribeDeviceEvents command (M3 wires actual events) then
-        // immediately uses the M2 polling fallback through SaveConfig's
-        // implicit detection. For M2 simplicity, fall back to scanning
-        // drive letters in-process.
-        // M3 will replace this with daemon-emitted device events.
-        return ScanLocalDrives();
-    }
+        var daemon = App.Daemon;
+        if (daemon is null) return null;
 
-    private static IpodIdentityCandidate? ScanLocalDrives()
-    {
-        for (char letter = 'A'; letter <= 'Z'; letter++)
+        await daemon.SendAsync(new SubscribeDeviceEventsCommand(), ct);
+        try
         {
-            var drive = $"{letter}:\\";
-            if (!System.IO.Directory.Exists(drive)) continue;
-            var sysInfo = System.IO.Path.Combine(drive, "iPod_Control", "Device", "SysInfo");
-            if (!System.IO.File.Exists(sysInfo)) continue;
-            try
+            while (!ct.IsCancellationRequested)
             {
-                var text = System.IO.File.ReadAllText(sysInfo);
-                var serial = ParseField(text, "FirewireGuid");
-                if (serial is null) continue;
-                var model = ParseField(text, "ModelNumStr") ?? "";
-                var label = DescribeModel(model);
-                return new IpodIdentityCandidate(serial, label, drive);
+                var evt = await daemon.Events.ReadAsync(ct);
+                if (evt is DeviceConnectedEvent dc)
+                {
+                    return new IpodIdentityCandidate(dc.Serial, dc.ModelLabel, dc.Drive);
+                }
+                // Other event types are ignored here — App.xaml.cs may also
+                // be reading from the same channel; both must consume one
+                // event per loop. M4 introduces a proper event router; for
+                // M3 the wizard owns the channel exclusively while open.
             }
-            catch { /* skip */ }
+            return null;
         }
-        return null;
-    }
-
-    private static string? ParseField(string text, string key)
-    {
-        foreach (var line in text.Split('\n'))
+        finally
         {
-            var trimmed = line.Trim();
-            if (trimmed.StartsWith(key, StringComparison.OrdinalIgnoreCase))
-            {
-                var rest = trimmed.Substring(key.Length).TrimStart(':', ' ').Trim();
-                if (!string.IsNullOrEmpty(rest)) return rest;
-            }
+            try { await daemon.SendAsync(new UnsubscribeDeviceEventsCommand()); } catch { }
         }
-        return null;
     }
 
-    private static string DescribeModel(string modelNum)
+    private async Task SendSaveConfigAsync(SaveConfigPayload payload)
     {
-        var upper = modelNum.TrimStart('x').ToUpperInvariant();
-        return upper switch
-        {
-            "MB029" or "MB147" or "MB565" => $"iPod Classic 7G ({upper})",
-            _ when !string.IsNullOrEmpty(upper) => $"iPod ({upper})",
-            _ => "iPod (model unknown)",
-        };
-    }
-
-    private async Task SaveConfigViaDaemon(SaveConfigPayload payload)
-    {
-        if (App.Daemon is null) return;
-        await App.Daemon.SendAsync(new SaveConfigCommand(
+        var daemon = App.Daemon;
+        if (daemon is null) return;
+        await daemon.SendAsync(new SaveConfigCommand(
             Source: payload.Source,
             Ipod: new IpodIdentity(payload.IpodSerial, payload.IpodModelLabel)));
     }
-
-    private void OnWizardFinished() => this.Close();
 
     private async void OnBrowseClick(object sender, RoutedEventArgs e)
     {
