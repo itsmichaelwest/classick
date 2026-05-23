@@ -325,6 +325,15 @@ fn run_tui(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
         // Allow Ctrl+C / 'q' to bail out of the TUI (caller still owns sync flow).
         if crossterm::event::poll(Duration::from_millis(80))? {
             if let Event::Key(key) = crossterm::event::read()? {
+                // Windows crossterm fires key events on Press AND Release by
+                // default; without this filter, every keystroke double-fires
+                // ('s' becomes "ss" in form inputs, '1' picks option twice in
+                // prompts). KeyEventKind::Repeat is also filtered to keep
+                // held-down keys from runaway-repeating in our discrete-action
+                // dispatch (we'd rather the user press again deliberately).
+                if key.kind != crossterm::event::KeyEventKind::Press {
+                    continue;
+                }
                 // Dispatch order matches render precedence: form first, then
                 // prompt, then review, then the global 'q' shortcut.
                 if let Some(form) = state.form.as_mut() {
@@ -668,7 +677,8 @@ fn render_form(f: &mut ratatui::Frame, form: &FormState) {
         .constraints([
             Constraint::Length(4),  // label / header
             Constraint::Length(3),  // input box
-            Constraint::Min(3),     // hint
+            Constraint::Length(3),  // hint (1 line + borders; was Min(3) which ate the rest)
+            Constraint::Min(0),     // spacer to absorb the rest of the screen
         ])
         .split(f.area());
 
@@ -679,8 +689,12 @@ fn render_form(f: &mut ratatui::Frame, form: &FormState) {
         chunks[0],
     );
 
+    // Trailing underscore stands in for a visible cursor — the real terminal
+    // cursor is hidden during the alternate-screen TUI session, so without
+    // this the empty input box looks dead.
+    let input_display = format!("{}_", form.input);
     f.render_widget(
-        Paragraph::new(form.input.as_str())
+        Paragraph::new(input_display)
             .style(Style::default().add_modifier(Modifier::BOLD))
             .block(Block::default().borders(Borders::ALL).title(" input ")),
         chunks[1],
