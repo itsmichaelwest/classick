@@ -3,4 +3,6 @@
 //! See `docs/superpowers/specs/2026-05-24-phase-6-daemon-model-design.md`.
 
 pub mod history;
+#[cfg(windows)]
+pub mod ipc_server;
 pub mod state;

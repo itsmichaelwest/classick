@@ -14,7 +14,7 @@ pub const DAEMON_PROTOCOL_VERSION: &str = "1.1.0";
 
 /// Events from daemon → UI clients (in addition to forwarded sync-
 /// subprocess events from `src/ipc.rs`).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonEvent {
     Hello {
