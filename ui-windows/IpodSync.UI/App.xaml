@@ -26,6 +26,18 @@
             <XamlUICommand x:Key="SyncNowCommand" Label="Sync Now" Description="Sync Now" />
 
             <!--
+                Settings command surfaced through the tray context menu.
+                M4 wires this to opening the SettingsWindow.
+            -->
+            <XamlUICommand x:Key="SettingsCommand" Label="Settings" Description="Settings" />
+
+            <!--
+                Left-click on the tray icon opens the status popover.
+                Bound to TaskbarIcon.LeftClickCommand below.
+            -->
+            <XamlUICommand x:Key="OpenPopoverCommand" Label="Open" Description="Open status popover" />
+
+            <!--
                 Tray icon defined here (NOT in C#) so it inherits
                 Application-resource lifetime. That lifetime anchor is what
                 keeps the process alive after the last window closes in
@@ -41,10 +53,12 @@
                 ToolTipText="ipod-sync · idle"
                 ContextMenuMode="SecondWindow"
                 NoLeftClickDelay="True"
+                LeftClickCommand="{StaticResource OpenPopoverCommand}"
                 IconSource="ms-appx:///Assets/tray-idle.ico">
                 <tb:TaskbarIcon.ContextFlyout>
                     <MenuFlyout>
                         <MenuFlyoutItem Command="{StaticResource SyncNowCommand}" />
+                        <MenuFlyoutItem Command="{StaticResource SettingsCommand}" />
                         <MenuFlyoutSeparator />
                         <MenuFlyoutItem Command="{StaticResource QuitCommand}" />
                     </MenuFlyout>
