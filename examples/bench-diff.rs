@@ -39,6 +39,7 @@ fn main() -> Result<()> {
     let mut fp_calls = 0usize;
     let mut audio_fp_calls = 0usize;
     let t2 = Instant::now();
+    // TODO Phase 3 Task 6: thread config.encoder + config.force_reencode here.
     let actions = manifest::diff(
         &manifest,
         &sources,
@@ -50,6 +51,8 @@ fn main() -> Result<()> {
             audio_fp_calls += 1;
             source::audio_fingerprint(p)
         },
+        "ffmpeg",
+        false,
     )?;
     let t_diff = t2.elapsed();
     println!(

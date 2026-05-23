@@ -50,11 +50,18 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // 4. Diff. Pass `source::fingerprint` as the slow-path hash callback;
     //    it only fires for entries whose (mtime, size) doesn't match the
     //    manifest, so the steady-state "nothing changed" run is stat-only.
+    // TODO Phase 3 Task 6: thread config.encoder + config.force_reencode here.
+    // Hardcoding ("ffmpeg", false) preserves Phase 2 behavior exactly — the
+    // default target encoder matches what apply_loop writes for fresh entries,
+    // and force-off + the "unknown" carve-out means Phase 2 manifests upgrade
+    // without spurious re-encodes.
     let actions = manifest::diff(
         &manifest,
         &sources,
         source::fingerprint,
         source::audio_fingerprint,
+        "ffmpeg",
+        false,
     )?;
     let (add, modify, metadata_only, remove, unchanged) = count_actions(&actions);
 
@@ -575,6 +582,11 @@ pub(crate) fn do_metadata_only(
         ipod_relpath: entry.ipod_relpath.clone(),
         source_known: true,
         audio_fingerprint: entry.audio_fingerprint.clone(),
+        // MetadataOnly preserves the iPod-side file body verbatim, so the
+        // encoder identity is unchanged. Copy from the existing entry.
+        encoder: entry.encoder.clone(),
+        encoder_version: entry.encoder_version.clone(),
+        source_format: entry.source_format.clone(),
     })
 }
 
@@ -669,6 +681,14 @@ pub(crate) fn entry_from(
         ipod_relpath: handle.ipod_relpath.clone(),
         source_known: true,
         audio_fingerprint: audio_fingerprint.to_string(),
+        // TODO Phase 3 Task 6: thread the ResolvedEncoder { name, version }
+        // and probe.codec_name through here. For now we hard-code Phase 2's
+        // historical reality: ffmpeg was the only encoder, FLAC the only
+        // source. That keeps a fresh-on-disk entry encoder-matched against
+        // the default target ("ffmpeg") so no spurious re-encode fires.
+        encoder: "ffmpeg".to_string(),
+        encoder_version: String::new(),
+        source_format: "flac".to_string(),
     }
 }
 
@@ -683,6 +703,13 @@ pub(crate) fn build_rebuild_manifest(db: &OwnedDb) -> Manifest {
         ipod_relpath: h.ipod_relpath,
         source_known: false,
         audio_fingerprint: String::new(),
+        // Rebuilt entries have no source file to introspect — encoder and
+        // source_format are genuinely unknown. The encoder-mismatch carve-out
+        // for "unknown" keeps these untouched on first run after rebuild,
+        // and they'll get refilled on the next Modify via entry_from.
+        encoder: "unknown".to_string(),
+        encoder_version: String::new(),
+        source_format: "flac".to_string(),
     }).collect();
     // last_source_root is intentionally None: the iPod's DB doesn't carry
     // the original source library root. The next normal sync's

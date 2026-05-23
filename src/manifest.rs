@@ -47,9 +47,27 @@ pub struct ManifestEntry {
     /// orchestrator populates this field on the resulting re-write.
     #[serde(default)]
     pub audio_fingerprint: String,
+    /// One of: "ffmpeg" | "refalac" | "passthrough" | "unknown". Identifies
+    /// which encoder produced the on-iPod file (or that it was a passthrough
+    /// copy with no encoder involved). Used by diff's encoder-mismatch
+    /// heuristic to trigger Modify when the user changes --encoder.
+    /// Phase 2 manifests deserialize as "unknown" so the upgrade run doesn't
+    /// trigger a thundering re-encode.
+    #[serde(default = "default_encoder")]
+    pub encoder: String,
+    /// E.g. "ffmpeg n7.0" or "refalac 1.85". Empty for passthrough or unknown.
+    #[serde(default)]
+    pub encoder_version: String,
+    /// Source codec, e.g. "flac" | "mp3" | "aac" | "alac" | "wav" | "ogg"
+    /// | "opus" | "aiff". Used for stats and future format-change detection.
+    /// Phase 2 entries (FLAC-only era) default to "flac".
+    #[serde(default = "default_source_format")]
+    pub source_format: String,
 }
 
 fn default_source_known() -> bool { true }
+fn default_encoder() -> String { "unknown".to_string() }
+fn default_source_format() -> String { "flac".to_string() }
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -89,6 +107,8 @@ pub fn diff(
     sources: &[SourceEntry],
     mut compute_fingerprint: impl FnMut(&Path) -> Result<String>,
     mut compute_audio_fingerprint: impl FnMut(&Path) -> Result<String>,
+    target_encoder: &str,
+    force_reencode: bool,
 ) -> Result<Vec<Action>> {
     let manifest_by_path: HashMap<&PathBuf, &ManifestEntry> = manifest
         .tracks
@@ -109,7 +129,15 @@ pub fn diff(
                     && entry.source_size == src.size;
                 if stat_matches {
                     // FAST PATH — no fingerprint read.
-                    actions.push(Action::Unchanged((*entry).clone()));
+                    // Encoder-mismatch check: if the stored encoder differs
+                    // from what we'd use now, the file body on iPod is the
+                    // wrong encoder's output and needs re-encoding even
+                    // though the source is unchanged.
+                    if is_encoder_mismatch(entry, target_encoder, force_reencode) {
+                        actions.push(Action::Modify(src.clone(), (*entry).clone()));
+                    } else {
+                        actions.push(Action::Unchanged((*entry).clone()));
+                    }
                 } else {
                     // Slow path: hash the first MiB and compare.
                     let fp = compute_fingerprint(&src.path)?;
@@ -117,7 +145,12 @@ pub fn diff(
                         && src.size == entry.source_size;
                     if content_unchanged {
                         // mtime was touched but content is identical.
-                        actions.push(Action::Unchanged((*entry).clone()));
+                        // Same encoder-mismatch check as the fast path.
+                        if is_encoder_mismatch(entry, target_encoder, force_reencode) {
+                            actions.push(Action::Modify(src.clone(), (*entry).clone()));
+                        } else {
+                            actions.push(Action::Unchanged((*entry).clone()));
+                        }
                     } else if !entry.audio_fingerprint.is_empty() {
                         // Phase 3.x path: file fingerprint differs, but the
                         // manifest has a stored audio-only fingerprint to
@@ -154,6 +187,23 @@ pub fn diff(
     }
 
     Ok(actions)
+}
+
+/// True iff this manifest entry's stored encoder differs from the target
+/// encoder in a way that means we should re-encode.
+///
+/// Carve-outs:
+/// - `force = true`: always returns true. User asked for it.
+/// - `encoder == "unknown"`: Phase 2 manifest entry (no encoder field on disk).
+///   Don't trigger spurious re-encodes on first Phase 3 run — let the entry
+///   get populated naturally on its next normal Modify.
+/// - `encoder == "passthrough"`: there's no encoder for a copied file; the
+///   on-iPod bytes are the source bytes regardless of what's set globally.
+fn is_encoder_mismatch(entry: &ManifestEntry, target: &str, force: bool) -> bool {
+    if force { return true; }
+    if entry.encoder == "unknown" { return false; }
+    if entry.encoder == "passthrough" { return false; }
+    entry.encoder != target
 }
 
 /// Read the manifest from disk; return an empty manifest if the file doesn't exist.
@@ -205,6 +255,9 @@ mod tests {
             ipod_relpath: r"iPod_Control\Music\F12\KLMN.m4a".to_string(),
             source_known: true,
             audio_fingerprint: String::new(),
+            encoder: "unknown".to_string(),
+            encoder_version: String::new(),
+            source_format: "flac".to_string(),
         }
     }
 
@@ -281,7 +334,7 @@ mod tests {
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
-        let actions = diff(&manifest, &sources, never_called(), never_called_audio()).unwrap();
+        let actions = diff(&manifest, &sources, never_called(), never_called_audio(), "ffmpeg", false).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
     }
@@ -291,7 +344,7 @@ mod tests {
         // Add path doesn't go through the fingerprint callback either.
         let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![] };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
-        let actions = diff(&manifest, &sources, never_called(), never_called_audio()).unwrap();
+        let actions = diff(&manifest, &sources, never_called(), never_called_audio(), "ffmpeg", false).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Add(_)));
     }
@@ -309,7 +362,7 @@ mod tests {
         let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
         src.mtime = 1700099999;
         let sources = vec![src];
-        let actions = diff(&manifest, &sources, returns("blake3:bb"), never_called_audio()).unwrap();
+        let actions = diff(&manifest, &sources, returns("blake3:bb"), never_called_audio(), "ffmpeg", false).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)));
     }
@@ -325,7 +378,7 @@ mod tests {
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 200)];
-        let actions = diff(&manifest, &sources, returns("blake3:aa"), never_called_audio()).unwrap();
+        let actions = diff(&manifest, &sources, returns("blake3:aa"), never_called_audio(), "ffmpeg", false).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)));
     }
@@ -338,7 +391,7 @@ mod tests {
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![];
-        let actions = diff(&manifest, &sources, never_called(), never_called_audio()).unwrap();
+        let actions = diff(&manifest, &sources, never_called(), never_called_audio(), "ffmpeg", false).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Remove(_)));
     }
@@ -349,7 +402,7 @@ mod tests {
         entry.source_known = false;  // from --rebuild-manifest
         let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
         let sources = vec![];  // no sources present
-        let actions = diff(&manifest, &sources, never_called(), never_called_audio()).unwrap();
+        let actions = diff(&manifest, &sources, never_called(), never_called_audio(), "ffmpeg", false).unwrap();
         assert_eq!(actions.len(), 0, "unknown-source entries are NOT removed when source is absent");
     }
 
@@ -364,7 +417,7 @@ mod tests {
         };
         let mut src = sample_source(r"C:\a.flac", "blake3:aa", 100);
         src.mtime = 1700099999;  // touched
-        let actions = diff(&manifest, &[src], returns("blake3:aa"), never_called_audio()).unwrap();
+        let actions = diff(&manifest, &[src], returns("blake3:aa"), never_called_audio(), "ffmpeg", false).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
     }
@@ -385,6 +438,8 @@ mod tests {
             &sources,
             returns("blake3:bb"),
             returns_audio("blake3-audio:zz"),
+            "ffmpeg",
+            false,
         ).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::MetadataOnly { .. }),
@@ -406,6 +461,8 @@ mod tests {
             &sources,
             returns("blake3:bb"),
             never_called_audio(),  // audio callback MUST NOT fire — nothing to compare to
+            "ffmpeg",
+            false,
         ).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)),
@@ -426,6 +483,8 @@ mod tests {
             &sources,
             returns("blake3:bb"),
             returns_audio("blake3-audio:different"),
+            "ffmpeg",
+            false,
         ).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)));
@@ -444,6 +503,8 @@ mod tests {
             &sources,
             never_called(),
             never_called_audio(),
+            "ffmpeg",
+            false,
         ).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
@@ -505,5 +566,148 @@ mod tests {
         }"#;
         let entry: ManifestEntry = serde_json::from_str(new).unwrap();
         assert_eq!(entry.audio_fingerprint, "blake3-audio:cc");
+    }
+
+    #[test]
+    fn manifest_entry_without_encoder_field_deserializes_with_unknown_default() {
+        // Phase 2 manifests have no encoder field. They MUST deserialize as
+        // "unknown" so the encoder-mismatch heuristic skips them — otherwise
+        // every Phase 2 entry would re-encode the first time the user runs
+        // Phase 3, which is exactly what we don't want.
+        let phase2 = r#"{
+            "source_path": "C:\\a.flac",
+            "source_mtime": 1700000000,
+            "source_size": 100,
+            "source_fingerprint": "blake3:aa",
+            "ipod_dbid": 1234,
+            "ipod_relpath": "iPod_Control\\Music\\F01\\AAAA.m4a",
+            "source_known": true
+        }"#;
+        let entry: ManifestEntry = serde_json::from_str(phase2).unwrap();
+        assert_eq!(entry.encoder, "unknown",
+            "missing encoder field must default to 'unknown' for back-compat");
+        assert_eq!(entry.encoder_version, "",
+            "missing encoder_version must default to empty string");
+    }
+
+    #[test]
+    fn manifest_entry_without_source_format_deserializes_with_flac_default() {
+        // Phase 2 was FLAC-only, so guessing "flac" for legacy entries is
+        // historically accurate (Phase 3 addendum Change 3).
+        let phase2 = r#"{
+            "source_path": "C:\\a.flac",
+            "source_mtime": 1700000000,
+            "source_size": 100,
+            "source_fingerprint": "blake3:aa",
+            "ipod_dbid": 1234,
+            "ipod_relpath": "iPod_Control\\Music\\F01\\AAAA.m4a",
+            "source_known": true
+        }"#;
+        let entry: ManifestEntry = serde_json::from_str(phase2).unwrap();
+        assert_eq!(entry.source_format, "flac",
+            "missing source_format must default to 'flac' (Phase 2 only handled FLAC)");
+    }
+
+    #[test]
+    fn diff_encoder_match_emits_unchanged() {
+        // entry.encoder == target_encoder, no fingerprint change → Unchanged.
+        let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
+        entry.encoder = "ffmpeg".to_string();
+        let manifest = Manifest {
+            version: 1, ipod_serial: None, last_source_root: None,
+            tracks: vec![entry],
+        };
+        let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
+        let actions = diff(
+            &manifest, &sources, never_called(), never_called_audio(),
+            "ffmpeg", false,
+        ).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Unchanged(_)),
+            "encoder match + content unchanged must stay Unchanged; got {:?}", actions[0]);
+    }
+
+    #[test]
+    fn diff_encoder_mismatch_emits_modify() {
+        // entry.encoder = "ffmpeg", target_encoder = "refalac", no fingerprint
+        // change → Modify (the on-iPod bytes are ffmpeg's, user wants refalac's).
+        let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
+        entry.encoder = "ffmpeg".to_string();
+        let manifest = Manifest {
+            version: 1, ipod_serial: None, last_source_root: None,
+            tracks: vec![entry],
+        };
+        let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
+        let actions = diff(
+            &manifest, &sources, never_called(), never_called_audio(),
+            "refalac", false,
+        ).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Modify(_, _)),
+            "encoder mismatch on otherwise-Unchanged entry must trigger Modify; got {:?}",
+            actions[0]);
+    }
+
+    #[test]
+    fn diff_force_reencode_overrides_match() {
+        // entry.encoder = target_encoder but force=true → Modify regardless.
+        let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
+        entry.encoder = "ffmpeg".to_string();
+        let manifest = Manifest {
+            version: 1, ipod_serial: None, last_source_root: None,
+            tracks: vec![entry],
+        };
+        let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
+        let actions = diff(
+            &manifest, &sources, never_called(), never_called_audio(),
+            "ffmpeg", true,
+        ).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Modify(_, _)),
+            "--force-reencode must promote even encoder-match entries to Modify");
+    }
+
+    #[test]
+    fn diff_unknown_encoder_preserved() {
+        // Phase 2 entry has encoder="unknown". Target is "ffmpeg". The
+        // carve-out keeps it Unchanged so the Phase 2→3 upgrade doesn't
+        // trigger a thundering re-encode across the whole library.
+        let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
+        entry.encoder = "unknown".to_string();
+        let manifest = Manifest {
+            version: 1, ipod_serial: None, last_source_root: None,
+            tracks: vec![entry],
+        };
+        let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
+        let actions = diff(
+            &manifest, &sources, never_called(), never_called_audio(),
+            "ffmpeg", false,
+        ).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Unchanged(_)),
+            "unknown-encoder entries (Phase 2 back-compat) must stay Unchanged; got {:?}",
+            actions[0]);
+    }
+
+    #[test]
+    fn diff_passthrough_encoder_immune_to_mismatch() {
+        // Passthrough files have no encoder; switching --encoder is irrelevant
+        // because the bytes on iPod are the source bytes verbatim.
+        let mut entry = sample_entry(r"C:\a.mp3", "blake3:aa", 100);
+        entry.encoder = "passthrough".to_string();
+        entry.source_format = "mp3".to_string();
+        let manifest = Manifest {
+            version: 1, ipod_serial: None, last_source_root: None,
+            tracks: vec![entry],
+        };
+        let sources = vec![sample_source(r"C:\a.mp3", "blake3:aa", 100)];
+        let actions = diff(
+            &manifest, &sources, never_called(), never_called_audio(),
+            "refalac", false,
+        ).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Unchanged(_)),
+            "passthrough entries must be immune to encoder-mismatch; got {:?}",
+            actions[0]);
     }
 }
