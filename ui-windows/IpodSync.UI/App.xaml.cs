@@ -78,7 +78,9 @@ public partial class App : Application
             // Surface as a tray notification rather than a window pop.
             // For now, just quit cleanly.
             Tray?.Dispose();
-            Application.Current.Exit();
+            // Application.Current.Exit() doesn't reliably exit the process in
+            // windowless mode (H.NotifyIcon issue #66). Use Environment.Exit.
+            Environment.Exit(0);
             return;
         }
 
@@ -118,7 +120,9 @@ public partial class App : Application
                 await Daemon.DisposeAsync();
             }
             Tray?.Dispose();
-            Application.Current.Exit();
+            // Application.Current.Exit() doesn't reliably exit the process in
+            // windowless mode (H.NotifyIcon issue #66). Use Environment.Exit.
+            Environment.Exit(0);
         });
     }
 

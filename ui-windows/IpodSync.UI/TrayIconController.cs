@@ -2,16 +2,22 @@ using System;
 using H.NotifyIcon;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Windows.Foundation;
 
 namespace IpodSync_UI;
 
 /// <summary>
-/// Owns the system tray icon. M2 ships idle / offline states + Quit
-/// menu item. M3 adds syncing / error states + Sync Now / Settings.
+/// Wraps the App.xaml-defined <see cref="TaskbarIcon"/>. The icon's
+/// Application-resource lifetime is what keeps the app alive in
+/// tray-only mode (no visible windows). See the H.NotifyIcon
+/// Windowless sample for the canonical pattern.
 /// </summary>
 public sealed class TrayIconController : IDisposable
 {
     private TaskbarIcon? _icon;
+    private XamlUICommand? _quitCommand;
+    private TypedEventHandler<XamlUICommand, ExecuteRequestedEventArgs>? _quitHandler;
     private bool _disposed;
 
     public event Action? QuitRequested;
@@ -19,18 +25,11 @@ public sealed class TrayIconController : IDisposable
 
     public void Initialize()
     {
-        var menu = new MenuFlyout();
-        var quit = new MenuFlyoutItem { Text = "Quit" };
-        quit.Click += (_, _) => QuitRequested?.Invoke();
-        menu.Items.Add(quit);
-
-        _icon = new TaskbarIcon
-        {
-            IconSource = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(
-                new Uri("ms-appx:///Assets/tray-idle.ico")),
-            ToolTipText = "ipod-sync · idle",
-            ContextFlyout = menu,
-        };
+        _icon = (TaskbarIcon)Application.Current.Resources["TrayIcon"];
+        _quitCommand = (XamlUICommand)Application.Current.Resources["QuitCommand"];
+        _quitHandler = (_, _) => QuitRequested?.Invoke();
+        _quitCommand.ExecuteRequested += _quitHandler;
+        // ForceCreate() performs the OS-level NotifyIcon registration.
         _icon.ForceCreate();
     }
 
@@ -63,6 +62,12 @@ public sealed class TrayIconController : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        if (_quitCommand is not null && _quitHandler is not null)
+        {
+            _quitCommand.ExecuteRequested -= _quitHandler;
+        }
+        _quitHandler = null;
+        _quitCommand = null;
         _icon?.Dispose();
         _icon = null;
     }

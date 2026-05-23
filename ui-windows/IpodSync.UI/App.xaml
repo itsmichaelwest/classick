@@ -3,14 +3,45 @@
     x:Class="IpodSync_UI.App"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:IpodSync_UI">
+    xmlns:local="using:IpodSync_UI"
+    xmlns:tb="using:H.NotifyIcon">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
                 <!-- Other merged dictionaries here -->
             </ResourceDictionary.MergedDictionaries>
-            <!-- Other app resources here -->
+
+            <!--
+                Quit command surfaced through the tray menu. Exposed as an
+                Application resource so TrayIconController can bind its
+                ExecuteRequested handler at startup.
+            -->
+            <XamlUICommand x:Key="QuitCommand" Label="Quit" Description="Quit" />
+
+            <!--
+                Tray icon defined here (NOT in C#) so it inherits
+                Application-resource lifetime. That lifetime anchor is what
+                keeps the process alive after the last window closes in
+                tray-only mode. Pattern lifted from the H.NotifyIcon
+                "Windowless" sample.
+
+                ContextMenuMode="SecondWindow" avoids the process-leak that
+                "PopupMenu" mode causes on exit (H.NotifyIcon issue #66).
+            -->
+            <tb:TaskbarIcon
+                x:Key="TrayIcon"
+                Visibility="Visible"
+                ToolTipText="ipod-sync · idle"
+                ContextMenuMode="SecondWindow"
+                NoLeftClickDelay="True"
+                IconSource="ms-appx:///Assets/tray-idle.ico">
+                <tb:TaskbarIcon.ContextFlyout>
+                    <MenuFlyout>
+                        <MenuFlyoutItem Command="{StaticResource QuitCommand}" />
+                    </MenuFlyout>
+                </tb:TaskbarIcon.ContextFlyout>
+            </tb:TaskbarIcon>
         </ResourceDictionary>
     </Application.Resources>
 </Application>
