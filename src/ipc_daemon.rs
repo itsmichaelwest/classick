@@ -99,6 +99,12 @@ pub enum DaemonCommand {
     },
     SubscribeDeviceEvents,
     UnsubscribeDeviceEvents,
+    /// Request cancellation of the currently-running sync. The daemon
+    /// signals the orchestrator task, which writes a Cancel command
+    /// to the subprocess stdin and force-kills after a 5s grace.
+    /// History entry records outcome=Aborted with reason "user_cancelled".
+    /// No-op if no sync is in progress.
+    CancelSync,
     Shutdown,
 }
 

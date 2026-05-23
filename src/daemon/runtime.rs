@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Production entry. Constructs the real device watcher + real
 /// spawn-fn and runs the daemon.
@@ -48,11 +48,11 @@ pub async fn run_daemon() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<DaemonEvent>(256);
     let exe = std::env::current_exe()?;
     let event_tx_for_spawn = event_tx.clone();
-    let spawn_sync: SpawnFn = Arc::new(move |drive: String| {
+    let spawn_sync: SpawnFn = Arc::new(move |drive: String, cancel_rx: oneshot::Receiver<()>| {
         let exe = exe.clone();
         let event_tx = event_tx_for_spawn.clone();
         Box::pin(async move {
-            sync_orchestrator::run(exe, drive, event_tx).await
+            sync_orchestrator::run(exe, drive, cancel_rx, event_tx).await
         })
     });
 
@@ -70,7 +70,7 @@ pub async fn run_daemon() -> Result<()> {
 /// runtime can clone it into a tokio::spawn'd task without consuming the
 /// daemon's only copy.
 pub type SpawnFn = Arc<
-    dyn Fn(String) -> Pin<Box<dyn std::future::Future<Output = Result<OrchestratorOutcome>> + Send>>
+    dyn Fn(String, oneshot::Receiver<()>) -> Pin<Box<dyn std::future::Future<Output = Result<OrchestratorOutcome>> + Send>>
         + Send
         + Sync,
 >;
@@ -125,6 +125,10 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let mut device_rx = deps.watcher.start();
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
     let spawn_sync = deps.spawn_sync;
+    // Cancellation signal for the currently-running sync (if any). Set
+    // by start_sync_session; taken + sent by handle_client_command's
+    // CancelSync arm; cleared in handle_internal_event after completion.
+    let mut cancel_tx_holder: Option<oneshot::Sender<()>> = None;
 
     tracing::info!("daemon: ready (configured_serial={configured_serial:?})");
 
@@ -146,6 +150,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &connected,
                     &spawn_sync,
                     &internal_tx,
+                    &mut cancel_tx_holder,
                     &configured_serial,
                 );
             }
@@ -164,12 +169,14 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &history,
                     &spawn_sync,
                     &internal_tx,
+                    &mut cancel_tx_holder,
                     configured_serial.as_deref(),
                 );
                 broadcast_status(&event_tx, &state, &connected, &config_path, &history);
             }
 
             Some(internal) = internal_rx.recv() => {
+                cancel_tx_holder = None;  // sync over, drop the (possibly already-fired) sender
                 handle_internal_event(internal, &mut state, &event_tx, &history, &connected);
             }
 
@@ -193,6 +200,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                             &event_tx,
                             &spawn_sync,
                             &internal_tx,
+                            &mut cancel_tx_holder,
                         );
                     }
                 }
@@ -265,6 +273,7 @@ fn handle_device_event(
     history: &HistoryService,
     spawn_sync: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
     configured_serial: Option<&str>,
 ) {
     match event {
@@ -285,6 +294,7 @@ fn handle_device_event(
                     event_tx,
                     spawn_sync,
                     internal_tx,
+                    cancel_tx_holder,
                 );
             }
         }
@@ -325,6 +335,7 @@ fn start_sync_session(
     event_tx: &broadcast::Sender<DaemonEvent>,
     spawn_sync: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
 ) {
     if state.try_start_sync_for_device(trigger.clone(), serial.clone(), drive.clone())
         != TriggerOutcome::Accepted
@@ -343,13 +354,19 @@ fn start_sync_session(
         next_scheduled_unix_secs: None,
     });
 
+    // Per-sync cancel channel. Sender is held by the runtime so the
+    // CancelSync IPC command can wake the orchestrator; Receiver is
+    // passed into the spawn closure.
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    *cancel_tx_holder = Some(cancel_tx);
+
     let spawn_sync = spawn_sync.clone();
     let internal_tx = internal_tx.clone();
     let drive_for_task = drive.clone();
     let trigger_for_task = trigger.clone();
     let serial_for_task = serial.clone();
     tokio::spawn(async move {
-        let outcome = (spawn_sync)(drive_for_task).await;
+        let outcome = (spawn_sync)(drive_for_task, cancel_rx).await;
         let _ = internal_tx.send(InternalEvent::SyncCompleted {
             trigger: trigger_for_task,
             serial: serial_for_task,
@@ -416,6 +433,7 @@ fn handle_client_command(
     connected: &Option<DetectedIpod>,
     spawn_sync: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
     configured_serial: &Option<String>,
 ) {
     tracing::info!("daemon: client {client_id} command: {command:?}");
@@ -487,7 +505,20 @@ fn handle_client_command(
                 event_tx,
                 spawn_sync,
                 internal_tx,
+                cancel_tx_holder,
             );
+        }
+        DaemonCommand::CancelSync => {
+            // Wake the orchestrator's cancel arm. The orchestrator
+            // writes a Cancel command to subprocess stdin and force-kills
+            // after 5s; the SyncCompleted internal event arrives shortly
+            // with outcome = Aborted{reason="user_cancelled"}.
+            if let Some(tx) = cancel_tx_holder.take() {
+                let _ = tx.send(());
+                tracing::info!("daemon: client {client_id} cancelled the running sync");
+            } else {
+                tracing::debug!("daemon: client {client_id} sent cancel_sync but no sync is in progress");
+            }
         }
         DaemonCommand::SubscribeDeviceEvents | DaemonCommand::UnsubscribeDeviceEvents => {
             // M3: all clients see device events (simpler than per-client

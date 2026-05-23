@@ -13,7 +13,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestratorOutcome {
@@ -50,10 +50,13 @@ impl FailureTracker {
     }
 }
 
-/// Drive the spawned child to completion (or until bail).
+/// Drive the spawned child to completion, until bail, or until cancelled.
+/// `cancel_rx` fires when the user clicks Cancel in the UI; the orchestrator
+/// writes a Cancel command to the subprocess stdin and force-kills after 5s.
 pub async fn run(
     exe: PathBuf,
     drive: String,
+    mut cancel_rx: oneshot::Receiver<()>,
     event_tx: broadcast::Sender<DaemonEvent>,
 ) -> Result<OrchestratorOutcome> {
     let mut cmd = build_command(&exe, &drive);
@@ -66,42 +69,62 @@ pub async fn run(
     let mut last_summary: Option<SyncSummary> = None;
     let mut finish_success: Option<bool> = None;
 
-    while let Some(line) = reader.next_line().await? {
-        // Forward EVERY parseable line to the daemon's broadcast channel
-        // so UI clients see live sync progress. Wrapping the raw line in
-        // a SyncEvent envelope keeps the daemon protocol independent
-        // from M1 stdio-IPC semver.
-        let _ = event_tx.send(DaemonEvent::SyncEvent { line: line.clone() });
+    loop {
+        tokio::select! {
+            line_res = reader.next_line() => {
+                let line = match line_res? {
+                    Some(l) => l,
+                    None => break,  // subprocess closed stdout (normal completion or crash)
+                };
 
-        let Some(value) = serde_json::from_str::<Value>(&line).ok() else { continue };
-        let ty = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        match ty {
-            "summary" => {
-                tracker.total_planned = value.get("total_planned")
-                    .and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                last_summary = Some(summary_from_value(&value));
-            }
-            "track_done" => { tracker.tracks_completed += 1; }
-            "error" => {
-                tracker.tracks_errored += 1;
-                if tracker.should_bail() {
-                    let _ = stdin.write_all(b"{\"type\":\"cancel\"}\n").await;
-                    let _ = stdin.flush().await;
-                    drop(stdin);
-                    bounded_kill(&mut child, Duration::from_secs(5)).await;
-                    return Ok(OrchestratorOutcome::Aborted {
-                        reason: format!(
-                            "too_many_failures: {} of {} tracks failed",
-                            tracker.tracks_errored, tracker.total_planned
-                        ),
-                        summary: last_summary,
-                    });
+                // Forward EVERY parseable line to the daemon's broadcast channel
+                // so UI clients see live sync progress. Wrapping the raw line in
+                // a SyncEvent envelope keeps the daemon protocol independent
+                // from M1 stdio-IPC semver.
+                let _ = event_tx.send(DaemonEvent::SyncEvent { line: line.clone() });
+
+                let Some(value) = serde_json::from_str::<Value>(&line).ok() else { continue };
+                let ty = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match ty {
+                    "summary" => {
+                        tracker.total_planned = value.get("total_planned")
+                            .and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                        last_summary = Some(summary_from_value(&value));
+                    }
+                    "track_done" => { tracker.tracks_completed += 1; }
+                    "error" => {
+                        tracker.tracks_errored += 1;
+                        if tracker.should_bail() {
+                            let _ = stdin.write_all(b"{\"type\":\"cancel\"}\n").await;
+                            let _ = stdin.flush().await;
+                            drop(stdin);
+                            bounded_kill(&mut child, Duration::from_secs(5)).await;
+                            return Ok(OrchestratorOutcome::Aborted {
+                                reason: format!(
+                                    "too_many_failures: {} of {} tracks failed",
+                                    tracker.tracks_errored, tracker.total_planned
+                                ),
+                                summary: last_summary,
+                            });
+                        }
+                    }
+                    "finish" => {
+                        finish_success = value.get("success").and_then(|v| v.as_bool());
+                    }
+                    _ => {}
                 }
             }
-            "finish" => {
-                finish_success = value.get("success").and_then(|v| v.as_bool());
+            _ = &mut cancel_rx => {
+                // User cancelled. Same teardown sequence as the >50% bail.
+                let _ = stdin.write_all(b"{\"type\":\"cancel\"}\n").await;
+                let _ = stdin.flush().await;
+                drop(stdin);
+                bounded_kill(&mut child, Duration::from_secs(5)).await;
+                return Ok(OrchestratorOutcome::Aborted {
+                    reason: "user_cancelled".to_string(),
+                    summary: last_summary,
+                });
             }
-            _ => {}
         }
     }
 
