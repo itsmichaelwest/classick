@@ -1,4 +1,19 @@
 <Solution>
+  <!--
+    Explicit solution-level configurations. Without this VS auto-derives
+    from the union of project Platforms and can end up with stale entries
+    (e.g. Debug|x86 references) that don't match the current project
+    configs, causing the "solution specifies a project configuration that
+    does not exist" error on solution load.
+    All three projects now declare Platforms="x64;ARM64" so no per-project
+    remapping is needed here.
+  -->
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Release" />
+    <Platform Name="x64" />
+    <Platform Name="ARM64" />
+  </Configurations>
   <Project Path="IpodSync.UI/IpodSync.UI.csproj" />
   <Project Path="IpodSync.UI.Core/IpodSync.UI.Core.csproj" />
   <Project Path="IpodSync.UI.Tests/IpodSync.UI.Tests.csproj" />
