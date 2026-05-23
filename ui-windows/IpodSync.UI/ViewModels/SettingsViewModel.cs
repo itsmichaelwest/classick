@@ -171,39 +171,6 @@ public partial class SettingsAboutViewModel : ObservableObject
     public string GitHubUrl => "https://github.com/itsmichaelwest/ipod-sync";
 }
 
-public partial class HistoryEntryViewModel : ObservableObject
-{
-    public HistoryEntryViewModel(HistoryEntry e)
-    {
-        Timestamp = e.Timestamp;
-        DurationSecs = e.DurationSecs;
-        Trigger = e.Trigger;
-        Outcome = e.Outcome;
-        ErrorMessage = e.ErrorMessage;
-        Summary = e.Summary;
-    }
-
-    public string Timestamp { get; }
-    public ulong DurationSecs { get; }
-    public string Trigger { get; }
-    public string Outcome { get; }
-    public string? ErrorMessage { get; }
-    public SyncSummary? Summary { get; }
-
-    public string OutcomeGlyph => Outcome switch
-    {
-        "ok"      => "✓",  // check
-        "error"   => "!",
-        "aborted" => "✗",  // cross
-        _         => "?",
-    };
-
-    public string SummaryText => Summary is null
-        ? (ErrorMessage ?? "")
-        : $"+{Summary.Add} ~{Summary.Modify} -{Summary.Remove}" +
-          (Summary.Skipped > 0 ? $", {Summary.Skipped} skipped" : "");
-
-    public string DurationText => DurationSecs < 60
-        ? $"{DurationSecs}s"
-        : $"{DurationSecs / 60}m {DurationSecs % 60}s";
-}
+// HistoryEntryViewModel lives in ViewModels/HistoryEntryViewModel.cs so it can
+// be link-compiled into the net10.0 test project without dragging in
+// SettingsViewModel's WinUI-app dependencies (e.g. App.DispatcherQueue).

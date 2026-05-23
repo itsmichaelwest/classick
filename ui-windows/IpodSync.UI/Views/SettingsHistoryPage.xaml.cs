@@ -11,5 +11,6 @@ public sealed partial class SettingsHistoryPage : Page
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         ViewModel = e.Parameter as SettingsViewModel;
+        Bindings.Update();
     }
 }

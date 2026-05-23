@@ -45,6 +45,8 @@
              Link="LinkedViewModels\WizardViewModel.cs" />
     <Compile Include="..\IpodSync.UI\ViewModels\PopoverViewModel.cs"
              Link="LinkedViewModels\PopoverViewModel.cs" />
+    <Compile Include="..\IpodSync.UI\ViewModels\HistoryEntryViewModel.cs"
+             Link="LinkedViewModels\HistoryEntryViewModel.cs" />
     <Compile Include="..\IpodSync.UI\Notifications\NotificationDecision.cs"
              Link="LinkedViewModels\NotificationDecision.cs" />
   </ItemGroup>

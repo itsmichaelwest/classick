@@ -77,30 +77,4 @@ public partial class PopoverViewModel : ObservableObject
     }
 }
 
-/// <summary>
-/// Local placeholder until T9 promotes this to <c>SettingsViewModel.cs</c>.
-/// If T9 lands first and defines its own, delete this type and rely on
-/// the shared one.
-/// </summary>
-public partial class HistoryEntryViewModel : ObservableObject
-{
-    public HistoryEntryViewModel(HistoryEntry e)
-    {
-        Timestamp = e.Timestamp;
-        SummaryText = e.ErrorMessage ?? (e.Summary is null ? "" :
-            $"+{e.Summary.Add} ~{e.Summary.Modify} -{e.Summary.Remove}");
-        OutcomeGlyph = e.Outcome switch
-        {
-            "ok" => "✓",
-            "error" => "!",
-            "aborted" => "✗",
-            _ => "?",
-        };
-        DurationText = e.DurationSecs < 60 ? $"{e.DurationSecs}s" : $"{e.DurationSecs / 60}m";
-    }
-
-    public string Timestamp { get; }
-    public string SummaryText { get; }
-    public string OutcomeGlyph { get; }
-    public string DurationText { get; }
-}
+// HistoryEntryViewModel canonicalized in SettingsViewModel.cs (T9).
