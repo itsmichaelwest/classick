@@ -73,28 +73,58 @@ and `IpcBackend` land in M1 Tasks 2 and 3.
 ui-windows\
 ├── IpodSync.UI.slnx                  Visual Studio solution (.slnx XML format)
 ├── README.md                         (this file)
-└── IpodSync.UI\                      Main WinUI 3 app project
-    ├── IpodSync.UI.csproj            .NET 10, WinUI 3, CommunityToolkit.Mvvm
-    ├── App.xaml / App.xaml.cs        WinUI app entry; exposes App.Window,
-    │                                 App.DispatcherQueue, App.WindowHandle
-    ├── MainWindow.xaml / .cs         Frame host + Mica backdrop + TitleBar
-    ├── MainPage.xaml / .cs           Placeholder content for M1 bootstrap
-    ├── ViewModels\
-    │   └── MainPageViewModel.cs      Template-supplied counter VM (unused;
-    │                                 will be replaced by ReviewViewModel /
-    │                                 ProgressViewModel in M1 Tasks 6 + 7)
-    ├── Properties\                   Publish profiles (template defaults)
-    ├── Assets\                       App icons (template defaults)
-    ├── Package.appxmanifest          MSIX manifest (for packaged builds /
-    │                                 dotnet run debug identity registration)
-    └── app.manifest                  Win32 manifest (per-monitor DPI, etc.)
+├── IpodSync.UI\                      Main WinUI 3 app project
+│   ├── IpodSync.UI.csproj            .NET 10 win10.0.26100, WinUI 3,
+│   │                                 CommunityToolkit.Mvvm. References Core.
+│   ├── App.xaml / App.xaml.cs        WinUI app entry; exposes App.Window,
+│   │                                 App.DispatcherQueue, App.WindowHandle
+│   ├── MainWindow.xaml / .cs         Frame host + Mica backdrop + TitleBar
+│   ├── MainPage.xaml / .cs           Placeholder content for M1 bootstrap
+│   ├── ViewModels\
+│   │   └── MainPageViewModel.cs      Template-supplied counter VM (unused;
+│   │                                 will be replaced by ReviewViewModel /
+│   │                                 ProgressViewModel in M1 Tasks 6 + 7)
+│   ├── Properties\                   Publish profiles (template defaults)
+│   ├── Assets\                       App icons (template defaults)
+│   ├── Package.appxmanifest          MSIX manifest (for packaged builds /
+│   │                                 dotnet run debug identity registration)
+│   └── app.manifest                  Win32 manifest (per-monitor DPI, etc.)
+├── IpodSync.UI.Core\                 Pure System.* class library (no WinUI)
+│   ├── IpodSync.UI.Core.csproj       net10.0; RootNamespace=IpodSync_UI
+│   └── Ipc\                          IPC wire types + CoreProcess child-process
+│       ├── IpcEvent.cs               Polymorphic record hierarchy for events
+│       ├── IpcCommand.cs             Polymorphic record hierarchy for commands
+│       └── CoreProcess.cs            Spawn ipod-sync.exe --ipc-mode, stream
+│                                     events via System.Threading.Channels.
+└── IpodSync.UI.Tests\                xUnit test project
+    ├── IpodSync.UI.Tests.csproj      net10.0; references Core (NOT the
+    │                                 WinUI app — the WindowsAppRuntime
+    │                                 module init blows up in vstest hosts).
+    └── IpcWireFormatTests.cs         JSON round-trip tests for the IPC
+                                      protocol per docs/ipc-protocol.md.
 ```
+
+### Why a separate `IpodSync.UI.Core` project?
+
+The WinUI 3 app project drags in `Microsoft.WindowsAppSDK`, which injects a
+`[ModuleInitializer]` that calls `DeploymentManager.Initialize()` the first
+time the assembly is loaded. That works for the packaged app but throws
+`REGDB_E_CLASSNOTREG` inside a vstest worker (no package identity).
+
+The IPC plumbing is intentionally pure `System.*` code, so isolating it in a
+plain-net10.0 class library lets both the WinUI app and the test project
+reference it cleanly, with no module-init pain.
 
 ## Test
 
-No test project yet. `IpodSync.UI.Tests\` (xUnit) lands in M1 Task 5 alongside
-the `CoreProcess` IPC client and the wire-type records — see
-`..\docs\superpowers\plans\2026-05-24-phase-6-m1-ipc-shell.md`.
+```powershell
+dotnet test IpodSync.UI.Tests\IpodSync.UI.Tests.csproj
+```
+
+22 tests cover the IPC wire format: discriminator round-trips for every event
+type, the nested `decision` envelope on `review_decision`, null/typed-only
+payloads, and a guard that unknown event types raise a `JsonException`
+(forward-compat per `docs/ipc-protocol.md` §2).
 
 ## Notes for subsequent M1 tasks
 

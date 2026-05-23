@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      Plain net10.0 (no -windows TFM, no WinAppSDK). This project hosts the
+      pure System.* IPC plumbing (Ipc/IpcEvent.cs, IpcCommand.cs, CoreProcess.cs)
+      so it can be unit-tested from a vstest host without tripping the WinUI 3
+      runtime auto-initializer. The WinUI app project (IpodSync.UI) references
+      this assembly and consumes the types directly under the IpodSync_UI.Ipc
+      namespace.
+    -->
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>IpodSync_UI</RootNamespace>
+  </PropertyGroup>
+
+</Project>

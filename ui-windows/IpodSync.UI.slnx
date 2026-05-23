@@ -1,3 +1,5 @@
 <Solution>
   <Project Path="IpodSync.UI/IpodSync.UI.csproj" />
+  <Project Path="IpodSync.UI.Core/IpodSync.UI.Core.csproj" />
+  <Project Path="IpodSync.UI.Tests/IpodSync.UI.Tests.csproj" />
 </Solution>
