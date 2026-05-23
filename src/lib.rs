@@ -5,6 +5,7 @@ pub mod config_file;
 pub mod daemon;
 pub mod ffi;
 pub mod ipc;
+pub mod ipc_daemon;
 pub mod ipod;
 pub mod logging;
 pub mod manifest;
