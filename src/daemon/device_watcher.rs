@@ -63,6 +63,65 @@ impl Debouncer {
     }
 }
 
+type ScanFn = Box<dyn FnMut() -> Option<DetectedIpod> + Send>;
+
+/// Periodically polls a scan function and emits Connected /
+/// Disconnected events. Production wiring uses
+/// `ipod::device::scan_for_ipod`; tests inject a scripted closure.
+pub struct PollingDeviceWatcher {
+    scan: ScanFn,
+    interval: Duration,
+}
+
+impl PollingDeviceWatcher {
+    /// Production constructor: scans every 1.5s using the real drive-letter walk.
+    pub fn new_production() -> Self {
+        Self {
+            scan: Box::new(crate::ipod::device::scan_for_ipod),
+            interval: Duration::from_millis(1500),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test(scan: ScanFn, interval: Duration) -> Self {
+        Self { scan, interval }
+    }
+}
+
+impl DeviceWatcher for PollingDeviceWatcher {
+    fn start(mut self) -> mpsc::Receiver<DeviceEvent> {
+        let (tx, rx) = mpsc::channel::<DeviceEvent>(32);
+        tokio::spawn(async move {
+            let mut last: Option<DetectedIpod> = None;
+            let mut ticker = tokio::time::interval(self.interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let current = (self.scan)();
+                match (&last, &current) {
+                    (None, Some(now)) => {
+                        if tx.send(DeviceEvent::Connected(now.clone())).await.is_err() { return; }
+                    }
+                    (Some(prev), None) => {
+                        if tx.send(DeviceEvent::Disconnected { serial: prev.serial.clone() }).await.is_err() {
+                            return;
+                        }
+                    }
+                    (Some(prev), Some(now)) if prev.serial != now.serial => {
+                        if tx.send(DeviceEvent::Disconnected { serial: prev.serial.clone() }).await.is_err() {
+                            return;
+                        }
+                        if tx.send(DeviceEvent::Connected(now.clone())).await.is_err() { return; }
+                    }
+                    _ => { /* steady state */ }
+                }
+                last = current;
+            }
+        });
+        rx
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +181,82 @@ mod tests {
         let _ = d.admit(DeviceEvent::Disconnected { serial: "0xABC".to_string() });
         let reconnect = d.admit(DeviceEvent::Connected(ipod("0xABC")));
         assert!(reconnect.is_some(), "after Disconnect, reconnect must admit even within window");
+    }
+
+    use crate::ipod::device::DetectedIpod;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// Closure-driven scan func, so tests can step through observations.
+    fn scripted_scanner(observations: Vec<Option<DetectedIpod>>) -> impl FnMut() -> Option<DetectedIpod> {
+        let queue = Arc::new(Mutex::new(observations));
+        move || {
+            let mut q = queue.lock().unwrap();
+            if q.is_empty() { None } else { q.remove(0) }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn polling_emits_connected_on_first_appearance() {
+        let scanner = scripted_scanner(vec![
+            Some(ipod("0xABC")),  // First poll
+        ]);
+        let watcher = PollingDeviceWatcher::new_for_test(
+            Box::new(scanner),
+            Duration::from_millis(100),
+        );
+        let mut rx = watcher.start();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let event = rx.recv().await.expect("event");
+        match event {
+            DeviceEvent::Connected(d) => assert_eq!(d.serial, "0xABC"),
+            other => panic!("expected Connected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn polling_emits_disconnected_when_device_disappears() {
+        let scanner = scripted_scanner(vec![
+            Some(ipod("0xABC")),
+            Some(ipod("0xABC")),
+            None,
+        ]);
+        let watcher = PollingDeviceWatcher::new_for_test(
+            Box::new(scanner),
+            Duration::from_millis(100),
+        );
+        let mut rx = watcher.start();
+        // Drain Connected
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let first = rx.recv().await.unwrap();
+        assert!(matches!(first, DeviceEvent::Connected(_)));
+        // Advance until disconnect.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let disc = rx.recv().await.unwrap();
+        match disc {
+            DeviceEvent::Disconnected { serial } => assert_eq!(serial, "0xABC"),
+            other => panic!("expected Disconnected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn polling_emits_swap_as_disconnect_then_connect() {
+        let scanner = scripted_scanner(vec![
+            Some(ipod("0xABC")),
+            Some(ipod("0xDEF")),  // Different iPod plugged in
+        ]);
+        let watcher = PollingDeviceWatcher::new_for_test(
+            Box::new(scanner),
+            Duration::from_millis(100),
+        );
+        let mut rx = watcher.start();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let first = rx.recv().await.unwrap();
+        assert!(matches!(first, DeviceEvent::Connected(d) if d.serial == "0xABC"));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let disc = rx.recv().await.unwrap();
+        assert!(matches!(disc, DeviceEvent::Disconnected { ref serial } if serial == "0xABC"));
+        let conn = rx.recv().await.unwrap();
+        assert!(matches!(conn, DeviceEvent::Connected(d) if d.serial == "0xDEF"));
     }
 }
