@@ -12,12 +12,19 @@ pub struct Manifest {
     pub version: u32,
     #[serde(default)]
     pub ipod_serial: Option<String>,
+    /// Source library root from the last successful sync. Used to detect when
+    /// the user accidentally points --source at a different directory (which
+    /// would otherwise produce a catastrophic remove=N diff against an
+    /// unrelated source). Phase 2/3.x/3.y/3.z manifests deserialize cleanly
+    /// because of #[serde(default)].
+    #[serde(default)]
+    pub last_source_root: Option<PathBuf>,
     pub tracks: Vec<ManifestEntry>,
 }
 
 impl Manifest {
     pub fn empty() -> Self {
-        Self { version: 1, ipod_serial: None, tracks: Vec::new() }
+        Self { version: 1, ipod_serial: None, last_source_root: None, tracks: Vec::new() }
     }
 }
 
@@ -258,7 +265,7 @@ mod tests {
     #[test]
     fn save_atomic_roundtrip() {
         let path = std::env::temp_dir().join(format!("ipod-sync-test-rt-{}.json", std::process::id()));
-        let m = Manifest { version: 1, ipod_serial: None, tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)] };
+        let m = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)] };
         save_atomic(&path, &m).unwrap();
         let loaded = load_or_default(&path).unwrap();
         assert_eq!(loaded.tracks.len(), 1);
@@ -270,7 +277,7 @@ mod tests {
         // mtime + size both match the manifest → FAST PATH; callback must
         // NOT fire. `never_called()` asserts that invariant for us.
         let manifest = Manifest {
-            version: 1, ipod_serial: None,
+            version: 1, ipod_serial: None, last_source_root: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
@@ -282,7 +289,7 @@ mod tests {
     #[test]
     fn diff_classifies_new() {
         // Add path doesn't go through the fingerprint callback either.
-        let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![] };
+        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![] };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
         let actions = diff(&manifest, &sources, never_called(), never_called_audio()).unwrap();
         assert_eq!(actions.len(), 1);
@@ -296,7 +303,7 @@ mod tests {
         // entry has empty audio_fingerprint (sample_entry default) so the
         // bootstrap branch emits Modify without invoking the audio callback.
         let manifest = Manifest {
-            version: 1, ipod_serial: None,
+            version: 1, ipod_serial: None, last_source_root: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
@@ -314,7 +321,7 @@ mod tests {
         // file scenario). Manifest entry has empty audio_fingerprint so the
         // bootstrap branch fires — no audio callback invocation.
         let manifest = Manifest {
-            version: 1, ipod_serial: None,
+            version: 1, ipod_serial: None, last_source_root: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 200)];
@@ -327,7 +334,7 @@ mod tests {
     fn diff_classifies_removed() {
         // No source list → Remove emitted without any callback work.
         let manifest = Manifest {
-            version: 1, ipod_serial: None,
+            version: 1, ipod_serial: None, last_source_root: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![];
@@ -340,7 +347,7 @@ mod tests {
     fn diff_preserves_unknown_source_entries() {
         let mut entry = sample_entry(r"C:\unknown.flac", "blake3:??", 0);
         entry.source_known = false;  // from --rebuild-manifest
-        let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
+        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
         let sources = vec![];  // no sources present
         let actions = diff(&manifest, &sources, never_called(), never_called_audio()).unwrap();
         assert_eq!(actions.len(), 0, "unknown-source entries are NOT removed when source is absent");
@@ -352,7 +359,7 @@ mod tests {
         // Slow path runs, callback fires, but result is Unchanged (file
         // fingerprint matched → audio callback not consulted).
         let manifest = Manifest {
-            version: 1, ipod_serial: None,
+            version: 1, ipod_serial: None, last_source_root: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let mut src = sample_source(r"C:\a.flac", "blake3:aa", 100);
@@ -368,7 +375,7 @@ mod tests {
         // differs (tags edited) but the audio_fingerprint matches → MetadataOnly.
         let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         entry.audio_fingerprint = "blake3-audio:zz".to_string();
-        let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
+        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
         // Bump mtime so stat doesn't match → slow path runs.
         let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
         src.mtime = 1700099999;
@@ -390,7 +397,7 @@ mod tests {
         let entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         assert_eq!(entry.audio_fingerprint, "",
             "test premise: sample_entry produces empty audio_fingerprint");
-        let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
+        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
         let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
         src.mtime = 1700099999;
         let sources = vec![src];
@@ -409,7 +416,7 @@ mod tests {
     fn diff_classifies_modify_when_audio_actually_changed() {
         let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         entry.audio_fingerprint = "blake3-audio:zz".to_string();
-        let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
+        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
         // Source: file fingerprint changed AND audio actually differs.
         let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
         src.mtime = 1700099999;
@@ -430,7 +437,7 @@ mod tests {
         // stat-match path must short-circuit before either callback fires.
         let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         entry.audio_fingerprint = "blake3-audio:zz".to_string();
-        let manifest = Manifest { version: 1, ipod_serial: None, tracks: vec![entry] };
+        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
         let actions = diff(
             &manifest,
@@ -440,6 +447,33 @@ mod tests {
         ).unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
+    }
+
+    #[test]
+    fn manifest_without_last_source_root_deserializes_cleanly() {
+        // Phase 2/3.x/3.y/3.z manifests don't have the last_source_root field.
+        // The #[serde(default)] on the field must let them load with
+        // last_source_root=None so the source-change safeguard short-circuits
+        // on first post-upgrade run (no spurious prompt).
+        let old = r#"{
+            "version": 1,
+            "ipod_serial": null,
+            "tracks": []
+        }"#;
+        let m: Manifest = serde_json::from_str(old).unwrap();
+        assert_eq!(m.version, 1);
+        assert_eq!(m.last_source_root, None);
+        assert!(m.tracks.is_empty());
+
+        // And new-shape JSON with the field populated round-trips.
+        let new = r#"{
+            "version": 1,
+            "ipod_serial": null,
+            "last_source_root": "F:\\music",
+            "tracks": []
+        }"#;
+        let m: Manifest = serde_json::from_str(new).unwrap();
+        assert_eq!(m.last_source_root, Some(PathBuf::from(r"F:\music")));
     }
 
     #[test]

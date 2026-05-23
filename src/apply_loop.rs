@@ -88,24 +88,83 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         unchanged,
     };
 
+    // Source-change safeguard: if the manifest's last_source_root is set
+    // AND differs from the current config.source, AND the manifest has tracks,
+    // loudly confirm before letting the diff's Remove actions fire. This
+    // catches the catastrophic case where the user typo'd --source or pointed
+    // at a different library entirely — without this, every existing track
+    // would be Removed (because it's "missing" from the wrong source root).
+    let mut safeguard_force_no_delete = false;
+    if !manifest.tracks.is_empty() {
+        if let Some(last) = &manifest.last_source_root {
+            if last != &config.source {
+                let msg = format!(
+                    "Source root has changed since the last sync.\n\n\
+                     Previous: {}\n\
+                     Current : {}\n\n\
+                     The current diff would REMOVE {} track(s) (everything in the manifest \
+                     that's not in the new source).\n\n\
+                     If this was intentional, choose Continue. If you typo'd --source or are \
+                     pointing at a different library, choose Abort. If you want to add new \
+                     tracks from the new source without touching the iPod's existing tracks, \
+                     choose --no-delete mode.",
+                    last.display(),
+                    config.source.display(),
+                    remove,
+                );
+                let outcome = await_prompt(
+                    progress,
+                    decision_rx,
+                    msg,
+                    &[
+                        "Continue (apply Remove + Add normally)",
+                        "Use --no-delete for this run",
+                        "Abort",
+                    ],
+                    &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                )?;
+                match outcome {
+                    PromptOutcome::Retry => {
+                        progress.log("Source-change safeguard: user chose Continue.".to_string());
+                    }
+                    PromptOutcome::Skip => {
+                        progress.log(
+                            "Source-change safeguard: applying with --no-delete for this run."
+                                .to_string(),
+                        );
+                        safeguard_force_no_delete = true;
+                    }
+                    _ => {
+                        return Err(anyhow!("source-change safeguard aborted"));
+                    }
+                }
+            }
+        }
+    }
+
     // Decide effective no_delete based on dry-run / apply / interactive review.
+    // The safeguard_force_no_delete bit is OR'd into every branch so the
+    // summary shown to the user matches what the apply loop will actually do.
     let effective_no_delete: bool = if config.dry_run {
-        let effective_remove = if config.no_delete { 0 } else { remove };
+        let no_delete = config.no_delete || safeguard_force_no_delete;
+        let effective_remove = if no_delete { 0 } else { remove };
         let total_planned = add + modify + metadata_only + effective_remove;
         progress.summary(add, modify, remove, unchanged, total_planned);
         progress.log("Dry run; nothing was written.");
         return Ok(());
     } else if config.apply || !config.use_tui {
         // Non-interactive: just apply with the configured no_delete.
-        let effective_remove = if config.no_delete { 0 } else { remove };
+        let no_delete = config.no_delete || safeguard_force_no_delete;
+        let effective_remove = if no_delete { 0 } else { remove };
         let total_planned = add + modify + metadata_only + effective_remove;
         progress.summary(add, modify, remove, unchanged, total_planned);
-        config.no_delete
+        no_delete
     } else {
         // Interactive review.
-        progress.review(summary_struct, config.no_delete);
+        progress.review(summary_struct, config.no_delete || safeguard_force_no_delete);
         match decision_rx.recv() {
             Ok(Decision::Review(ReviewDecision::Apply { no_delete })) => {
+                let no_delete = no_delete || safeguard_force_no_delete;
                 let effective_remove = if no_delete { 0 } else { remove };
                 let total_planned = add + modify + metadata_only + effective_remove;
                 progress.summary(add, modify, remove, unchanged, total_planned);
@@ -131,6 +190,8 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         }
     };
 
+    // safeguard_force_no_delete is already folded into every branch of the
+    // `effective_no_delete` decision above, so no extra OR needed here.
     let effective_remove = if effective_no_delete { 0 } else { remove };
     let total_planned = add + modify + metadata_only + effective_remove;
 
@@ -418,6 +479,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         progress.log("Writing iPod DB...");
         db.write()?;
         progress.log("Writing manifest...");
+        // Stamp the current source root onto the manifest so the next run's
+        // source-change safeguard has something to compare against.
+        manifest.last_source_root = Some(config.source.clone());
         manifest::save_atomic(&config.manifest_path, &manifest)?;
 
         progress.log("Done. Eject the iPod before unplugging.");
@@ -602,5 +666,8 @@ pub(crate) fn build_rebuild_manifest(db: &OwnedDb) -> Manifest {
         source_known: false,
         audio_fingerprint: String::new(),
     }).collect();
-    Manifest { version: 1, ipod_serial: None, tracks }
+    // last_source_root is intentionally None: the iPod's DB doesn't carry
+    // the original source library root. The next normal sync's
+    // manifest::save_atomic populates it from config.source.
+    Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks }
 }
