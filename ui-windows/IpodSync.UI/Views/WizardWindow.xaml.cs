@@ -46,27 +46,24 @@ public sealed partial class WizardWindow : Window
     private async Task<IpodIdentityCandidate?> WaitForDeviceFromDaemonAsync(CancellationToken ct)
     {
         var daemon = App.Daemon;
-        if (daemon is null) return null;
+        var router = App.Router;
+        if (daemon is null || router is null) return null;
 
-        await daemon.SendAsync(new SubscribeDeviceEventsCommand(), ct);
-        try
+        var tcs = new TaskCompletionSource<IpodIdentityCandidate?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void Handler(DeviceConnectedEvent dc)
         {
-            while (!ct.IsCancellationRequested)
-            {
-                var evt = await daemon.Events.ReadAsync(ct);
-                if (evt is DeviceConnectedEvent dc)
-                {
-                    return new IpodIdentityCandidate(dc.Serial, dc.ModelLabel, dc.Drive);
-                }
-                // Other event types are ignored here — App.xaml.cs may also
-                // be reading from the same channel; both must consume one
-                // event per loop. M4 introduces a proper event router; for
-                // M3 the wizard owns the channel exclusively while open.
-            }
-            return null;
+            tcs.TrySetResult(new IpodIdentityCandidate(dc.Serial, dc.ModelLabel, dc.Drive));
         }
+        router.DeviceConnected += Handler;
+        await daemon.SendAsync(new SubscribeDeviceEventsCommand(), ct);
+
+        using var reg = ct.Register(() => tcs.TrySetResult(null));
+        try { return await tcs.Task; }
         finally
         {
+            router.DeviceConnected -= Handler;
             try { await daemon.SendAsync(new UnsubscribeDeviceEventsCommand()); } catch { }
         }
     }
