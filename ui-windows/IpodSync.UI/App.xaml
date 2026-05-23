@@ -20,6 +20,12 @@
             <XamlUICommand x:Key="QuitCommand" Label="Quit" Description="Quit" />
 
             <!--
+                Sync Now command surfaced through the tray menu. M3 wires
+                this to a TriggerSync("manual") IPC call against the daemon.
+            -->
+            <XamlUICommand x:Key="SyncNowCommand" Label="Sync Now" Description="Sync Now" />
+
+            <!--
                 Tray icon defined here (NOT in C#) so it inherits
                 Application-resource lifetime. That lifetime anchor is what
                 keeps the process alive after the last window closes in
@@ -38,6 +44,8 @@
                 IconSource="ms-appx:///Assets/tray-idle.ico">
                 <tb:TaskbarIcon.ContextFlyout>
                     <MenuFlyout>
+                        <MenuFlyoutItem Command="{StaticResource SyncNowCommand}" />
+                        <MenuFlyoutSeparator />
                         <MenuFlyoutItem Command="{StaticResource QuitCommand}" />
                     </MenuFlyout>
                 </tb:TaskbarIcon.ContextFlyout>

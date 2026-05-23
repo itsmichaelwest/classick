@@ -58,6 +58,7 @@ public partial class App : Application
         Tray = new TrayIconController();
         Tray.Initialize();
         Tray.QuitRequested += OnQuitRequested;
+        Tray.SyncNowRequested += OnSyncNowRequested;
 
         // 2. Ensure daemon is running.
         if (!await IsDaemonRunningAsync())
@@ -87,13 +88,21 @@ public partial class App : Application
         // 4. Ask daemon for config status. If unconfigured, open the wizard.
         await Daemon.SendAsync(new GetConfigCommand());
         var first = await Daemon.Events.ReadAsync();
-        if (first is ConfigUpdateEvent cfg && cfg.Ipod is null)
+        bool needsWizard = first is ConfigUpdateEvent cfg && cfg.Ipod is null;
+
+        if (needsWizard)
         {
             ShowWizard();
+            // Wizard owns the daemon event channel exclusively while
+            // open; the tray loop starts after wizard close.
+            // (M4: introduce a real event router so multiple consumers
+            //  can subscribe concurrently.)
         }
         else
         {
-            // Configured: stay hidden in tray. M3 starts the auto-sync flow.
+            // Configured: kick off tray event loop + ask for initial status.
+            StartTrayEventLoop();
+            await Daemon.SendAsync(new GetStatusCommand());
         }
     }
 
@@ -107,6 +116,72 @@ public partial class App : Application
             WindowHandle = IntPtr.Zero;
         };
         Window.Activate();
+    }
+
+    private void StartTrayEventLoop()
+    {
+        _ = Task.Run(async () =>
+        {
+            if (Daemon is null) return;
+            try
+            {
+                await foreach (var evt in Daemon.Events.ReadAllAsync())
+                {
+                    switch (evt)
+                    {
+                        case StatusUpdateEvent s:
+                            UpdateTrayFromStatus(s);
+                            break;
+                        case DeviceConnectedEvent dc:
+                            if (Tray is not null)
+                            {
+                                DispatcherQueue.TryEnqueue(() =>
+                                    Tray.SetState(TrayState.Idle, $"iPod connected ({dc.ModelLabel})"));
+                            }
+                            break;
+                        case DeviceDisconnectedEvent:
+                            if (Tray is not null)
+                            {
+                                DispatcherQueue.TryEnqueue(() =>
+                                    Tray.SetState(TrayState.Offline, "iPod not connected"));
+                            }
+                            break;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.WriteLine($"app: tray event loop ended: {e}");
+            }
+        });
+    }
+
+    private void UpdateTrayFromStatus(StatusUpdateEvent s)
+    {
+        if (Tray is null) return;
+        var (state, tooltip) = (s.State, s.IpodConnected) switch
+        {
+            ("syncing", _)   => (TrayState.Syncing, "Syncing..."),
+            (_,    true)     => (TrayState.Idle,    "iPod connected · idle"),
+            _                => (TrayState.Offline, "iPod not connected"),
+        };
+        DispatcherQueue.TryEnqueue(() => Tray.SetState(state, tooltip));
+    }
+
+    private void OnSyncNowRequested()
+    {
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            if (Daemon is null) return;
+            try
+            {
+                await Daemon.SendAsync(new TriggerSyncCommand("manual"));
+            }
+            catch (Exception e)
+            {
+                Debug.WriteLine($"app: trigger_sync failed: {e}");
+            }
+        });
     }
 
     private void OnQuitRequested()

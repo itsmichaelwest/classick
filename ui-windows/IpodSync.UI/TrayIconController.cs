@@ -1,82 +1,72 @@
 using System;
+using System.IO;
 using H.NotifyIcon;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Windows.Foundation;
 
 namespace IpodSync_UI;
 
 /// <summary>
-/// Wraps the App.xaml-defined <see cref="TaskbarIcon"/>. The icon's
-/// Application-resource lifetime is what keeps the app alive in
-/// tray-only mode (no visible windows). See the H.NotifyIcon
-/// Windowless sample for the canonical pattern.
+/// 4-state tray icon driven by daemon StatusUpdate events.
+/// </summary>
+public enum TrayState { Idle, Syncing, Error, Offline }
+
+/// <summary>
+/// Owns the H.NotifyIcon-backed system-tray icon. Lifetime is anchored
+/// by the TaskbarIcon defined as an Application.Resource in App.xaml
+/// (so the dispatcher stays alive while no windows are open).
 /// </summary>
 public sealed class TrayIconController : IDisposable
 {
     private TaskbarIcon? _icon;
     private XamlUICommand? _quitCommand;
-    private TypedEventHandler<XamlUICommand, ExecuteRequestedEventArgs>? _quitHandler;
-    private bool _disposed;
+    private XamlUICommand? _syncNowCommand;
+    private TrayState _state = TrayState.Offline;
 
     public event Action? QuitRequested;
-    public event Action? ShowSettingsRequested;  // M4 wires the Settings menu item
+    public event Action? SyncNowRequested;
 
     public void Initialize()
     {
         _icon = (TaskbarIcon)Application.Current.Resources["TrayIcon"];
         _quitCommand = (XamlUICommand)Application.Current.Resources["QuitCommand"];
-        _quitHandler = (_, _) => QuitRequested?.Invoke();
-        _quitCommand.ExecuteRequested += _quitHandler;
-        // ForceCreate() performs the OS-level NotifyIcon registration.
+        _syncNowCommand = (XamlUICommand)Application.Current.Resources["SyncNowCommand"];
+        _quitCommand.ExecuteRequested += (_, _) => QuitRequested?.Invoke();
+        _syncNowCommand.ExecuteRequested += (_, _) => SyncNowRequested?.Invoke();
         _icon.ForceCreate();
+        SetState(TrayState.Offline, "iPod not connected");
     }
 
-    public void SetState(TrayIconState state)
+    /// <summary>
+    /// Swap icon + tooltip atomically. Safe to call from any thread —
+    /// H.NotifyIcon marshals to the UI thread internally.
+    /// </summary>
+    public void SetState(TrayState state, string tooltip)
     {
         if (_icon is null) return;
-        string iconAsset;
-        string tooltip;
-        switch (state)
+        _state = state;
+        var iconPath = state switch
         {
-            case TrayIconState.Idle:
-                iconAsset = "tray-idle.ico";
-                tooltip = "ipod-sync · idle";
-                break;
-            case TrayIconState.Offline:
-                iconAsset = "tray-offline.ico";
-                tooltip = "iPod not connected";
-                break;
-            default:
-                iconAsset = "tray-idle.ico";
-                tooltip = $"ipod-sync · {state}";
-                break;
+            TrayState.Idle    => "Assets/tray-idle.ico",
+            TrayState.Syncing => "Assets/tray-syncing.ico",
+            TrayState.Error   => "Assets/tray-error.ico",
+            TrayState.Offline => "Assets/tray-offline.ico",
+            _                  => "Assets/tray-offline.ico",
+        };
+        var abs = Path.Combine(AppContext.BaseDirectory, iconPath);
+        if (File.Exists(abs))
+        {
+            _icon.IconSource = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(abs));
         }
-        _icon.IconSource = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(
-            new Uri($"ms-appx:///Assets/{iconAsset}"));
         _icon.ToolTipText = tooltip;
     }
 
+    public TrayState CurrentState => _state;
+
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        if (_quitCommand is not null && _quitHandler is not null)
-        {
-            _quitCommand.ExecuteRequested -= _quitHandler;
-        }
-        _quitHandler = null;
-        _quitCommand = null;
         _icon?.Dispose();
         _icon = null;
     }
-}
-
-public enum TrayIconState
-{
-    Idle,
-    Syncing,  // M3
-    Error,    // M3
-    Offline,
 }
