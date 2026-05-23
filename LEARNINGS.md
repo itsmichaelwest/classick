@@ -2,6 +2,10 @@
 
 Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+## TUI thread join: bounded-time + force-exit (2026-05-24)
+
+- **`Progress::finish` now has a 5-second join deadline.** If the TUI thread doesn't reach a terminal state within that window after we send `ProgressEvent::Finish`, we `eprintln!` a warning and `std::process::exit(2)` instead of waiting forever. Driver: Phase 3.z Gate Scenario 5 produced a 2-hour zombie process (PID 39196, 60s CPU = idle, responsive but no window). The catastrophic 1275-remove apply loop completed, but the TUI thread never returned. Most likely crossterm's `LeaveAlternateScreen` or `disable_raw_mode` wedged on a Windows console handle after the gauge/panel rendering had visibly degraded earlier in the run. Couldn't reproduce safely (would mean wiping the iPod again) so we fixed defensively: poll `JoinHandle::is_finished()` with a 50ms tick, force-exit on timeout. If the warning fires repeatedly, the root cause matters and should be investigated; until then the bound is good insurance.
+
 ## Phase 3 gate (2026-05-24) — PASS (5/6 driven; refalac optional)
 
 - **Scenario 6 (Phase 2 manifest back-compat) PASS** — `cargo run --release` against 1275-track manifest written by pre-Phase 3 code produced `Modify=0`, `Unchanged=1275`. The `is_encoder_mismatch` carve-out for `encoder="unknown"` correctly prevented a thundering re-encode after Phase 3 upgrade. **Most important regression test — no users broken by Phase 3.**

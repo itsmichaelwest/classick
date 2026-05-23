@@ -155,9 +155,36 @@ impl Progress {
     /// `let _ = t.join()`, leaving the orchestrator silently writing to the
     /// iPod with no visible UI. Per-event `send` failures are still ignored
     /// (the channel is one-way and a closed channel is benign at teardown).
+    ///
+    /// If the thread doesn't reach a terminal state within `JOIN_DEADLINE`
+    /// after we sent Finish, we force-exit the process with code 2 rather
+    /// than wait indefinitely. The Phase 3.z gate produced a 2-hour zombie
+    /// process this way: catastrophic Scenario 5 run finished applying its
+    /// 1275 removes, but the TUI thread never returned — most likely
+    /// crossterm's `LeaveAlternateScreen` or `disable_raw_mode` wedged on a
+    /// Windows console handle after the gauge/panel rendering had already
+    /// degraded visibly. Force-exit guarantees that "work done" leads to
+    /// "process gone" inside a bounded window even if we don't fully
+    /// understand the root cause.
     pub fn finish(mut self) -> Result<()> {
+        const JOIN_DEADLINE: Duration = Duration::from_secs(5);
+        const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
         let _ = self.sender.send(ProgressEvent::Finish);
         if let Some(t) = self.thread.take() {
+            let deadline = Instant::now() + JOIN_DEADLINE;
+            while !t.is_finished() {
+                if Instant::now() >= deadline {
+                    eprintln!(
+                        "WARN: TUI thread did not exit within {JOIN_DEADLINE:?} \
+                         after Finish; force-exiting to avoid a zombie process. \
+                         If this fires more than once, file a bug with terminal info."
+                    );
+                    std::process::exit(2);
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            // Thread is done; join is now non-blocking.
             t.join().map_err(|panic| {
                 let msg = panic
                     .downcast_ref::<String>()
