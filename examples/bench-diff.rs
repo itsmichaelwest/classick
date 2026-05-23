@@ -39,7 +39,10 @@ fn main() -> Result<()> {
     let mut fp_calls = 0usize;
     let mut audio_fp_calls = 0usize;
     let t2 = Instant::now();
-    // TODO Phase 3 Task 6: thread config.encoder + config.force_reencode here.
+    // Encoder choice + force_reencode are irrelevant to this benchmark:
+    // we're measuring stat-only walk + diff throughput, not the encoder
+    // branch. Hardcoding ("ffmpeg", false) keeps the diff deterministic
+    // against any local manifest regardless of the user's current --encoder.
     let actions = manifest::diff(
         &manifest,
         &sources,

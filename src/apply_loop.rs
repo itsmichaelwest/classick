@@ -17,8 +17,56 @@ use crate::preflight;
 use crate::progress::{ActionPlanSummary, Decision, Progress, ReviewDecision};
 use crate::source::{self, SourceEntry};
 use crate::tags::tags_from_probe;
-use crate::transcode::{self, has_embedded_art};
+use crate::transcode::{self, has_embedded_art, ProbeOutput, SourceAction};
 use crate::try_with_prompt::{await_prompt, PromptOutcome};
+
+/// Stable string label for an `EncoderChoice`, used for the manifest's
+/// `encoder` field and for `diff`'s encoder-mismatch target string.
+pub(crate) fn encoder_str(choice: EncoderChoice) -> &'static str {
+    match choice {
+        EncoderChoice::Ffmpeg => "ffmpeg",
+        EncoderChoice::Refalac => "refalac",
+    }
+}
+
+/// Best-effort extraction of the source codec name (e.g. "flac", "mp3",
+/// "aac", "alac", "vorbis", "opus", "pcm_s16le") from an ffprobe result.
+/// Falls back to the first segment of `format.format_name` if no audio
+/// stream advertises a codec_name; "unknown" if even that's missing.
+pub(crate) fn source_format_from_probe(probe: &ProbeOutput) -> String {
+    if let Some(s) = probe.streams.iter().find(|s| s.codec_type == "audio") {
+        if let Some(c) = &s.codec_name {
+            return c.clone();
+        }
+    }
+    probe
+        .format
+        .format_name
+        .as_deref()
+        .unwrap_or("unknown")
+        .split(',')
+        .next()
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Probe `ffmpeg -version` and return the first line (e.g. "ffmpeg version
+/// n7.0 ..."). Forensic-only: recorded in `ManifestEntry.encoder_version`
+/// so a future audit can correlate an iPod-side ALAC file with the exact
+/// encoder that wrote it. Returns Err if ffmpeg isn't spawnable.
+pub(crate) fn ffmpeg_version() -> Result<String> {
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-version"])
+        .output()
+        .context("invoking ffmpeg -version")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(stdout
+        .lines()
+        .next()
+        .unwrap_or("ffmpeg")
+        .trim()
+        .to_string())
+}
 
 pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<()> {
     if config.dry_run && config.apply {
@@ -43,7 +91,6 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     } else {
         None
     };
-    let _ = refalac_version; // TODO Task 6: thread into entry_from / transcode_via_refalac.
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
     let sources = preflight::walk_source(config, progress, decision_rx)?;
 
@@ -61,18 +108,17 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // 4. Diff. Pass `source::fingerprint` as the slow-path hash callback;
     //    it only fires for entries whose (mtime, size) doesn't match the
     //    manifest, so the steady-state "nothing changed" run is stat-only.
-    // TODO Phase 3 Task 6: thread config.encoder + config.force_reencode here.
-    // Hardcoding ("ffmpeg", false) preserves Phase 2 behavior exactly — the
-    // default target encoder matches what apply_loop writes for fresh entries,
-    // and force-off + the "unknown" carve-out means Phase 2 manifests upgrade
-    // without spurious re-encodes.
+    //    The target_encoder + force_reencode pair drives the encoder-mismatch
+    //    branch (manifest::is_encoder_mismatch) so an existing entry whose
+    //    body was written by a different encoder gets promoted to Modify.
+    let target_encoder = encoder_str(config.encoder);
     let actions = manifest::diff(
         &manifest,
         &sources,
         source::fingerprint,
         source::audio_fingerprint,
-        "ffmpeg",
-        false,
+        target_encoder,
+        config.force_reencode,
     )?;
     let (add, modify, metadata_only, remove, unchanged) = count_actions(&actions);
 
@@ -356,9 +402,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // Second half: re-add. Only runs if delete succeeded.
                     // (The --no-delete short-circuit above already returned.)
                     if deleted {
-                        let added: Option<(TrackHandle, String, String)> = loop {
-                            match add_one(&db, &src) {
-                                Ok(triple) => break Some(triple),
+                        let added: Option<AddOneOutcome> = loop {
+                            match add_one(&db, &src, config, &refalac_version) {
+                                Ok(outcome) => break Some(outcome),
                                 Err(e) => {
                                     let msg = format!(
                                         "Failed to add new version of {}:\n  {e}\n\nChoose:",
@@ -387,8 +433,16 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                                 }
                             }
                         };
-                        if let Some((handle, fp, audio_fp)) = added {
-                            manifest.tracks.push(entry_from(&src, &handle, &fp, &audio_fp));
+                        if let Some(o) = added {
+                            manifest.tracks.push(entry_from(
+                                &src,
+                                &o.handle,
+                                &o.fingerprint,
+                                &o.audio_fingerprint,
+                                &o.encoder,
+                                &o.encoder_version,
+                                &o.source_format,
+                            ));
                         }
                     }
                     progress.track_done();
@@ -401,9 +455,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                         format!("ADD {}", display_path(&src.path)),
                     );
                     // Skip is clean here: no iPod state changes, no manifest update.
-                    let added: Option<(TrackHandle, String, String)> = loop {
-                        match add_one(&db, &src) {
-                            Ok(triple) => break Some(triple),
+                    let added: Option<AddOneOutcome> = loop {
+                        match add_one(&db, &src, config, &refalac_version) {
+                            Ok(outcome) => break Some(outcome),
                             Err(e) => {
                                 let msg = format!(
                                     "Failed to add {}:\n  {e}\n\nChoose:",
@@ -425,8 +479,16 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                             }
                         }
                     };
-                    if let Some((handle, fp, audio_fp)) = added {
-                        manifest.tracks.push(entry_from(&src, &handle, &fp, &audio_fp));
+                    if let Some(o) = added {
+                        manifest.tracks.push(entry_from(
+                            &src,
+                            &o.handle,
+                            &o.fingerprint,
+                            &o.audio_fingerprint,
+                            &o.encoder,
+                            &o.encoder_version,
+                            &o.source_format,
+                        ));
                     }
                     progress.track_done();
                 }
@@ -601,24 +663,116 @@ pub(crate) fn do_metadata_only(
     })
 }
 
-/// Transcode + add one source file. Returns the iPod-side handle plus the
-/// freshly-computed source fingerprint AND audio-only fingerprint. Both
-/// fingerprints are computed here (not by the walker) because Add/Modify are
-/// the only code paths that need them for the manifest entry — the
-/// steady-state Unchanged path stays stat-only. The audio fingerprint lets
-/// future runs detect tag-only edits and take the MetadataOnly fast path.
-pub(crate) fn add_one(db: &OwnedDb, src: &SourceEntry) -> Result<(TrackHandle, String, String)> {
+/// Per-track result of `add_one`. A struct rather than a 6-tuple because
+/// the Modify/Add arms in `run` and the manifest entry builder both consume
+/// it; positional access would obscure intent at the call sites.
+pub(crate) struct AddOneOutcome {
+    pub handle: TrackHandle,
+    pub fingerprint: String,
+    pub audio_fingerprint: String,
+    /// "ffmpeg" | "refalac" | "passthrough" — matches the manifest field.
+    pub encoder: String,
+    /// Forensic version string (e.g. "ffmpeg version n7.0 ..." or
+    /// "refalac 1.85"). Empty for passthrough.
+    pub encoder_version: String,
+    /// ffprobe codec_name of the source (e.g. "flac", "mp3", "aac").
+    pub source_format: String,
+}
+
+/// Probe → classify → branch on Passthrough/Transcode(encoder) for one source.
+/// Adds the resulting file to the iPod via libgpod, then computes both file +
+/// audio-only fingerprints for the manifest. Both fingerprints are computed
+/// here (not by the walker) because Add/Modify are the only code paths that
+/// need them — the steady-state Unchanged path stays stat-only. The audio
+/// fingerprint lets future runs detect tag-only edits and take the
+/// MetadataOnly fast path.
+///
+/// The encoder branch:
+/// - Passthrough: byte-for-byte copy of the source (mp3 / aac / alac /
+///   optionally wav). Encoder recorded as "passthrough" so the
+///   encoder-mismatch heuristic can carve it out from future re-encodes.
+/// - Transcode + Ffmpeg: existing `transcode_to_alac` (single-step ffmpeg
+///   FLAC→ALAC, art passthrough).
+/// - Transcode + Refalac: 2-step `transcode_via_refalac` (ffmpeg-decode to
+///   WAV, then refalac to ALAC, with optional --artwork from a temp jpg).
+pub(crate) fn add_one(
+    db: &OwnedDb,
+    src: &SourceEntry,
+    config: &Config,
+    refalac_version: &Option<String>,
+) -> Result<AddOneOutcome> {
     let probe = transcode::probe(&src.path)
         .with_context(|| format!("probe {}", src.path.display()))?;
     let tags = tags_from_probe(&probe);
+    let source_format = source_format_from_probe(&probe);
 
-    let temp = transcode::temp_alac_path();
-    if let Some(parent) = temp.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    transcode::transcode_to_alac(&src.path, &temp)
-        .with_context(|| format!("transcode {}", src.path.display()))?;
+    let classify_cfg = transcode::ClassifyConfig {
+        passthrough_wav: config.passthrough_wav,
+    };
+    let action = transcode::classify(&probe, &classify_cfg)
+        .with_context(|| format!("classify {}", src.path.display()))?;
 
+    // Resolve the on-disk file we'll feed into libgpod, plus the
+    // encoder identity to record in the manifest.
+    let (encoder, encoder_version, temp): (String, String, std::path::PathBuf) = match action {
+        SourceAction::Passthrough => {
+            let dst = transcode::temp_passthrough_path(&src.path);
+            transcode::passthrough(&src.path, &dst)
+                .with_context(|| format!("passthrough copy for {}", src.path.display()))?;
+            ("passthrough".to_string(), String::new(), dst)
+        }
+        SourceAction::Transcode => match config.encoder {
+            EncoderChoice::Ffmpeg => {
+                let dst = transcode::temp_alac_path();
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                transcode::transcode_to_alac(&src.path, &dst)
+                    .with_context(|| format!("transcode {}", src.path.display()))?;
+                let ver = ffmpeg_version()
+                    .unwrap_or_else(|_| "ffmpeg (version unknown)".to_string());
+                ("ffmpeg".to_string(), ver, dst)
+            }
+            EncoderChoice::Refalac => {
+                let dst = transcode::temp_alac_path();
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                // Refalac --artwork wants a path; extract embedded art to a
+                // temp jpg first if any, then pass it. Cleaned up after.
+                let art_path_opt = if has_embedded_art(&probe) {
+                    let art_path = transcode::temp_art_path();
+                    transcode::extract_cover_art(&src.path, &art_path).with_context(|| {
+                        format!("extract art for refalac --artwork: {}", src.path.display())
+                    })?;
+                    Some(art_path)
+                } else {
+                    None
+                };
+                let ffmpeg_path = config.ffmpeg.as_path();
+                let result = transcode::transcode_via_refalac(
+                    &src.path,
+                    &dst,
+                    &config.refalac_path,
+                    ffmpeg_path,
+                    art_path_opt.as_deref(),
+                )
+                .with_context(|| format!("refalac transcode {}", src.path.display()));
+                if let Some(p) = &art_path_opt {
+                    let _ = std::fs::remove_file(p);
+                }
+                result?;
+                let ver = refalac_version
+                    .clone()
+                    .unwrap_or_else(|| "refalac (version unknown)".to_string());
+                ("refalac".to_string(), ver, dst)
+            }
+        },
+    };
+
+    // libgpod still writes its own thumbnail copy, so we extract once more
+    // here for the apply_tags path. Source-side bytes are unchanged; this
+    // is independent of refalac's own --artwork embed.
     let art = if has_embedded_art(&probe) {
         let art_path = transcode::temp_art_path();
         transcode::extract_cover_art(&src.path, &art_path)?;
@@ -629,16 +783,24 @@ pub(crate) fn add_one(db: &OwnedDb, src: &SourceEntry) -> Result<(TrackHandle, S
         None
     };
 
-    let handle = db.add_track_with_file(&temp, &tags, art.as_deref())
+    let handle = db
+        .add_track_with_file(&temp, &tags, art.as_deref())
         .with_context(|| format!("add_track_with_file for {}", src.path.display()))?;
 
     let _ = std::fs::remove_file(&temp);
 
     let fingerprint = source::fingerprint(&src.path)
         .with_context(|| format!("fingerprint {}", src.path.display()))?;
-    let audio_fp = source::audio_fingerprint(&src.path)
+    let audio_fingerprint = source::audio_fingerprint(&src.path)
         .with_context(|| format!("audio_fingerprint {}", src.path.display()))?;
-    Ok((handle, fingerprint, audio_fp))
+    Ok(AddOneOutcome {
+        handle,
+        fingerprint,
+        audio_fingerprint,
+        encoder,
+        encoder_version,
+        source_format,
+    })
 }
 
 /// Take the last 2 path components for display ("Album\Track.flac"). Falls
@@ -682,6 +844,9 @@ pub(crate) fn entry_from(
     handle: &TrackHandle,
     fingerprint: &str,
     audio_fingerprint: &str,
+    encoder: &str,
+    encoder_version: &str,
+    source_format: &str,
 ) -> ManifestEntry {
     ManifestEntry {
         source_path: src.path.clone(),
@@ -692,14 +857,12 @@ pub(crate) fn entry_from(
         ipod_relpath: handle.ipod_relpath.clone(),
         source_known: true,
         audio_fingerprint: audio_fingerprint.to_string(),
-        // TODO Phase 3 Task 6: thread the ResolvedEncoder { name, version }
-        // and probe.codec_name through here. For now we hard-code Phase 2's
-        // historical reality: ffmpeg was the only encoder, FLAC the only
-        // source. That keeps a fresh-on-disk entry encoder-matched against
-        // the default target ("ffmpeg") so no spurious re-encode fires.
-        encoder: "ffmpeg".to_string(),
-        encoder_version: String::new(),
-        source_format: "flac".to_string(),
+        // Recorded per-track from add_one's classify+encoder branch so
+        // future runs can detect encoder-mismatch (or carve out passthrough
+        // entries that have no encoder identity to mismatch against).
+        encoder: encoder.to_string(),
+        encoder_version: encoder_version.to_string(),
+        source_format: source_format.to_string(),
     }
 }
 
@@ -726,4 +889,59 @@ pub(crate) fn build_rebuild_manifest(db: &OwnedDb) -> Manifest {
     // the original source library root. The next normal sync's
     // manifest::save_atomic populates it from config.source.
     Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// encoder_str is what `run` feeds into `manifest::diff` as the target
+    /// encoder name and what `add_one` records on each new entry. Mismatches
+    /// here would silently break the encoder-mismatch diff branch — every
+    /// fresh entry would look like a mismatch against itself.
+    #[test]
+    fn encoder_str_maps_choices_to_manifest_strings() {
+        assert_eq!(encoder_str(EncoderChoice::Ffmpeg), "ffmpeg");
+        assert_eq!(encoder_str(EncoderChoice::Refalac), "refalac");
+    }
+
+    /// source_format_from_probe pulls codec_name from the first audio stream
+    /// (matching what classify uses). Any non-audio leading stream — for
+    /// instance an attached_pic video stream that ffprobe sometimes emits
+    /// first — must NOT win.
+    #[test]
+    fn source_format_from_probe_prefers_audio_stream_codec_name() {
+        let json = r#"{
+            "streams":[
+                {"codec_type":"video","codec_name":"mjpeg"},
+                {"codec_type":"audio","codec_name":"flac"}
+            ],
+            "format":{"format_name":"flac"}
+        }"#;
+        let probe: ProbeOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(source_format_from_probe(&probe), "flac");
+    }
+
+    /// When an audio stream has no `codec_name` (defensive — Phase 1/2
+    /// fixtures didn't carry it), fall back to the first component of
+    /// `format.format_name`. Comma-split mirrors classify's container logic.
+    #[test]
+    fn source_format_from_probe_falls_back_to_first_format_name_segment() {
+        let json = r#"{
+            "streams":[{"codec_type":"audio"}],
+            "format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2"}
+        }"#;
+        let probe: ProbeOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(source_format_from_probe(&probe), "mov");
+    }
+
+    /// Last resort: neither codec_name nor format_name — return "unknown"
+    /// rather than panicking. Manifest entries can later get corrected on
+    /// the next normal Modify.
+    #[test]
+    fn source_format_from_probe_returns_unknown_when_no_info() {
+        let json = r#"{"streams":[],"format":{}}"#;
+        let probe: ProbeOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(source_format_from_probe(&probe), "unknown");
+    }
 }

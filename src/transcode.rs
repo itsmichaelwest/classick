@@ -382,6 +382,74 @@ pub fn temp_passthrough_path(src: &Path) -> PathBuf {
     p
 }
 
+/// 2-step pipeline: source → ffmpeg-decode → temp.wav → refalac → temp.m4a.
+///
+/// Refalac only reads WAV/AIFF natively; uniform handling of all source
+/// formats goes through the WAV intermediate. Future work: pipe directly
+/// (ffmpeg stdout → refalac stdin) to eliminate the WAV temp.
+///
+/// Returns `Ok(())` on success; both temps cleaned up before return.
+/// Caller is responsible for tags + cover-art via libgpod (refalac doesn't
+/// carry over WAV-side tags).
+pub fn transcode_via_refalac(
+    src: &Path,
+    dst_m4a: &Path,
+    refalac_path: &Path,
+    ffmpeg_path: &Path,
+    art_jpg: Option<&Path>,
+) -> Result<()> {
+    let temp_wav = temp_wav_path();
+    if let Some(parent) = temp_wav.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if let Some(parent) = dst_m4a.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    // Step 1: ffmpeg decode source → temp.wav. -vn drops any attached_pic
+    // video stream so refalac sees a pure-audio WAV.
+    let mut ffmpeg = Command::new(ffmpeg_path);
+    ffmpeg.args(["-hide_banner", "-loglevel", "warning", "-y", "-i"]);
+    ffmpeg.arg(src);
+    ffmpeg.args(["-vn", "-acodec", "pcm_s16le"]);
+    ffmpeg.arg(&temp_wav);
+    let ffmpeg_out = ffmpeg
+        .output()
+        .with_context(|| format!("ffmpeg decode of {} to WAV", src.display()))?;
+    if !ffmpeg_out.status.success() {
+        let _ = std::fs::remove_file(&temp_wav);
+        return Err(anyhow!(
+            "ffmpeg decode {} -> WAV failed: {}",
+            src.display(),
+            String::from_utf8_lossy(&ffmpeg_out.stderr)
+        ));
+    }
+
+    // Step 2: refalac WAV → ALAC m4a (with optional artwork).
+    let mut refalac = Command::new(refalac_path);
+    refalac.args(["--silent", "-o"]);
+    refalac.arg(dst_m4a);
+    if let Some(art) = art_jpg {
+        refalac.arg("--artwork");
+        refalac.arg(art);
+    }
+    refalac.arg(&temp_wav);
+    let refalac_out = refalac
+        .output()
+        .with_context(|| format!("refalac encode of {} to ALAC", temp_wav.display()));
+    let _ = std::fs::remove_file(&temp_wav);
+    let refalac_out = refalac_out?;
+    if !refalac_out.status.success() {
+        let _ = std::fs::remove_file(dst_m4a);
+        return Err(anyhow!(
+            "refalac encode -> {} failed: {}",
+            dst_m4a.display(),
+            String::from_utf8_lossy(&refalac_out.stderr)
+        ));
+    }
+    Ok(())
+}
+
 /// Extract the first video stream (assumed to be the attached_pic / cover art)
 /// from `src` to `dst` as a single still image. Assumes the source actually
 /// has an attached_pic stream — caller should check via `has_embedded_art`
