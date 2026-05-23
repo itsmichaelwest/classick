@@ -2,6 +2,15 @@
 
 Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+## Phase 3 gate (2026-05-24) — PASS (5/6 driven; refalac optional)
+
+- **Scenario 6 (Phase 2 manifest back-compat) PASS** — `cargo run --release` against 1275-track manifest written by pre-Phase 3 code produced `Modify=0`, `Unchanged=1275`. The `is_encoder_mismatch` carve-out for `encoder="unknown"` correctly prevented a thundering re-encode after Phase 3 upgrade. **Most important regression test — no users broken by Phase 3.**
+- **Scenario 5 (`--force-reencode`) PASS** — `cargo run --release -- --force-reencode` produced `Modify=1275`, every transcodable track flagged regardless of encoder match. Override flag works as designed.
+- **Scenarios 1, 2 N/A** — user's library is FLAC-only; no mixed-source preview to exercise and no MP3/AAC to byte-compare against passthrough output.
+- **Scenarios 3, 4 deferred** — refalac install is opt-in (user runs ffmpeg by default); skip unless/until user installs qaac and wants Apple's reference ALAC encoder.
+- **Scenario 7 (iPod-level acceptance) trivial** — both gate runs ended at Review screen with `q`; no new tracks written, existing tracks from yesterday's recovery sync play normally.
+- **Source-change safeguard verified not firing** — manifest's `last_source_root` correctly matches current `config.source`, so the safeguard prompt stayed dormant. The safeguard's positive case was exercised the painful way during the Phase 3.z gate (see entry below).
+
 ## Phase 3 Task 5 — refalac vendoring (2026-05-23)
 
 - **Vendor binaries are gitignored.** `vendor/refalac/` is in .gitignore;
