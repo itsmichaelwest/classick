@@ -65,24 +65,31 @@ pub fn verify_refalac(
             Ok(version) => return Ok(version),
             Err(e) => {
                 let msg = format!(
-                    "refalac64 was not reachable at {}:\n  {e}\n\n\
-                     Either drop refalac64.exe + libFLAC.dll into vendor/refalac/ \
-                     (build.rs picks them up), put refalac64.exe on PATH, or pass \
-                     --refalac-path <path>.\n\n\
-                     See docs/superpowers/specs/2026-05-23-phase-3-addendum.md \
-                     for the install steps. Then retry.",
+                    "You picked --encoder refalac but refalac64 wasn't reachable at {}.\n  {e}\n\n\
+                     To install (one-time setup):\n\
+                     1. Download the latest qaac release:\n\
+                        https://github.com/nu774/qaac/releases\n\
+                     2. Extract refalac64.exe + libFLAC.dll from the zip\n\
+                     3. Drop both files into the project's vendor/refalac/ directory\n\
+                        (or put refalac64.exe on PATH, or pass --refalac-path <path>)\n\
+                     4. Rebuild (cargo build --release) so build.rs picks them up\n\n\
+                     Don't want to install qaac? Re-run without --encoder refalac \
+                     (or with --encoder ffmpeg) to use the default ffmpeg encoder, \
+                     which is already working on this machine.",
                     config.refalac_path.display()
                 );
                 let outcome = await_prompt(
                     progress,
                     decision_rx,
                     msg,
-                    &["Retry", "Abort"],
+                    &["Retry (after installing)", "Abort"],
                     &[PromptOutcome::Retry, PromptOutcome::Abort],
                 )?;
                 match outcome {
                     PromptOutcome::Retry => continue,
-                    _ => return Err(anyhow!("refalac required; aborted")),
+                    _ => return Err(anyhow!(
+                        "refalac required for --encoder refalac; aborted (see prompt for install steps, or use --encoder ffmpeg)"
+                    )),
                 }
             }
         }
