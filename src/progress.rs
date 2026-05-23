@@ -2,7 +2,7 @@
 //! plain log lines otherwise. Main thread sends events; a dedicated thread
 //! drains the channel and renders.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use crossterm::event::{Event, KeyCode};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
@@ -86,18 +86,39 @@ pub struct Progress {
 }
 
 impl Progress {
-    pub fn start(use_tui: bool) -> Result<(Self, Receiver<Decision>)> {
-        let is_tty = std::io::stdout().is_terminal();
-        let active_tui = use_tui && is_tty;
+    /// Spawn the progress-rendering thread.
+    ///
+    /// Three-way dispatch, in priority order:
+    /// 1. `ipc_mode == true` → [`run_ipc`]: serializes events to stdout as
+    ///    newline-delimited JSON per `docs/ipc-protocol.md`; parses commands
+    ///    from stdin back into the decision channel. No terminal manipulation.
+    ///    Tracing goes to a file (see [`crate::logging::init`]).
+    /// 2. `use_tui == true` AND stdout is a TTY → [`run_tui`]: ratatui +
+    ///    alternate screen.
+    /// 3. otherwise → [`run_plain`]: line-by-line stdout/stderr.
+    pub fn start(use_tui: bool, ipc_mode: bool) -> Result<(Self, Receiver<Decision>)> {
         let (event_tx, event_rx) = mpsc::channel();
         let (decision_tx, decision_rx) = mpsc::channel();
         let thread = std::thread::spawn(move || {
-            if active_tui {
-                if let Err(e) = run_tui(event_rx, decision_tx) {
-                    eprintln!("TUI failure: {e}; falling back to plain mode is not possible mid-run");
+            if ipc_mode {
+                if let Err(e) = run_ipc(event_rx, decision_tx) {
+                    // We CAN'T println — that's the wire. We CAN'T eprintln —
+                    // the parent process may be capturing stderr for crash
+                    // diagnostics, and a non-JSON line on stderr is at best
+                    // confusing. Route through tracing, which in ipc_mode is
+                    // wired to a file by `logging::init`.
+                    tracing::error!("IPC backend failure: {e}");
                 }
             } else {
-                run_plain(event_rx, decision_tx);
+                let is_tty = std::io::stdout().is_terminal();
+                let active_tui = use_tui && is_tty;
+                if active_tui {
+                    if let Err(e) = run_tui(event_rx, decision_tx) {
+                        eprintln!("TUI failure: {e}; falling back to plain mode is not possible mid-run");
+                    }
+                } else {
+                    run_plain(event_rx, decision_tx);
+                }
             }
         });
         Ok((
@@ -243,6 +264,101 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
             ProgressEvent::Finish => break,
         }
     }
+}
+
+/// JSON-over-stdio backend for `--ipc-mode`. See `docs/ipc-protocol.md`.
+///
+/// Wire model:
+/// - Stdout carries events: one `IpcEvent` per `\n`-terminated line, UTF-8.
+///   Explicit `flush()` after every line because Rust's stdout is
+///   block-buffered when attached to a pipe; without the flush the UI would
+///   wait indefinitely.
+/// - Stdin carries commands: one `IpcCommand` per line. A dedicated reader
+///   thread parses each line and pushes a translated `Decision` into the
+///   same channel the TUI uses, so the orchestrator code path is identical.
+///
+/// stdout MUST stay clean — no `println!` from anywhere, no tracing on stdout.
+/// `logging::init` routes tracing to a file in this mode; errors from this
+/// function go through `tracing::error!` (called by `Progress::start`), never
+/// to stdout.
+fn run_ipc(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result<()> {
+    use crate::ipc::{IpcCommand, IpcEvent, PROTOCOL_VERSION};
+    use std::io::{BufRead, BufReader};
+
+    // 1. Handshake. MUST be the first byte on stdout so the UI can validate
+    //    protocol compatibility before sending anything (see ipc-protocol §1).
+    let hello = IpcEvent::Hello {
+        protocol_version: PROTOCOL_VERSION.to_string(),
+        core_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    write_ipc_event(&hello).context("ipc: hello write failed")?;
+
+    // 2. Stdin reader. Lives in its own thread so the main event loop never
+    //    blocks waiting for the UI. Exits on EOF (parent closed our stdin —
+    //    treat as a graceful shutdown signal), on parse-loop error, or when
+    //    the decision channel is closed (orchestrator gone).
+    let cmd_tx = decision_tx.clone();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let reader = BufReader::new(stdin.lock());
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break, // pipe broken / EOF: UI gone, just exit
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<IpcCommand>(trimmed) {
+                Ok(cmd) => {
+                    if let Some(decision) = cmd.to_decision() {
+                        if cmd_tx.send(decision).is_err() {
+                            // Orchestrator dropped the receiver; further reads
+                            // are pointless.
+                            break;
+                        }
+                    }
+                    // None means a command without a decision payload (e.g.
+                    // Start in M1) — silently consumed.
+                }
+                Err(e) => {
+                    // Per ipc-protocol §2: malformed input is not fatal.
+                    // Log and continue reading.
+                    tracing::warn!("ipc: unparseable command line {trimmed:?}: {e}");
+                }
+            }
+        }
+    });
+
+    // 3. Event loop: drain internal channel, write each event as a JSON line.
+    //    Loop ends when we see Finish (normal) or the channel closes (sender
+    //    dropped without sending Finish — should not happen in practice).
+    for event in rx {
+        let is_finish = matches!(event, ProgressEvent::Finish);
+        if let Some(ipc_event) = IpcEvent::from_progress(&event) {
+            write_ipc_event(&ipc_event).context("ipc: event write failed")?;
+        }
+        if is_finish {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Write one `IpcEvent` as a single newline-terminated JSON line on stdout,
+/// then flush. Flushing every line is required per `docs/ipc-protocol.md` §3:
+/// stdout is block-buffered when piped, and an unflushed write would leave
+/// the UI hanging. Cost is negligible at our event rate (~10/s peak).
+fn write_ipc_event(event: &crate::ipc::IpcEvent) -> Result<()> {
+    use std::io::Write;
+    let line = serde_json::to_string(event).context("ipc: serialize event")?;
+    let stdout = std::io::stdout();
+    let mut locked = stdout.lock();
+    writeln!(locked, "{line}").context("ipc: stdout write")?;
+    locked.flush().context("ipc: stdout flush")?;
+    Ok(())
 }
 
 struct TuiState {

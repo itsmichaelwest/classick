@@ -88,6 +88,12 @@ pub struct Cli {
     #[arg(long)]
     pub no_tui: bool,
 
+    /// Speak IPC over stdin/stdout instead of rendering a TUI. Used by GUI
+    /// frontends (WinUI 3 on Windows, future SwiftUI on macOS, etc.). See
+    /// `docs/ipc-protocol.md` for the wire format. Implies --no-tui.
+    #[arg(long)]
+    pub ipc_mode: bool,
+
     /// Encoder for transcoded tracks (non-passthrough). Default: ffmpeg.
     /// Passthrough source codecs (mp3, aac, alac) are unaffected.
     #[arg(long, value_enum)]
@@ -126,10 +132,23 @@ mod tests {
         assert!(!cli.verbose);
         assert!(!cli.rebuild_manifest);
         assert!(!cli.no_tui);
+        assert!(!cli.ipc_mode);
         assert_eq!(cli.encoder, None);
         assert!(!cli.passthrough_wav);
         assert!(!cli.force_reencode);
         assert!(cli.refalac_path.is_none());
+    }
+
+    #[test]
+    fn parses_ipc_mode_flag() {
+        let cli = Cli::try_parse_from(["ipod-sync", "--ipc-mode"]).unwrap();
+        assert!(cli.ipc_mode);
+    }
+
+    #[test]
+    fn ipc_mode_defaults_false() {
+        let cli = Cli::try_parse_from(["ipod-sync"]).unwrap();
+        assert!(!cli.ipc_mode);
     }
 
     #[test]

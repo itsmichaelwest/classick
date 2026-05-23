@@ -21,9 +21,12 @@ fn main() -> Result<()> {
     // Logging next. We use the raw verbose flag from the CLI since Config
     // resolution may itself prompt through the TUI; we want tracing wired up
     // before any of that.
-    ipod_sync::logging::init(cli.verbose, use_tui);
+    // NOTE: Wave 3 (Task 3 of Phase 6 M1) will replace these `false` literals
+    // with `cli.ipc_mode` and adjust `use_tui` to be suppressed when ipc_mode
+    // is set. Task 2 ships only the building blocks (signatures + IpcBackend).
+    ipod_sync::logging::init(cli.verbose, use_tui, false);
 
-    let (progress, decision_rx) = Progress::start(use_tui)?;
+    let (progress, decision_rx) = Progress::start(use_tui, false)?;
 
     // Everything else runs while the TUI is up. Any error from here on
     // routes through progress.error / progress.prompt before exiting.
