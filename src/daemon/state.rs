@@ -14,6 +14,8 @@ pub enum DaemonState {
 pub struct SyncSession {
     pub started_at_unix_secs: u64,
     pub trigger: SyncTrigger,
+    pub serial: Option<String>,
+    pub drive: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,24 @@ impl StateMachine {
     /// (and transitions to Syncing); returns `DroppedAlreadySyncing` if
     /// state was Syncing (state unchanged).
     pub fn try_start_sync(&mut self, trigger: SyncTrigger) -> TriggerOutcome {
+        self.try_start_sync_inner(trigger, None, None)
+    }
+
+    pub fn try_start_sync_for_device(
+        &mut self,
+        trigger: SyncTrigger,
+        serial: String,
+        drive: String,
+    ) -> TriggerOutcome {
+        self.try_start_sync_inner(trigger, Some(serial), Some(drive))
+    }
+
+    fn try_start_sync_inner(
+        &mut self,
+        trigger: SyncTrigger,
+        serial: Option<String>,
+        drive: Option<String>,
+    ) -> TriggerOutcome {
         match &self.state {
             DaemonState::Idle => {
                 let now = std::time::SystemTime::now()
@@ -46,6 +66,8 @@ impl StateMachine {
                 self.state = DaemonState::Syncing(SyncSession {
                     started_at_unix_secs: now,
                     trigger,
+                    serial,
+                    drive,
                 });
                 TriggerOutcome::Accepted
             }
@@ -112,5 +134,29 @@ mod tests {
         let mut sm = StateMachine::new();
         assert!(sm.finish_sync().is_none());
         assert!(sm.is_idle());
+    }
+
+    #[test]
+    fn session_carries_drive_and_serial() {
+        let mut sm = StateMachine::new();
+        sm.try_start_sync_for_device(SyncTrigger::PlugIn, "0xABC".to_string(), "G:\\".to_string());
+        if let DaemonState::Syncing(s) = sm.state() {
+            assert_eq!(s.serial.as_deref(), Some("0xABC"));
+            assert_eq!(s.drive.as_deref(), Some("G:\\"));
+        } else {
+            panic!("expected Syncing");
+        }
+    }
+
+    #[test]
+    fn try_start_sync_without_device_still_works() {
+        // Manual triggers without an attached device set serial/drive to None.
+        let mut sm = StateMachine::new();
+        let outcome = sm.try_start_sync(SyncTrigger::Manual);
+        assert_eq!(outcome, TriggerOutcome::Accepted);
+        if let DaemonState::Syncing(s) = sm.state() {
+            assert!(s.serial.is_none());
+            assert!(s.drive.is_none());
+        }
     }
 }

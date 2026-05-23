@@ -21,6 +21,7 @@ pub enum SyncTrigger {
 pub enum SyncOutcome {
     Ok,
     Error,
+    Aborted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +159,26 @@ mod tests {
         assert_eq!(entries.len(), 50);
         assert_eq!(entries[0].timestamp, "2026-05-24T10:05:00Z");
         assert_eq!(entries[49].timestamp, "2026-05-24T10:54:00Z");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn aborted_outcome_round_trips() {
+        let p = tmp_path("aborted");
+        let _ = std::fs::remove_file(&p);
+        let svc = HistoryService::new(p.clone());
+        let entry = HistoryEntry {
+            timestamp: "2026-05-25T10:00:00Z".to_string(),
+            duration_secs: 7,
+            trigger: SyncTrigger::PlugIn,
+            outcome: SyncOutcome::Aborted,
+            error_message: Some("too_many_failures: 6 of 10 tracks failed".to_string()),
+            summary: None,
+        };
+        svc.append(entry.clone()).unwrap();
+        let read_back = svc.read();
+        assert_eq!(read_back.len(), 1);
+        assert_eq!(read_back[0].outcome, SyncOutcome::Aborted);
         let _ = std::fs::remove_file(&p);
     }
 
