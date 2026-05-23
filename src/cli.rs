@@ -94,6 +94,14 @@ pub struct Cli {
     #[arg(long)]
     pub ipc_mode: bool,
 
+    /// Run as a long-lived background daemon. Listens on a named pipe for
+    /// UI clients, handles device events + scheduling, spawns sync
+    /// subprocesses on demand. See
+    /// docs/superpowers/specs/2026-05-24-phase-6-daemon-model-design.md.
+    /// Mutually exclusive with --ipc-mode and --no-tui.
+    #[arg(long, conflicts_with_all = ["ipc_mode", "no_tui"])]
+    pub daemon: bool,
+
     /// Encoder for transcoded tracks (non-passthrough). Default: ffmpeg.
     /// Passthrough source codecs (mp3, aac, alac) are unaffected.
     #[arg(long, value_enum)]
@@ -238,5 +246,17 @@ mod tests {
         let cli = Cli::try_parse_from(["ipod-sync"]).unwrap();
         assert!(!cli.apply);
         assert!(!cli.save_config);
+    }
+
+    #[test]
+    fn parses_daemon_flag() {
+        let cli = Cli::try_parse_from(["ipod-sync", "--daemon"]).unwrap();
+        assert!(cli.daemon);
+    }
+
+    #[test]
+    fn daemon_and_ipc_mode_conflict() {
+        let result = Cli::try_parse_from(["ipod-sync", "--daemon", "--ipc-mode"]);
+        assert!(result.is_err());
     }
 }

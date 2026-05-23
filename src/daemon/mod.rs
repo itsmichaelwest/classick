@@ -5,4 +5,6 @@
 pub mod history;
 #[cfg(windows)]
 pub mod ipc_server;
+#[cfg(windows)]
+pub mod runtime;
 pub mod state;

@@ -10,6 +10,18 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Daemon mode bypasses TUI / progress / orchestrate entirely. Logging is
+    // routed to a file (like ipc-mode) since stdout/stderr are not the wire
+    // here — clients talk to the daemon over a named pipe.
+    #[cfg(windows)]
+    if cli.daemon {
+        ipod_sync::logging::init(cli.verbose, /*use_tui*/ false, /*ipc_mode*/ true);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return runtime.block_on(ipod_sync::daemon::runtime::run_daemon());
+    }
+
     // Pre-flight: decide if we're going TUI, plain, or IPC. IPC mode always
     // wins — when --ipc-mode is set, a GUI frontend owns the presentation
     // layer and the Rust core just speaks JSON over stdio. TUI is suppressed
