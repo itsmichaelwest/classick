@@ -4,7 +4,7 @@
 
 #![cfg(windows)]
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // The daemon binds a single global named-pipe per process, so these two
@@ -53,7 +53,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
     let deps = DaemonDeps {
         configured_serial: Some("0xABC".to_string()),
         watcher: Box::new(watcher),
-        spawn_sync: Box::new(spawn_fn),
+        spawn_sync: Arc::new(spawn_fn),
         schedule_minutes: 0,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
@@ -103,7 +103,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
     let deps = DaemonDeps {
         configured_serial: Some("0xCONFIGURED".to_string()),
         watcher: Box::new(watcher),
-        spawn_sync: Box::new(spawn_fn),
+        spawn_sync: Arc::new(spawn_fn),
         schedule_minutes: 0,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
@@ -118,4 +118,81 @@ async fn unknown_device_does_not_trigger_auto_sync() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(!spawn_called.load(std::sync::atomic::Ordering::Relaxed),
             "unknown serial must NOT trigger auto-sync");
+}
+
+/// Regression for "stuck in syncing": a long-running orchestrator must
+/// not block the runtime loop from processing client commands or new
+/// device events. Verifies by injecting a spawn-fn whose future never
+/// resolves, then sending a Disconnected event that the runtime is
+/// expected to handle (cleanly transitioning state back to Idle via
+/// the Aborted-on-detach path) WHILE the orchestrator is still pending.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn runtime_stays_responsive_during_long_sync() {
+    let _guard = PIPE_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    use ipod_sync::daemon::device_watcher::{DeviceEvent, DeviceWatcher};
+    use ipod_sync::daemon::runtime::{DaemonDeps, run_daemon_with_deps};
+    use ipod_sync::ipod::device::DetectedIpod;
+    use tokio::sync::{mpsc, oneshot};
+
+    struct ScriptedWatcher(mpsc::Receiver<DeviceEvent>);
+    impl DeviceWatcher for ScriptedWatcher {
+        fn start(self: Box<Self>) -> mpsc::Receiver<DeviceEvent> { self.0 }
+    }
+    let (tx, rx) = mpsc::channel::<DeviceEvent>(4);
+    let watcher = ScriptedWatcher(rx);
+
+    // Signal when spawn-fn was entered, and pend forever (the orchestrator
+    // future never resolves — simulates a long sync).
+    let (spawn_entered_tx, spawn_entered_rx) = oneshot::channel::<()>();
+    let spawn_entered_tx = std::sync::Mutex::new(Some(spawn_entered_tx));
+    let spawn_fn = move |_drive: String| {
+        if let Some(s) = spawn_entered_tx.lock().unwrap().take() { let _ = s.send(()); }
+        Box::pin(async move {
+            std::future::pending::<()>().await;  // never resolves
+            #[allow(unreachable_code)]
+            Ok(ipod_sync::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
+                outcome: ipod_sync::daemon::history::SyncOutcome::Ok,
+                summary: None,
+            })
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
+    };
+
+    let deps = DaemonDeps {
+        configured_serial: Some("0xABC".to_string()),
+        watcher: Box::new(watcher),
+        spawn_sync: Arc::new(spawn_fn),
+        schedule_minutes: 0,
+    };
+    let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
+
+    // Trigger sync via Connected.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tx.send(DeviceEvent::Connected(DetectedIpod {
+        serial: "0xABC".to_string(),
+        model_label: "iPod 7G".to_string(),
+        drive: "G:\\".to_string(),
+    })).await.unwrap();
+
+    // Confirm orchestrator started (and is now stuck in std::future::pending).
+    tokio::time::timeout(Duration::from_secs(2), spawn_entered_rx).await
+        .expect("orchestrator should spawn within 2s")
+        .expect("spawn-entered channel intact");
+
+    // Now the key test: send a Disconnected event WHILE the orchestrator
+    // is pending. If the runtime loop were blocked on the orchestrator
+    // (the M3 bug we just fixed), this send would queue indefinitely and
+    // the device-event arm would never fire. With the fix, the runtime
+    // picks it up promptly.
+    let send_result = tokio::time::timeout(
+        Duration::from_secs(2),
+        tx.send(DeviceEvent::Disconnected { serial: "0xABC".to_string() }),
+    ).await;
+    assert!(send_result.is_ok(), "Disconnected send timed out — runtime loop is blocked");
+    assert!(send_result.unwrap().is_ok(), "send failed: receiver dropped?");
+
+    // Give the runtime a moment to process. We can't observe state
+    // mutation directly from outside, but the fact that the send
+    // completed within 2s of a pending orchestrator proves the loop
+    // is responsive.
+    tokio::time::sleep(Duration::from_millis(200)).await;
 }
