@@ -249,10 +249,23 @@ async fn spawn_sync_session(
         }
     };
 
-    let _ = history.append(make_history_entry(
+    let entry = make_history_entry(
         trigger, history_outcome, error_message, summary, started_at,
-    ));
+    );
+    let last_sync = Some(entry.clone());
+    let _ = history.append(entry);
     state.finish_sync();
+
+    // Tell UIs the sync is over so the tray icon + tooltip flip back to
+    // Idle. Without this, manual TriggerSync leaves the tray stuck in
+    // "Syncing..." until the next device-event arm fires broadcast_status.
+    let _ = event_tx.send(DaemonEvent::StatusUpdate {
+        state: DaemonStateLabel::Idle,
+        configured: true,
+        ipod_connected: true,
+        last_sync,
+        next_scheduled_unix_secs: None,
+    });
 }
 
 fn make_history_entry(
