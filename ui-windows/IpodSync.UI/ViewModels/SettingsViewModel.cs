@@ -63,13 +63,33 @@ public partial class SettingsViewModel : ObservableObject
 
 public partial class SettingsGeneralViewModel : ObservableObject
 {
-    public SettingsGeneralViewModel(ConfigUpdateEvent c) { /* T7 */ }
-    public string SourcePath { get; set; } = "";
-    public bool IsSourceDirty => false;  // T7
-    public bool IsAnyDaemonFieldDirty => false;  // T7
-    public string FirstSyncMode { get; set; } = "review";
-    public string SubsequentSyncMode { get; set; } = "auto_apply";
-    public string NotifyOn { get; set; } = "all";
+    private readonly string _originalSource;
+    private readonly DaemonSettings? _originalDaemon;
+
+    public SettingsGeneralViewModel(ConfigUpdateEvent c)
+    {
+        _originalSource = c.Source ?? "";
+        _originalDaemon = c.Daemon;
+        SourcePath = _originalSource;
+        IpodModelLabel = c.Ipod?.ModelLabel ?? "(not configured)";
+        IpodSerial = c.Ipod?.Serial ?? "";
+        FirstSyncMode = c.Daemon?.FirstSyncMode ?? "review";
+        SubsequentSyncMode = c.Daemon?.SubsequentSyncMode ?? "auto_apply";
+        NotifyOn = c.Daemon?.NotifyOn ?? "all";
+    }
+
+    [ObservableProperty] private string sourcePath = "";
+    [ObservableProperty] private string ipodModelLabel = "";
+    [ObservableProperty] private string ipodSerial = "";
+    [ObservableProperty] private string firstSyncMode = "review";
+    [ObservableProperty] private string subsequentSyncMode = "auto_apply";
+    [ObservableProperty] private string notifyOn = "all";
+
+    public bool IsSourceDirty => SourcePath != _originalSource;
+    public bool IsAnyDaemonFieldDirty =>
+        FirstSyncMode != (_originalDaemon?.FirstSyncMode ?? "review") ||
+        SubsequentSyncMode != (_originalDaemon?.SubsequentSyncMode ?? "auto_apply") ||
+        NotifyOn != (_originalDaemon?.NotifyOn ?? "all");
 }
 
 public partial class SettingsScheduleViewModel : ObservableObject
