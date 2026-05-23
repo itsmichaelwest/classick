@@ -1,0 +1,9 @@
+{
+  "streams": [
+    { "codec_type": "audio", "codec_name": "aac" }
+  ],
+  "format": {
+    "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+    "tags": { "title": "Test", "artist": "Test" }
+  }
+}

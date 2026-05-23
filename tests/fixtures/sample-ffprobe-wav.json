@@ -1,0 +1,9 @@
+{
+  "streams": [
+    { "codec_type": "audio", "codec_name": "pcm_s16le" }
+  ],
+  "format": {
+    "format_name": "wav",
+    "tags": { "title": "Test", "artist": "Test" }
+  }
+}

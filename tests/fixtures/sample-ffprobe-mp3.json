@@ -1,0 +1,9 @@
+{
+  "streams": [
+    { "codec_type": "audio", "codec_name": "mp3" }
+  ],
+  "format": {
+    "format_name": "mp3",
+    "tags": { "TITLE": "Test", "ARTIST": "Test" }
+  }
+}

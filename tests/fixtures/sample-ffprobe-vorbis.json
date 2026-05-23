@@ -1,0 +1,9 @@
+{
+  "streams": [
+    { "codec_type": "audio", "codec_name": "vorbis" }
+  ],
+  "format": {
+    "format_name": "ogg",
+    "tags": { "TITLE": "Test", "ARTIST": "Test" }
+  }
+}

@@ -14,6 +14,11 @@ pub struct ProbeOutput {
 
 #[derive(Debug, Deserialize)]
 pub struct ProbeFormat {
+    /// Comma-separated container list (e.g. `mov,mp4,m4a,3gp,3g2,mj2` for an
+    /// MP4-family file). `classify` splits on `,` and checks each component.
+    /// Optional + serde-default so Phase 1/Phase 2 fixtures still deserialize.
+    #[serde(default)]
+    pub format_name: Option<String>,
     pub tags: Option<ProbeTags>,
 }
 
@@ -83,6 +88,11 @@ impl<'de> Deserialize<'de> for ProbeTags {
 #[derive(Debug, Deserialize)]
 pub struct ProbeStream {
     pub codec_type: String,
+    /// ffprobe codec_name, e.g. `flac`, `mp3`, `aac`, `alac`, `vorbis`, `opus`,
+    /// `pcm_s16le`. Required input to `classify`; optional + serde-default so
+    /// Phase 1/Phase 2 fixtures still deserialize.
+    #[serde(default)]
+    pub codec_name: Option<String>,
     #[serde(default)]
     pub disposition: Option<ProbeDisposition>,
 }
@@ -190,6 +200,146 @@ pub fn temp_art_path() -> PathBuf {
     p
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3: source classification + passthrough pipeline.
+// ---------------------------------------------------------------------------
+
+/// Outcome of [`classify`] — tells `apply_loop::add_one` which pipeline to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceAction {
+    /// Copy the source byte-for-byte; iPod plays it natively (mp3, aac, alac,
+    /// and pcm/wav-aiff when `--passthrough-wav` is set).
+    Passthrough,
+    /// Decode + re-encode to ALAC via the configured encoder
+    /// (flac, vorbis, opus, and pcm/wav-aiff by default).
+    Transcode,
+}
+
+/// Subset of `Config` that [`classify`] needs. Keeps the function's signature
+/// small and avoids a circular dep on `crate::config` from `transcode`.
+///
+/// `apply_loop` (Task 6) constructs one of these from `&Config` at call-time:
+/// `ClassifyConfig { passthrough_wav: config.passthrough_wav }`. Phase 3's
+/// Task 3 adds the `passthrough_wav` field to `Config`; until that lands,
+/// callers can still construct this struct directly with a literal bool.
+#[derive(Debug, Clone, Copy)]
+pub struct ClassifyConfig {
+    pub passthrough_wav: bool,
+}
+
+/// Classify a source file based on its ffprobe output. Returns the action the
+/// apply loop should take for this track.
+///
+/// Decision matrix per the Phase 3 spec § "Source classification":
+///
+/// | codec_name             | container                | action                                       |
+/// |------------------------|--------------------------|----------------------------------------------|
+/// | `flac`                 | `flac`                   | Transcode (iPod can't decode FLAC)           |
+/// | `mp3`                  | `mp3`                    | Passthrough                                  |
+/// | `aac`                  | `m4a` / `mp4` / `aac` / `mov` | Passthrough                             |
+/// | `alac`                 | `m4a` / `mp4` / `mov`    | Passthrough                                  |
+/// | `vorbis`               | `ogg`                    | Transcode                                    |
+/// | `opus`                 | `opus` / `ogg`           | Transcode                                    |
+/// | `pcm_*` (any subtype)  | `wav` / `aiff`           | Passthrough iff `passthrough_wav`, else Transcode |
+/// | anything else          | *                        | Err (caller surfaces stop-on-first-error)   |
+///
+/// `format.format_name` is comma-separated for multi-format containers
+/// (e.g. `mov,mp4,m4a,3gp,3g2,mj2`). We split on `,` and check each component.
+pub fn classify(probe: &ProbeOutput, config: &ClassifyConfig) -> Result<SourceAction> {
+    let audio_codec = probe
+        .streams
+        .iter()
+        .find(|s| s.codec_type == "audio")
+        .and_then(|s| s.codec_name.as_deref())
+        .ok_or_else(|| anyhow!("classify: no audio stream / codec_name in probe"))?;
+
+    let containers: Vec<&str> = probe
+        .format
+        .format_name
+        .as_deref()
+        .map(|s| s.split(',').map(|x| x.trim()).collect())
+        .unwrap_or_default();
+    let in_container = |c: &str| containers.iter().any(|x| *x == c);
+
+    // PCM is an open family (s16le, s24le, s32le, f32le, ...). Treat any
+    // `pcm_*` codec as a single bucket for the WAV/AIFF decision.
+    let is_pcm = audio_codec.starts_with("pcm_");
+
+    let action = match audio_codec {
+        "flac" if in_container("flac") => SourceAction::Transcode,
+        "mp3" if in_container("mp3") => SourceAction::Passthrough,
+        "aac"
+            if in_container("m4a")
+                || in_container("mp4")
+                || in_container("aac")
+                || in_container("mov") =>
+        {
+            SourceAction::Passthrough
+        }
+        "alac" if in_container("m4a") || in_container("mp4") || in_container("mov") => {
+            SourceAction::Passthrough
+        }
+        "vorbis" if in_container("ogg") => SourceAction::Transcode,
+        "opus" if in_container("opus") || in_container("ogg") => SourceAction::Transcode,
+        _ if is_pcm && (in_container("wav") || in_container("aiff")) => {
+            if config.passthrough_wav {
+                SourceAction::Passthrough
+            } else {
+                SourceAction::Transcode
+            }
+        }
+        _ => {
+            return Err(anyhow!(
+                "unsupported source: codec_name={audio_codec}, container={containers:?}.\n\
+                 ipod-sync v1 handles: flac, mp3, aac, alac, vorbis, opus, pcm (wav/aiff).\n\
+                 AC3, WMA, and other formats are out of scope."
+            ));
+        }
+    };
+
+    Ok(action)
+}
+
+/// Copy `src` to `dst` byte-for-byte. The destination's parent dir is created
+/// if missing. Used by `apply_loop::add_one` when [`classify`] returns
+/// [`SourceAction::Passthrough`].
+///
+/// Tags are NOT touched here — libgpod handles them via `apply_tags`, separate
+/// from the file body. Cover art for passthrough lives inside the source
+/// file's own metadata (e.g. ID3 APIC for MP3, MP4 `covr` atom for AAC/ALAC);
+/// we still extract it via `extract_cover_art` for libgpod's thumbnail-write
+/// path, but the file body itself is a verbatim copy.
+pub fn passthrough(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("create parent dir {}: {e}", parent.display()))?;
+    }
+    std::fs::copy(src, dst)
+        .map(|_| ())
+        .map_err(|e| anyhow!("passthrough copy {} -> {}: {e}", src.display(), dst.display()))
+}
+
+/// Path for the refalac 2-step pipeline's WAV intermediate.
+/// `%TEMP%\ipod-sync\ipod-sync-<pid>.wav`.
+pub fn temp_wav_path() -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push("ipod-sync");
+    p.push(format!("ipod-sync-{}.wav", std::process::id()));
+    p
+}
+
+/// Path for a passthrough copy. Same extension as the source so libgpod's
+/// internal type-sniffing works without extra hints. Falls back to `.bin`
+/// only if the source has no extension at all (shouldn't happen for files
+/// the walker accepted, but defensive).
+pub fn temp_passthrough_path(src: &Path) -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push("ipod-sync");
+    let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("bin");
+    p.push(format!("ipod-sync-{}.{ext}", std::process::id()));
+    p
+}
+
 /// Extract the first video stream (assumed to be the attached_pic / cover art)
 /// from `src` to `dst` as a single still image. Assumes the source actually
 /// has an attached_pic stream — caller should check via `has_embedded_art`
@@ -294,5 +444,151 @@ mod tests {
         let probe: ProbeOutput = serde_json::from_str(json).unwrap();
         assert!(probe.format.tags.is_none());
         assert!(!has_embedded_art(&probe));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: classify decision matrix.
+    // -----------------------------------------------------------------------
+
+    const FX_MP3: &str = include_str!("../tests/fixtures/sample-ffprobe-mp3.json");
+    const FX_AAC: &str = include_str!("../tests/fixtures/sample-ffprobe-aac.json");
+    const FX_ALAC: &str = include_str!("../tests/fixtures/sample-ffprobe-alac.json");
+    const FX_VORBIS: &str = include_str!("../tests/fixtures/sample-ffprobe-vorbis.json");
+    const FX_OPUS: &str = include_str!("../tests/fixtures/sample-ffprobe-opus.json");
+    const FX_WAV: &str = include_str!("../tests/fixtures/sample-ffprobe-wav.json");
+    const FX_UNKNOWN: &str = include_str!("../tests/fixtures/sample-ffprobe-unknown.json");
+    // Re-uses the existing SAMPLE constant for FLAC (codec_name=flac, format_name=flac).
+
+    fn cc(passthrough_wav: bool) -> ClassifyConfig {
+        ClassifyConfig { passthrough_wav }
+    }
+
+    fn parse(s: &str) -> ProbeOutput {
+        serde_json::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn classify_flac_is_transcode() {
+        assert_eq!(
+            classify(&parse(SAMPLE), &cc(false)).unwrap(),
+            SourceAction::Transcode
+        );
+    }
+
+    #[test]
+    fn classify_mp3_is_passthrough() {
+        assert_eq!(
+            classify(&parse(FX_MP3), &cc(false)).unwrap(),
+            SourceAction::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_aac_in_m4a_container_is_passthrough() {
+        assert_eq!(
+            classify(&parse(FX_AAC), &cc(false)).unwrap(),
+            SourceAction::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_alac_in_m4a_container_is_passthrough() {
+        assert_eq!(
+            classify(&parse(FX_ALAC), &cc(false)).unwrap(),
+            SourceAction::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_vorbis_is_transcode() {
+        assert_eq!(
+            classify(&parse(FX_VORBIS), &cc(false)).unwrap(),
+            SourceAction::Transcode
+        );
+    }
+
+    #[test]
+    fn classify_opus_is_transcode() {
+        assert_eq!(
+            classify(&parse(FX_OPUS), &cc(false)).unwrap(),
+            SourceAction::Transcode
+        );
+    }
+
+    #[test]
+    fn classify_wav_default_is_transcode() {
+        assert_eq!(
+            classify(&parse(FX_WAV), &cc(false)).unwrap(),
+            SourceAction::Transcode
+        );
+    }
+
+    #[test]
+    fn classify_wav_with_passthrough_wav_is_passthrough() {
+        assert_eq!(
+            classify(&parse(FX_WAV), &cc(true)).unwrap(),
+            SourceAction::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_unknown_codec_errors() {
+        let err = classify(&parse(FX_UNKNOWN), &cc(false)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsupported source"), "got: {msg}");
+        assert!(
+            msg.contains("ac3"),
+            "msg should name the offending codec_name: {msg}"
+        );
+    }
+
+    #[test]
+    fn classify_no_audio_stream_errors() {
+        let json = r#"{"streams":[{"codec_type":"video","codec_name":"png"}],"format":{"format_name":"png_pipe"}}"#;
+        let err = classify(&parse(json), &cc(false)).unwrap_err();
+        assert!(err.to_string().contains("no audio stream"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: passthrough + temp path helpers.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn passthrough_copies_bytes_verbatim() {
+        let src_dir =
+            std::env::temp_dir().join(format!("ipod-sync-pt-test-{}", std::process::id()));
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let src = src_dir.join("in.mp3");
+        let dst = src_dir.join("subdir").join("out.mp3");
+        let bytes: Vec<u8> = (0u8..=255).chain(0..=128).collect(); // arbitrary
+        std::fs::write(&src, &bytes).unwrap();
+
+        passthrough(&src, &dst).unwrap();
+        let copied = std::fs::read(&dst).unwrap();
+        assert_eq!(bytes, copied);
+
+        std::fs::remove_dir_all(&src_dir).ok();
+    }
+
+    #[test]
+    fn temp_passthrough_path_preserves_extension() {
+        assert_eq!(
+            temp_passthrough_path(Path::new(r"C:\a.mp3"))
+                .extension()
+                .and_then(|s| s.to_str()),
+            Some("mp3")
+        );
+        assert_eq!(
+            temp_passthrough_path(Path::new(r"C:\a.m4a"))
+                .extension()
+                .and_then(|s| s.to_str()),
+            Some("m4a")
+        );
+        assert_eq!(
+            temp_passthrough_path(Path::new(r"C:\noext"))
+                .extension()
+                .and_then(|s| s.to_str()),
+            Some("bin")
+        );
     }
 }
