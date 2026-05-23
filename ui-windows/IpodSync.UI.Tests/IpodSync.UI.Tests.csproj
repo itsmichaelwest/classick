@@ -43,6 +43,8 @@
              Link="LinkedViewModels\ProgressViewModel.cs" />
     <Compile Include="..\IpodSync.UI\ViewModels\WizardViewModel.cs"
              Link="LinkedViewModels\WizardViewModel.cs" />
+    <Compile Include="..\IpodSync.UI\Notifications\NotificationDecision.cs"
+             Link="LinkedViewModels\NotificationDecision.cs" />
   </ItemGroup>
 
   <ItemGroup>
