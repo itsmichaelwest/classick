@@ -27,6 +27,40 @@
     <Content Include="Assets\Wide310x150Logo.scale-200.png" />
   </ItemGroup>
 
+  <!--
+    Bundle the Rust core binary as packaged content. Copies it next to
+    IpodSync.UI.exe at build time AND includes it in the MSIX, so
+    CoreLocator's "sibling to UI exe" lookup always wins.
+    Run `cargo build` with the release flag from the repo root before
+    building the UI.
+  -->
+  <ItemGroup>
+    <Content Include="..\..\target\release\ipod-sync.exe" Condition="Exists('..\..\target\release\ipod-sync.exe')">
+      <Link>ipod-sync.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!--
+      Also bundle the libgpod runtime DLLs (build.rs copies them to
+      target\release\ alongside ipod-sync.exe). Without these the core
+      crashes immediately with "gpod.dll was not found".
+    -->
+    <Content Include="..\..\target\release\*.dll" Condition="Exists('..\..\target\release\ipod-sync.exe')">
+      <Link>%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!--
+    Friendly warning if the Rust core hasn't been built yet. Doesn't fail
+    the build (CoreLocator still falls back to PATH lookup) but tells
+    the user how to fix the most common case.
+  -->
+  <Target Name="WarnIfCoreMissing" BeforeTargets="Build">
+    <Warning
+      Condition="!Exists('..\..\target\release\ipod-sync.exe')"
+      Text="ipod-sync.exe not found at ..\..\target\release\. Run `cargo build` with the release flag from the repo root, then rebuild this project. The UI will start but show a 'core not found' dialog until the binary exists." />
+  </Target>
+
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
