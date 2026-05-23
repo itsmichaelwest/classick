@@ -3,6 +3,38 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+/// Encoder choice for the transcode pipeline. Passthrough sources never see
+/// this (no encoding happens). See docs/superpowers/specs/2026-05-23-phase-3-addendum.md
+/// Change 1 for why ffmpeg is the default (was: auto in the original spec).
+//
+// FUTURE: per-format encoder selection. If a future user wants per-source-codec
+// encoder choice (e.g. flac -> refalac, opus -> ffmpeg), this enum stays as-is;
+// add a `pub struct EncoderConfig { default: EncoderChoice, per_format: HashMap<String, EncoderChoice> }`
+// and have apply_loop resolve `cfg.for_source(&probe.codec_name)` instead of
+// passing the global `cfg.encoder`. Everything below this layer is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[clap(rename_all = "lowercase")]
+pub enum EncoderChoice {
+    Ffmpeg,
+    Refalac,
+}
+
+impl EncoderChoice {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EncoderChoice::Ffmpeg => "ffmpeg",
+            EncoderChoice::Refalac => "refalac",
+        }
+    }
+}
+
+impl Default for EncoderChoice {
+    fn default() -> Self {
+        Self::Ffmpeg
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "ipod-sync",
@@ -55,6 +87,27 @@ pub struct Cli {
     /// Disable the ratatui TUI; use plain log output even when stdout is a TTY.
     #[arg(long)]
     pub no_tui: bool,
+
+    /// Encoder for transcoded tracks (non-passthrough). Default: ffmpeg.
+    /// Passthrough source codecs (mp3, aac, alac) are unaffected.
+    #[arg(long, value_enum)]
+    pub encoder: Option<EncoderChoice>,
+
+    /// Path to refalac64.exe. Defaults to "refalac64" (PATH lookup or vendored
+    /// copy alongside the binary). Only consulted when --encoder refalac.
+    #[arg(long)]
+    pub refalac_path: Option<PathBuf>,
+
+    /// Copy WAV/AIFF (PCM) sources bit-perfect to the iPod instead of
+    /// transcoding to ALAC. Default: transcode (saves space).
+    #[arg(long)]
+    pub passthrough_wav: bool,
+
+    /// Treat every Add/Modify track as "must re-encode" regardless of the
+    /// manifest's stored encoder. Useful after an ffmpeg/refalac upgrade or
+    /// to switch encoders for an existing library.
+    #[arg(long)]
+    pub force_reencode: bool,
 }
 
 #[cfg(test)]
@@ -73,6 +126,52 @@ mod tests {
         assert!(!cli.verbose);
         assert!(!cli.rebuild_manifest);
         assert!(!cli.no_tui);
+        assert_eq!(cli.encoder, None);
+        assert!(!cli.passthrough_wav);
+        assert!(!cli.force_reencode);
+        assert!(cli.refalac_path.is_none());
+    }
+
+    #[test]
+    fn parses_explicit_encoder_refalac() {
+        let cli = Cli::try_parse_from(["ipod-sync", "--encoder", "refalac"]).unwrap();
+        assert_eq!(cli.encoder, Some(EncoderChoice::Refalac));
+    }
+
+    #[test]
+    fn parses_explicit_encoder_ffmpeg() {
+        let cli = Cli::try_parse_from(["ipod-sync", "--encoder", "ffmpeg"]).unwrap();
+        assert_eq!(cli.encoder, Some(EncoderChoice::Ffmpeg));
+    }
+
+    #[test]
+    fn rejects_unknown_encoder() {
+        assert!(
+            Cli::try_parse_from(["ipod-sync", "--encoder", "auto"]).is_err(),
+            "spec's 'auto' mode was dropped per the addendum"
+        );
+        assert!(Cli::try_parse_from(["ipod-sync", "--encoder", "lame"]).is_err());
+    }
+
+    #[test]
+    fn parses_refalac_path_passthrough_wav_force_reencode() {
+        let cli = Cli::try_parse_from([
+            "ipod-sync",
+            "--encoder",
+            "refalac",
+            "--refalac-path",
+            r"C:\bin\refalac64.exe",
+            "--passthrough-wav",
+            "--force-reencode",
+        ])
+        .unwrap();
+        assert_eq!(cli.encoder, Some(EncoderChoice::Refalac));
+        assert_eq!(
+            cli.refalac_path.as_deref().and_then(|p| p.to_str()),
+            Some(r"C:\bin\refalac64.exe")
+        );
+        assert!(cli.passthrough_wav);
+        assert!(cli.force_reencode);
     }
 
     #[test]

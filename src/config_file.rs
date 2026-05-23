@@ -21,6 +21,14 @@ pub struct PersistedConfig {
     pub no_delete: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_tui: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<crate::cli::EncoderChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passthrough_wav: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refalac_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_reencode: Option<bool>,
 }
 
 /// Default location of the persisted config: %APPDATA%\ipod-sync\config.toml.
@@ -91,6 +99,10 @@ mod tests {
         assert!(cfg.ffmpeg.is_none());
         assert!(cfg.no_delete.is_none());
         assert!(cfg.no_tui.is_none());
+        assert!(cfg.encoder.is_none());
+        assert!(cfg.passthrough_wav.is_none());
+        assert!(cfg.refalac_path.is_none());
+        assert!(cfg.force_reencode.is_none());
     }
 
     #[test]
@@ -121,6 +133,10 @@ mod tests {
             ffmpeg: None,
             no_delete: Some(true),
             no_tui: Some(false),
+            encoder: Some(crate::cli::EncoderChoice::Refalac),
+            passthrough_wav: Some(true),
+            refalac_path: Some(PathBuf::from(r"C:\bin\refalac64.exe")),
+            force_reencode: Some(false),
         };
         save(&path, &cfg).unwrap();
         let loaded = load(&path).unwrap().unwrap();
@@ -139,12 +155,20 @@ mod tests {
             ffmpeg: None,
             no_delete: None,
             no_tui: None,
+            encoder: None,
+            passthrough_wav: None,
+            refalac_path: None,
+            force_reencode: None,
         };
         save(&path, &cfg).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("source"));
         assert!(!saved.contains("ipod"), "None fields must be skipped in TOML output:\n{saved}");
         assert!(!saved.contains("no_delete"));
+        assert!(!saved.contains("encoder"), "None fields must be skipped:\n{saved}");
+        assert!(!saved.contains("passthrough_wav"));
+        assert!(!saved.contains("refalac_path"));
+        assert!(!saved.contains("force_reencode"));
         let _ = std::fs::remove_file(&path);
     }
 }
