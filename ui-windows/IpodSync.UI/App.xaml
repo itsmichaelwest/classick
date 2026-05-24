@@ -56,9 +56,16 @@
                 marshalling. TrayIconController applies the correct icon via
                 an absolute file path during Initialize(), before ForceCreate.
             -->
+            <!--
+                Tray icon starts hidden so the user never sees it
+                flash before App.OnLaunched decides whether to show
+                the wizard (no iPod paired → wizard takes over) or
+                drop into tray mode (paired → tray visible). App calls
+                Tray.SetVisible(true) once an iPod identity is known.
+            -->
             <tb:TaskbarIcon
                 x:Key="TrayIcon"
-                Visibility="Visible"
+                Visibility="Collapsed"
                 ToolTipText="ipod-sync · idle"
                 ContextMenuMode="SecondWindow"
                 NoLeftClickDelay="True"

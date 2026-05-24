@@ -109,7 +109,9 @@ public partial class WizardViewModel : ObservableObject
             DetectedIpod = detected;
             if (detected is null)
             {
-                ScanError = "No iPod detected. Plug in your iPod and click Retry.";
+                ScanError =
+                    "No iPod detected. Plug in your iPod and click Retry.\n" +
+                    "If you recently reformatted via iTunes, sync one track with iTunes first so it writes the iPod's identity, then click Retry.";
             }
         }
         catch (OperationCanceledException) { /* user navigated back or closed wizard */ }

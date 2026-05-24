@@ -578,6 +578,30 @@ fn handle_client_command(
             }
             let _ = event_tx.send(build_config_update(Some(current)));
         }
+        DaemonCommand::ForgetIpod => {
+            let mut current = config_file::load(config_path).ok().flatten().unwrap_or_default();
+            current.ipod_identity = None;
+            if let Err(e) = config_file::save(config_path, &current) {
+                tracing::error!("daemon: failed to save config after forget_ipod: {e}");
+                return;
+            }
+            tracing::info!("daemon: client {client_id} cleared the persisted iPod identity");
+            let _ = event_tx.send(build_config_update(Some(current)));
+            // Re-announce the currently-attached device (if any) so a
+            // freshly-opened wizard sees it. Without this re-emit, the
+            // device-watcher's polling loop is in steady-state — the
+            // device is still physically connected so no transition
+            // event fires, and the wizard's DeviceConnected subscriber
+            // waits forever.
+            if let Some(device) = connected.as_ref() {
+                let _ = event_tx.send(DaemonEvent::DeviceConnected {
+                    serial: device.serial.clone(),
+                    model_label: device.model_label.clone(),
+                    drive: device.drive.clone(),
+                    name: device.name.clone(),
+                });
+            }
+        }
         DaemonCommand::GetHistory { limit } => {
             let mut entries = history.read();
             let start = entries.len().saturating_sub(limit);
@@ -630,9 +654,26 @@ fn handle_client_command(
                 tracing::debug!("daemon: client {client_id} sent cancel_sync but no sync is in progress");
             }
         }
-        DaemonCommand::SubscribeDeviceEvents | DaemonCommand::UnsubscribeDeviceEvents => {
-            // M3: all clients see device events (simpler than per-client
-            // filtering). Subscribe is a no-op handshake.
+        DaemonCommand::SubscribeDeviceEvents => {
+            // All clients see all device events on the shared
+            // broadcast channel — subscribe is a handshake, not a
+            // routing op. BUT a late subscriber misses any
+            // DeviceConnected emitted before the subscribe (e.g. the
+            // first-poll event on daemon startup, before the wizard
+            // opens). Re-broadcast for any currently-attached device
+            // so the late subscriber sees the steady state.
+            if let Some(device) = connected.as_ref() {
+                let _ = event_tx.send(DaemonEvent::DeviceConnected {
+                    serial: device.serial.clone(),
+                    model_label: device.model_label.clone(),
+                    drive: device.drive.clone(),
+                    name: device.name.clone(),
+                });
+            }
+        }
+        DaemonCommand::UnsubscribeDeviceEvents => {
+            // Symmetric no-op — subscription is implicit, so there's
+            // nothing to tear down.
         }
         DaemonCommand::Shutdown => {
             tracing::info!("daemon: shutdown requested by client {client_id}; exiting loop");

@@ -103,6 +103,16 @@ public sealed class TrayIconController : IDisposable
         _icon.ForceCreate();
     }
 
+    /// <summary>Show or hide the tray icon. Used during first-run /
+    /// re-pair flows to keep the tray hidden while the wizard owns
+    /// the user's attention — the wizard is the primary surface
+    /// until an iPod identity is committed to config.</summary>
+    public void SetVisible(bool visible)
+    {
+        if (_icon is null) return;
+        _icon.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     public void SetState(TrayState state, string tooltip)
     {
         if (_icon is null) return;
@@ -198,10 +208,26 @@ public sealed class TrayIconController : IDisposable
 
     private static bool ReadTaskbarUsesLightTheme()
     {
-        // SystemUsesLightTheme:
-        //   1 = light taskbar  → use the "Light" variant (dark glyph)
-        //   0 = dark taskbar   → use the "Dark"  variant (light glyph)
-        // Missing key = dark (Windows 11 default).
+        // Prefer UISettings.GetColorValue(Background) — it returns the
+        // actual system theme background color, which matches what the
+        // taskbar renders. The HKCU SystemUsesLightTheme registry
+        // value is unreliable on some Win11 setups (custom theme
+        // packs, certain accent configurations) where it can stay at
+        // 1 even when the user is visually on a dark taskbar.
+        //
+        // Falls back to the registry read if UISettings throws (e.g.
+        // unpackaged-app COM init issues).
+        try
+        {
+            var ui = new Windows.UI.ViewManagement.UISettings();
+            var bg = ui.GetColorValue(Windows.UI.ViewManagement.UIColorType.Background);
+            // Light theme background ≈ white; dark theme ≈ black.
+            // The midpoint (384 / 3 ≈ 128 per channel) splits the
+            // two cleanly even for tinted themes.
+            return (bg.R + bg.G + bg.B) > 384;
+        }
+        catch { /* fall through to registry */ }
+
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(PersonalizeKey);

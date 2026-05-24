@@ -6,116 +6,166 @@
     xmlns:vm="using:IpodSync_UI.ViewModels"
     Title="iPod Status">
     <!--
-        Root size lives here (not in code) so designers can tweak the
-        popover footprint without recompiling. PopoverWindow.cs measures
-        this Grid before first Activate() and resizes the AppWindow to
-        match, so the window appears already at the right size — no
-        centre-of-screen flash and no resize jump.
+        Root grid stretches to fill the entire window client. The
+        canonical popover size (360×192 DIP) lives as a constant in
+        PopoverWindow.xaml.cs and is applied via AppWindow.ResizeClient
+        before first Activate(), so the window appears already at the
+        right size — no centre-of-screen flash and no resize jump.
+
+        Why stretch instead of explicit Width/Height: WinAppSDK 2.x
+        reserves an invisible window-header drag-area band inside the
+        client rect even when hasTitleBar=false. With a fixed-size
+        Grid, that band peeks out around the Grid as dark chrome bands
+        top + bottom. Stretching paints the Grid edge-to-edge so the
+        backdrop never shows around the content.
+
+        The Grid hosts two mutually-exclusive layouts switched by
+        IpodConnected: the normal connected layout (device row +
+        storage + footer) and the empty state (centered icon + "No
+        iPod connected" caption + footer with just Settings).
     -->
-    <Grid x:Name="PopoverRoot" Width="360" Height="192">
+    <Grid x:Name="PopoverRoot">
         <Grid.RowDefinitions>
             <RowDefinition Height="*" />
             <RowDefinition Height="48" />
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0"
-                    Padding="16"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="0,0,0,1"
-                    Spacing="12">
-            <StackPanel Orientation="Horizontal" Spacing="12">
+        <!--
+            =================== CONTENT AREA ========================
+            Holds both layouts so they share the same background +
+            bottom border. Children are mutually exclusive via
+            ShowConnectedContent / ShowEmptyState, swapped on the
+            daemon's IpodConnected signal.
+        -->
+        <Grid Grid.Row="0"
+              Background="{ThemeResource LayerFillColorDefaultBrush}"
+              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+              BorderThickness="0,0,0,1">
+
+            <!--
+                Connected layout — device row, storage bar, and (during
+                sync) progress block.
+            -->
+            <StackPanel Padding="16"
+                        Spacing="12"
+                        Visibility="{x:Bind ViewModel.ShowConnectedContent, Mode=OneWay}">
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                    <Image Source="ms-appx:///Assets/ipod.svg"
+                           Width="30"
+                           Height="44"
+                           Stretch="Uniform" />
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind ViewModel.DeviceLabel, Mode=OneWay}"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock Text="{x:Bind ViewModel.LastSyncedLabel, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </StackPanel>
+
                 <!--
-                    Device graphic. Drop an SVG at Assets/ipod.svg (or any
-                    raster format) and the Image will pick it up via the
-                    csproj Content include. WinUI 3 routes .svg URIs through
-                    SvgImageSource automatically, so the image scales
-                    cleanly at every DPI.
+                    Storage block. Always rendered when idle so the
+                    popover footprint matches the Figma regardless of
+                    whether the daemon has reported storage yet —
+                    placeholders kick in when HasStorage is false.
                 -->
-                <Image Source="ms-appx:///Assets/ipod.svg"
-                       Width="30"
-                       Height="48"
-                       Stretch="Uniform" />
-                <StackPanel VerticalAlignment="Center">
-                    <TextBlock Text="{x:Bind ViewModel.DeviceLabel, Mode=OneWay}"
-                               Style="{StaticResource BodyStrongTextBlockStyle}" />
-                    <TextBlock Text="{x:Bind ViewModel.LastSyncedLabel, Mode=OneWay}"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <StackPanel Visibility="{x:Bind ViewModel.NotSyncing, Mode=OneWay}">
+                    <Grid MinHeight="32">
+                        <ProgressBar Value="{x:Bind ViewModel.StorageProgressValue, Mode=OneWay}"
+                                     Minimum="0"
+                                     Maximum="100"
+                                     IsIndeterminate="False" />
+                    </Grid>
+                    <Grid>
+                        <TextBlock Text="{x:Bind ViewModel.StorageUsedDisplay, Mode=OneWay}"
+                                   HorizontalAlignment="Left"
+                                   Style="{StaticResource CaptionTextBlockStyle}" />
+                        <TextBlock Text="{x:Bind ViewModel.StorageFreeDisplay, Mode=OneWay}"
+                                   HorizontalAlignment="Right"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </Grid>
+                </StackPanel>
+
+                <!--
+                    Live sync-progress block. Visible during a sync;
+                    driven by IpcEvent forwards from the sync subprocess
+                    via the DaemonEventRouter. ProgressBar Maximum binds
+                    to total so Value can use raw track index —
+                    Indeterminate kicks in before the first TrackStart
+                    (Maximum=0).
+                -->
+                <StackPanel Visibility="{x:Bind ViewModel.Syncing, Mode=OneWay}">
+                    <Grid MinHeight="32">
+                        <ProgressBar Value="{x:Bind ViewModel.ProgressCurrent, Mode=OneWay}"
+                                     Minimum="0"
+                                     Maximum="{x:Bind ViewModel.ProgressTotal, Mode=OneWay}"
+                                     IsIndeterminate="{x:Bind ViewModel.NoProgressYet, Mode=OneWay}" />
+                    </Grid>
+                    <Grid>
+                        <TextBlock Text="{x:Bind ViewModel.DetailLine, Mode=OneWay}"
+                                   HorizontalAlignment="Left"
+                                   TextTrimming="CharacterEllipsis"
+                                   MaxWidth="220"
+                                   Style="{StaticResource CaptionTextBlockStyle}" />
+                        <TextBlock Text="{x:Bind ViewModel.ProgressLabel, Mode=OneWay}"
+                                   HorizontalAlignment="Right"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </Grid>
                 </StackPanel>
             </StackPanel>
 
             <!--
-                Storage block. Visible only when idle AND we have
-                storage info from the daemon. Collapses during sync so
-                the progress block below takes its place — same vertical
-                footprint, no popover resize on state change.
+                Empty state — "No iPod connected" centered hero, shown
+                when the daemon reports IpodConnected = false.
             -->
-            <StackPanel Visibility="{x:Bind ViewModel.ShowStorage, Mode=OneWay}">
-                <Grid MinHeight="32">
-                    <ProgressBar Value="{x:Bind ViewModel.StorageProgressValue, Mode=OneWay}"
-                                 Minimum="0"
-                                 Maximum="100" />
-                </Grid>
-                <Grid>
-                    <TextBlock Text="{x:Bind ViewModel.StorageUsedLabel, Mode=OneWay}"
-                               HorizontalAlignment="Left"
-                               Style="{StaticResource CaptionTextBlockStyle}" />
-                    <TextBlock Text="{x:Bind ViewModel.StorageFreeLabel, Mode=OneWay}"
-                               HorizontalAlignment="Right"
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="12"
+                        Visibility="{x:Bind ViewModel.ShowEmptyState, Mode=OneWay}">
+                <Image Source="ms-appx:///Assets/ipod.svg"
+                       Width="30"
+                       Height="44"
+                       Stretch="Uniform"
+                       HorizontalAlignment="Center" />
+                <StackPanel HorizontalAlignment="Center">
+                    <TextBlock Text="No iPod connected"
+                               HorizontalAlignment="Center"
+                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <TextBlock Text="Please connect your iPod to begin"
+                               HorizontalAlignment="Center"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </Grid>
+                </StackPanel>
             </StackPanel>
-
-            <!--
-                Live sync-progress block. Visible during a sync; driven
-                by IpcEvent forwards from the sync subprocess via the
-                DaemonEventRouter. ProgressBar Maximum binds to total so
-                Value can use raw track index — Indeterminate kicks in
-                before the first TrackStart (Maximum=0).
-            -->
-            <StackPanel Visibility="{x:Bind ViewModel.Syncing, Mode=OneWay}">
-                <Grid MinHeight="32">
-                    <ProgressBar Value="{x:Bind ViewModel.ProgressCurrent, Mode=OneWay}"
-                                 Minimum="0"
-                                 Maximum="{x:Bind ViewModel.ProgressTotal, Mode=OneWay}"
-                                 IsIndeterminate="{x:Bind ViewModel.NoProgressYet, Mode=OneWay}" />
-                </Grid>
-                <Grid>
-                    <TextBlock Text="{x:Bind ViewModel.CurrentTrackLabel, Mode=OneWay}"
-                               HorizontalAlignment="Left"
-                               TextTrimming="CharacterEllipsis"
-                               MaxWidth="220"
-                               Style="{StaticResource CaptionTextBlockStyle}" />
-                    <TextBlock Text="{x:Bind ViewModel.ProgressLabel, Mode=OneWay}"
-                               HorizontalAlignment="Right"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </Grid>
-            </StackPanel>
-        </StackPanel>
+        </Grid>
 
         <!--
-            Footer actions. NOTE: Grid.Row="1" — earlier this said "2"
-            which silently clamped to the last defined row; harmless but
-            misleading when reading the XAML.
+            Footer. Connected state: Sync now / Stop sync on the left,
+            Eject + Settings on the right. Empty state: "Looking for
+            iPod on USB…" caption on the left, only Settings on the
+            right (Sync now / Eject would be no-ops without a device).
         -->
         <Grid Grid.Row="1" Padding="8,0">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
+
+            <!-- Connected + idle: Sync now. -->
             <Button Grid.Column="0"
+                    HorizontalAlignment="Left"
                     Click="OnSyncNow"
                     MinWidth="120"
-                    Visibility="{x:Bind ViewModel.NotSyncing, Mode=OneWay}"
-                    Style="{ThemeResource AccentButtonStyle}">
+                    Visibility="{x:Bind ViewModel.ShowSyncNowButton, Mode=OneWay}">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <FontIcon Glyph="&#xE895;" FontSize="16" />
                     <TextBlock Text="Sync now" />
                 </StackPanel>
             </Button>
             <Button Grid.Column="0"
+                    HorizontalAlignment="Left"
                     Click="OnCancelSync"
                     MinWidth="120"
                     Visibility="{x:Bind ViewModel.Syncing, Mode=OneWay}">
@@ -125,18 +175,22 @@
                 </StackPanel>
             </Button>
 
+            <!-- Empty state: status caption replacing Sync now. -->
+            <TextBlock Grid.Column="0"
+                       Text="Looking for iPod on USB…"
+                       Margin="8,0,0,0"
+                       VerticalAlignment="Center"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                       Visibility="{x:Bind ViewModel.ShowEmptyState, Mode=OneWay}" />
+
+            <!-- Right rail: Eject (connected only) + Settings (always). -->
             <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="2">
-                <Button Click="OnOpenSource"
-                        ToolTipService.ToolTip="Open source folder"
-                        Style="{StaticResource SubtleButtonStyle}"
-                        Padding="10"
-                        BorderThickness="0">
-                    <FontIcon Glyph="&#xE838;" FontSize="16" />
-                </Button>
                 <Button ToolTipService.ToolTip="Eject iPod"
                         Style="{StaticResource SubtleButtonStyle}"
                         Padding="10"
-                        BorderThickness="0">
+                        BorderThickness="0"
+                        Visibility="{x:Bind ViewModel.ShowConnectedContent, Mode=OneWay}">
                     <FontIcon Glyph="&#xF847;" FontSize="16" />
                 </Button>
                 <Button Click="OnOpenSettings"

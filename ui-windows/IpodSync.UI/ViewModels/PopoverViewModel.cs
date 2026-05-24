@@ -11,9 +11,15 @@ public partial class PopoverViewModel : ObservableObject
     [ObservableProperty] private string deviceLabel = "iPod";
     [ObservableProperty] private string lastSyncedLabel = "";
     [ObservableProperty] private bool syncing;
+    [ObservableProperty] private bool ipodConnected;
     [ObservableProperty] private int progressCurrent;
     [ObservableProperty] private int progressTotal;
     [ObservableProperty] private string currentTrackLabel = "";
+    /// <summary>Latest line of daemon narration during a sync. Used to
+    /// give the user signal during the "Preparing…" phase (scan,
+    /// fingerprint, plan-build) when there's no track-count yet, and
+    /// as a secondary detail line during the apply loop.</summary>
+    [ObservableProperty] private string currentLogLine = "";
 
     // Storage. StorageProgressValue is 0..100 for the ProgressBar.
     // When unknown (no device, or query failed), all three are empty /
@@ -33,6 +39,22 @@ public partial class PopoverViewModel : ObservableObject
     /// the progress block can take its place.</summary>
     public bool ShowStorage => !Syncing && HasStorage;
 
+    /// <summary>True when the popover should render the "no iPod
+    /// connected" empty state — centered icon + caption, no storage,
+    /// no Sync Now / Eject buttons. Driven by daemon-reported
+    /// connection state (see <see cref="Update"/>).</summary>
+    public bool ShowEmptyState => !IpodConnected;
+
+    /// <summary>Inverse of <see cref="ShowEmptyState"/>: the normal
+    /// connected layout (device row + storage / sync progress + full
+    /// footer).</summary>
+    public bool ShowConnectedContent => IpodConnected;
+
+    /// <summary>True when the footer should show the Sync Now button —
+    /// connected AND idle. Hidden during sync (Stop sync takes its
+    /// place) and in the empty state (no device to sync).</summary>
+    public bool ShowSyncNowButton => IpodConnected && !Syncing;
+
     /// <summary>True between sync start and the first SummaryEvent /
     /// TrackStart, so the popover's ProgressBar can render as
     /// indeterminate (marquee) until we know the total count.</summary>
@@ -50,15 +72,45 @@ public partial class PopoverViewModel : ObservableObject
         }
     }
 
+    /// <summary>Left-side detail caption beneath the progress bar.
+    /// Prefers the current track name during the apply loop; falls
+    /// back to the latest daemon log line during the prep phase so
+    /// the user always sees what's happening instead of a blank
+    /// caption beside "Preparing…".</summary>
+    public string DetailLine =>
+        !string.IsNullOrEmpty(CurrentTrackLabel) ? CurrentTrackLabel : CurrentLogLine;
+
+    /// <summary>Storage labels for display: real values when HasStorage,
+    /// em-dash placeholder otherwise. The popover always renders the
+    /// storage row so its footprint stays stable while data is loading.</summary>
+    public string StorageUsedDisplay => HasStorage ? StorageUsedLabel : "— used";
+    public string StorageFreeDisplay => HasStorage ? StorageFreeLabel : "— free";
+
     partial void OnSyncingChanged(bool value)
     {
         OnPropertyChanged(nameof(NotSyncing));
         OnPropertyChanged(nameof(ShowStorage));
         OnPropertyChanged(nameof(ProgressLabel));
         OnPropertyChanged(nameof(NoProgressYet));
+        OnPropertyChanged(nameof(ShowSyncNowButton));
     }
-    partial void OnHasStorageChanged(bool value) => OnPropertyChanged(nameof(ShowStorage));
+    partial void OnHasStorageChanged(bool value)
+    {
+        OnPropertyChanged(nameof(ShowStorage));
+        OnPropertyChanged(nameof(StorageUsedDisplay));
+        OnPropertyChanged(nameof(StorageFreeDisplay));
+    }
+    partial void OnIpodConnectedChanged(bool value)
+    {
+        OnPropertyChanged(nameof(ShowEmptyState));
+        OnPropertyChanged(nameof(ShowConnectedContent));
+        OnPropertyChanged(nameof(ShowSyncNowButton));
+    }
+    partial void OnStorageUsedLabelChanged(string value) => OnPropertyChanged(nameof(StorageUsedDisplay));
+    partial void OnStorageFreeLabelChanged(string value) => OnPropertyChanged(nameof(StorageFreeDisplay));
     partial void OnProgressCurrentChanged(int value) => OnPropertyChanged(nameof(ProgressLabel));
+    partial void OnCurrentTrackLabelChanged(string value) => OnPropertyChanged(nameof(DetailLine));
+    partial void OnCurrentLogLineChanged(string value) => OnPropertyChanged(nameof(DetailLine));
     partial void OnProgressTotalChanged(int value)
     {
         OnPropertyChanged(nameof(ProgressLabel));
@@ -70,6 +122,7 @@ public partial class PopoverViewModel : ObservableObject
     public void Update(StatusUpdateEvent s)
     {
         Syncing = s.State == "syncing";
+        IpodConnected = s.IpodConnected;
         ApplyStorage(s.Storage);
         if (Syncing)
         {
@@ -125,6 +178,12 @@ public partial class PopoverViewModel : ObservableObject
     {
         switch (evt)
         {
+            case HeaderEvent h:
+                // Sync just started — show the source path so the
+                // "Preparing…" phase has signal until the first
+                // SummaryEvent gives us a track count.
+                CurrentLogLine = $"Scanning {h.Source}";
+                break;
             case SummaryEvent s:
                 // Subprocess has built the action plan; we can flash
                 // the "preparing" → real numbers transition immediately
@@ -132,15 +191,23 @@ public partial class PopoverViewModel : ObservableObject
                 ProgressTotal = s.TotalPlanned;
                 ProgressCurrent = 0;
                 CurrentTrackLabel = "";
+                CurrentLogLine = $"{s.Add} to add, {s.Modify} to update, {s.Remove} to remove";
                 break;
             case TrackStartEvent t:
                 ProgressCurrent = t.Current;
                 ProgressTotal = t.Total;
                 CurrentTrackLabel = t.Label;
+                CurrentLogLine = "";
                 break;
             case TrackDoneEvent:
                 // Mid-track UI flicker isn't worth fighting; we wait
                 // for the next TrackStart to advance the visible label.
+                break;
+            case LogEvent l:
+                // Forward the daemon's per-step narration so the
+                // "Preparing…" phase shows real progress (file walks,
+                // fingerprinting, etc.) instead of a blank caption.
+                CurrentLogLine = l.Message;
                 break;
             case FinishEvent:
                 // Daemon's subsequent Idle StatusUpdate will swap the
@@ -149,6 +216,7 @@ public partial class PopoverViewModel : ObservableObject
                 ProgressCurrent = 0;
                 ProgressTotal = 0;
                 CurrentTrackLabel = "";
+                CurrentLogLine = "";
                 break;
         }
     }

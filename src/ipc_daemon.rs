@@ -103,6 +103,11 @@ pub enum DaemonCommand {
         #[serde(default)]
         ipod: Option<IpodIdentity>,
     },
+    /// Clear the persisted iPod identity. Used when the user picks
+    /// "Remove this iPod" from settings or the chooser. SaveConfig
+    /// can't express "unset" because `ipod: None` is the wire-level
+    /// "don't change" sentinel.
+    ForgetIpod,
     TriggerSync {
         source: TriggerSource,
     },

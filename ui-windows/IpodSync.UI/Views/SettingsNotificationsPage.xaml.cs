@@ -4,10 +4,12 @@ using Microsoft.UI.Xaml.Navigation;
 
 namespace IpodSync_UI.Views;
 
-public sealed partial class SettingsSchedulePage : Page
+public sealed partial class SettingsNotificationsPage : Page
 {
     public SettingsViewModel? ViewModel { get; private set; }
-    public SettingsSchedulePage() { InitializeComponent(); }
+
+    public SettingsNotificationsPage() { InitializeComponent(); }
+
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         ViewModel = e.Parameter as SettingsViewModel;

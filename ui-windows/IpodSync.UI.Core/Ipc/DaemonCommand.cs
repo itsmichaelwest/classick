@@ -6,6 +6,7 @@ namespace IpodSync_UI.Ipc;
 [JsonDerivedType(typeof(GetStatusCommand), "get_status")]
 [JsonDerivedType(typeof(GetConfigCommand), "get_config")]
 [JsonDerivedType(typeof(SaveConfigCommand), "save_config")]
+[JsonDerivedType(typeof(ForgetIpodCommand), "forget_ipod")]
 [JsonDerivedType(typeof(TriggerSyncCommand), "trigger_sync")]
 [JsonDerivedType(typeof(GetHistoryCommand), "get_history")]
 [JsonDerivedType(typeof(SubscribeDeviceEventsCommand), "subscribe_device_events")]
@@ -22,6 +23,11 @@ public sealed record SaveConfigCommand(
     [property: JsonPropertyName("daemon")] DaemonSettings? Daemon = null,
     [property: JsonPropertyName("ipod")] IpodIdentity? Ipod = null
 ) : DaemonCommand;
+
+/// <summary>Clear the persisted iPod identity. SaveConfig can't
+/// express this because its <c>Ipod</c> field treats null as "leave
+/// alone".</summary>
+public sealed record ForgetIpodCommand : DaemonCommand;
 
 public sealed record TriggerSyncCommand(
     [property: JsonPropertyName("source")] string Source  // "manual" | "scheduled" | "plug_in"

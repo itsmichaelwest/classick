@@ -32,6 +32,11 @@ public partial class App : Application
     private static PopoverWindow? _popover;
     private static SettingsWindow? _settings;
 
+    /// <summary>HWND of the currently-open settings window, or zero if
+    /// closed. Used by the General page to anchor the folder picker
+    /// (InitializeWithWindow needs the owning HWND on WinUI 3).</summary>
+    public static IntPtr SettingsWindowHandle { get; private set; }
+
     public App() { InitializeComponent(); }
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
@@ -109,18 +114,29 @@ public partial class App : Application
         {
             ShowWizard();
         }
+        else
+        {
+            // Paired iPod present → reveal the tray (XAML starts it
+            // hidden so the user doesn't see it flash before this
+            // decision lands).
+            UpdateTrayVisibility();
+        }
     }
 
-    private void ShowWizard()
+    private void ShowWizard() => ShowWizardStatic();
+
+    /// <summary>True while the pair wizard owns the user's attention.
+    /// The tray icon is hidden and popover requests are no-ops in
+    /// this state — the wizard is the only legitimate surface until
+    /// an iPod identity has been committed.</summary>
+    private static bool _wizardActive;
+
+    /// <summary>Tray is visible iff an iPod is paired AND the wizard
+    /// isn't currently in front. Idempotent — safe to call from
+    /// every code path that flips either signal.</summary>
+    private static void UpdateTrayVisibility()
     {
-        Window = new WizardWindow();
-        WindowHandle = WinRT.Interop.WindowNative.GetWindowHandle(Window);
-        Window.Closed += (_, _) =>
-        {
-            Window = null;
-            WindowHandle = IntPtr.Zero;
-        };
-        Window.Activate();
+        Tray?.SetVisible(!_wizardActive && LatestConfig?.Ipod is not null);
     }
 
     private void OnStatusUpdated(StatusUpdateEvent s)
@@ -141,7 +157,12 @@ public partial class App : Application
         // it into an open popover so the label flips from model →
         // friendly name without needing the user to reopen the flyout.
         DispatcherQueue.TryEnqueue(() =>
-            _popover?.ViewModel.SetDeviceLabel(c.Ipod?.Name, c.Ipod?.ModelLabel));
+        {
+            _popover?.ViewModel.SetDeviceLabel(c.Ipod?.Name, c.Ipod?.ModelLabel);
+            // Pair / forget transitions flip the tray's visibility
+            // automatically — no separate notification needed.
+            UpdateTrayVisibility();
+        });
     }
     private void OnHistoryUpdated(HistoryUpdateEvent h)
     {
@@ -188,12 +209,18 @@ public partial class App : Application
     {
         DispatcherQueue.TryEnqueue(() =>
         {
+            // Suppress the popover while the wizard owns the
+            // foreground. We also hide the tray during the wizard so
+            // in normal use this branch is unreachable, but the
+            // guard is cheap and survives the user re-showing the
+            // tray via another path (e.g. notification action).
+            if (_wizardActive || LatestConfig?.Ipod is null) return;
             if (_popover is not null) { _popover.Activate(); return; }
             var vm = new PopoverViewModel();
             vm.SetDeviceLabel(LatestConfig?.Ipod?.Name, LatestConfig?.Ipod?.ModelLabel);
             if (LatestStatus is not null) vm.Update(LatestStatus);
             if (LatestHistory is not null) vm.ApplyHistory(LatestHistory);
-            _popover = new PopoverWindow(vm, Daemon!, LatestConfig?.Source ?? "");
+            _popover = new PopoverWindow(vm, Daemon!);
             _popover.Closed += (_, _) => _popover = null;
             _popover.Activate();
         });
@@ -205,13 +232,50 @@ public partial class App : Application
     {
         DispatcherQueue.TryEnqueue(() =>
         {
+            // Dismiss the popover so the user doesn't end up with two
+            // overlapping flyouts anchored to the same tray corner.
+            _popover?.Close();
             if (_settings is not null) { _settings.Activate(); return; }
             if (Daemon is null || Router is null || LatestConfig is null) return;
             var vm = new SettingsViewModel(Daemon, Router, LatestConfig);
             _settings = new SettingsWindow(vm);
-            _settings.Closed += (_, _) => _settings = null;
+            SettingsWindowHandle = WinRT.Interop.WindowNative.GetWindowHandle(_settings);
+            _settings.Closed += (_, _) =>
+            {
+                _settings = null;
+                SettingsWindowHandle = IntPtr.Zero;
+            };
             _settings.Activate();
         });
+    }
+
+    /// <summary>Open the pair wizard to add a new iPod. Closes any open
+    /// settings window so the wizard can take focus without the user
+    /// juggling overlapping windows.</summary>
+    public static void RequestPairNewIpod()
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _settings?.Close();
+            _popover?.Close();
+            ShowWizardStatic();
+        });
+    }
+
+    private static void ShowWizardStatic()
+    {
+        _wizardActive = true;
+        UpdateTrayVisibility();
+        Window = new WizardWindow();
+        WindowHandle = WinRT.Interop.WindowNative.GetWindowHandle(Window);
+        Window.Closed += (_, _) =>
+        {
+            Window = null;
+            WindowHandle = IntPtr.Zero;
+            _wizardActive = false;
+            UpdateTrayVisibility();
+        };
+        Window.Activate();
     }
 
     private void OnSyncNowRequested()

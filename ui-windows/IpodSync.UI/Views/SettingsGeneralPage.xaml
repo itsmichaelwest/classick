@@ -2,54 +2,126 @@
 <Page
     x:Class="IpodSync_UI.Views.SettingsGeneralPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:tk="using:CommunityToolkit.WinUI.Controls">
+    <!--
+        General settings page. Mirrors the Figma — page-title "Settings",
+        then section labels (General, About) with SettingsCard /
+        SettingsExpander rows. Edits auto-save through the parent
+        ViewModel's debounced SaveAsync; there is no Save button.
+
+        Content width matches the Figma column width (392 DIP). Page
+        padding is 24 left/right per design.
+    -->
     <ScrollViewer>
-        <StackPanel Padding="24" Spacing="20" MaxWidth="540" HorizontalAlignment="Left">
-            <TextBlock Text="General" Style="{ThemeResource TitleTextBlockStyle}" />
+        <StackPanel Padding="24" Spacing="20" HorizontalAlignment="Stretch">
+            <TextBlock Text="Settings" Style="{ThemeResource TitleTextBlockStyle}" />
 
-            <StackPanel Spacing="8">
-                <TextBlock Text="Music source folder" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                    <TextBox Grid.Column="0"
-                             Text="{x:Bind ViewModel.General.SourcePath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                             IsReadOnly="True" />
-                    <Button Grid.Column="1" Content="Change…" Click="OnPickSource" />
-                </Grid>
+            <!-- ============ General section ============ -->
+            <TextBlock Text="General" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+            <StackPanel Spacing="4">
+                <tk:SettingsCard Header="Music folder"
+                                 Description="{x:Bind ViewModel.General.SourcePath, Mode=OneWay}">
+                    <tk:SettingsCard.HeaderIcon>
+                        <FontIcon Glyph="&#xE8B7;" />
+                    </tk:SettingsCard.HeaderIcon>
+                    <Button Content="Change…" Click="OnPickSource" />
+                </tk:SettingsCard>
+
+                <tk:SettingsExpander Header="Sync mode"
+                                     Description="{x:Bind ViewModel.General.SyncModeSummary, Mode=OneWay}">
+                    <tk:SettingsExpander.HeaderIcon>
+                        <FontIcon Glyph="&#xE895;" />
+                    </tk:SettingsExpander.HeaderIcon>
+                    <tk:SettingsExpander.Items>
+                        <tk:SettingsCard ContentAlignment="Left">
+                            <StackPanel Spacing="8" Margin="0,0,0,6">
+                                <RadioButton GroupName="SyncMode"
+                                             Content="Automatic"
+                                             IsChecked="{x:Bind IsAutomatic, Mode=TwoWay}" />
+                                <TextBlock Text="Your iPod will automatically sync whenever it's plugged in"
+                                           Margin="28,-12,0,8"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap" />
+                                <RadioButton GroupName="SyncMode"
+                                             Content="Manual"
+                                             IsChecked="{x:Bind IsManual, Mode=TwoWay}" />
+                                <TextBlock Text="You'll need to start each sync manually from the tray"
+                                           Margin="28,-12,0,0"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+                        </tk:SettingsCard>
+                    </tk:SettingsExpander.Items>
+                </tk:SettingsExpander>
+
+                <tk:SettingsCard Header="Sync frequency"
+                                 Description="Run a periodic sync even if the iPod stays plugged in">
+                    <tk:SettingsCard.HeaderIcon>
+                        <FontIcon Glyph="&#xE823;" />
+                    </tk:SettingsCard.HeaderIcon>
+                    <!--
+                        Tag must be authored as <x:Int32> so the
+                        SelectedValuePath=Tag comparison matches the int
+                        VM property. A bare Tag="30" is a string, and
+                        string vs int never matches → dropdown renders
+                        empty even when the underlying value is set.
+                    -->
+                    <ComboBox SelectedValue="{x:Bind ViewModel.General.ScheduleMinutes, Mode=TwoWay}"
+                              SelectedValuePath="Tag"
+                              MinWidth="160">
+                        <ComboBoxItem Content="Only on plug-in">
+                            <ComboBoxItem.Tag><x:Int32>0</x:Int32></ComboBoxItem.Tag>
+                        </ComboBoxItem>
+                        <ComboBoxItem Content="Every 15 minutes">
+                            <ComboBoxItem.Tag><x:Int32>15</x:Int32></ComboBoxItem.Tag>
+                        </ComboBoxItem>
+                        <ComboBoxItem Content="Every 30 minutes">
+                            <ComboBoxItem.Tag><x:Int32>30</x:Int32></ComboBoxItem.Tag>
+                        </ComboBoxItem>
+                        <ComboBoxItem Content="Every hour">
+                            <ComboBoxItem.Tag><x:Int32>60</x:Int32></ComboBoxItem.Tag>
+                        </ComboBoxItem>
+                        <ComboBoxItem Content="Every 4 hours">
+                            <ComboBoxItem.Tag><x:Int32>240</x:Int32></ComboBoxItem.Tag>
+                        </ComboBoxItem>
+                        <ComboBoxItem Content="Once a day">
+                            <ComboBoxItem.Tag><x:Int32>1440</x:Int32></ComboBoxItem.Tag>
+                        </ComboBoxItem>
+                    </ComboBox>
+                </tk:SettingsCard>
+
+                <tk:SettingsCard Header="Launch ipod-sync on startup"
+                                 Description="Start automatically when you sign in to Windows">
+                    <tk:SettingsCard.HeaderIcon>
+                        <FontIcon Glyph="&#xE7E8;" />
+                    </tk:SettingsCard.HeaderIcon>
+                    <ToggleSwitch IsOn="{x:Bind ViewModel.General.LaunchOnStartup, Mode=TwoWay}" />
+                </tk:SettingsCard>
+
+                <tk:SettingsCard Header="Remove this iPod"
+                                 Description="Forget and re-run the wizard to pair a different iPod">
+                    <tk:SettingsCard.HeaderIcon>
+                        <FontIcon Glyph="&#xE74D;" />
+                    </tk:SettingsCard.HeaderIcon>
+                    <Button Content="Remove…" Click="OnRemoveIpod" />
+                </tk:SettingsCard>
             </StackPanel>
 
-            <StackPanel Spacing="8">
-                <TextBlock Text="iPod identity" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-                <TextBlock Text="{x:Bind ViewModel.General.IpodModelLabel, Mode=OneWay}" />
-                <TextBlock Text="{x:Bind ViewModel.General.IpodSerial, Mode=OneWay}"
-                           Opacity="0.7" FontFamily="Consolas" />
-                <Button Content="Re-identify (coming in M5)" IsEnabled="False" />
-            </StackPanel>
-
-            <StackPanel Spacing="8">
-                <TextBlock Text="Sync mode" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-                <TextBlock Text="First sync after setup" />
-                <ComboBox SelectedValue="{x:Bind ViewModel.General.FirstSyncMode, Mode=TwoWay}"
-                          SelectedValuePath="Tag">
-                    <ComboBoxItem Content="Review before applying" Tag="review" />
-                    <ComboBoxItem Content="Apply automatically" Tag="auto_apply" />
-                </ComboBox>
-                <TextBlock Text="Subsequent syncs" Margin="0,8,0,0" />
-                <ComboBox SelectedValue="{x:Bind ViewModel.General.SubsequentSyncMode, Mode=TwoWay}"
-                          SelectedValuePath="Tag">
-                    <ComboBoxItem Content="Review before applying" Tag="review" />
-                    <ComboBoxItem Content="Apply automatically" Tag="auto_apply" />
-                </ComboBox>
-            </StackPanel>
-
-            <StackPanel Spacing="8">
-                <TextBlock Text="Notifications" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-                <ComboBox SelectedValue="{x:Bind ViewModel.General.NotifyOn, Mode=TwoWay}"
-                          SelectedValuePath="Tag">
-                    <ComboBoxItem Content="All sync events" Tag="all" />
-                    <ComboBoxItem Content="Errors only" Tag="errors_only" />
-                    <ComboBoxItem Content="None" Tag="none" />
-                </ComboBox>
-            </StackPanel>
+            <!-- ============ About section ============ -->
+            <TextBlock Text="About" Style="{ThemeResource BodyStrongTextBlockStyle}" Margin="0,12,0,0" />
+            <tk:SettingsCard Header="{x:Bind ViewModel.About.AppName, Mode=OneWay}"
+                             Description="{x:Bind ViewModel.About.VersionLabel, Mode=OneWay}">
+                <tk:SettingsCard.HeaderIcon>
+                    <ImageIcon Source="ms-appx:///Assets/ipod.svg" />
+                </tk:SettingsCard.HeaderIcon>
+                <Button Click="OnShowLogFolder">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE838;" FontSize="14" />
+                        <TextBlock Text="Log folder" />
+                    </StackPanel>
+                </Button>
+            </tk:SettingsCard>
         </StackPanel>
     </ScrollViewer>
 </Page>
