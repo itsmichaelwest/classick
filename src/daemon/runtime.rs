@@ -48,11 +48,11 @@ pub async fn run_daemon() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<DaemonEvent>(crate::daemon::BROADCAST_CHANNEL_CAPACITY);
     let exe = std::env::current_exe()?;
     let event_tx_for_spawn = event_tx.clone();
-    let spawn_sync: SpawnFn = Arc::new(move |drive: String, cancel_rx: oneshot::Receiver<()>| {
+    let spawn_sync: SpawnFn = Arc::new(move |drive: String, cancel_rx, prompt_rx| {
         let exe = exe.clone();
         let event_tx = event_tx_for_spawn.clone();
         Box::pin(async move {
-            sync_orchestrator::run(exe, drive, cancel_rx, event_tx).await
+            sync_orchestrator::run(exe, drive, cancel_rx, prompt_rx, event_tx).await
         })
     });
 
@@ -72,8 +72,16 @@ pub async fn run_daemon() -> Result<()> {
 /// Async closure that runs one sync to completion. Arc-wrapped so the
 /// runtime can clone it into a tokio::spawn'd task without consuming the
 /// daemon's only copy.
+///
+/// Args: `(drive, cancel_rx, prompt_decisions_rx)`. The prompt channel
+/// lets `DaemonCommand::DecidePrompt` ferry user replies through to
+/// the running subprocess's stdin without blocking the runtime loop.
 pub type SpawnFn = Arc<
-    dyn Fn(String, oneshot::Receiver<()>) -> Pin<Box<dyn std::future::Future<Output = Result<OrchestratorOutcome>> + Send>>
+    dyn Fn(
+            String,
+            oneshot::Receiver<()>,
+            tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<OrchestratorOutcome>> + Send>>
         + Send
         + Sync,
 >;
@@ -170,6 +178,12 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     // by start_sync_session; taken + sent by handle_client_command's
     // CancelSync arm; cleared in handle_internal_event after completion.
     let mut cancel_tx_holder: Option<oneshot::Sender<()>> = None;
+    // Prompt-decision relay: each DecidePrompt command sends its
+    // (id, choice) into this mpsc; the orchestrator's select loop
+    // reads it and writes the corresponding {"type":"prompt_decision",
+    // ...}\n line to the subprocess stdin. Set alongside cancel_tx
+    // at sync-start; cleared on completion.
+    let mut prompt_tx_holder: Option<mpsc::UnboundedSender<(u64, i32)>> = None;
     let mut configured_serial = configured_serial;
 
     tracing::info!("daemon: ready (configured_serial={configured_serial:?})");
@@ -193,6 +207,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &spawn_sync,
                     &internal_tx,
                     &mut cancel_tx_holder,
+                    &mut prompt_tx_holder,
                     &mut configured_serial,
                 );
                 if should_exit { break ExitReason::Shutdown; }
@@ -213,6 +228,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &spawn_sync,
                     &internal_tx,
                     &mut cancel_tx_holder,
+                    &mut prompt_tx_holder,
                     configured_serial.as_deref(),
                     &config_path,
                 );
@@ -220,10 +236,13 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
             }
 
             Some(internal) = internal_rx.recv() => {
-                // Only the SyncCompleted variant clears the cancel-tx
-                // holder. IpodNameResolved is unrelated to sync lifecycle.
+                // Only the SyncCompleted variant clears the sync-lifecycle
+                // holders. IpodNameResolved is unrelated to sync lifecycle.
                 let is_sync_completion = matches!(internal, InternalEvent::SyncCompleted { .. });
-                if is_sync_completion { cancel_tx_holder = None; }
+                if is_sync_completion {
+                    cancel_tx_holder = None;
+                    prompt_tx_holder = None;
+                }
                 handle_internal_event(internal, &mut state, &event_tx, &history, &mut connected, &config_path);
             }
 
@@ -250,6 +269,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                             &spawn_sync,
                             &internal_tx,
                             &mut cancel_tx_holder,
+                            &mut prompt_tx_holder,
                         );
                     }
                 }
@@ -419,6 +439,7 @@ fn handle_device_event(
     spawn_sync: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
+    prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
     configured_serial: Option<&str>,
     config_path: &std::path::Path,
 ) {
@@ -479,6 +500,7 @@ fn handle_device_event(
                     spawn_sync,
                     internal_tx,
                     cancel_tx_holder,
+                    prompt_tx_holder,
                 );
             }
         }
@@ -520,6 +542,7 @@ fn start_sync_session(
     spawn_sync: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
+    prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
 ) {
     if state.try_start_sync_for_device(trigger.clone(), serial.clone(), drive.clone())
         != TriggerOutcome::Accepted
@@ -539,11 +562,18 @@ fn start_sync_session(
         storage: device_storage::query_storage(&drive),
     });
 
-    // Per-sync cancel channel. Sender is held by the runtime so the
-    // CancelSync IPC command can wake the orchestrator; Receiver is
+    // Per-sync cancel channel. Sender held by the runtime so the
+    // CancelSync IPC command can wake the orchestrator; Receiver
     // passed into the spawn closure.
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     *cancel_tx_holder = Some(cancel_tx);
+
+    // Per-sync prompt-decision channel. Sender held by the runtime
+    // so DaemonCommand::DecidePrompt can ferry user replies through
+    // to the subprocess. Receiver passed into the spawn closure for
+    // the orchestrator's select loop to read.
+    let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<(u64, i32)>();
+    *prompt_tx_holder = Some(prompt_tx);
 
     let spawn_sync = spawn_sync.clone();
     let internal_tx = internal_tx.clone();
@@ -551,7 +581,7 @@ fn start_sync_session(
     let trigger_for_task = trigger.clone();
     let serial_for_task = serial.clone();
     tokio::spawn(async move {
-        let outcome = (spawn_sync)(drive_for_task, cancel_rx).await;
+        let outcome = (spawn_sync)(drive_for_task, cancel_rx, prompt_rx).await;
         let _ = internal_tx.send(InternalEvent::SyncCompleted {
             trigger: trigger_for_task,
             serial: serial_for_task,
@@ -633,6 +663,7 @@ fn handle_client_command(
     spawn_sync: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
+    prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
     configured_serial: &mut Option<String>,
 ) -> bool {
     tracing::info!("daemon: client {client_id} command: {command:?}");
@@ -749,6 +780,7 @@ fn handle_client_command(
                 spawn_sync,
                 internal_tx,
                 cancel_tx_holder,
+                prompt_tx_holder,
             );
         }
         DaemonCommand::CancelSync => {
@@ -761,6 +793,28 @@ fn handle_client_command(
                 tracing::info!("daemon: client {client_id} cancelled the running sync");
             } else {
                 tracing::debug!("daemon: client {client_id} sent cancel_sync but no sync is in progress");
+            }
+        }
+        DaemonCommand::DecidePrompt { id, choice } => {
+            // Forward the user's reply to the running sync subprocess.
+            // The orchestrator writes the prompt_decision line to
+            // stdin; the apply loop's await_prompt then returns the
+            // chosen PromptOutcome and the sync proceeds.
+            if let Some(tx) = prompt_tx_holder.as_ref() {
+                if tx.send((id, choice)).is_err() {
+                    tracing::warn!(
+                        "daemon: client {client_id} sent decide_prompt id={id} choice={choice} \
+                         but the orchestrator channel was already closed (sync probably ended)"
+                    );
+                } else {
+                    tracing::info!(
+                        "daemon: client {client_id} answered prompt id={id} → choice={choice}"
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    "daemon: client {client_id} sent decide_prompt id={id} but no sync is in progress"
+                );
             }
         }
         DaemonCommand::SubscribeDeviceEvents => {

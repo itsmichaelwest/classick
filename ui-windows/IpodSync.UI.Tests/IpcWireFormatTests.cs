@@ -246,4 +246,25 @@ public class IpcWireFormatTests
         var json = JsonSerializer.Serialize<IpcCommand>(new StartCommand());
         Assert.Contains("\"type\":\"start\"", json);
     }
+
+    [Fact]
+    public void Decide_prompt_daemon_command_round_trips()
+    {
+        // Distinct from PromptDecisionCommand (above) which is the
+        // M1 subprocess-stdio command. DecidePromptCommand is the
+        // daemon-IPC command sent by the UI to the daemon, which in
+        // turn forwards a PromptDecisionCommand to the subprocess
+        // stdin. They share field names + values but live on
+        // different transports.
+        var cmd = new DecidePromptCommand(Id: 17, Choice: 1);
+        var json = JsonSerializer.Serialize<DaemonCommand>(cmd);
+        Assert.Contains("\"type\":\"decide_prompt\"", json);
+        Assert.Contains("\"id\":17", json);
+        Assert.Contains("\"choice\":1", json);
+
+        var back = JsonSerializer.Deserialize<DaemonCommand>(json);
+        var decide = Assert.IsType<DecidePromptCommand>(back);
+        Assert.Equal(17UL, decide.Id);
+        Assert.Equal(1, decide.Choice);
+    }
 }

@@ -123,6 +123,17 @@ pub enum DaemonCommand {
     /// History entry records outcome=Aborted with reason "user_cancelled".
     /// No-op if no sync is in progress.
     CancelSync,
+    /// Forward a user's reply to a `PromptEvent` from the sync
+    /// subprocess. The daemon writes `{"type":"prompt_decision",
+    /// "id":<id>,"choice":<choice>}` to the subprocess stdin. Without
+    /// this command, daemon-relayed prompts (source-change safeguard,
+    /// per-track retry/skip/abort) block the sync indefinitely
+    /// because the popover UI has no other way to answer.
+    /// No-op if no sync is in progress.
+    DecidePrompt {
+        id: u64,
+        choice: i32,
+    },
     Shutdown,
 }
 

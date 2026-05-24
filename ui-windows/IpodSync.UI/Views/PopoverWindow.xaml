@@ -146,8 +146,11 @@
             Eject + Settings on the right. Empty state: "Looking for
             iPod on USB…" caption on the left, only Settings on the
             right (Sync now / Eject would be no-ops without a device).
+            Hidden entirely when a prompt overlay is active — its own
+            option buttons are the only meaningful actions then.
         -->
-        <Grid Grid.Row="1" Padding="8,0">
+        <Grid Grid.Row="1" Padding="8,0"
+              Visibility="{x:Bind ViewModel.ShowFooter, Mode=OneWay}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
@@ -201,6 +204,53 @@
                     <FontIcon Glyph="&#xE713;" FontSize="16" />
                 </Button>
             </StackPanel>
+        </Grid>
+
+        <!--
+            Prompt overlay. Spans both rows so it covers the full
+            popover (content + footer); placed last in document order
+            so it wins z-order naturally. Visibility binds to
+            PromptActive — when true, the connected / empty / footer
+            layouts above are simultaneously hidden via their own
+            ShowConnectedContent / ShowEmptyState / ShowFooter binds,
+            so the overlay doesn't need an opaque background to mask
+            them out. Rendered by the daemon ferrying a PromptEvent
+            from the sync subprocess (source-change safeguard,
+            per-track retry/skip/abort, etc.); button click sends
+            DecidePromptCommand back via the daemon.
+        -->
+        <Grid Grid.Row="0"
+              Grid.RowSpan="2"
+              Padding="16"
+              Visibility="{x:Bind ViewModel.PromptActive, Mode=OneWay}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <ScrollViewer Grid.Row="0"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <TextBlock Text="{x:Bind ViewModel.PromptMessage, Mode=OneWay}"
+                           TextWrapping="Wrap"
+                           Style="{StaticResource CaptionTextBlockStyle}" />
+            </ScrollViewer>
+            <ItemsControl Grid.Row="1"
+                          ItemsSource="{x:Bind ViewModel.PromptOptions, Mode=OneWay}"
+                          Margin="0,8,0,0">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Vertical" Spacing="4" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                        <Button Content="{x:Bind}"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Left"
+                                Click="OnPromptOptionClicked" />
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
         </Grid>
     </Grid>
 </Window>

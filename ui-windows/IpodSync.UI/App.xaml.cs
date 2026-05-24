@@ -40,8 +40,31 @@ public partial class App : Application
     private static string _currentTrackLabel = "";
     private static string _currentLogLine = "";
 
+    /// <summary>Latest unanswered prompt from the sync subprocess, or
+    /// null if no prompt is in flight. Survives popover open/close so
+    /// reopening the tray when a prompt has been pending sees the
+    /// overlay immediately instead of just "Preparing…". Cleared on
+    /// FinishEvent and on the popover's own ClearPrompt path after
+    /// the user picks an option (the daemon's stdin write is
+    /// fire-and-forward).</summary>
+    private static PromptEvent? _pendingPrompt;
+
     private static PopoverWindow? _popover;
     private static SettingsWindow? _settings;
+
+    /// <summary>Monotonic timestamp (UTC ticks) of the most recent
+    /// popover close, used to debounce the tray-icon toggle path. The
+    /// OS fires PopoverRequested on every tray-icon click; if the
+    /// click also caused the open popover to lose focus, the focus-
+    /// loss handler closes the window BEFORE PopoverRequested fires
+    /// (or vice versa, depending on input timing). Without this
+    /// debounce, the tray click would close-then-immediately-reopen
+    /// and look like the click did nothing. Window matches typical
+    /// double-click latency; tuned for "intentional re-click reopens
+    /// quickly, accidental re-click after dismiss is swallowed".</summary>
+    private static long _popoverClosedAtTicks;
+    private static readonly long PopoverToggleDebounceTicks =
+        TimeSpan.FromMilliseconds(300).Ticks;
 
     /// <summary>HWND of the currently-open settings window, or zero if
     /// closed. Used by the General page to anchor the folder picker
@@ -237,6 +260,11 @@ public partial class App : Application
                 _progressTotal = t.Total;
                 _currentTrackLabel = t.Label;
                 _currentLogLine = "";
+                // A TrackStart implies the subprocess moved past any
+                // pending prompt — clear the App-level snapshot so a
+                // popover opened after the answer doesn't re-render
+                // the stale prompt.
+                _pendingPrompt = null;
                 break;
             case HeaderEvent h:
                 _currentLogLine = $"Scanning {h.Source}";
@@ -244,11 +272,17 @@ public partial class App : Application
             case LogEvent l:
                 _currentLogLine = l.Message;
                 break;
+            case PromptEvent p:
+                // Hold the prompt so a popover opened during the wait
+                // can render the overlay immediately on activation.
+                _pendingPrompt = p;
+                break;
             case FinishEvent:
                 _progressCurrent = 0;
                 _progressTotal = 0;
                 _currentTrackLabel = "";
                 _currentLogLine = "";
+                _pendingPrompt = null;
                 break;
         }
         // Then forward to an open popover so it animates in real time.
@@ -265,7 +299,24 @@ public partial class App : Application
             // guard is cheap and survives the user re-showing the
             // tray via another path (e.g. notification action).
             if (_wizardActive || LatestConfig?.Ipod is null) return;
-            if (_popover is not null) { _popover.Activate(); return; }
+
+            // Tray-icon toggle: a tray click while the popover is open
+            // means "close it". Replaces the prior "re-Activate the
+            // existing one" behaviour, which made the tray icon look
+            // dead on second click.
+            if (_popover is not null)
+            {
+                _popover.Close();
+                return;
+            }
+
+            // Debounce: if the popover was open within the last
+            // ~300ms, the tray click that brought us here is the same
+            // click that just dismissed the previous instance via
+            // focus loss. Don't immediately reopen — the user clicked
+            // the tray intending to close.
+            var sinceClose = DateTime.UtcNow.Ticks - _popoverClosedAtTicks;
+            if (sinceClose < PopoverToggleDebounceTicks) return;
             var vm = new PopoverViewModel();
             vm.SetDeviceLabel(LatestConfig?.Ipod?.Name, LatestConfig?.Ipod?.ModelLabel);
             if (LatestStatus is not null) vm.Update(LatestStatus);
@@ -286,8 +337,20 @@ public partial class App : Application
                 // Pre-summary phase: at least give the user a log line.
                 vm.CurrentLogLine = _currentLogLine;
             }
+            // Re-render any unanswered prompt so a popover opened
+            // mid-wait shows the overlay immediately instead of just
+            // "Preparing…". Re-using ApplyIpcProgress's PromptEvent
+            // arm keeps the seed path and live path in lock-step.
+            if (_pendingPrompt is not null)
+            {
+                vm.ApplyIpcProgress(_pendingPrompt);
+            }
             _popover = new PopoverWindow(vm, Daemon!);
-            _popover.Closed += (_, _) => _popover = null;
+            _popover.Closed += (_, _) =>
+            {
+                _popover = null;
+                _popoverClosedAtTicks = DateTime.UtcNow.Ticks;
+            };
             _popover.Activate();
         });
     }

@@ -21,6 +21,32 @@ public partial class PopoverViewModel : ObservableObject
     /// as a secondary detail line during the apply loop.</summary>
     [ObservableProperty] private string currentLogLine = "";
 
+    // Prompt overlay state. When the daemon ferries a PromptEvent
+    // from the sync subprocess (source-change safeguard, retry/skip/
+    // abort prompts, etc.), the popover renders an overlay panel
+    // with the message and a button per option. The user's click
+    // sends a DecidePromptCommand back to the daemon, which forwards
+    // it to the subprocess stdin so the sync proceeds. Cleared on
+    // Finish / TrackStart / explicit answer.
+    [ObservableProperty] private bool promptActive;
+    [ObservableProperty] private ulong promptId;
+    [ObservableProperty] private string promptMessage = "";
+    public ObservableCollection<string> PromptOptions { get; } = new();
+
+    partial void OnPromptActiveChanged(bool value)
+    {
+        // When the prompt overlay toggles, every layout-region
+        // visibility flag flips with it. Fire the dependent-property
+        // notifications so the popover XAML can simply hide the
+        // underlying content (vs. relying on the overlay to opaquely
+        // paint over it, which doesn't work cleanly over the acrylic
+        // backdrop).
+        OnPropertyChanged(nameof(ShowConnectedContent));
+        OnPropertyChanged(nameof(ShowEmptyState));
+        OnPropertyChanged(nameof(ShowFooter));
+        OnPropertyChanged(nameof(ShowSyncNowButton));
+    }
+
     // Storage. StorageProgressValue is 0..100 for the ProgressBar.
     // When unknown (no device, or query failed), all three are empty /
     // 0 — the XAML hides the storage row in that case via a binding to
@@ -42,18 +68,24 @@ public partial class PopoverViewModel : ObservableObject
     /// <summary>True when the popover should render the "no iPod
     /// connected" empty state — centered icon + caption, no storage,
     /// no Sync Now / Eject buttons. Driven by daemon-reported
-    /// connection state (see <see cref="Update"/>).</summary>
-    public bool ShowEmptyState => !IpodConnected;
+    /// connection state. Suppressed when a prompt overlay is active
+    /// so the underlying layout doesn't bleed through.</summary>
+    public bool ShowEmptyState => !IpodConnected && !PromptActive;
 
-    /// <summary>Inverse of <see cref="ShowEmptyState"/>: the normal
-    /// connected layout (device row + storage / sync progress + full
-    /// footer).</summary>
-    public bool ShowConnectedContent => IpodConnected;
+    /// <summary>The normal connected layout (device row + storage /
+    /// sync progress + full footer). Suppressed when a prompt overlay
+    /// is active.</summary>
+    public bool ShowConnectedContent => IpodConnected && !PromptActive;
+
+    /// <summary>True when the popover should show the footer row
+    /// (Sync now / Stop sync / Eject / Settings). Hidden during a
+    /// pending prompt because the prompt's own option buttons are
+    /// the only meaningful actions then.</summary>
+    public bool ShowFooter => !PromptActive;
 
     /// <summary>True when the footer should show the Sync Now button —
-    /// connected AND idle. Hidden during sync (Stop sync takes its
-    /// place) and in the empty state (no device to sync).</summary>
-    public bool ShowSyncNowButton => IpodConnected && !Syncing;
+    /// connected AND idle AND no prompt in flight.</summary>
+    public bool ShowSyncNowButton => IpodConnected && !Syncing && !PromptActive;
 
     /// <summary>True between sync start and the first SummaryEvent /
     /// TrackStart, so the popover's ProgressBar can render as
@@ -105,6 +137,7 @@ public partial class PopoverViewModel : ObservableObject
         OnPropertyChanged(nameof(ShowEmptyState));
         OnPropertyChanged(nameof(ShowConnectedContent));
         OnPropertyChanged(nameof(ShowSyncNowButton));
+        OnPropertyChanged(nameof(ShowFooter));
     }
     partial void OnStorageUsedLabelChanged(string value) => OnPropertyChanged(nameof(StorageUsedDisplay));
     partial void OnStorageFreeLabelChanged(string value) => OnPropertyChanged(nameof(StorageFreeDisplay));
@@ -198,6 +231,11 @@ public partial class PopoverViewModel : ObservableObject
                 ProgressTotal = t.Total;
                 CurrentTrackLabel = t.Label;
                 CurrentLogLine = "";
+                // A TrackStart implies the sync moved past any
+                // pending prompt — defensively clear the overlay so
+                // a stale prompt-active state can't sit on top of
+                // active progress.
+                ClearPrompt();
                 break;
             case TrackDoneEvent:
                 // Mid-track UI flicker isn't worth fighting; we wait
@@ -209,6 +247,19 @@ public partial class PopoverViewModel : ObservableObject
                 // fingerprinting, etc.) instead of a blank caption.
                 CurrentLogLine = l.Message;
                 break;
+            case PromptEvent p:
+                // Daemon ferried a prompt from the sync subprocess
+                // (source-change safeguard, retry/skip/abort, etc.).
+                // Surface the overlay so the user can answer; the
+                // popover's button-click handler sends a
+                // DecidePromptCommand back via the daemon, which
+                // forwards it to the subprocess stdin.
+                PromptId = p.Id;
+                PromptMessage = p.Message;
+                PromptOptions.Clear();
+                foreach (var o in p.Options) PromptOptions.Add(o);
+                PromptActive = true;
+                break;
             case FinishEvent:
                 // Daemon's subsequent Idle StatusUpdate will swap the
                 // panel back to storage, but reset numbers now so a
@@ -217,8 +268,22 @@ public partial class PopoverViewModel : ObservableObject
                 ProgressTotal = 0;
                 CurrentTrackLabel = "";
                 CurrentLogLine = "";
+                ClearPrompt();
                 break;
         }
+    }
+
+    /// <summary>Hide the prompt overlay and drop the option list.
+    /// Called both by the popover after the user picks an option
+    /// (the answer goes out via DecidePromptCommand) and defensively
+    /// on TrackStart / Finish in case the subprocess answered some
+    /// other way (e.g. internal Cancel from a tracker bail).</summary>
+    public void ClearPrompt()
+    {
+        PromptActive = false;
+        PromptMessage = "";
+        PromptId = 0;
+        PromptOptions.Clear();
     }
 
     private void ApplyStorage(StorageInfo? info)

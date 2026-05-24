@@ -13,7 +13,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestratorOutcome {
@@ -65,12 +65,23 @@ impl FailureTracker {
 }
 
 /// Drive the spawned child to completion, until bail, or until cancelled.
+///
 /// `cancel_rx` fires when the user clicks Cancel in the UI; the orchestrator
 /// writes a Cancel command to the subprocess stdin and force-kills after 5s.
+///
+/// `prompt_decisions_rx` carries `(id, choice)` pairs from
+/// `DaemonCommand::DecidePrompt`; each is serialised as
+/// `{"type":"prompt_decision","id":N,"choice":N}\n` and written to
+/// the subprocess stdin. Without this channel, daemon-relayed
+/// prompts (source-change safeguard, retry/skip/abort, etc.) would
+/// block the sync indefinitely — the popover UI emits its reply via
+/// DecidePrompt, the daemon ferries it here, and the orchestrator
+/// hands it to the subprocess's prompt-waiting code.
 pub async fn run(
     exe: PathBuf,
     drive: String,
     mut cancel_rx: oneshot::Receiver<()>,
+    mut prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
 ) -> Result<OrchestratorOutcome> {
     let mut cmd = build_command(&exe, &drive);
@@ -138,6 +149,20 @@ pub async fn run(
                     reason: "user_cancelled".to_string(),
                     summary: last_summary,
                 });
+            }
+            Some((id, choice)) = prompt_decisions_rx.recv() => {
+                // User replied to a daemon-relayed prompt. Forward the
+                // decision to the subprocess via stdin so its
+                // apply_loop's await_prompt call returns. Errors
+                // writing to stdin are non-fatal here — if the
+                // subprocess died between the prompt emit and the
+                // user's click, the SyncCompleted event from the
+                // exited child will handle teardown normally.
+                let line = format!("{{\"type\":\"prompt_decision\",\"id\":{id},\"choice\":{choice}}}\n");
+                if let Err(e) = stdin.write_all(line.as_bytes()).await {
+                    tracing::warn!("orchestrator: failed to forward prompt_decision to subprocess: {e}");
+                }
+                let _ = stdin.flush().await;
             }
         }
     }
