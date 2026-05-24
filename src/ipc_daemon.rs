@@ -7,7 +7,6 @@
 //! `protocol_version = "1.1.0"` since this extends M1's "1.0.0".
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
-#[cfg(windows)]
 use crate::daemon::device_storage::StorageInfo;
 use crate::daemon::history::HistoryEntry;
 use serde::{Deserialize, Serialize};
@@ -33,8 +32,8 @@ pub enum DaemonEvent {
         next_scheduled_unix_secs: Option<u64>,
         /// Free + total bytes on the iPod's drive. `None` when no iPod
         /// is connected, or when the drive query failed (treat absence
-        /// as "no info yet" on the UI).
-        #[cfg(windows)]
+        /// as "no info yet" on the UI). Always `None` on non-Windows
+        /// platforms until a native `statvfs`/`statfs` impl lands.
         #[serde(skip_serializing_if = "Option::is_none")]
         storage: Option<StorageInfo>,
     },

@@ -3,17 +3,13 @@
 //! See `docs/superpowers/specs/2026-05-24-phase-6-daemon-model-design.md`.
 
 pub mod device_watcher;
-#[cfg(windows)]
 pub mod device_storage;
 pub mod format;
 pub mod history;
-#[cfg(windows)]
 pub mod ipc_server;
-#[cfg(windows)]
 pub mod runtime;
 pub mod scheduler;
 pub mod state;
-#[cfg(windows)]
 pub mod sync_orchestrator;
 
 // ---------------------------------------------------------------------------

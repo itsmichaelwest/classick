@@ -12,8 +12,8 @@ fn main() -> Result<()> {
 
     // Daemon mode bypasses TUI / progress / orchestrate entirely. Logging is
     // routed to a file (like ipc-mode) since stdout/stderr are not the wire
-    // here — clients talk to the daemon over a named pipe.
-    #[cfg(windows)]
+    // here — clients talk to the daemon over a named pipe (Windows) or a
+    // Unix-domain socket (everywhere else).
     if cli.daemon {
         ipod_sync::logging::init(cli.verbose, /*use_tui*/ false, /*ipc_mode*/ true);
         let runtime = tokio::runtime::Builder::new_multi_thread()

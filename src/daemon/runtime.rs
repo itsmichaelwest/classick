@@ -156,14 +156,16 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let mut connected: Option<DetectedIpod> = None;
     let configured_serial = deps.configured_serial;
 
-    let pipe_name = deps.pipe_name.as_deref()
-        .unwrap_or(crate::daemon::ipc_server::PIPE_NAME);
+    let pipe_name = deps
+        .pipe_name
+        .clone()
+        .unwrap_or_else(crate::daemon::ipc_server::default_pipe_name);
     let (event_tx, mut cmd_rx, mut new_client_rx) = match deps.preset_event_tx {
-        Some(tx) => crate::daemon::ipc_server::spawn_server_full_with(tx, pipe_name).await?,
+        Some(tx) => crate::daemon::ipc_server::spawn_server_full_with(tx, &pipe_name).await?,
         None => {
             let (event_tx, _) = broadcast::channel::<DaemonEvent>(256);
             let (tx, rx, _new_client_rx) =
-                crate::daemon::ipc_server::spawn_server_full_with(event_tx, pipe_name).await?;
+                crate::daemon::ipc_server::spawn_server_full_with(event_tx, &pipe_name).await?;
             // Test path: synthesize an empty new-client channel that
             // never fires. The integration tests don't exercise snapshot
             // semantics; production goes through spawn_server_full.

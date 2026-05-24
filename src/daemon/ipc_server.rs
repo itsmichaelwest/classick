@@ -1,17 +1,54 @@
-//! Multi-instance named-pipe IPC server on Windows. Accepts UI client
-//! connections, broadcasts daemon events to all clients, routes client
-//! commands to a central handler.
+//! IPC server for UI ↔ daemon traffic.
 //!
-//! Pipe path: `\\.\pipe\ipod-sync`. Wire format: newline-delimited JSON
-//! per `docs/ipc-protocol.md` (v1.1.0).
+//! Windows: multi-instance named-pipe server on `\\.\pipe\ipod-sync`.
+//! Unix:    Unix-domain-socket server on `$XDG_RUNTIME_DIR/ipod-sync.sock`
+//!          (with fallback to `$TMPDIR` and finally `/tmp`).
+//!
+//! Wire format is newline-delimited JSON per `docs/ipc-protocol.md`
+//! (v1.1.0); identical on both transports. The per-client handler is
+//! generic over `AsyncRead`/`AsyncWrite`, so the only platform-specific
+//! code is the accept loop.
 
 use crate::ipc_daemon::{DaemonCommand, DaemonEvent, DAEMON_PROTOCOL_VERSION};
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{broadcast, mpsc};
 
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::ServerOptions;
+#[cfg(unix)]
+use tokio::net::UnixListener;
+
+/// Windows production transport address (named-pipe label). The .NET
+/// side mirrors this in `IpodSync.UI.Core.AppIdentity`; the two MUST
+/// stay in sync. See `default_pipe_name` for the platform-agnostic
+/// resolver.
+#[cfg(windows)]
 pub const PIPE_NAME: &str = r"\\.\pipe\ipod-sync";
+
+/// Resolve the platform-default IPC transport address.
+///
+/// - **Windows:** the named-pipe label [`PIPE_NAME`].
+/// - **Unix:** a socket path under `$XDG_RUNTIME_DIR` if set and the
+///   directory exists, else `$TMPDIR`, else `/tmp`. File name is
+///   always `ipod-sync.sock`.
+pub fn default_pipe_name() -> String {
+    #[cfg(windows)]
+    {
+        PIPE_NAME.to_string()
+    }
+    #[cfg(unix)]
+    {
+        let dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_dir())
+            .or_else(|| std::env::var_os("TMPDIR").map(std::path::PathBuf::from))
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        dir.join("ipod-sync.sock")
+            .to_string_lossy()
+            .into_owned()
+    }
+}
 
 /// Incoming command from a connected client, tagged with the client id
 /// so the handler can reply back via the per-client sender.
@@ -22,16 +59,17 @@ pub struct ClientCommand {
 }
 
 /// Test-friendly entry: creates a fresh broadcast channel. Uses
-/// the production [`PIPE_NAME`] — only one such test can run at a
-/// time, and never while a real daemon is up. Tests that need
-/// isolation should call [`spawn_server_with`] with a per-test pipe.
+/// the platform default transport address — only one such test can run
+/// at a time, and never while a real daemon is up. Tests that need
+/// isolation should call [`spawn_server_with`] with a per-test path.
 pub async fn spawn_server() -> Result<(
     broadcast::Sender<DaemonEvent>,
     mpsc::UnboundedReceiver<ClientCommand>,
 )> {
     let (event_tx, _) = broadcast::channel::<DaemonEvent>(256);
+    let pipe = default_pipe_name();
     let (sender, cmd_rx, _new_client_rx) =
-        spawn_server_full_with(event_tx.clone(), PIPE_NAME).await?;
+        spawn_server_full_with(event_tx.clone(), &pipe).await?;
     Ok((sender, cmd_rx))
 }
 
@@ -47,13 +85,15 @@ pub async fn spawn_server_full(
     mpsc::UnboundedReceiver<ClientCommand>,
     mpsc::UnboundedReceiver<()>,
 )> {
-    spawn_server_full_with(event_tx, PIPE_NAME).await
+    let pipe = default_pipe_name();
+    spawn_server_full_with(event_tx, &pipe).await
 }
 
-/// Underlying impl that accepts an arbitrary pipe name. Production calls
-/// it with [`PIPE_NAME`] (the IPC contract with the UI). Tests can pass
-/// `\\.\pipe\ipod-sync-test-<pid>-<n>` to avoid colliding with each
-/// other AND with a real running daemon on the developer's machine.
+/// Underlying impl that accepts an arbitrary transport address.
+/// Production calls it with [`default_pipe_name`] (the IPC contract
+/// with the UI). Tests pass a unique per-test address — on Windows
+/// `\\.\pipe\ipod-sync-test-<pid>-<n>`, on Unix a path under a
+/// tempdir — so the suite runs alongside a real daemon.
 pub async fn spawn_server_full_with(
     event_tx: broadcast::Sender<DaemonEvent>,
     pipe_name: &str,
@@ -65,12 +105,27 @@ pub async fn spawn_server_full_with(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ClientCommand>();
     let (new_client_tx, new_client_rx) = mpsc::unbounded_channel::<()>();
 
-    let event_tx_clone = event_tx.clone();
-    let new_client_tx_clone = new_client_tx.clone();
-    let pipe_name = pipe_name.to_string();
+    spawn_accept_loop(
+        event_tx.clone(),
+        pipe_name.to_string(),
+        cmd_tx,
+        new_client_tx,
+    )?;
+
+    Ok((event_tx, cmd_rx, new_client_rx))
+}
+
+#[cfg(windows)]
+fn spawn_accept_loop(
+    event_tx: broadcast::Sender<DaemonEvent>,
+    pipe_name: String,
+    cmd_tx: mpsc::UnboundedSender<ClientCommand>,
+    new_client_tx: mpsc::UnboundedSender<()>,
+) -> Result<()> {
     tokio::spawn(async move {
         let mut next_client_id: u64 = 1;
-        // Create the first instance up-front.
+        // Create the first instance up-front so a fast-following
+        // client sees a listening pipe immediately.
         let mut server = match ServerOptions::new()
             .first_pipe_instance(true)
             .create(&pipe_name)
@@ -102,25 +157,81 @@ pub async fn spawn_server_full_with(
 
             let client_id = next_client_id;
             next_client_id += 1;
-            let event_rx = event_tx_clone.subscribe();
+            let event_rx = event_tx.subscribe();
             let cmd_tx = cmd_tx.clone();
-            let new_client_tx = new_client_tx_clone.clone();
-            tokio::spawn(handle_client(client_id, connected, event_rx, cmd_tx, new_client_tx));
+            let new_client_tx = new_client_tx.clone();
+            let (reader, writer) = tokio::io::split(connected);
+            tokio::spawn(handle_client(
+                client_id,
+                reader,
+                writer,
+                event_rx,
+                cmd_tx,
+                new_client_tx,
+            ));
         }
     });
-
-    Ok((event_tx, cmd_rx, new_client_rx))
+    Ok(())
 }
 
-async fn handle_client(
+#[cfg(unix)]
+fn spawn_accept_loop(
+    event_tx: broadcast::Sender<DaemonEvent>,
+    pipe_name: String,
+    cmd_tx: mpsc::UnboundedSender<ClientCommand>,
+    new_client_tx: mpsc::UnboundedSender<()>,
+) -> Result<()> {
+    // UnixListener::bind errors if the path already exists. A stale
+    // socket from a previously-crashed daemon is the common case;
+    // remove it. If a real daemon is currently bound we'll trample
+    // its socket, but a real daemon would also be holding a process
+    // lock somewhere — the named-pipe `first_pipe_instance(true)`
+    // analogue. For now: trust the operator to run only one daemon.
+    let _ = std::fs::remove_file(&pipe_name);
+    let listener = UnixListener::bind(&pipe_name)
+        .with_context(|| format!("bind unix socket {pipe_name}"))?;
+    tokio::spawn(async move {
+        tracing::info!("ipc-server: listening on {pipe_name}");
+        let mut next_client_id: u64 = 1;
+        loop {
+            let stream = match listener.accept().await {
+                Ok((s, _addr)) => s,
+                Err(e) => {
+                    tracing::warn!("ipc-server: accept failed: {e}");
+                    continue;
+                }
+            };
+            let client_id = next_client_id;
+            next_client_id += 1;
+            let event_rx = event_tx.subscribe();
+            let cmd_tx = cmd_tx.clone();
+            let new_client_tx = new_client_tx.clone();
+            let (reader, writer) = tokio::io::split(stream);
+            tokio::spawn(handle_client(
+                client_id,
+                reader,
+                writer,
+                event_rx,
+                cmd_tx,
+                new_client_tx,
+            ));
+        }
+    });
+    Ok(())
+}
+
+async fn handle_client<R, W>(
     client_id: u64,
-    pipe: NamedPipeServer,
+    reader_half: R,
+    mut writer_half: W,
     mut event_rx: broadcast::Receiver<DaemonEvent>,
     cmd_tx: mpsc::UnboundedSender<ClientCommand>,
     new_client_tx: mpsc::UnboundedSender<()>,
-) {
+) where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     tracing::info!("ipc-server: client {client_id} connected");
-    let (reader_half, mut writer_half) = tokio::io::split(pipe);
 
     let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<DaemonEvent>();
 
