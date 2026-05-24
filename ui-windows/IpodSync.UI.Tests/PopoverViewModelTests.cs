@@ -1,3 +1,4 @@
+using System;
 using System.Threading.Tasks;
 using IpodSync_UI.Ipc;
 using IpodSync_UI.ViewModels;
@@ -128,6 +129,84 @@ public class PopoverViewModelTests
         vm.ClearPrompt();
         Assert.True(vm.ShowConnectedContent);
         Assert.True(vm.ShowFooter);
+    }
+
+    [Fact]
+    public void ProgressCaption_is_empty_when_not_syncing()
+    {
+        var vm = new PopoverViewModel();
+        Assert.Equal("", vm.ProgressCaption);
+    }
+
+    [Fact]
+    public void ProgressCaption_shows_preparing_before_summary()
+    {
+        var vm = new PopoverViewModel();
+        vm.Update(Status("syncing", ipodConnected: true));
+        // No SummaryEvent yet → still in the prep phase.
+        Assert.Equal("Preparing sync…", vm.ProgressCaption);
+    }
+
+    [Fact]
+    public void ProgressCaption_shows_counter_after_summary_and_track_start()
+    {
+        var vm = new PopoverViewModel();
+        vm.Update(Status("syncing", ipodConnected: true));
+        vm.ApplyIpcProgress(new SummaryEvent(Add: 20, Modify: 5, MetadataOnly: 0, Remove: 5, Unchanged: 0, TotalPlanned: 30));
+        vm.ApplyIpcProgress(new TrackStartEvent(Current: 7, Total: 30, Label: "ADD /Music/x.flac"));
+        Assert.Equal("Syncing 7 of 30 tracks", vm.ProgressCaption);
+    }
+
+    [Fact]
+    public void Current_track_label_is_kept_for_tooltip_use()
+    {
+        // We dropped the per-track filename from the primary caption,
+        // but it stays on CurrentTrackLabel so the XAML can hang it off
+        // a ToolTipService.ToolTip on the caption TextBlock.
+        var vm = new PopoverViewModel();
+        vm.ApplyIpcProgress(new TrackStartEvent(1, 10, "ADD /Music/Artist/track.flac"));
+        Assert.Equal("ADD /Music/Artist/track.flac", vm.CurrentTrackLabel);
+    }
+
+    [Fact]
+    public void EtaLabel_is_empty_in_warmup_window()
+    {
+        // First two completed tracks are too noisy to estimate from —
+        // we wait until we have at least 3 samples.
+        var vm = new PopoverViewModel();
+        vm.Update(Status("syncing", ipodConnected: true));
+        vm.ApplyIpcProgress(new SummaryEvent(Add: 100, Modify: 0, MetadataOnly: 0, Remove: 0, Unchanged: 0, TotalPlanned: 100));
+        vm.ApplyIpcProgress(new TrackStartEvent(1, 100, "ADD /a")); // 0 completed
+        Assert.Equal("", vm.EtaLabel);
+        vm.ApplyIpcProgress(new TrackStartEvent(3, 100, "ADD /c")); // 2 completed
+        Assert.Equal("", vm.EtaLabel);
+    }
+
+    [Fact]
+    public void EtaLabel_renders_after_warmup_with_seeded_start_time()
+    {
+        // Seed SyncStartedAt far enough in the past that the per-track
+        // average produces a stable, named ETA bucket.
+        var vm = new PopoverViewModel();
+        vm.Update(Status("syncing", ipodConnected: true));
+        vm.ApplyIpcProgress(new SummaryEvent(Add: 100, Modify: 0, MetadataOnly: 0, Remove: 0, Unchanged: 0, TotalPlanned: 100));
+        vm.ApplyIpcProgress(new TrackStartEvent(11, 100, "ADD /k")); // 10 completed
+        // Pretend the apply loop started 60 seconds ago → 6s/track →
+        // ~90 tracks remaining → ~540s → "about 9 min left" bucket.
+        vm.SyncStartedAt = DateTimeOffset.Now.AddSeconds(-60);
+        Assert.Matches(@"about \d+ min left", vm.EtaLabel);
+    }
+
+    [Fact]
+    public void FinishEvent_clears_eta_state()
+    {
+        var vm = new PopoverViewModel();
+        vm.Update(Status("syncing", ipodConnected: true));
+        vm.ApplyIpcProgress(new SummaryEvent(Add: 10, Modify: 0, MetadataOnly: 0, Remove: 0, Unchanged: 0, TotalPlanned: 10));
+        Assert.NotNull(vm.SyncStartedAt);
+        vm.ApplyIpcProgress(new FinishEvent(true));
+        Assert.Null(vm.SyncStartedAt);
+        Assert.Equal("", vm.EtaLabel);
     }
 
     [Fact]

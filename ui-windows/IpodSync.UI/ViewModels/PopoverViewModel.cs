@@ -14,12 +14,33 @@ public partial class PopoverViewModel : ObservableObject
     [ObservableProperty] private bool ipodConnected;
     [ObservableProperty] private int progressCurrent;
     [ObservableProperty] private int progressTotal;
+    /// <summary>Raw <see cref="TrackStartEvent.Label"/> for the currently
+    /// processing track (e.g. "ADD /Music/Artist/Album/01 Track.flac").
+    /// Not rendered as the primary caption — that's a counter — but
+    /// exposed as a hover tooltip on the caption so anyone curious can
+    /// see exactly which file is being processed.</summary>
     [ObservableProperty] private string currentTrackLabel = "";
-    /// <summary>Latest line of daemon narration during a sync. Used to
-    /// give the user signal during the "Preparing…" phase (scan,
-    /// fingerprint, plan-build) when there's no track-count yet, and
-    /// as a secondary detail line during the apply loop.</summary>
-    [ObservableProperty] private string currentLogLine = "";
+
+    /// <summary>Wall-clock time the apply loop started (first
+    /// <see cref="SummaryEvent"/>). Used to compute <see cref="EtaLabel"/>
+    /// from <see cref="ProgressCurrent"/>/<see cref="ProgressTotal"/>.
+    /// Null outside of an active sync.
+    ///
+    /// <para>Settable so the App can seed it when a popover is opened
+    /// mid-sync — otherwise the ETA would restart from the popover-open
+    /// timestamp and drift slow until the wall-clock catches up.</para>
+    /// </summary>
+    public DateTimeOffset? SyncStartedAt
+    {
+        get => _syncStartedAt;
+        set
+        {
+            if (_syncStartedAt == value) return;
+            _syncStartedAt = value;
+            OnPropertyChanged(nameof(EtaLabel));
+        }
+    }
+    private DateTimeOffset? _syncStartedAt;
 
     // Prompt overlay state. When the daemon ferries a PromptEvent
     // from the sync subprocess (source-change safeguard, retry/skip/
@@ -92,25 +113,59 @@ public partial class PopoverViewModel : ObservableObject
     /// indeterminate (marquee) until we know the total count.</summary>
     public bool NoProgressYet => Syncing && ProgressTotal <= 0;
 
-    /// <summary>Human-friendly "Track 12 of 50" / "Preparing…" label
-    /// shown beneath the sync progress bar. Empty before a TrackStart
-    /// event arrives.</summary>
-    public string ProgressLabel
+    /// <summary>Left-side caption beneath the sync progress bar. One
+    /// short line: "Preparing sync…" until the action plan is built,
+    /// then "Syncing N of M tracks". The per-track filename is exposed
+    /// as a tooltip via <see cref="CurrentTrackLabel"/> for anyone who
+    /// wants to see exactly which file is in flight.</summary>
+    public string ProgressCaption
     {
         get
         {
-            if (ProgressTotal <= 0) return Syncing ? "Preparing…" : "";
-            return $"Track {ProgressCurrent} of {ProgressTotal}";
+            if (!Syncing) return "";
+            if (ProgressTotal <= 0) return "Preparing sync…";
+            return $"Syncing {ProgressCurrent} of {ProgressTotal} tracks";
         }
     }
 
-    /// <summary>Left-side detail caption beneath the progress bar.
-    /// Prefers the current track name during the apply loop; falls
-    /// back to the latest daemon log line during the prep phase so
-    /// the user always sees what's happening instead of a blank
-    /// caption beside "Preparing…".</summary>
-    public string DetailLine =>
-        !string.IsNullOrEmpty(CurrentTrackLabel) ? CurrentTrackLabel : CurrentLogLine;
+    /// <summary>Right-side ETA caption (e.g. "about 3 min left").
+    /// Suppressed during the prep phase (no track count yet) and during
+    /// the first couple of tracks (the per-track average is too noisy
+    /// to be useful before we have a few samples). Empty otherwise so
+    /// the popover doesn't flash an obviously-wrong "5 hr left" on the
+    /// first track of a fast sync.</summary>
+    public string EtaLabel
+    {
+        get
+        {
+            if (!Syncing || ProgressTotal <= 0 || SyncStartedAt is null) return "";
+            // Use completed-track count (ProgressCurrent is 1-indexed
+            // and names the currently-starting track). Wait for ≥3
+            // completed before estimating so an outlier first track
+            // doesn't dominate the average.
+            int completed = Math.Max(0, ProgressCurrent - 1);
+            if (completed < 3) return "";
+            var elapsed = DateTimeOffset.Now - SyncStartedAt.Value;
+            if (elapsed.TotalSeconds <= 0) return "";
+            double perTrack = elapsed.TotalSeconds / completed;
+            double remainingSec = perTrack * (ProgressTotal - completed);
+            return FormatEta(remainingSec);
+        }
+    }
+
+    private static string FormatEta(double remainingSec)
+    {
+        if (remainingSec < 45) return "less than a minute";
+        if (remainingSec < 90) return "about a minute left";
+        if (remainingSec < 3600)
+        {
+            int minutes = (int)Math.Round(remainingSec / 60.0);
+            return $"about {minutes} min left";
+        }
+        double hours = remainingSec / 3600.0;
+        if (hours < 1.5) return "about 1 hr left";
+        return $"about {(int)Math.Round(hours)} hr left";
+    }
 
     /// <summary>Storage labels for display: real values when HasStorage,
     /// em-dash placeholder otherwise. The popover always renders the
@@ -122,7 +177,8 @@ public partial class PopoverViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(NotSyncing));
         OnPropertyChanged(nameof(ShowStorage));
-        OnPropertyChanged(nameof(ProgressLabel));
+        OnPropertyChanged(nameof(ProgressCaption));
+        OnPropertyChanged(nameof(EtaLabel));
         OnPropertyChanged(nameof(NoProgressYet));
         OnPropertyChanged(nameof(ShowSyncNowButton));
     }
@@ -141,12 +197,15 @@ public partial class PopoverViewModel : ObservableObject
     }
     partial void OnStorageUsedLabelChanged(string value) => OnPropertyChanged(nameof(StorageUsedDisplay));
     partial void OnStorageFreeLabelChanged(string value) => OnPropertyChanged(nameof(StorageFreeDisplay));
-    partial void OnProgressCurrentChanged(int value) => OnPropertyChanged(nameof(ProgressLabel));
-    partial void OnCurrentTrackLabelChanged(string value) => OnPropertyChanged(nameof(DetailLine));
-    partial void OnCurrentLogLineChanged(string value) => OnPropertyChanged(nameof(DetailLine));
+    partial void OnProgressCurrentChanged(int value)
+    {
+        OnPropertyChanged(nameof(ProgressCaption));
+        OnPropertyChanged(nameof(EtaLabel));
+    }
     partial void OnProgressTotalChanged(int value)
     {
-        OnPropertyChanged(nameof(ProgressLabel));
+        OnPropertyChanged(nameof(ProgressCaption));
+        OnPropertyChanged(nameof(EtaLabel));
         OnPropertyChanged(nameof(NoProgressYet));
     }
 
@@ -211,26 +270,27 @@ public partial class PopoverViewModel : ObservableObject
     {
         switch (evt)
         {
-            case HeaderEvent h:
-                // Sync just started — show the source path so the
-                // "Preparing…" phase has signal until the first
-                // SummaryEvent gives us a track count.
-                CurrentLogLine = $"Scanning {h.Source}";
+            case HeaderEvent:
+                // Header arrives before SummaryEvent, but we no longer
+                // narrate it: the popover just shows "Preparing sync…"
+                // until the action plan is built.
                 break;
             case SummaryEvent s:
-                // Subprocess has built the action plan; we can flash
-                // the "preparing" → real numbers transition immediately
-                // even before the first TrackStart arrives.
+                // Subprocess has built the action plan; flip from
+                // "Preparing sync…" to the determinate counter and
+                // start the wall-clock for ETA. SyncStartedAt is set
+                // here rather than on Syncing→true so the ETA's
+                // per-track average doesn't include the variable
+                // prep-phase time (scan / fingerprint / plan-build).
                 ProgressTotal = s.TotalPlanned;
                 ProgressCurrent = 0;
                 CurrentTrackLabel = "";
-                CurrentLogLine = $"{s.Add} to add, {s.Modify} to update, {s.Remove} to remove";
+                SyncStartedAt = DateTimeOffset.Now;
                 break;
             case TrackStartEvent t:
                 ProgressCurrent = t.Current;
                 ProgressTotal = t.Total;
                 CurrentTrackLabel = t.Label;
-                CurrentLogLine = "";
                 // A TrackStart implies the sync moved past any
                 // pending prompt — defensively clear the overlay so
                 // a stale prompt-active state can't sit on top of
@@ -241,11 +301,11 @@ public partial class PopoverViewModel : ObservableObject
                 // Mid-track UI flicker isn't worth fighting; we wait
                 // for the next TrackStart to advance the visible label.
                 break;
-            case LogEvent l:
-                // Forward the daemon's per-step narration so the
-                // "Preparing…" phase shows real progress (file walks,
-                // fingerprinting, etc.) instead of a blank caption.
-                CurrentLogLine = l.Message;
+            case LogEvent:
+                // Daemon narration is no longer surfaced in the popover —
+                // the caption is a clean "Syncing N of M tracks" line.
+                // The full log still goes to the daemon's log file for
+                // post-mortem.
                 break;
             case PromptEvent p:
                 // Daemon ferried a prompt from the sync subprocess
@@ -267,7 +327,7 @@ public partial class PopoverViewModel : ObservableObject
                 ProgressCurrent = 0;
                 ProgressTotal = 0;
                 CurrentTrackLabel = "";
-                CurrentLogLine = "";
+                SyncStartedAt = null;
                 ClearPrompt();
                 break;
         }

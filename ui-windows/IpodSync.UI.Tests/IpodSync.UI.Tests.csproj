@@ -41,8 +41,6 @@
     -->
     <Compile Include="..\IpodSync.UI\ViewModels\ReviewViewModel.cs"
              Link="LinkedViewModels\ReviewViewModel.cs" />
-    <Compile Include="..\IpodSync.UI\ViewModels\ProgressViewModel.cs"
-             Link="LinkedViewModels\ProgressViewModel.cs" />
     <Compile Include="..\IpodSync.UI\ViewModels\WizardViewModel.cs"
              Link="LinkedViewModels\WizardViewModel.cs" />
     <Compile Include="..\IpodSync.UI\ViewModels\PopoverViewModel.cs"

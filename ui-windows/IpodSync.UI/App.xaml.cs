@@ -38,7 +38,12 @@ public partial class App : Application
     private static int _progressCurrent;
     private static int _progressTotal;
     private static string _currentTrackLabel = "";
-    private static string _currentLogLine = "";
+    /// <summary>Wall-clock time the action plan started executing (first
+    /// <see cref="SummaryEvent"/>). Held at App scope so a popover
+    /// opened mid-sync seeds the same start time as the popover that
+    /// was opened from the start, instead of restarting the ETA's
+    /// per-track average from the popover-open instant.</summary>
+    private static DateTimeOffset? _syncStartedAt;
 
     /// <summary>Latest unanswered prompt from the sync subprocess, or
     /// null if no prompt is in flight. Survives popover open/close so
@@ -183,7 +188,7 @@ public partial class App : Application
             _progressCurrent = 0;
             _progressTotal = 0;
             _currentTrackLabel = "";
-            _currentLogLine = "";
+            _syncStartedAt = null;
         }
         LatestStatus = s;
         DispatcherQueue.TryEnqueue(() =>
@@ -253,24 +258,21 @@ public partial class App : Application
                 _progressTotal = s.TotalPlanned;
                 _progressCurrent = 0;
                 _currentTrackLabel = "";
-                _currentLogLine = $"{s.Add} to add, {s.Modify} to update, {s.Remove} to remove";
+                // Mirror PopoverViewModel: stamp the apply-loop start
+                // here so the ETA's per-track average excludes the
+                // variable prep phase. Set at App scope so reopening
+                // the popover mid-sync reuses the original timestamp.
+                _syncStartedAt = DateTimeOffset.Now;
                 break;
             case TrackStartEvent t:
                 _progressCurrent = t.Current;
                 _progressTotal = t.Total;
                 _currentTrackLabel = t.Label;
-                _currentLogLine = "";
                 // A TrackStart implies the subprocess moved past any
                 // pending prompt — clear the App-level snapshot so a
                 // popover opened after the answer doesn't re-render
                 // the stale prompt.
                 _pendingPrompt = null;
-                break;
-            case HeaderEvent h:
-                _currentLogLine = $"Scanning {h.Source}";
-                break;
-            case LogEvent l:
-                _currentLogLine = l.Message;
                 break;
             case PromptEvent p:
                 // Hold the prompt so a popover opened during the wait
@@ -281,7 +283,7 @@ public partial class App : Application
                 _progressCurrent = 0;
                 _progressTotal = 0;
                 _currentTrackLabel = "";
-                _currentLogLine = "";
+                _syncStartedAt = null;
                 _pendingPrompt = null;
                 break;
         }
@@ -322,20 +324,18 @@ public partial class App : Application
             if (LatestStatus is not null) vm.Update(LatestStatus);
             if (LatestHistory is not null) vm.ApplyHistory(LatestHistory);
             // Replay accumulated sync progress so the user doesn't see
-            // "Preparing…" when the subprocess is already mid-apply.
+            // "Preparing sync…" when the subprocess is already mid-apply.
             // Order matters: ProgressTotal sets NoProgressYet, which
-            // controls whether "Preparing…" still renders.
+            // controls whether the indeterminate / "Preparing sync…"
+            // state still renders. SyncStartedAt is the App-scope
+            // stamp from SummaryEvent so the ETA carries continuity
+            // across popover open/close.
             if (LatestStatus?.State == "syncing" && _progressTotal > 0)
             {
                 vm.ProgressTotal = _progressTotal;
                 vm.ProgressCurrent = _progressCurrent;
                 vm.CurrentTrackLabel = _currentTrackLabel;
-                vm.CurrentLogLine = _currentLogLine;
-            }
-            else if (LatestStatus?.State == "syncing" && !string.IsNullOrEmpty(_currentLogLine))
-            {
-                // Pre-summary phase: at least give the user a log line.
-                vm.CurrentLogLine = _currentLogLine;
+                vm.SyncStartedAt = _syncStartedAt;
             }
             // Re-render any unanswered prompt so a popover opened
             // mid-wait shows the overlay immediately instead of just
