@@ -7,7 +7,13 @@
                 VerticalAlignment="Center"
                 Spacing="16"
                 MaxWidth="400">
-        <Image Source="ms-appx:///Assets/ipod.svg"
+        <!--
+          Source from targetsize-512 — the largest authored variant — and let
+          WinUI downscale to 96 DIPs. Pure downscale at every supported DPI
+          (96→384 actual pixels at 400%, well under 512). AppList.scale-* tops
+          out at 176 px so it would upscale above 100% DPI.
+        -->
+        <Image Source="ms-appx:///Assets/AppList.targetsize-512.png"
                Width="96" Height="96"
                HorizontalAlignment="Center" />
         <TextBlock Text="Welcome to ipod-sync"
