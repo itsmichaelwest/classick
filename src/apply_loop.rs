@@ -50,15 +50,16 @@ pub(crate) fn source_format_from_probe(probe: &ProbeOutput) -> String {
         .to_string()
 }
 
-/// Probe `ffmpeg -version` and return the first line (e.g. "ffmpeg version
+/// Probe `<ffmpeg> -version` and return the first line (e.g. "ffmpeg version
 /// n7.0 ..."). Forensic-only: recorded in `ManifestEntry.encoder_version`
 /// so a future audit can correlate an iPod-side ALAC file with the exact
-/// encoder that wrote it. Returns Err if ffmpeg isn't spawnable.
-pub(crate) fn ffmpeg_version() -> Result<String> {
-    let out = std::process::Command::new("ffmpeg")
+/// encoder that wrote it. Returns Err if ffmpeg isn't spawnable. `ffmpeg_path`
+/// is the configured ffmpeg binary (F-21 / F-16).
+pub(crate) fn ffmpeg_version(ffmpeg_path: &std::path::Path) -> Result<String> {
+    let out = std::process::Command::new(ffmpeg_path)
         .args(["-hide_banner", "-version"])
         .output()
-        .context("invoking ffmpeg -version")?;
+        .with_context(|| format!("invoking {} -version", ffmpeg_path.display()))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     Ok(stdout
         .lines()
@@ -81,7 +82,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
 
     // Pre-resolve gates: ffmpeg, iPod mount, source walk. Each runs its own
     // Retry/Abort (or Retry/Change/Abort) prompt loop on failure.
-    preflight::verify_ffmpeg(progress, decision_rx)?;
+    preflight::verify_ffmpeg(config, progress, decision_rx)?;
     // Refalac is opt-in via --encoder refalac; only probe when the user asked
     // for it (per Phase 3 addendum Change 4). The resolved version string is
     // threaded into apply_loop so Wave 3 Task 6 can record it on each new
@@ -503,7 +504,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // `do_metadata_only` so the retry loop has a single
                     // fallible call to wrap. Skip leaves manifest as-is.
                     let updated: Option<ManifestEntry> = loop {
-                        match do_metadata_only(&db, &source, &entry) {
+                        match do_metadata_only(&db, &source, &entry, config) {
                             Ok(new_entry) => break Some(new_entry),
                             Err(e) => {
                                 let msg = format!(
@@ -625,13 +626,14 @@ pub(crate) fn do_metadata_only(
     db: &OwnedDb,
     source: &SourceEntry,
     entry: &ManifestEntry,
+    config: &Config,
 ) -> Result<ManifestEntry> {
-    let probe = transcode::probe(&source.path)
+    let probe = transcode::probe(&source.path, &config.ffmpeg)
         .with_context(|| format!("probe {}", source.path.display()))?;
     let tags = tags_from_probe(&probe);
     let art = if has_embedded_art(&probe) {
         let art_path = transcode::temp_art_path();
-        transcode::extract_cover_art(&source.path, &art_path)?;
+        transcode::extract_cover_art(&source.path, &art_path, &config.ffmpeg)?;
         let bytes = std::fs::read(&art_path)?;
         let _ = std::fs::remove_file(&art_path);
         Some(bytes)
@@ -701,7 +703,7 @@ pub(crate) fn add_one(
     config: &Config,
     refalac_version: &Option<String>,
 ) -> Result<AddOneOutcome> {
-    let probe = transcode::probe(&src.path)
+    let probe = transcode::probe(&src.path, &config.ffmpeg)
         .with_context(|| format!("probe {}", src.path.display()))?;
     let tags = tags_from_probe(&probe);
     let source_format = source_format_from_probe(&probe);
@@ -727,9 +729,9 @@ pub(crate) fn add_one(
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
-                transcode::transcode_to_alac(&src.path, &dst)
+                transcode::transcode_to_alac(&src.path, &dst, &config.ffmpeg)
                     .with_context(|| format!("transcode {}", src.path.display()))?;
-                let ver = ffmpeg_version()
+                let ver = ffmpeg_version(&config.ffmpeg)
                     .unwrap_or_else(|_| "ffmpeg (version unknown)".to_string());
                 ("ffmpeg".to_string(), ver, dst)
             }
@@ -742,7 +744,7 @@ pub(crate) fn add_one(
                 // temp jpg first if any, then pass it. Cleaned up after.
                 let art_path_opt = if has_embedded_art(&probe) {
                     let art_path = transcode::temp_art_path();
-                    transcode::extract_cover_art(&src.path, &art_path).with_context(|| {
+                    transcode::extract_cover_art(&src.path, &art_path, &config.ffmpeg).with_context(|| {
                         format!("extract art for refalac --artwork: {}", src.path.display())
                     })?;
                     Some(art_path)
@@ -775,7 +777,7 @@ pub(crate) fn add_one(
     // is independent of refalac's own --artwork embed.
     let art = if has_embedded_art(&probe) {
         let art_path = transcode::temp_art_path();
-        transcode::extract_cover_art(&src.path, &art_path)?;
+        transcode::extract_cover_art(&src.path, &art_path, &config.ffmpeg)?;
         let bytes = std::fs::read(&art_path)?;
         let _ = std::fs::remove_file(&art_path);
         Some(bytes)

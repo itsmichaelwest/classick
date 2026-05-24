@@ -4,7 +4,7 @@
 //! machine.
 
 use std::time::Duration;
-use tokio::time::Interval;
+use tokio::time::{Instant, Interval};
 
 pub struct SyncScheduler {
     interval: Option<Interval>,
@@ -13,18 +13,17 @@ pub struct SyncScheduler {
 
 impl SyncScheduler {
     /// Build a scheduler that fires every `minutes` minutes. 0 disables.
+    ///
+    /// The first tick fires at +`minutes` minutes from construction (NOT
+    /// immediately). Implemented via `interval_at(Instant::now() + period, ...)`
+    /// so we don't need to consume a "free" immediate tick at runtime.
     pub fn new(minutes: u32) -> Self {
         let interval = if minutes == 0 {
             None
         } else {
-            let mut i = tokio::time::interval(Duration::from_secs(minutes as u64 * 60));
-            // Skip the immediate tick at construction time; we want the
-            // first fire to be `minutes` from now, not right now.
+            let period = Duration::from_secs(minutes as u64 * 60);
+            let mut i = tokio::time::interval_at(Instant::now() + period, period);
             i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // First tick fires immediately by default; consume it.
-            // Caller doesn't see this since `tick` below is awaited
-            // separately. We document the contract: first user-observed
-            // tick is at +1 interval.
             Some(i)
         };
         Self { interval, minutes }
@@ -43,19 +42,7 @@ impl SyncScheduler {
     /// future that never resolves.
     pub async fn tick(&mut self) {
         match &mut self.interval {
-            Some(i) => {
-                // Consume the "immediate" first tick once on first call so
-                // the user-observed first tick is at +1 interval from now.
-                static SEEN_FIRST: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
-                // (Note: SEEN_FIRST is process-global, fine for the daemon
-                // singleton; tests that build multiple schedulers should
-                // call tick twice and discard the first.)
-                if !SEEN_FIRST.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    i.tick().await;
-                }
-                i.tick().await;
-            }
+            Some(i) => { i.tick().await; }
             None => std::future::pending::<()>().await,
         }
     }

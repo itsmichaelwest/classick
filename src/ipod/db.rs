@@ -40,10 +40,7 @@ impl OwnedDb {
     /// wire the mountpoint into the DB so libgpod write helpers (itdb_cp_track_to_ipod,
     /// itdb_filename_on_ipod, etc.) know where to put files on disk.
     pub fn open(ipod_mount: &Path) -> Result<Self> {
-        let db_path = ipod_mount
-            .join("iPod_Control")
-            .join("iTunes")
-            .join("iTunesDB");
+        let db_path = crate::ipod::layout::itunes_db_path(ipod_mount);
         let path_c = path_to_cstring(&db_path)?;
         let mount_c = path_to_cstring(ipod_mount)?;
         unsafe {
@@ -117,10 +114,7 @@ impl OwnedDb {
             let mount_c = ffi::itdb_get_mountpoint(self.0);
             if !mount_c.is_null() {
                 let mount = CStr::from_ptr(mount_c).to_string_lossy();
-                let bak = Path::new(mount.as_ref())
-                    .join("iPod_Control")
-                    .join("iTunes")
-                    .join("Play Counts.bak");
+                let bak = crate::ipod::layout::play_counts_bak_path(Path::new(mount.as_ref()));
                 let _ = std::fs::remove_file(&bak); // ignore NotFound; other errors surface on the subsequent write
             }
         }
@@ -211,18 +205,7 @@ impl OwnedDb {
     /// then calls `write` once.
     pub fn delete_track(&self, dbid: u64) -> Result<()> {
         unsafe {
-            // Find the track by walking the GList. libgpod doesn't expose a
-            // hashmap lookup; 1,400 tracks at ~30ns per pointer-chase is fine.
-            let mut node = (*self.0).tracks;
-            let mut found: *mut ffi::Itdb_Track = std::ptr::null_mut();
-            while !node.is_null() {
-                let t = (*node).data as *mut ffi::Itdb_Track;
-                if !t.is_null() && (*t).dbid as u64 == dbid {
-                    found = t;
-                    break;
-                }
-                node = (*node).next;
-            }
+            let found = self.find_track_by_dbid(dbid);
             if found.is_null() {
                 return Ok(()); // already gone; idempotent
             }
@@ -256,16 +239,7 @@ impl OwnedDb {
         art: Option<&[u8]>,
     ) -> Result<()> {
         unsafe {
-            let mut node = (*self.0).tracks;
-            let mut found: *mut ffi::Itdb_Track = std::ptr::null_mut();
-            while !node.is_null() {
-                let t = (*node).data as *mut ffi::Itdb_Track;
-                if !t.is_null() && (*t).dbid as u64 == dbid {
-                    found = t;
-                    break;
-                }
-                node = (*node).next;
-            }
+            let found = self.find_track_by_dbid(dbid);
             if found.is_null() {
                 return Ok(()); // idempotent: track not present
             }
@@ -286,6 +260,24 @@ impl OwnedDb {
             }
         }
         Ok(())
+    }
+
+    /// Walk the DB's track GList and return the first track whose dbid
+    /// matches, or NULL if none. libgpod doesn't expose a hashmap lookup;
+    /// ~1,400 tracks at ~30ns per pointer-chase is fine.
+    ///
+    /// # Safety
+    /// The returned pointer is only valid for the lifetime of `&self`.
+    unsafe fn find_track_by_dbid(&self, dbid: u64) -> *mut ffi::Itdb_Track {
+        let mut node = (*self.0).tracks;
+        while !node.is_null() {
+            let t = (*node).data as *mut ffi::Itdb_Track;
+            if !t.is_null() && (*t).dbid as u64 == dbid {
+                return t;
+            }
+            node = (*node).next;
+        }
+        std::ptr::null_mut()
     }
 
     /// Walk all tracks currently in the DB and return their handles.
@@ -315,6 +307,29 @@ impl Drop for OwnedDb {
         unsafe {
             ffi::itdb_free(self.0);
         }
+    }
+}
+
+/// Read the iPod's user-set name (the master playlist's `name` field
+/// in iTunesDB). Returns `None` if the DB can't be parsed, the master
+/// playlist is missing, or the name is blank.
+///
+/// This opens the full iTunesDB which can take 100ms–1s on large
+/// libraries — callers in the daemon's async loop should wrap this in
+/// `tokio::task::spawn_blocking` to avoid stalling the runtime.
+pub fn read_ipod_name(ipod_mount: &Path) -> Option<String> {
+    let db = OwnedDb::open(ipod_mount).ok()?;
+    unsafe {
+        let master = ffi::itdb_playlist_mpl(db.as_ptr());
+        if master.is_null() {
+            return None;
+        }
+        let name_ptr = (*master).name;
+        if name_ptr.is_null() {
+            return None;
+        }
+        let s = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
+        if s.trim().is_empty() { None } else { Some(s) }
     }
 }
 

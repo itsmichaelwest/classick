@@ -8,6 +8,7 @@
 //! a scripted device watcher and a fake spawn-fn.
 
 use crate::config_file::{self, PersistedConfig};
+use crate::daemon::device_storage::{self, StorageInfo};
 use crate::daemon::device_watcher::{Debouncer, DeviceEvent, DeviceWatcher, PollingDeviceWatcher};
 use crate::daemon::history::{HistoryEntry, HistoryService, SyncOutcome, SyncSummary, SyncTrigger};
 use crate::daemon::ipc_server::{spawn_server, ClientCommand};
@@ -22,7 +23,6 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Production entry. Constructs the real device watcher + real
@@ -40,12 +40,12 @@ pub async fn run_daemon() -> Result<()> {
         .flatten()
         .and_then(|c| c.daemon)
         .map(|d| d.schedule_minutes)
-        .unwrap_or(30);
+        .unwrap_or(crate::daemon::DEFAULT_SCHEDULE_MINUTES);
 
     // Build the broadcast event_tx FIRST so the spawn_sync closure can
     // capture a clone — that way orchestrator events flow through the
     // same channel UI clients are subscribed to.
-    let (event_tx, _) = broadcast::channel::<DaemonEvent>(256);
+    let (event_tx, _) = broadcast::channel::<DaemonEvent>(crate::daemon::BROADCAST_CHANNEL_CAPACITY);
     let exe = std::env::current_exe()?;
     let event_tx_for_spawn = event_tx.clone();
     let spawn_sync: SpawnFn = Arc::new(move |drive: String, cancel_rx: oneshot::Receiver<()>| {
@@ -98,6 +98,16 @@ enum InternalEvent {
         started_at_unix_secs: u64,
         outcome: Result<OrchestratorOutcome>,
     },
+    /// Sent by the iPod-name reader task after itdb_parse completes on
+    /// a freshly-plugged device. The runtime applies the name to
+    /// `connected` (if the serial still matches the current device),
+    /// persists it into config so the UI sees it across daemon
+    /// restarts, then re-broadcasts a DeviceConnected + ConfigUpdate
+    /// so the popover updates immediately.
+    IpodNameResolved {
+        serial: String,
+        name: Option<String>,
+    },
 }
 
 /// Test-friendly entry. Production wraps real impls and calls this.
@@ -107,7 +117,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let config_path = config_file::default_path()?;
     let mut state = StateMachine::new();
     let mut scheduler = SyncScheduler::new(deps.schedule_minutes);
-    let mut debouncer = Debouncer::new(Duration::from_millis(500));
+    let mut debouncer = Debouncer::new(crate::daemon::DEVICE_DEBOUNCE_WINDOW);
     let mut connected: Option<DetectedIpod> = None;
     let configured_serial = deps.configured_serial;
 
@@ -171,13 +181,17 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &internal_tx,
                     &mut cancel_tx_holder,
                     configured_serial.as_deref(),
+                    &config_path,
                 );
                 broadcast_status(&event_tx, &state, &connected, &config_path, &history);
             }
 
             Some(internal) = internal_rx.recv() => {
-                cancel_tx_holder = None;  // sync over, drop the (possibly already-fired) sender
-                handle_internal_event(internal, &mut state, &event_tx, &history, &connected);
+                // Only the SyncCompleted variant clears the cancel-tx
+                // holder. IpodNameResolved is unrelated to sync lifecycle.
+                let is_sync_completion = matches!(internal, InternalEvent::SyncCompleted { .. });
+                if is_sync_completion { cancel_tx_holder = None; }
+                handle_internal_event(internal, &mut state, &event_tx, &history, &mut connected, &config_path);
             }
 
             Some(()) = new_client_rx.recv() => {
@@ -218,9 +232,46 @@ fn handle_internal_event(
     state: &mut StateMachine,
     event_tx: &broadcast::Sender<DaemonEvent>,
     history: &HistoryService,
-    connected: &Option<DetectedIpod>,
+    connected: &mut Option<DetectedIpod>,
+    config_path: &std::path::Path,
 ) {
     match event {
+        InternalEvent::IpodNameResolved { serial, name } => {
+            // Apply only if the resolved-name's serial still matches
+            // the currently-connected device. (Device could've been
+            // detached during the iTunesDB parse.)
+            let Some(c) = connected.as_mut() else { return };
+            if c.serial != serial { return }
+            if c.name == name { return }
+            c.name = name.clone();
+
+            // Persist the name into the user's IpodIdentity so it
+            // survives daemon restarts (read_ipod_name is a 100-500ms
+            // op we don't want to repeat unnecessarily).
+            if let Ok(Some(mut cfg)) = config_file::load(config_path) {
+                if let Some(id) = cfg.ipod_identity.as_mut() {
+                    if id.serial == serial && id.name != name {
+                        id.name = name.clone();
+                        if let Err(e) = config_file::save(config_path, &cfg) {
+                            tracing::warn!("daemon: failed to persist iPod name to config: {e}");
+                        }
+                    }
+                }
+            }
+
+            // Re-broadcast DeviceConnected with the now-populated
+            // name, and a ConfigUpdate so the popover/title bar
+            // refreshes from either path.
+            let _ = event_tx.send(DaemonEvent::DeviceConnected {
+                serial: c.serial.clone(),
+                model_label: c.model_label.clone(),
+                drive: c.drive.clone(),
+                name: c.name.clone(),
+            });
+            let cfg = config_file::load(config_path).ok().flatten();
+            let _ = event_tx.send(build_config_update(cfg));
+            return;
+        }
         InternalEvent::SyncCompleted { trigger, serial, started_at_unix_secs, outcome } => {
             // If the device was detached mid-sync, the Disconnected handler
             // already wrote an Aborted history entry and called finish_sync.
@@ -260,6 +311,7 @@ fn handle_internal_event(
                 ipod_connected: connected.is_some(),
                 last_sync,
                 next_scheduled_unix_secs: None,
+                storage: current_storage(connected),
             });
         }
     }
@@ -275,15 +327,49 @@ fn handle_device_event(
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
     configured_serial: Option<&str>,
+    config_path: &std::path::Path,
 ) {
     match event {
-        DeviceEvent::Connected(ipod) => {
+        DeviceEvent::Connected(mut ipod) => {
+            // Seed name from persisted config so the UI doesn't flash
+            // "iPod (Classic 7G)" then snap to "Michael's iPod" — if
+            // we read the name on a previous plug-in we already have it.
+            if ipod.name.is_none() {
+                if let Ok(Some(cfg)) = config_file::load(config_path) {
+                    if let Some(id) = cfg.ipod_identity.as_ref() {
+                        if id.serial == ipod.serial { ipod.name = id.name.clone(); }
+                    }
+                }
+            }
+
             *connected = Some(ipod.clone());
             let _ = event_tx.send(DaemonEvent::DeviceConnected {
                 serial: ipod.serial.clone(),
                 model_label: ipod.model_label.clone(),
                 drive: ipod.drive.clone(),
+                name: ipod.name.clone(),
             });
+
+            // Off-thread iTunesDB read so the daemon loop stays
+            // responsive. Result arrives via IpodNameResolved.
+            let drive_for_read = ipod.drive.clone();
+            let serial_for_read = ipod.serial.clone();
+            let tx_for_read = internal_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let drive_path = std::path::PathBuf::from(&drive_for_read);
+                let started = std::time::Instant::now();
+                let name = crate::ipod::db::read_ipod_name(&drive_path);
+                tracing::info!(
+                    "daemon: read iPod name for {serial_for_read} in {}ms → {:?}",
+                    started.elapsed().as_millis(),
+                    name,
+                );
+                let _ = tx_for_read.send(InternalEvent::IpodNameResolved {
+                    serial: serial_for_read,
+                    name,
+                });
+            });
+
             // Auto-sync only fires for the configured serial.
             if configured_serial == Some(ipod.serial.as_str()) && state.is_idle() {
                 start_sync_session(
@@ -352,6 +438,7 @@ fn start_sync_session(
         ipod_connected: true,
         last_sync: None,
         next_scheduled_unix_secs: None,
+        storage: device_storage::query_storage(&drive),
     });
 
     // Per-sync cancel channel. Sender is held by the runtime so the
@@ -421,7 +508,17 @@ fn broadcast_status(
         ipod_connected: connected.is_some(),
         last_sync: entries.last().cloned(),
         next_scheduled_unix_secs: None,
+        storage: current_storage(connected),
     });
+}
+
+/// Query free + total bytes for the connected iPod's drive. `None` when
+/// no device is connected OR when the volume query failed (drive may
+/// have been unplugged mid-tick). UI treats absence as "no info yet".
+fn current_storage(connected: &Option<DetectedIpod>) -> Option<StorageInfo> {
+    connected
+        .as_ref()
+        .and_then(|d| device_storage::query_storage(&d.drive))
 }
 
 fn handle_client_command(
@@ -451,6 +548,7 @@ fn handle_client_command(
                 ipod_connected: connected.is_some(),
                 last_sync: entries.last().cloned(),
                 next_scheduled_unix_secs: None,
+                storage: current_storage(connected),
             });
         }
         DaemonCommand::GetConfig => {
@@ -461,7 +559,19 @@ fn handle_client_command(
             let mut current = config_file::load(config_path).ok().flatten().unwrap_or_default();
             if let Some(s) = source { current.source = Some(PathBuf::from(s)); }
             if let Some(d) = daemon { current.daemon = Some(d); }
-            if let Some(i) = ipod { current.ipod_identity = Some(i); }
+            if let Some(mut i) = ipod {
+                // Wizard / settings clients don't know the iPod's
+                // firmware name — preserve it across saves so the user
+                // doesn't lose "Michael's iPod" the moment they re-run
+                // the wizard for the same device. Only carry it over
+                // when serials match (different iPod = clean slate).
+                if i.name.is_none() {
+                    if let Some(prev) = current.ipod_identity.as_ref() {
+                        if prev.serial == i.serial { i.name = prev.name.clone(); }
+                    }
+                }
+                current.ipod_identity = Some(i);
+            }
             if let Err(e) = config_file::save(config_path, &current) {
                 tracing::error!("daemon: failed to save config: {e}");
                 return;
@@ -545,7 +655,7 @@ fn build_config_update(cfg: Option<PersistedConfig>) -> DaemonEvent {
 fn history_file_path() -> Result<PathBuf> {
     let base = dirs::data_local_dir()
         .ok_or_else(|| anyhow::anyhow!("LOCALAPPDATA unavailable"))?
-        .join("ipod-sync");
+        .join(crate::PROJECT_DIR);
     Ok(base.join("history.json"))
 }
 

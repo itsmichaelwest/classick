@@ -65,6 +65,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
         serial: "0xABC".to_string(),
         model_label: "iPod 7G".to_string(),
         drive: "G:\\".to_string(),
+        name: None,
     })).await.unwrap();
 
     // The spawn-fn should have been called with the right drive.
@@ -115,6 +116,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
         serial: "0xWRONG".to_string(),
         model_label: "Other iPod".to_string(),
         drive: "H:\\".to_string(),
+        name: None,
     })).await.unwrap();
 
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -174,6 +176,7 @@ async fn runtime_stays_responsive_during_long_sync() {
         serial: "0xABC".to_string(),
         model_label: "iPod 7G".to_string(),
         drive: "G:\\".to_string(),
+        name: None,
     })).await.unwrap();
 
     // Confirm orchestrator started (and is now stuck in std::future::pending).

@@ -116,6 +116,22 @@ pub fn has_embedded_art(probe: &ProbeOutput) -> bool {
     })
 }
 
+/// Derive the ffprobe binary path from the configured ffmpeg path. If ffmpeg
+/// is a full path (e.g. `C:\bin\ffmpeg.exe`), ffprobe is taken from the same
+/// directory; otherwise we assume both are on PATH and return the bare
+/// `"ffprobe"` name. Centralizing this here means callers don't each invent
+/// their own ffprobe-lookup logic, and the `--ffmpeg` override extends to
+/// probing automatically (F-16).
+pub fn ffprobe_path_for(ffmpeg: &Path) -> PathBuf {
+    if ffmpeg.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
+        ffmpeg.with_file_name(
+            if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" }
+        )
+    } else {
+        PathBuf::from("ffprobe")
+    }
+}
+
 /// Build the ffmpeg argument vector for FLAC→ALAC with art passthrough.
 /// Extracted so we can unit-test the arg construction without spawning ffmpeg.
 pub fn ffmpeg_args(src: &Path, dst: &Path) -> Vec<String> {
@@ -134,12 +150,15 @@ pub fn ffmpeg_args(src: &Path, dst: &Path) -> Vec<String> {
 }
 
 /// Spawn ffprobe on `src` and parse its JSON output into a `ProbeOutput`.
-pub fn probe(src: &Path) -> Result<ProbeOutput> {
-    let out = Command::new("ffprobe")
+/// `ffmpeg_path` is the configured ffmpeg binary; ffprobe is derived from it
+/// via [`ffprobe_path_for`] (F-16).
+pub fn probe(src: &Path, ffmpeg_path: &Path) -> Result<ProbeOutput> {
+    let ffprobe = ffprobe_path_for(ffmpeg_path);
+    let out = Command::new(&ffprobe)
         .args(["-loglevel", "error", "-of", "json", "-show_format", "-show_streams"])
         .arg(src)
         .output()
-        .map_err(|e| anyhow!("failed to spawn ffprobe (is it on PATH?): {e}"))?;
+        .map_err(|e| anyhow!("failed to spawn {} (is it on PATH?): {e}", ffprobe.display()))?;
     if !out.status.success() {
         return Err(anyhow!(
             "ffprobe failed (exit {:?}): {}",
@@ -153,11 +172,12 @@ pub fn probe(src: &Path) -> Result<ProbeOutput> {
 }
 
 /// Transcode `src` (FLAC) → `dst` (ALAC in MP4/ipod container, art passed through).
-pub fn transcode_to_alac(src: &Path, dst: &Path) -> Result<()> {
-    let status = Command::new("ffmpeg")
+/// `ffmpeg_path` is the configured ffmpeg binary (F-16).
+pub fn transcode_to_alac(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<()> {
+    let status = Command::new(ffmpeg_path)
         .args(ffmpeg_args(src, dst))
         .status()
-        .map_err(|e| anyhow!("failed to spawn ffmpeg (is it on PATH?): {e}"))?;
+        .map_err(|e| anyhow!("failed to spawn {} (is it on PATH?): {e}", ffmpeg_path.display()))?;
     if !status.success() {
         return Err(anyhow!("ffmpeg transcode failed (exit {:?})", status.code()));
     }
@@ -206,40 +226,54 @@ pub fn verify_refalac_available(refalac_path: &Path) -> Result<String> {
     Ok(version)
 }
 
-/// Verify ffmpeg and ffprobe are reachable via PATH. Call at startup so the user
-/// gets a clear error before we try anything else.
-pub fn verify_tools_available() -> Result<()> {
-    for tool in &["ffmpeg", "ffprobe"] {
-        let r = Command::new(tool).arg("-version").output();
+/// Verify ffmpeg and ffprobe are reachable. `ffmpeg_path` is the configured
+/// ffmpeg binary; ffprobe is derived from it via [`ffprobe_path_for`] (F-16).
+/// Call at startup so the user gets a clear error before we try anything else.
+pub fn verify_tools_available(ffmpeg_path: &Path) -> Result<()> {
+    let ffprobe = ffprobe_path_for(ffmpeg_path);
+    for (label, tool) in [("ffmpeg", ffmpeg_path.to_path_buf()), ("ffprobe", ffprobe)] {
+        let r = Command::new(&tool).arg("-version").output();
         match r {
             Ok(o) if o.status.success() => {}
             Ok(o) => return Err(anyhow!(
-                "{tool} returned exit {:?}: {}",
+                "{label} ({}) returned exit {:?}: {}",
+                tool.display(),
                 o.status.code(),
                 String::from_utf8_lossy(&o.stderr).trim()
             )),
             Err(_) => return Err(anyhow!(
-                "{tool} not found on PATH. Install ffmpeg (e.g. winget install Gyan.FFmpeg) and re-run."
+                "{label} not found at {}. Install ffmpeg (e.g. winget install Gyan.FFmpeg) or pass --ffmpeg <path> and re-run.",
+                tool.display()
             )),
         }
     }
     Ok(())
 }
 
+/// Per-process temp file under `%TEMP%\<PROJECT_DIR>\` with an optional
+/// filename infix and the given extension. Centralizes the
+/// `%TEMP%/ipod-sync/ipod-sync-<infix>-<pid>.<ext>` pattern used by the
+/// transcode pipeline (alac, wav, art, passthrough).
+fn project_temp_path(infix: &str, ext: &str) -> PathBuf {
+    let mut p = std::env::temp_dir();
+    p.push(crate::PROJECT_DIR);
+    let filename = if infix.is_empty() {
+        format!("{}-{}.{ext}", crate::PROJECT_DIR, std::process::id())
+    } else {
+        format!("{}-{infix}-{}.{ext}", crate::PROJECT_DIR, std::process::id())
+    };
+    p.push(filename);
+    p
+}
+
 /// Build the path to the Phase 1 temp file: %TEMP%\ipod-sync\ipod-sync-<pid>.m4a.
 pub fn temp_alac_path() -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push("ipod-sync");
-    p.push(format!("ipod-sync-{}.m4a", std::process::id()));
-    p
+    project_temp_path("", "m4a")
 }
 
 /// Build the path to the Phase 1 cover-art temp file.
 pub fn temp_art_path() -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push("ipod-sync");
-    p.push(format!("ipod-sync-art-{}.jpg", std::process::id()));
-    p
+    project_temp_path("art", "jpg")
 }
 
 // ---------------------------------------------------------------------------
@@ -364,10 +398,7 @@ pub fn passthrough(src: &Path, dst: &Path) -> Result<()> {
 /// Path for the refalac 2-step pipeline's WAV intermediate.
 /// `%TEMP%\ipod-sync\ipod-sync-<pid>.wav`.
 pub fn temp_wav_path() -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push("ipod-sync");
-    p.push(format!("ipod-sync-{}.wav", std::process::id()));
-    p
+    project_temp_path("", "wav")
 }
 
 /// Path for a passthrough copy. Same extension as the source so libgpod's
@@ -375,11 +406,8 @@ pub fn temp_wav_path() -> PathBuf {
 /// only if the source has no extension at all (shouldn't happen for files
 /// the walker accepted, but defensive).
 pub fn temp_passthrough_path(src: &Path) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push("ipod-sync");
     let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("bin");
-    p.push(format!("ipod-sync-{}.{ext}", std::process::id()));
-    p
+    project_temp_path("", ext)
 }
 
 /// 2-step pipeline: source → ffmpeg-decode → temp.wav → refalac → temp.m4a.
@@ -453,16 +481,16 @@ pub fn transcode_via_refalac(
 /// Extract the first video stream (assumed to be the attached_pic / cover art)
 /// from `src` to `dst` as a single still image. Assumes the source actually
 /// has an attached_pic stream — caller should check via `has_embedded_art`
-/// before calling.
-pub fn extract_cover_art(src: &Path, dst: &Path) -> Result<()> {
-    let status = Command::new("ffmpeg")
+/// before calling. `ffmpeg_path` is the configured ffmpeg binary (F-16).
+pub fn extract_cover_art(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<()> {
+    let status = Command::new(ffmpeg_path)
         .args(["-loglevel", "error", "-y"])
         .args(["-i"])
         .arg(src)
         .args(["-an", "-c:v", "copy", "-map", "0:v:0", "-frames:v", "1"])
         .arg(dst)
         .status()
-        .map_err(|e| anyhow!("failed to spawn ffmpeg for art extract: {e}"))?;
+        .map_err(|e| anyhow!("failed to spawn {} for art extract: {e}", ffmpeg_path.display()))?;
     if !status.success() {
         return Err(anyhow!(
             "ffmpeg cover-art extract failed (exit {:?})",

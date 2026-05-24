@@ -48,7 +48,8 @@ public partial class App : Application
         if (!await IsDaemonRunningAsync())
         {
             SpawnDaemon();
-            await Task.Delay(500);
+            // No pre-sleep — DaemonClient.ConnectAsync already has its own
+            // backoff loop (1s, 2s, 4s) that absorbs daemon startup latency.
         }
 
         try { Daemon = await DaemonClient.ConnectAsync(); }
@@ -77,15 +78,33 @@ public partial class App : Application
             getNotifyOn: () => LatestConfig?.Daemon?.NotifyOn ?? "all");
         Notifications.Initialize();
 
+        // Subscribe a one-shot TCS for the daemon's ConfigUpdate event BEFORE
+        // sending GetConfig — guarantees we observe the reply even if it
+        // arrives before SendAsync returns. The 2s cap is a defensive ceiling,
+        // not the primary signal.
+        var configReceived = new TaskCompletionSource<ConfigUpdateEvent>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        void OneShotConfig(ConfigUpdateEvent c)
+        {
+            Router!.ConfigUpdated -= OneShotConfig;
+            configReceived.TrySetResult(c);
+        }
+        Router.ConfigUpdated += OneShotConfig;
+
         // Ask for the initial config + status + history.
         await Daemon.SendAsync(new GetConfigCommand());
         await Daemon.SendAsync(new GetStatusCommand());
         await Daemon.SendAsync(new GetHistoryCommand(Limit: 10));
 
+        // Wait for the actual ConfigUpdate, capped at 2s so a dead daemon
+        // doesn't wedge startup forever. Either outcome: we make the wizard
+        // decision below using whatever LatestConfig holds.
+        try { await configReceived.Task.WaitAsync(TimeSpan.FromSeconds(2)); }
+        catch (TimeoutException) { Router.ConfigUpdated -= OneShotConfig; }
+
         // Open wizard if config has no iPod identity. The wizard also
         // subscribes to the router (T14) so the channel-exclusivity
         // hack from M3 goes away.
-        await Task.Delay(150);  // give the router time to populate LatestConfig
         if (LatestConfig?.Ipod is null)
         {
             ShowWizard();
@@ -114,7 +133,16 @@ public partial class App : Application
         });
     }
 
-    private void OnConfigUpdated(ConfigUpdateEvent c) => LatestConfig = c;
+    private void OnConfigUpdated(ConfigUpdateEvent c)
+    {
+        LatestConfig = c;
+        // Config updates carry the latest friendly iPod name (the
+        // daemon writes it after reading iTunesDB on plug-in). Push
+        // it into an open popover so the label flips from model →
+        // friendly name without needing the user to reopen the flyout.
+        DispatcherQueue.TryEnqueue(() =>
+            _popover?.ViewModel.SetDeviceLabel(c.Ipod?.Name, c.Ipod?.ModelLabel));
+    }
     private void OnHistoryUpdated(HistoryUpdateEvent h)
     {
         LatestHistory = h;
@@ -123,7 +151,13 @@ public partial class App : Application
     private void OnDeviceConnected(DeviceConnectedEvent dc)
     {
         DispatcherQueue.TryEnqueue(() =>
-            Tray?.SetState(TrayState.Idle, $"iPod connected ({dc.ModelLabel})"));
+        {
+            Tray?.SetState(TrayState.Idle, $"iPod connected ({dc.Name ?? dc.ModelLabel})");
+            // The daemon re-broadcasts DeviceConnected with the resolved
+            // name after the async iTunesDB parse completes — keep the
+            // popover label in sync if it's open.
+            _popover?.ViewModel.SetDeviceLabel(dc.Name, dc.ModelLabel);
+        });
     }
     private void OnDeviceDisconnected(DeviceDisconnectedEvent _)
     {
@@ -156,12 +190,12 @@ public partial class App : Application
         {
             if (_popover is not null) { _popover.Activate(); return; }
             var vm = new PopoverViewModel();
+            vm.SetDeviceLabel(LatestConfig?.Ipod?.Name, LatestConfig?.Ipod?.ModelLabel);
             if (LatestStatus is not null) vm.Update(LatestStatus);
             if (LatestHistory is not null) vm.ApplyHistory(LatestHistory);
             _popover = new PopoverWindow(vm, Daemon!, LatestConfig?.Source ?? "");
             _popover.Closed += (_, _) => _popover = null;
             _popover.Activate();
-            _popover.AnchorAboveTray();
         });
     }
 

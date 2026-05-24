@@ -20,7 +20,7 @@ fn main() -> Result<()> {
     let source_root = std::env::var("IPOD_SYNC_SOURCE")
         .map_err(|_| anyhow!("set IPOD_SYNC_SOURCE to the music root"))?;
     let manifest_path: PathBuf = std::env::var_os("APPDATA")
-        .map(|a| PathBuf::from(a).join("ipod-sync").join("manifest.json"))
+        .map(|a| PathBuf::from(a).join(ipod_sync::PROJECT_DIR).join("manifest.json"))
         .ok_or_else(|| anyhow!("APPDATA not set"))?;
 
     println!("source    = {source_root}");

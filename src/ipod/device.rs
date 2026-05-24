@@ -2,40 +2,24 @@
 //! device struct so itdb_write computes a valid signed iTunesDB.
 
 use anyhow::{anyhow, Result};
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::path::Path;
 
 use crate::ffi;
 
 /// Extract the value of the `FirewireGuid:` line from a SysInfo body.
 /// Returns just the hex value (typically `0x...`).
-///
-/// SysInfo is line-oriented `Key: value`. We match the exact key `FirewireGuid`
-/// (case-sensitive — matches how iTunes writes it). Lines where the key is a
-/// mere prefix of `FirewireGuid` (e.g. `FirewireGuidSomething`) are skipped.
 pub fn extract_firewire_guid(sysinfo: &str) -> Result<String> {
-    for line in sysinfo.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        if key.trim() != "FirewireGuid" {
-            continue;
-        }
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(anyhow!("FirewireGuid line has no value: {line:?}"));
-        }
-        return Ok(value.to_string());
+    match parse_sysinfo_field(sysinfo, "FirewireGuid") {
+        Some(value) if !value.is_empty() => Ok(value),
+        Some(_) => Err(anyhow!("FirewireGuid line has no value")),
+        None => Err(anyhow!("FirewireGuid key not found in SysInfo")),
     }
-    Err(anyhow!("FirewireGuid key not found in SysInfo"))
 }
 
 /// Resolve `<mount>\iPod_Control\Device\SysInfo`, read it, extract FirewireGuid.
 pub fn read_firewire_guid(ipod_mount: &Path) -> Result<String> {
-    let path = ipod_mount
-        .join("iPod_Control")
-        .join("Device")
-        .join("SysInfo");
+    let path = crate::ipod::layout::sysinfo_path(ipod_mount);
     let body = std::fs::read_to_string(&path)
         .map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
     extract_firewire_guid(&body)
@@ -56,10 +40,10 @@ pub unsafe fn set_firewire_guid(
     if device.is_null() {
         return Err(anyhow!("Itdb_Device pointer is NULL"));
     }
-    let key = CString::new("FirewireGuid").unwrap();
+    const KEY: &CStr = c"FirewireGuid";
     let value = CString::new(guid)
         .map_err(|_| anyhow!("FirewireGuid contains interior NUL byte"))?;
-    ffi::itdb_device_set_sysinfo(device, key.as_ptr(), value.as_ptr());
+    ffi::itdb_device_set_sysinfo(device, KEY.as_ptr(), value.as_ptr());
     Ok(())
 }
 
@@ -69,6 +53,12 @@ pub struct DetectedIpod {
     pub serial: String,
     pub model_label: String,
     pub drive: String,
+    /// User-set "iPod name" from the iTunesDB master-playlist name
+    /// (e.g. "Michael's iPod"). `None` if the iTunesDB couldn't be
+    /// parsed at scan time — UI falls back to `model_label` in that
+    /// case. Populated lazily on plug-in by the daemon to keep
+    /// scan_drive_for_ipod itself cheap.
+    pub name: Option<String>,
 }
 
 /// Scan all Windows drive letters for an iPod (presence of
@@ -90,10 +80,15 @@ pub fn scan_for_ipod() -> Option<DetectedIpod> {
 /// Test-friendly variant: check a specific drive (or any path) for the
 /// iPod_Control\Device\SysInfo file and read identity from it.
 pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
-    let sysinfo = drive.join("iPod_Control").join("Device").join("SysInfo");
-    if !sysinfo.exists() {
+    // F-09: require BOTH SysInfo and iTunesDB. A device with only SysInfo
+    // is mid-restore (no DB written yet); the daemon would announce
+    // "connected" but a sync attempt would fail at OwnedDb::open. The
+    // unified predicate keeps daemon detection and CLI mount-detection
+    // in agreement about what counts as an iPod.
+    if !crate::ipod::layout::is_ipod_mount(drive) {
         return None;
     }
+    let sysinfo = crate::ipod::layout::sysinfo_path(drive);
     let text = std::fs::read_to_string(&sysinfo).ok()?;
     let serial = parse_sysinfo_field(&text, "FirewireGuid")?;
     let model_num = parse_sysinfo_field(&text, "ModelNumStr").unwrap_or_default();
@@ -102,15 +97,23 @@ pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
         serial,
         model_label,
         drive: drive.to_string_lossy().into_owned(),
+        // Filled in by the daemon (or left as None) — iTunesDB parsing
+        // is expensive and not needed for serial/model identification.
+        name: None,
     })
 }
 
+/// Strict `Key: value` parser for the iPod's flat-text SysInfo file.
+///
+/// Matches the exact key (case-sensitive — matches how iTunes writes it).
+/// Lines where the key is a mere prefix of `key` (e.g. `FirewireGuidSomething`
+/// when searching for `FirewireGuid`) are skipped — see test
+/// `ignores_lines_starting_with_firewire_guid_prefix_but_not_exact_key`.
 fn parse_sysinfo_field(text: &str, key: &str) -> Option<String> {
     for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix(key) {
-            let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-            return Some(rest.trim().to_string());
+        let Some((k, v)) = line.split_once(':') else { continue };
+        if k.trim() == key {
+            return Some(v.trim().to_string());
         }
     }
     None
@@ -145,13 +148,10 @@ fn candidate_drives() -> Vec<String> {
         .collect()
 }
 
-/// True if `drive` looks like a mounted iPod (has iTunesDB).
+/// True if `drive` looks like a mounted iPod. Uses the canonical predicate
+/// (both SysInfo and iTunesDB present); see findings F-09.
 fn looks_like_ipod(drive: &String) -> bool {
-    std::path::Path::new(drive)
-        .join("iPod_Control")
-        .join("iTunes")
-        .join("iTunesDB")
-        .exists()
+    crate::ipod::layout::is_ipod_mount(std::path::Path::new(drive))
 }
 
 /// Given a set of iPod-looking mounts, return the unique one or an error.
@@ -243,16 +243,38 @@ mod tests {
     }
 
     #[test]
-    fn scan_drive_for_ipod_detects_serial_when_sysinfo_present() {
+    fn scan_drive_for_ipod_detects_serial_when_both_files_present() {
+        // F-09: scan_drive_for_ipod requires BOTH SysInfo (for identity)
+        // AND iTunesDB (proves it's syncable). A device with only one is
+        // mid-restore or corrupted — we don't try to sync to it.
         let tmp = std::env::temp_dir().join(format!("ipod-scan-found-test-{}", std::process::id()));
+        let sysinfo_dir = tmp.join("iPod_Control").join("Device");
+        let itunes_dir = tmp.join("iPod_Control").join("iTunes");
+        std::fs::create_dir_all(&sysinfo_dir).unwrap();
+        std::fs::create_dir_all(&itunes_dir).unwrap();
+        std::fs::write(
+            sysinfo_dir.join("SysInfo"),
+            "FirewireGuid: 0xEXAMPLE1234\nModelNumStr: xMB029\n",
+        ).unwrap();
+        std::fs::write(itunes_dir.join("iTunesDB"), b"").unwrap();
+        let detected = scan_drive_for_ipod(&tmp).expect("should detect");
+        assert_eq!(detected.serial, "0xEXAMPLE1234");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scan_drive_for_ipod_rejects_sysinfo_without_itunes_db() {
+        // F-09 regression: a half-restored device with SysInfo but no
+        // iTunesDB must NOT be reported as a syncable iPod.
+        let tmp = std::env::temp_dir().join(format!("ipod-scan-partial-test-{}", std::process::id()));
         let sysinfo_dir = tmp.join("iPod_Control").join("Device");
         std::fs::create_dir_all(&sysinfo_dir).unwrap();
         std::fs::write(
             sysinfo_dir.join("SysInfo"),
             "FirewireGuid: 0xEXAMPLE1234\nModelNumStr: xMB029\n",
         ).unwrap();
-        let detected = scan_drive_for_ipod(&tmp).expect("should detect");
-        assert_eq!(detected.serial, "0xEXAMPLE1234");
+        assert!(scan_drive_for_ipod(&tmp).is_none(),
+            "SysInfo without iTunesDB must not be classified as an iPod");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

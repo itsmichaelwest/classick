@@ -26,7 +26,7 @@ namespace IpodSync_UI.Ipc;
 /// </summary>
 public sealed class DaemonClient : IAsyncDisposable
 {
-    public const string PipeName = "ipod-sync";
+    public const string PipeName = IpodSync_UI.Core.AppIdentity.Name;
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan[] ReconnectBackoff = new[]
     {

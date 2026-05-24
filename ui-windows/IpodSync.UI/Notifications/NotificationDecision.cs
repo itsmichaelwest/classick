@@ -1,3 +1,4 @@
+using IpodSync_UI.Core;
 using IpodSync_UI.Ipc;
 
 namespace IpodSync_UI.Notifications;
@@ -38,12 +39,12 @@ public sealed partial class NotificationService
                     ? "Sync complete."
                     : $"Sync complete: +{summary.Add} ~{summary.Modify} -{summary.Remove}"
                       + (summary.Skipped > 0 ? $", {summary.Skipped} skipped" : "");
-                return new ToastDecision(ToastKind.Complete, "ipod-sync", body);
+                return new ToastDecision(ToastKind.Complete, AppIdentity.Name, body);
             }
             else
             {
                 var msg = newStatus.LastSync?.ErrorMessage ?? "Sync failed.";
-                return new ToastDecision(ToastKind.Error, "ipod-sync — sync failed", msg);
+                return new ToastDecision(ToastKind.Error, $"{AppIdentity.Name} — sync failed", msg);
             }
         }
 
@@ -51,7 +52,7 @@ public sealed partial class NotificationService
         if (previousState == "idle" && newStatus.State == "syncing")
         {
             if (notifyOn == "errors_only") return null;
-            return new ToastDecision(ToastKind.Started, "ipod-sync", "Syncing iPod…");
+            return new ToastDecision(ToastKind.Started, AppIdentity.Name, "Syncing iPod…");
         }
 
         return null;

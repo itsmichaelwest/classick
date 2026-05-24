@@ -6,10 +6,16 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
-    <Grid RowDefinitions="*,Auto">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TitleBar x:Name="SettingsTitleBar" Grid.Row="0" Title="Settings" />
         <NavigationView
             x:Name="Nav"
-            Grid.Row="0"
+            Grid.Row="1"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
             PaneDisplayMode="Left"
@@ -23,7 +29,7 @@
             </NavigationView.MenuItems>
             <Frame x:Name="ContentFrame" />
         </NavigationView>
-        <Grid Grid.Row="1" Background="{ThemeResource LayerFillColorDefaultBrush}" Padding="16,12">
+        <Grid Grid.Row="2" Background="{ThemeResource LayerFillColorDefaultBrush}" Padding="16,12">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
                 <Button Content="Cancel" Click="OnCancel" />
                 <Button Content="Save"

@@ -98,7 +98,7 @@ pub async fn run(
                             let _ = stdin.write_all(b"{\"type\":\"cancel\"}\n").await;
                             let _ = stdin.flush().await;
                             drop(stdin);
-                            bounded_kill(&mut child, Duration::from_secs(5)).await;
+                            bounded_kill(&mut child, crate::daemon::SYNC_KILL_GRACE).await;
                             return Ok(OrchestratorOutcome::Aborted {
                                 reason: format!(
                                     "too_many_failures: {} of {} tracks failed",
@@ -119,7 +119,7 @@ pub async fn run(
                 let _ = stdin.write_all(b"{\"type\":\"cancel\"}\n").await;
                 let _ = stdin.flush().await;
                 drop(stdin);
-                bounded_kill(&mut child, Duration::from_secs(5)).await;
+                bounded_kill(&mut child, crate::daemon::SYNC_KILL_GRACE).await;
                 return Ok(OrchestratorOutcome::Aborted {
                     reason: "user_cancelled".to_string(),
                     summary: last_summary,

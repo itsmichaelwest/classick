@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using IpodSync_UI.Core;
 using IpodSync_UI.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -22,7 +23,7 @@ public sealed partial class SettingsAboutPage : Page
     {
         var path = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "ipod-sync", "logs");
+            AppIdentity.Name, "logs");
         Directory.CreateDirectory(path);
         try { Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true }); }
         catch (Exception ex) { Debug.WriteLine($"about: open log folder failed: {ex.Message}"); }

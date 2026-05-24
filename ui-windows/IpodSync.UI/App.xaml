@@ -47,14 +47,22 @@
                 ContextMenuMode="SecondWindow" avoids the process-leak that
                 "PopupMenu" mode causes on exit (H.NotifyIcon issue #66).
             -->
+            <!--
+                IconSource is intentionally NOT set here. The PNG filenames
+                (e.g. Default_Dark_32.png) trip the MRT resource indexer
+                because it parses the trailing `_<n>` as a malformed qualifier
+                (PRI249 warning at build time). Resolving `ms-appx:///…` at
+                runtime then throws ERROR_INSUFFICIENT_BUFFER inside WinRT
+                marshalling. TrayIconController applies the correct icon via
+                an absolute file path during Initialize(), before ForceCreate.
+            -->
             <tb:TaskbarIcon
                 x:Key="TrayIcon"
                 Visibility="Visible"
                 ToolTipText="ipod-sync · idle"
                 ContextMenuMode="SecondWindow"
                 NoLeftClickDelay="True"
-                LeftClickCommand="{StaticResource OpenPopoverCommand}"
-                IconSource="ms-appx:///Assets/tray-idle.ico">
+                LeftClickCommand="{StaticResource OpenPopoverCommand}">
                 <tb:TaskbarIcon.ContextFlyout>
                     <MenuFlyout>
                         <MenuFlyoutItem Command="{StaticResource SyncNowCommand}" />

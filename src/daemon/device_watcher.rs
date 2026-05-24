@@ -79,7 +79,7 @@ impl PollingDeviceWatcher {
     pub fn new_production() -> Self {
         Self {
             scan: Box::new(crate::ipod::device::scan_for_ipod),
-            interval: Duration::from_millis(1500),
+            interval: crate::daemon::DEVICE_POLL_INTERVAL,
         }
     }
 
@@ -91,7 +91,7 @@ impl PollingDeviceWatcher {
 
 impl DeviceWatcher for PollingDeviceWatcher {
     fn start(self: Box<Self>) -> mpsc::Receiver<DeviceEvent> {
-        let (tx, rx) = mpsc::channel::<DeviceEvent>(32);
+        let (tx, rx) = mpsc::channel::<DeviceEvent>(crate::daemon::DEVICE_EVENT_CHANNEL_CAPACITY);
         let mut me = *self;
         tokio::spawn(async move {
             let mut last: Option<DetectedIpod> = None;
@@ -133,6 +133,7 @@ mod tests {
             serial: serial.to_string(),
             model_label: "iPod 7G".to_string(),
             drive: "G:\\".to_string(),
+            name: None,
         }
     }
 

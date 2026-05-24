@@ -87,7 +87,7 @@ pub fn init(verbose: bool, use_tui: bool, ipc_mode: bool) {
 fn ipc_log_path() -> PathBuf {
     let base = dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("ipod-sync")
+        .join(crate::PROJECT_DIR)
         .join("logs");
     let _ = std::fs::create_dir_all(&base);
     // SystemTime → unix seconds, used purely as a uniqueness suffix. We

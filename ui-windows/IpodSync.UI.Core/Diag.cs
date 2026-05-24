@@ -26,7 +26,7 @@ public static class Diag
             if (_path is not null) return _path;
             var baseDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ipod-sync", "logs");
+                AppIdentity.Name, "logs");
             try { Directory.CreateDirectory(baseDir); } catch { /* ignore */ }
             var ts = DateTime.Now.ToString("yyyyMMddTHHmmss");
             _path = Path.Combine(baseDir, $"ui-{ts}.log");

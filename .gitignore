@@ -30,3 +30,8 @@ Thumbs.db
 
 # Project state (manifest lives in %APPDATA%, but be safe)
 /manifest.json
+.superpowers/
+
+# Daemon runtime artifacts
+/daemon-stdout.log
+/daemon-stderr.log

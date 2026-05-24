@@ -24,10 +24,24 @@
     <Content Include="Assets\Square44x44Logo.targetsize-48_altform-lightunplated.png" />
     <Content Include="Assets\StoreLogo.png" />
     <Content Include="Assets\AppIcon.ico" />
-    <Content Include="Assets\tray-idle.ico" />
-    <Content Include="Assets\tray-offline.ico" />
-    <Content Include="Assets\tray-syncing.ico" />
-    <Content Include="Assets\tray-error.ico" />
+    <!--
+      Tray icon assets. Hand-tuned PNGs at 16/20/24/32 px, with separate
+      glyph-color variants for light vs dark taskbars. Resolved at runtime
+      by TrayIconController via Assets\tray\{StateName}_{Variant}_{Size}.png.
+    -->
+    <Content Include="Assets\tray\*.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!--
+      Vector assets (SVG). WinAppSDK's Image control routes ms-appx URIs
+      ending in .svg through SvgImageSource automatically — drop a file
+      here and reference it as ms-appx:///Assets/<name>.svg in XAML.
+      `Condition="Exists(...)"` keeps the build green before the asset
+      lands.
+    -->
+    <Content Include="Assets\*.svg" Condition="Exists('Assets')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Assets\Wide310x150Logo.scale-200.png" />
   </ItemGroup>
 

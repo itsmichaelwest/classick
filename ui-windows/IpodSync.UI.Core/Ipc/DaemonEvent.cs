@@ -25,8 +25,14 @@ public sealed record StatusUpdateEvent(
     [property: JsonPropertyName("configured")] bool Configured,
     [property: JsonPropertyName("ipod_connected")] bool IpodConnected,
     [property: JsonPropertyName("last_sync")] HistoryEntry? LastSync,
-    [property: JsonPropertyName("next_scheduled_unix_secs")] long? NextScheduledUnixSecs
+    [property: JsonPropertyName("next_scheduled_unix_secs")] long? NextScheduledUnixSecs,
+    [property: JsonPropertyName("storage")] StorageInfo? Storage = null
 ) : DaemonEvent;
+
+public sealed record StorageInfo(
+    [property: JsonPropertyName("total_bytes")] ulong TotalBytes,
+    [property: JsonPropertyName("free_bytes")] ulong FreeBytes
+);
 
 public sealed record ConfigUpdateEvent(
     [property: JsonPropertyName("source")] string? Source,
@@ -41,7 +47,8 @@ public sealed record HistoryUpdateEvent(
 public sealed record DeviceConnectedEvent(
     [property: JsonPropertyName("serial")] string Serial,
     [property: JsonPropertyName("model_label")] string ModelLabel,
-    [property: JsonPropertyName("drive")] string Drive
+    [property: JsonPropertyName("drive")] string Drive,
+    [property: JsonPropertyName("name")] string? Name = null
 ) : DaemonEvent;
 
 public sealed record DeviceDisconnectedEvent(
@@ -67,7 +74,8 @@ public sealed record DaemonSettings(
 
 public sealed record IpodIdentity(
     [property: JsonPropertyName("serial")] string Serial,
-    [property: JsonPropertyName("model_label")] string ModelLabel
+    [property: JsonPropertyName("model_label")] string ModelLabel,
+    [property: JsonPropertyName("name")] string? Name = null
 );
 
 public sealed record HistoryEntry(

@@ -33,9 +33,12 @@ public sealed partial class NotificationService : IDisposable
         if (!_registered)
         {
             // Packaged WinUI apps get AUMID from manifest automatically.
-            // Register is idempotent but logs on duplicate calls.
+            // Unpackaged Debug builds throw "No COM servers are registered
+            // for this app" — caught here so the app still starts; the
+            // _registered flag stays false so we don't spam toast attempts
+            // (which would each throw inside Show()) on every status update.
             try { AppNotificationManager.Default.Register(); _registered = true; }
-            catch (Exception e) { Debug.WriteLine($"notify: register failed: {e.Message}"); }
+            catch (Exception e) { Debug.WriteLine($"notify: register failed (toasts disabled): {e.Message}"); }
         }
         _router.StatusUpdated += OnStatusUpdated;
     }
@@ -45,6 +48,9 @@ public sealed partial class NotificationService : IDisposable
         var decision = DecideToast(_previousState, s, _getNotifyOn());
         _previousState = s.State;
         if (decision is null) return;
+        // Skip firing if registration failed — Show() would throw inside
+        // the WinAppSDK projection and log a stack trace per transition.
+        if (!_registered) return;
         FireToast(decision);
     }
 

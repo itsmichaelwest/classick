@@ -6,27 +6,21 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncMode {
+    #[default]
     Review,
     AutoApply,
 }
 
-impl Default for SyncMode {
-    fn default() -> Self { SyncMode::Review }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotifyLevel {
+    #[default]
     All,
     ErrorsOnly,
     None,
-}
-
-impl Default for NotifyLevel {
-    fn default() -> Self { NotifyLevel::All }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +57,12 @@ pub struct IpodIdentity {
     pub serial: String,
     #[serde(default)]
     pub model_label: String,
+    /// User-set "iPod name" from the device's iTunesDB master playlist
+    /// (e.g. "Michael's iPod"). Updated each time the daemon detects a
+    /// plug-in so the UI shows the current firmware name even if the
+    /// user has renamed it. `None` if the iTunesDB couldn't be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 fn default_true() -> bool { true }
@@ -104,7 +104,7 @@ pub struct PersistedConfig {
 pub fn default_path() -> Result<PathBuf> {
     let appdata = dirs::config_dir()
         .ok_or_else(|| anyhow!("could not resolve %APPDATA% via dirs::config_dir"))?;
-    Ok(appdata.join("ipod-sync").join("config.toml"))
+    Ok(appdata.join(crate::PROJECT_DIR).join("config.toml"))
 }
 
 /// Load the persisted config from `path`. Returns `Ok(None)` if the file
@@ -278,6 +278,7 @@ encoder = "ffmpeg"
             ipod_identity: Some(IpodIdentity {
                 serial: "EXAMPLE1234".to_string(),
                 model_label: "iPod Classic 7G".to_string(),
+                name: None,
             }),
             ..PersistedConfig::default()
         };

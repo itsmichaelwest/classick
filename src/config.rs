@@ -35,6 +35,9 @@ impl Config {
     /// Project the effective runtime config back into a PersistedConfig
     /// suitable for writing via `config_file::save`.
     pub fn to_persisted(&self) -> PersistedConfig {
+        // `..Default::default()` covers fields Config doesn't track (`daemon`,
+        // `ipod_identity`, future additions). Avoids the LEARNINGS-noted
+        // brittle break when PersistedConfig grows a new field.
         PersistedConfig {
             source: Some(self.source.clone()),
             ipod: self.ipod.clone(),
@@ -45,8 +48,7 @@ impl Config {
             passthrough_wav: Some(self.passthrough_wav),
             refalac_path: Some(self.refalac_path.clone()),
             force_reencode: Some(self.force_reencode),
-            daemon: None,
-            ipod_identity: None,
+            ..PersistedConfig::default()
         }
     }
 }
@@ -152,7 +154,7 @@ pub fn merge_source(
 fn default_manifest_path() -> Result<PathBuf> {
     let appdata = dirs::config_dir()
         .ok_or_else(|| anyhow!("could not resolve %APPDATA% via dirs::config_dir"))?;
-    Ok(appdata.join("ipod-sync").join("manifest.json"))
+    Ok(appdata.join(crate::PROJECT_DIR).join("manifest.json"))
 }
 
 /// "G" -> "G:". "G:" -> "G:". "G:\\" -> "G:\\". The Windows convention for

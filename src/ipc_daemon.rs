@@ -7,6 +7,8 @@
 //! `protocol_version = "1.1.0"` since this extends M1's "1.0.0".
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
+#[cfg(windows)]
+use crate::daemon::device_storage::StorageInfo;
 use crate::daemon::history::HistoryEntry;
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +31,12 @@ pub enum DaemonEvent {
         last_sync: Option<HistoryEntry>,
         #[serde(skip_serializing_if = "Option::is_none")]
         next_scheduled_unix_secs: Option<u64>,
+        /// Free + total bytes on the iPod's drive. `None` when no iPod
+        /// is connected, or when the drive query failed (treat absence
+        /// as "no info yet" on the UI).
+        #[cfg(windows)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        storage: Option<StorageInfo>,
     },
     ConfigUpdate {
         source: Option<String>,
@@ -42,6 +50,11 @@ pub enum DaemonEvent {
         serial: String,
         model_label: String,
         drive: String,
+        /// iPod's user-set name from the iTunesDB master-playlist name
+        /// (e.g. "Michael's iPod"). May be `None` if the daemon hasn't
+        /// finished reading the DB yet, or the DB read failed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     DeviceDisconnected {
         serial: String,
@@ -180,6 +193,7 @@ mod tests {
             serial: "0xABC".to_string(),
             model_label: "iPod 7G".to_string(),
             drive: "G:\\".to_string(),
+            name: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"device_connected""#));

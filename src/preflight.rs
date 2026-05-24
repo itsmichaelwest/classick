@@ -21,11 +21,15 @@ pub fn ensure_trailing_backslash(s: &str) -> String {
     if s.ends_with('\\') { s.to_string() } else { format!("{s}\\") }
 }
 
-/// Loop on `transcode::verify_tools_available` until ffmpeg/ffprobe are on
-/// PATH or the user aborts.
-pub fn verify_ffmpeg(progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<()> {
+/// Loop on `transcode::verify_tools_available` until ffmpeg/ffprobe are
+/// reachable (at the configured path) or the user aborts.
+pub fn verify_ffmpeg(
+    config: &Config,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<()> {
     loop {
-        match transcode::verify_tools_available() {
+        match transcode::verify_tools_available(&config.ffmpeg) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 let msg = format!(
@@ -108,7 +112,7 @@ pub fn resolve_ipod_mount(
         Some(m) => {
             let p = ensure_trailing_backslash(m);
             loop {
-                if Path::new(&p).join("iPod_Control").join("iTunes").join("iTunesDB").exists() {
+                if crate::ipod::layout::itunes_db_path(Path::new(&p)).exists() {
                     return Ok(p);
                 }
                 let msg = format!(

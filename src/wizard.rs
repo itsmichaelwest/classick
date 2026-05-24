@@ -17,9 +17,11 @@ pub fn run(progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<Path
     let id = progress.next_prompt_id();
     progress.form(FormRequest {
         id,
-        label: "ipod-sync — first-launch setup\n\
-                Enter the path to your FLAC source library (UNC like \\\\server\\music)."
-            .to_string(),
+        label: format!(
+            "{} — first-launch setup\n\
+             Enter the path to your FLAC source library (UNC like \\\\server\\music).",
+            crate::PROJECT_DIR
+        ),
         initial: String::new(),
         hint: "Enter to save and continue   Esc or Ctrl+C to abort".to_string(),
     });

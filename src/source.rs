@@ -23,6 +23,15 @@ pub struct SourceEntry {
 
 const FINGERPRINT_PREFIX_BYTES: usize = 1024 * 1024;
 
+/// Per-file retry count for the SMB-walking path. With the exponential `1<<n`
+/// backoff below, 3 retries spans 1+2+4 = 7 seconds of sleep before giving up.
+const WALKER_MAX_RETRIES: u32 = 3;
+
+/// Streaming read buffer size for `audio_fingerprint`'s post-metadata hash.
+/// 64 KiB matches the file-system block size on every supported volume and
+/// keeps the hasher chunked without pinning more memory than necessary.
+const AUDIO_HASH_CHUNK_BYTES: usize = 64 * 1024;
+
 const SKIPPED_DIR_NAMES: &[&str] = &["_excluded", ".unwanted"];
 
 /// Walk `root` for FLACs. Errors only on I/O failures at `root` itself;
@@ -50,7 +59,7 @@ pub fn walk(root: &Path) -> Result<Vec<SourceEntry>> {
         if !is_flac(entry.path()) {
             continue;
         }
-        if let Some(e) = read_entry_with_retry(&entry, 3) {
+        if let Some(e) = read_entry_with_retry(&entry, WALKER_MAX_RETRIES) {
             out.push(e);
         }
     }
@@ -96,21 +105,13 @@ fn read_entry_with_retry(entry: &walkdir::DirEntry, max_retries: u32) -> Option<
 /// blocking sleep per file. Only TimedOut/Interrupted/WouldBlock/UnexpectedEof
 /// are treated as transient (common SMB hiccups).
 ///
-/// If we can't downcast to io::Error, we conservatively retry — this happens
-/// when the source isn't an io::Error at all (e.g. a future refactor where
-/// build_source_entry adds a non-io failure mode).
+/// If we can't find an io::Error in the chain, we conservatively retry — this
+/// happens when the source isn't an io::Error at all (e.g. a future refactor
+/// where build_source_entry adds a non-io failure mode).
 fn is_transient(err: &anyhow::Error) -> bool {
-    if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
-        return matches!(
-            io_err.kind(),
-            std::io::ErrorKind::TimedOut
-                | std::io::ErrorKind::Interrupted
-                | std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::UnexpectedEof
-        );
-    }
-    // Also check the chain — `with_context` wraps the original io::Error
-    // as a source, so the top-level downcast misses it but `.chain()` finds it.
+    // `err.chain()` yields the top-level error first, then walks each
+    // `.source()` — so a `with_context`-wrapped io::Error is found here
+    // even though `err.downcast_ref::<io::Error>()` alone wouldn't see it.
     for cause in err.chain() {
         if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
             return matches!(
@@ -215,7 +216,7 @@ pub fn audio_fingerprint(path: &Path) -> Result<String> {
 
     // Cursor is now at the start of audio frames. Stream-hash from here to EOF.
     let mut hasher = blake3::Hasher::new();
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; AUDIO_HASH_CHUNK_BYTES];
     loop {
         let n = f.read(&mut buf)
             .map_err(|e| anyhow!("read audio frames from {}: {e}", path.display()))?;

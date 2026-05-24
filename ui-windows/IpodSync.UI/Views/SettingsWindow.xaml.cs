@@ -13,6 +13,8 @@ public sealed partial class SettingsWindow : Window
     {
         ViewModel = vm;
         InitializeComponent();
+        this.ExtendsContentIntoTitleBar = true;
+        this.SetTitleBar(SettingsTitleBar);
         Title = "ipod-sync settings";
         // Default to General tab.
         Nav.SelectedItem = Nav.MenuItems[0];
