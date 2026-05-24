@@ -23,6 +23,20 @@ ratatui = "0.29"
 crossterm = "0.29"
 dirs = "5"
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process"] }
+plist = "1"
+
+# Windows-only: SCSI INQUIRY pass-through to read SysInfoExtended XML directly
+# from the iPod firmware (the same mechanism iTunes uses). Lets us identify
+# the exact model/capacity/color without guessing from USB PID alone.
+[target.'cfg(windows)'.dependencies]
+# Win32_Security needed because CreateFileW's signature references SECURITY_ATTRIBUTES
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["test-util"] }

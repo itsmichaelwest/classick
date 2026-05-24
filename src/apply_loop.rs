@@ -285,10 +285,23 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // --rebuild-manifest" recovery block. Hoisted below.
     let sync_result: Result<()> = (|| -> Result<()> {
         let db = OwnedDb::open(Path::new(&mount))?;
-        let guid = device::read_firewire_guid(Path::new(&mount))?;
+        // Resolve the (FirewireGuid, ModelNumStr) pair libgpod needs
+        // to sign the iTunesDB iTunes will accept on read. Source
+        // preference: on-disk SysInfo > SCSI INQUIRY VPD pages
+        // (authoritative) > USB PID+capacity heuristic. ModelNumStr
+        // is critical — without it libgpod's checksum_type collapses
+        // to NONE and iTunes refuses the DB ("cannot read the
+        // contents of the iPod"), even though the iPod's firmware
+        // would still play the music.
+        let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
+        progress.log(format!(
+            "iPod identity: FirewireGuid={}, ModelNumStr={}",
+            identity.firewire_guid, identity.model_num_str,
+        ));
         unsafe {
             let device_ptr = (*db.as_ptr()).device;
-            device::set_firewire_guid(device_ptr, &guid)?;
+            device::set_firewire_guid(device_ptr, &identity.firewire_guid)?;
+            device::set_model_num(device_ptr, &identity.model_num_str)?;
         }
 
         // Defensive backup of iTunesDB before we touch it. If a sync

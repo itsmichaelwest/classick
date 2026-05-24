@@ -34,7 +34,10 @@ pub mod manifest;
 pub mod orchestrator;
 pub mod preflight;
 pub mod progress;
+#[cfg(windows)]
+pub mod scsi_inquiry;
 pub mod source;
+pub mod sysinfo_extended;
 pub mod tags;
 pub mod transcode;
 pub mod try_with_prompt;
