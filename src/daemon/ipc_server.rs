@@ -21,13 +21,17 @@ pub struct ClientCommand {
     pub reply: mpsc::UnboundedSender<DaemonEvent>,
 }
 
-/// Test-friendly entry: creates a fresh broadcast channel.
+/// Test-friendly entry: creates a fresh broadcast channel. Uses
+/// the production [`PIPE_NAME`] — only one such test can run at a
+/// time, and never while a real daemon is up. Tests that need
+/// isolation should call [`spawn_server_with`] with a per-test pipe.
 pub async fn spawn_server() -> Result<(
     broadcast::Sender<DaemonEvent>,
     mpsc::UnboundedReceiver<ClientCommand>,
 )> {
     let (event_tx, _) = broadcast::channel::<DaemonEvent>(256);
-    let (sender, cmd_rx, _new_client_rx) = spawn_server_full(event_tx.clone()).await?;
+    let (sender, cmd_rx, _new_client_rx) =
+        spawn_server_full_with(event_tx.clone(), PIPE_NAME).await?;
     Ok((sender, cmd_rx))
 }
 
@@ -43,25 +47,41 @@ pub async fn spawn_server_full(
     mpsc::UnboundedReceiver<ClientCommand>,
     mpsc::UnboundedReceiver<()>,
 )> {
+    spawn_server_full_with(event_tx, PIPE_NAME).await
+}
+
+/// Underlying impl that accepts an arbitrary pipe name. Production calls
+/// it with [`PIPE_NAME`] (the IPC contract with the UI). Tests can pass
+/// `\\.\pipe\ipod-sync-test-<pid>-<n>` to avoid colliding with each
+/// other AND with a real running daemon on the developer's machine.
+pub async fn spawn_server_full_with(
+    event_tx: broadcast::Sender<DaemonEvent>,
+    pipe_name: &str,
+) -> Result<(
+    broadcast::Sender<DaemonEvent>,
+    mpsc::UnboundedReceiver<ClientCommand>,
+    mpsc::UnboundedReceiver<()>,
+)> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ClientCommand>();
     let (new_client_tx, new_client_rx) = mpsc::unbounded_channel::<()>();
 
     let event_tx_clone = event_tx.clone();
     let new_client_tx_clone = new_client_tx.clone();
+    let pipe_name = pipe_name.to_string();
     tokio::spawn(async move {
         let mut next_client_id: u64 = 1;
         // Create the first instance up-front.
         let mut server = match ServerOptions::new()
             .first_pipe_instance(true)
-            .create(PIPE_NAME)
+            .create(&pipe_name)
         {
             Ok(s) => s,
             Err(e) => {
-                tracing::error!("ipc-server: failed to create initial named pipe: {e}");
+                tracing::error!("ipc-server: failed to create initial named pipe {pipe_name}: {e}");
                 return;
             }
         };
-        tracing::info!("ipc-server: listening on {PIPE_NAME}");
+        tracing::info!("ipc-server: listening on {pipe_name}");
 
         loop {
             if let Err(e) = server.connect().await {
@@ -72,7 +92,7 @@ pub async fn spawn_server_full(
 
             // Create the next instance immediately so the next client
             // connecting doesn't see "no instances available."
-            server = match ServerOptions::new().create(PIPE_NAME) {
+            server = match ServerOptions::new().create(&pipe_name) {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("ipc-server: failed to create next pipe instance: {e}");

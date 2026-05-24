@@ -2,6 +2,18 @@
 
 Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+## Periodic db.write checkpoints bound the orphan-on-crash window (2026-05-24)
+
+- **Problem (before fix):** `apply_loop.rs` only called `db.write()` + `manifest::save_atomic` at the very end. A daemon crash / USB unplug / power loss / hard-kill mid-sync left every track copied so far via `itdb_cp_track_to_ipod` as an orphan — present under `iPod_Control\Music\F**` but unreferenced by the iTunesDB on disk. The graceful-Shutdown and graceful-Cancel fixes only cover *signalled* exits; everything else still produced orphan piles.
+- **Fix:** New `crate::SYNC_CHECKPOINT_EVERY` constant (= 25). Apply loop counts each non-Unchanged action; every Nth, runs the same `db.write()` + `manifest::save_atomic` sequence the post-loop final-flush already uses. Worst-case orphan window shrinks from "entire library" to "≤ N tracks". On a ~1,400-track library that's ~56 checkpoints × ~100ms each ≈ 5.6s overhead on a ~90min sync (<0.2%).
+- **Constant location:** `src/lib.rs` next to `PROJECT_DIR` so the trade-off (orphan-window vs checkpoint overhead) is documented at one place — adjust there if real-world failure modes warrant a different N.
+
+## Daemon integration tests need a per-test config + pipe sandbox (2026-05-24)
+
+- **Symptom:** `daemon_runtime_integration` tests fail with `SendError` and/or `Elapsed(())` when (a) the developer's `%APPDATA%\ipod-sync\config.toml` has `subsequent_sync_mode = "review"` — `auto_sync_enabled()` returns false so the auto-sync test paths silently no-op; OR (b) a real daemon is already bound to `\\.\pipe\ipod-sync` — `spawn_server_full_with(.first_pipe_instance(true).)` fails → daemon task exits → `device_rx` is dropped → `tx.send(...).await.unwrap()` panics.
+- **Fix:** Added three optional override fields to `DaemonDeps`: `config_path`, `history_path`, `pipe_name`. Production passes `None` for all three. A new `sandbox()` test helper builds (a) a unique tempdir under `target/test-tmp/daemon-int-<pid>-<n>/` (b) a `config.toml` with `subsequent_sync_mode = "auto_apply"` (c) a unique pipe name `\\.\pipe\ipod-sync-test-<pid>-<n>`. The pipe-name plumbing also required a new `spawn_server_full_with(event_tx, pipe_name)` entry in `ipc_server.rs`; the existing `spawn_server_full` is now a thin wrapper passing `PIPE_NAME`.
+- **Why this matters:** the previous test setup was "works on my machine"–coupled to whatever sync-mode the developer happened to have set, and unrunnable while the UI was open. Both are now decoupled.
+
 ## Graceful Stop sync: poll decision_rx between tracks (2026-05-24)
 
 - **Symptom (before fix):** Click "Stop sync" in the tray; daemon sends `{"type":"cancel"}` to the subprocess; nothing visible happens for 5 seconds; daemon's `bounded_kill` then `TerminateProcess`s the subprocess. Every track copied via `itdb_cp_track_to_ipod` so far becomes an orphan because `db.write()` never ran.

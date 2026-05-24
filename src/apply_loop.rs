@@ -288,6 +288,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
 
         let mut i = 0usize;
         let mut cancelled = false;
+        let mut tracks_since_checkpoint = 0usize;
         for action in actions {
             // Non-blocking cancel poll. The IPC stdin reader maps a
             // `{"type":"cancel"}` from the daemon to
@@ -578,13 +579,34 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     progress.track_done();
                 }
             }
+
+            // Periodic checkpoint: every SYNC_CHECKPOINT_EVERY processed
+            // actions, persist the iTunesDB + manifest. Without this, a
+            // daemon crash / USB unplug / power loss mid-sync orphans every
+            // file copied via itdb_cp_track_to_ipod since the only db.write()
+            // was scheduled for the very end. With this, the orphan window
+            // is bounded to N tracks (~25 here).
+            //
+            // Unchanged / no-delete-Remove actions hit `continue` before
+            // reaching here and so don't move the counter — they don't
+            // mutate state worth persisting.
+            tracks_since_checkpoint += 1;
+            if tracks_since_checkpoint >= crate::SYNC_CHECKPOINT_EVERY {
+                progress.log(format!("Checkpoint: persisting state after {i} tracks…"));
+                db.write().context("checkpoint: db.write")?;
+                manifest.last_source_root = Some(config.source.clone());
+                manifest::save_atomic(&config.manifest_path, &manifest)
+                    .context("checkpoint: manifest save")?;
+                tracks_since_checkpoint = 0;
+            }
         }
 
-        // 6. Commit DB + manifest. NEITHER is persisted unless we got this far.
-        // Crucially, this also runs after a `cancelled` break above — we
-        // commit what's been done so the user gets a coherent partial sync
-        // (completed tracks registered in iTunesDB + manifest) instead of
-        // an orphan pile-up under iPod_Control\Music.
+        // 6. Final commit. NEITHER is persisted unless we got this far.
+        // Also runs after a `cancelled` break above so completed tracks
+        // get a coherent final flush (no orphan pile-up under
+        // iPod_Control\Music). Idempotent for the post-checkpoint
+        // residual: if the last checkpoint just fired, this re-writes
+        // the same state.
         progress.log("Writing iPod DB...");
         db.write()?;
         progress.log("Writing manifest...");

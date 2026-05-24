@@ -6,6 +6,20 @@
 /// label is the IPC contract). See findings F-02 for the rationale.
 pub const PROJECT_DIR: &str = "ipod-sync";
 
+/// How many completed apply-loop actions trigger a mid-sync checkpoint
+/// (`db.write()` + `manifest::save_atomic`). Without this, a daemon
+/// crash / USB unplug / power loss mid-sync leaves every file already
+/// copied via `itdb_cp_track_to_ipod` as an orphan: present under
+/// `iPod_Control\Music\F**` but unreferenced by the iTunesDB on disk
+/// (since the only `db.write()` was at the very end of the apply loop).
+/// With checkpoints, the worst-case orphan window is `N` tracks.
+///
+/// 25 picked as a compromise: on a ~1,400-track library that's ~56
+/// checkpoints × ~100ms each ≈ 5.6s overhead on a ~90min sync (<0.2%).
+/// Lower N = safer-but-slower; higher N = larger orphan window on
+/// crash. Tunable if real-world failure modes warrant it.
+pub const SYNC_CHECKPOINT_EVERY: usize = 25;
+
 pub mod apply_loop;
 pub mod cli;
 pub mod config;

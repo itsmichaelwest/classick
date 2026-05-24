@@ -11,7 +11,7 @@ use crate::config_file::{self, PersistedConfig};
 use crate::daemon::device_storage::{self, StorageInfo};
 use crate::daemon::device_watcher::{Debouncer, DeviceEvent, DeviceWatcher, PollingDeviceWatcher};
 use crate::daemon::history::{HistoryEntry, HistoryService, SyncOutcome, SyncSummary, SyncTrigger};
-use crate::daemon::ipc_server::{spawn_server, ClientCommand};
+use crate::daemon::ipc_server::ClientCommand;
 use crate::daemon::scheduler::SyncScheduler;
 use crate::daemon::state::{DaemonState, StateMachine, TriggerOutcome};
 use crate::daemon::sync_orchestrator::{self, OrchestratorOutcome};
@@ -62,6 +62,9 @@ pub async fn run_daemon() -> Result<()> {
         spawn_sync,
         schedule_minutes,
         preset_event_tx: Some(event_tx),
+        config_path: None,
+        history_path: None,
+        pipe_name: None,
     };
     run_daemon_with_deps(deps).await
 }
@@ -85,6 +88,24 @@ pub struct DaemonDeps {
     /// to the spawn_sync closure so orchestrator events broadcast on
     /// the same channel UI clients subscribe to.
     pub preset_event_tx: Option<broadcast::Sender<DaemonEvent>>,
+    /// Override the persisted-config path. Production passes `None` and
+    /// `config_file::default_path()` resolves to
+    /// `%APPDATA%\ipod-sync\config.toml`. Tests pass a tempdir-managed
+    /// path with a known-good config so the suite is deterministic
+    /// regardless of the developer's local settings (notably
+    /// `subsequent_sync_mode`, which gates auto-sync).
+    pub config_path: Option<PathBuf>,
+    /// Override the history file path. Production: `None` → default
+    /// (`%LOCALAPPDATA%\ipod-sync\history.json`). Tests: provide a
+    /// temp path so history append/read doesn't pollute the
+    /// developer's real history.json.
+    pub history_path: Option<PathBuf>,
+    /// Override the named-pipe name. Production: `None` → uses the
+    /// `\\.\pipe\ipod-sync` constant which is the IPC contract with
+    /// the UI. Tests pass a unique per-test pipe name like
+    /// `\\.\pipe\ipod-sync-test-<pid>-<n>` so the suite runs even
+    /// while a real daemon is bound to the production pipe.
+    pub pipe_name: Option<String>,
 }
 
 /// Internal events posted from background sync tasks back to the runtime
@@ -112,19 +133,29 @@ enum InternalEvent {
 
 /// Test-friendly entry. Production wraps real impls and calls this.
 pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
-    let history_path = history_file_path()?;
+    let history_path = match deps.history_path {
+        Some(p) => p,
+        None => history_file_path()?,
+    };
     let history = HistoryService::new(history_path);
-    let config_path = config_file::default_path()?;
+    let config_path = match deps.config_path {
+        Some(p) => p,
+        None => config_file::default_path()?,
+    };
     let mut state = StateMachine::new();
     let mut scheduler = SyncScheduler::new(deps.schedule_minutes);
     let mut debouncer = Debouncer::new(crate::daemon::DEVICE_DEBOUNCE_WINDOW);
     let mut connected: Option<DetectedIpod> = None;
     let configured_serial = deps.configured_serial;
 
+    let pipe_name = deps.pipe_name.as_deref()
+        .unwrap_or(crate::daemon::ipc_server::PIPE_NAME);
     let (event_tx, mut cmd_rx, mut new_client_rx) = match deps.preset_event_tx {
-        Some(tx) => crate::daemon::ipc_server::spawn_server_full(tx).await?,
+        Some(tx) => crate::daemon::ipc_server::spawn_server_full_with(tx, pipe_name).await?,
         None => {
-            let (tx, rx) = spawn_server().await?;
+            let (event_tx, _) = broadcast::channel::<DaemonEvent>(256);
+            let (tx, rx, _new_client_rx) =
+                crate::daemon::ipc_server::spawn_server_full_with(event_tx, pipe_name).await?;
             // Test path: synthesize an empty new-client channel that
             // never fires. The integration tests don't exercise snapshot
             // semantics; production goes through spawn_server_full.

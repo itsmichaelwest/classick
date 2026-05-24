@@ -4,6 +4,7 @@
 
 #![cfg(windows)]
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,6 +14,46 @@ use std::time::Duration;
 // acquires the lock for its full body so the pipe is freed when the
 // previous test's runtime task winds down.
 static PIPE_SERIAL: Mutex<()> = Mutex::new(());
+
+/// Per-test sandbox: unique tempdir under target/test-tmp/ with a
+/// known-good config.toml + unique named-pipe name.
+///
+/// Without the config sandbox the daemon's `auto_sync_enabled` check
+/// reads the developer's real `%APPDATA%\ipod-sync\config.toml`, which
+/// on machines running in Manual mode (subsequent_sync_mode = "review")
+/// returns false and silently breaks every test that exercises the
+/// auto-sync path.
+///
+/// Without the pipe-name sandbox the production pipe
+/// `\\.\pipe\ipod-sync` is bound by a real running daemon on the
+/// developer's machine, and `spawn_server_full_with(..first_pipe_instance(true)..)`
+/// fails immediately → the daemon task exits → device_rx is dropped
+/// → tx.send(...).await.unwrap() in the test panics with SendError.
+///
+/// Returns (config_path, history_path, pipe_name).
+fn sandbox() -> (PathBuf, PathBuf, String) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-tmp")
+        .join(format!("daemon-int-{pid}-{n}"));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let cfg = base.join("config.toml");
+    // Minimal config: just the daemon section in auto-apply mode. No
+    // ipod_identity — the tests pass `configured_serial` directly via
+    // DaemonDeps, which is the daemon's source of truth at startup.
+    std::fs::write(
+        &cfg,
+        "[daemon]\nsubsequent_sync_mode = \"auto_apply\"\nschedule_minutes = 0\nnotify_on = \"all\"\n",
+    )
+    .unwrap();
+    let pipe = format!(r"\\.\pipe\ipod-sync-test-{pid}-{n}");
+    (cfg, base.join("history.json"), pipe)
+}
 // This test exists to PROVE the wiring works end-to-end. It uses a
 // public test-only constructor on the runtime that takes injectable
 // watcher + orchestrator-spawn-fn so we don't depend on a real
@@ -50,12 +91,16 @@ async fn auto_sync_fires_when_configured_device_connects() {
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
     };
 
+    let (config_path, history_path, pipe_name) = sandbox();
     let deps = DaemonDeps {
         configured_serial: Some("0xABC".to_string()),
         watcher: Box::new(watcher),
         spawn_sync: Arc::new(spawn_fn),
         schedule_minutes: 0,
         preset_event_tx: None,
+        config_path: Some(config_path),
+        history_path: Some(history_path),
+        pipe_name: Some(pipe_name),
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 
@@ -102,12 +147,16 @@ async fn unknown_device_does_not_trigger_auto_sync() {
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
     };
 
+    let (config_path, history_path, pipe_name) = sandbox();
     let deps = DaemonDeps {
         configured_serial: Some("0xCONFIGURED".to_string()),
         watcher: Box::new(watcher),
         spawn_sync: Arc::new(spawn_fn),
         schedule_minutes: 0,
         preset_event_tx: None,
+        config_path: Some(config_path),
+        history_path: Some(history_path),
+        pipe_name: Some(pipe_name),
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 
@@ -161,12 +210,16 @@ async fn runtime_stays_responsive_during_long_sync() {
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
     };
 
+    let (config_path, history_path, pipe_name) = sandbox();
     let deps = DaemonDeps {
         configured_serial: Some("0xABC".to_string()),
         watcher: Box::new(watcher),
         spawn_sync: Arc::new(spawn_fn),
         schedule_minutes: 0,
         preset_event_tx: None,
+        config_path: Some(config_path),
+        history_path: Some(history_path),
+        pipe_name: Some(pipe_name),
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 
