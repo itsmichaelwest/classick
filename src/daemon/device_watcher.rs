@@ -75,10 +75,50 @@ pub struct PollingDeviceWatcher {
 }
 
 impl PollingDeviceWatcher {
-    /// Production constructor: scans every 1.5s using the real drive-letter walk.
+    /// Production constructor: scans every 1.5s using the real volume
+    /// enumeration. After the first observation, fast-paths via the
+    /// cached `\\?\Volume{GUID}\` identifier — one `GetVolumePathNamesForVolumeNameW`
+    /// call + the canonical iPod-files probe — instead of re-walking
+    /// every mountable volume and re-doing SCSI INQUIRY / USB descriptor
+    /// recovery. Falls back to a full scan on fast-path miss
+    /// (volume gone, files vanished mid-restore, no GUID cached yet).
     pub fn new_production() -> Self {
+        use crate::ipod::device::{self, DetectedIpod};
+
+        // Per-watcher cache of the last successful full scan, used to
+        // shortcut subsequent polls. Lives in the closure so the
+        // watcher's lifetime owns it; cleared on disconnect so a swap
+        // doesn't keep returning the old iPod's metadata.
+        let mut cached: Option<DetectedIpod> = None;
+
+        let scan: ScanFn = Box::new(move || {
+            // Fast path: previous observation gave us a volume GUID;
+            // try resolving it to a current mount + verifying iPod
+            // files. One Win32 call + two file-existence checks vs. a
+            // full enumeration.
+            if let Some(prev) = cached.as_ref() {
+                if let Some(guid) = prev.volume_guid.as_deref() {
+                    if let Some(fresh) = device::try_resolve_known_volume(guid, prev) {
+                        // Refresh cache so future polls reflect any
+                        // mount-path drift (drive-letter reassignment
+                        // mid-session).
+                        cached = Some(fresh.clone());
+                        return Some(fresh);
+                    }
+                }
+                // Fast-path miss: either no GUID (non-Windows, or
+                // permission-denied at scan time) or the volume is
+                // gone. Fall through to a cold scan; if that also
+                // returns None we'll naturally emit Disconnected.
+            }
+
+            let result = device::scan_for_ipod();
+            cached = result.clone();
+            result
+        });
+
         Self {
-            scan: Box::new(crate::ipod::device::scan_for_ipod),
+            scan,
             interval: crate::daemon::DEVICE_POLL_INTERVAL,
         }
     }
@@ -134,6 +174,7 @@ mod tests {
             model_label: "iPod 7G".to_string(),
             drive: "G:\\".to_string(),
             name: None,
+            volume_guid: None,
         }
     }
 

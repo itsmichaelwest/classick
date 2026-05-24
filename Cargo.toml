@@ -29,11 +29,18 @@ plist = "1"
 # from the iPod firmware (the same mechanism iTunes uses). Lets us identify
 # the exact model/capacity/color without guessing from USB PID alone.
 [target.'cfg(windows)'.dependencies]
-# Win32_Security needed because CreateFileW's signature references SECURITY_ATTRIBUTES
+# Win32_Security needed because CreateFileW's signature references SECURITY_ATTRIBUTES.
+# Win32_System_Diagnostics_ToolHelp powers detect_apple_processes' Toolhelp32 walk
+# (replaces a 300ms PowerShell shellout — see preflight.rs).
+# Win32_Devices_DeviceAndDriverInstallation powers the SetupAPI + Cfgmgr32 walk in
+# recover_ipod_info_from_usb (disk-device enumeration → USB parent → PID extraction),
+# replacing the second PowerShell shellout — see ipod/device.rs.
 windows-sys = { version = "0.59", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_IO",
     "Win32_System_Ioctl",
 ] }

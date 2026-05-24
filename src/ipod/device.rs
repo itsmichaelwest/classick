@@ -179,18 +179,28 @@ pub struct DetectedIpod {
     /// case. Populated lazily on plug-in by the daemon to keep
     /// scan_drive_for_ipod itself cheap.
     pub name: Option<String>,
+    /// Windows volume GUID for this mount, in `\\?\Volume{GUID}\` form.
+    /// Stable across drive-letter reassignments and unplug/replug
+    /// cycles, so the daemon's polling watcher can fast-path subsequent
+    /// observations: resolve the cached GUID → current mount path with
+    /// one Win32 call, vs. re-walking every present volume + re-reading
+    /// SysInfo. `None` on non-Windows (no native enumeration yet) and
+    /// when the volume GUID query failed (rare — only on permission
+    /// errors or unmount races).
+    pub volume_guid: Option<String>,
 }
 
-/// Scan all Windows drive letters for an iPod (presence of
-/// iPod_Control\Device\SysInfo). Returns the first match.
+/// Scan for a mounted iPod (presence of both `iPod_Control\Device\SysInfo`
+/// AND `iPod_Control\iTunes\iTunesDB` — see `is_ipod_mount`). Returns the
+/// first match.
+///
+/// Uses [`candidate_mount_points`] for enumeration, which on Windows
+/// natively asks the OS which drive letters are present + removable/fixed
+/// (no per-letter `Path::exists()` probe, no walking through 26 missing
+/// letters every poll, no hanging on slow network mounts).
 pub fn scan_for_ipod() -> Option<DetectedIpod> {
-    for letter in b'A'..=b'Z' {
-        let drive = format!("{}:\\", letter as char);
-        let drive_path = std::path::Path::new(&drive);
-        if !drive_path.exists() {
-            continue;
-        }
-        if let Some(detected) = scan_drive_for_ipod(drive_path) {
+    for mount in candidate_mount_points() {
+        if let Some(detected) = scan_drive_for_ipod(&mount) {
             return Some(detected);
         }
     }
@@ -294,6 +304,11 @@ pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
     let serial = serial?;
     if serial.is_empty() { return None; }
     let model_label = model_label_override.unwrap_or_else(|| describe_model(&model_num));
+    // Stash the volume GUID so the watcher can fast-path subsequent
+    // polls (one Win32 resolve vs. re-walking every present volume).
+    // Best-effort: a None here just degrades the next poll back to a
+    // full scan, no correctness impact.
+    let volume_guid = volume_guid_for_mount(drive);
     Some(DetectedIpod {
         serial,
         model_label,
@@ -301,6 +316,130 @@ pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
         // Filled in by the daemon (or left as None) — iTunesDB parsing
         // is expensive and not needed for serial/model identification.
         name: None,
+        volume_guid,
+    })
+}
+
+/// Resolve `<mount>` (e.g. `G:\`) to its stable `\\?\Volume{GUID}\`
+/// form via `GetVolumeNameForVolumeMountPointW`. `None` on non-Windows
+/// or when the OS rejects the query (path doesn't exist, no GUID
+/// assigned, permission denied). The returned string includes the
+/// trailing `\` per Win32 convention so it can be fed straight back
+/// to `GetVolumePathNamesForVolumeNameW`.
+pub fn volume_guid_for_mount(mount: &std::path::Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+
+        // GetVolumeNameForVolumeMountPointW requires the mount path to
+        // end with a backslash, and returns a string of the form
+        // "\\?\Volume{GUID}\" (50 chars + null is the documented worst
+        // case; 64 wide chars is a generous buffer).
+        let mut mount_str = mount.to_string_lossy().into_owned();
+        if !mount_str.ends_with('\\') && !mount_str.ends_with('/') {
+            mount_str.push('\\');
+        }
+        let mount_w: Vec<u16> = std::ffi::OsStr::new(&mount_str)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut buf = [0u16; 64];
+        let ok = unsafe {
+            GetVolumeNameForVolumeMountPointW(mount_w.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+        };
+        if ok == 0 {
+            return None;
+        }
+        let nul = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..nul]))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = mount;
+        None
+    }
+}
+
+/// Reverse of `volume_guid_for_mount`: resolve a `\\?\Volume{GUID}\`
+/// string to its current mount path (typically a drive letter like
+/// `G:\`, but also folder mounts if present).
+///
+/// Returns `None` when the volume is no longer mounted (device
+/// unplugged, ejected, or moved to a different machine). The daemon
+/// uses this as a fast-path disconnect signal — far cheaper than
+/// re-walking every present volume and inspecting iPod_Control.
+pub fn mount_for_volume_guid(volume_guid: &str) -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetVolumePathNamesForVolumeNameW;
+
+        let guid_w: Vec<u16> = std::ffi::OsStr::new(volume_guid)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // GetVolumePathNamesForVolumeNameW returns a double-null-
+        // terminated multi-string of mount paths. MAX_PATH (260) is
+        // generous for the typical case (one drive letter); we'd only
+        // need more for many folder mounts on the same volume, which
+        // is exotic.
+        let mut buf = vec![0u16; 260];
+        let mut returned_len: u32 = 0;
+        let ok = unsafe {
+            GetVolumePathNamesForVolumeNameW(
+                guid_w.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut returned_len,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        // First null-terminated entry. Skip empty (a volume with no
+        // mount points returns just `\0\0`).
+        let first_nul = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        if first_nul == 0 {
+            return None;
+        }
+        Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..first_nul])))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = volume_guid;
+        None
+    }
+}
+
+/// Fast-path device check for the daemon's polling watcher: given a
+/// known volume GUID from a prior full scan, resolve it to the current
+/// mount path and verify the iPod files are still there. Skips the
+/// drive-letter enumeration + per-mount file probes + SCSI INQUIRY +
+/// USB descriptor lookup — all of which only need to run on the cold
+/// path (first observation, or after a fast-path miss).
+///
+/// Returns `None` when the volume GUID no longer resolves (device gone
+/// or moved) or when the resolved mount no longer contains the canonical
+/// iPod files. Callers fall back to `scan_for_ipod` in that case.
+///
+/// On hit, returns a fresh `DetectedIpod` with the current drive path
+/// (which may differ from the cached observation if Windows reassigned
+/// the letter) and the cached identity carried forward.
+pub fn try_resolve_known_volume(
+    volume_guid: &str,
+    prev: &DetectedIpod,
+) -> Option<DetectedIpod> {
+    let mount = mount_for_volume_guid(volume_guid)?;
+    if !crate::ipod::layout::is_ipod_mount(&mount) {
+        return None;
+    }
+    Some(DetectedIpod {
+        serial: prev.serial.clone(),
+        model_label: prev.model_label.clone(),
+        drive: mount.to_string_lossy().into_owned(),
+        name: prev.name.clone(),
+        volume_guid: Some(volume_guid.to_string()),
     })
 }
 
@@ -424,72 +563,62 @@ fn scsi_inquiry_cached(
     }
 }
 
-/// Ask Windows for the USB device path of the volume mounted at
-/// `<letter>:\` and extract both the 16-hex-digit FirewireGuid and
-/// the USB Product ID.
+/// Recover the USB-derived identity of the iPod at `<letter>:\` via
+/// native Win32 calls — no PowerShell shellout.
 ///
-/// Apple iPods burn the FirewireGuid into the USB device descriptor
-/// as the iSerialNumber, which Windows surfaces in two places:
-///   - the storage-class path under `\\?\usbstor#…` (where the
-///     FirewireGuid sits between `&` separators), and
-///   - the USB-class path under `USB\VID_05AC&PID_XXXX\<guid>`
-///     (where the PID identifies the specific model).
+/// What we need (and where it comes from):
 ///
-/// We query both via one PowerShell call so the daemon stays free of
-/// Win32 storage-API bindings. Recovery only runs on iPod plug-in
-/// when SysInfo is empty, so the ~500ms shell-out is acceptable.
+/// | Field          | Source                                            |
+/// |----------------|---------------------------------------------------|
+/// | `disk_number`  | `IOCTL_STORAGE_GET_DEVICE_NUMBER` on `\\.\<letter>:` |
+/// | `capacity_bytes` | `IOCTL_DISK_GET_LENGTH_INFO` on same handle    |
+/// | `firewire_guid` | 16-hex chunk in the USBSTOR device-interface path (SetupAPI enumeration of `GUID_DEVINTERFACE_DISK`, matched by disk number) |
+/// | `pid`          | `PID_XXXX` in the parent USB device's instance ID (`CM_Get_Parent` then `CM_Get_Device_IDW`) |
+///
+/// All handles are opened with zero access so no admin elevation is
+/// needed for any of the IOCTLs; SetupAPI enumeration is unprivileged.
+/// Total cost on a warm Windows: low single-digit milliseconds. The
+/// PowerShell version it replaced cost 300-500ms (process spawn +
+/// CLR init + CIM query + parse), once per iPod plug-in.
 #[cfg(windows)]
 fn recover_ipod_info_from_usb(drive_letter: char) -> Option<UsbIpodInfo> {
-    // Single script returning four pipe-separated fields:
-    //   1. disk path  (\\?\usbstor#disk&ven_apple&… — contains the
-    //                  16-hex FirewireGuid)
-    //   2. usb path   (USB\VID_05AC&PID_XXXX\… — gives us the PID)
-    //   3. disk size  (raw bytes — used to disambiguate Classic 1G/2G/3G)
-    //   4. disk number (the N in \\.\PhysicalDriveN — used by
-    //                   scsi_inquiry to open the device for SCSI
-    //                   INQUIRY VPD pass-through, which returns the
-    //                   real ModelNumStr direct from device firmware)
-    let script = format!(
-        "$disk = Get-Volume -DriveLetter {0} | Get-Partition | Get-Disk; \
-         $diskPath = $disk.Path; \
-         $diskSize = $disk.Size; \
-         $diskNumber = $disk.Number; \
-         $usbPath = ''; \
-         if ($diskPath -match '[0-9a-fA-F]{{16}}') {{ \
-             $guid = $matches[0]; \
-             $usbPath = (Get-CimInstance Win32_PnPEntity -Filter \"Service='AppleIPod'\" | \
-                         Where-Object {{ $_.PNPDeviceID -like \"*$guid*\" }} | \
-                         Select-Object -First 1 -ExpandProperty PNPDeviceID); \
-         }} \
-         Write-Output \"$diskPath|$usbPath|$diskSize|$diskNumber\"",
-        drive_letter
-    );
-    use crate::windows_proc::NoConsoleWindow;
-    let output = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .no_console()
-        .output()
-        .ok()?;
-    if !output.status.success() { return None; }
-    let combined = String::from_utf8_lossy(&output.stdout);
-    let mut parts = combined.split('|');
-    let disk_path = parts.next()?;
-    let usb_path = parts.next().unwrap_or("");
-    let size_str = parts.next().unwrap_or("").trim();
-    let disk_number_str = parts.next().unwrap_or("").trim();
+    // Phase 1: open the volume, query disk number + capacity. The
+    // handle can be dropped immediately after these two IOCTLs — the
+    // remaining work (SetupAPI walk) talks to the device tree, not
+    // the volume.
+    let (disk_number, capacity_bytes) = {
+        let handle = open_volume_for_query(drive_letter)?;
+        let raw = std::os::windows::io::AsRawHandle::as_raw_handle(&handle)
+            as windows_sys::Win32::Foundation::HANDLE;
+        let dn = query_storage_device_number(raw)?;
+        // Capacity is best-effort; if it fails we still return a
+        // useful UsbIpodInfo (capacity is only used to disambiguate
+        // Classic 1G/2G/3G).
+        let cap = query_disk_length(raw);
+        (dn, cap)
+    };
 
-    let firewire_guid = extract_firewire_guid_from_usb_path(disk_path)?;
-    let pid = extract_pid_from_apple_usb_path(usb_path);
-    let capacity_bytes = size_str.parse::<u64>().ok();
-    let disk_number = disk_number_str.parse::<u32>().ok();
+    // Phase 2: SetupAPI walk to find the disk-class device interface
+    // whose underlying physical drive matches `disk_number`, extract
+    // the FirewireGuid from its device path, and stash its DevInst
+    // for the parent-USB lookup that follows.
+    let (disk_device_path, disk_devinst) = find_disk_device_by_number(disk_number)?;
+    let firewire_guid = extract_firewire_guid_from_usb_path(&disk_device_path)?;
+
+    // Phase 3: Cfgmgr32 walk from the disk device to its USB parent,
+    // then parse PID_XXXX from the parent's instance ID. Failure here
+    // is non-fatal — without PID we lose libgpod's model lookup but
+    // the FirewireGuid alone is enough to identify the device.
+    let pid = usb_parent_instance_id(disk_devinst)
+        .as_deref()
+        .and_then(extract_pid_from_apple_usb_path);
+
     let identity = pid.and_then(|p| identify_ipod(p, capacity_bytes));
 
-    // Try the authoritative SCSI INQUIRY path, with a per-process
-    // per-FirewireGuid cache so repeated polls don't re-attempt a
-    // privileged IOCTL that's already known to be permission-denied.
-    // Without this, the device-watcher's ~2s poll cadence would
-    // reissue the IOCTL forever and flood the log; with this, the
-    // attempt runs at most once per device per daemon lifetime.
+    // SCSI INQUIRY VPD is the authoritative source for ModelNumStr
+    // when available, but requires admin elevation. Cached per-
+    // FirewireGuid so we attempt it at most once per device per
+    // daemon lifetime — see scsi_inquiry_cached.
     let (sysinfo_extended_xml, sysinfo_extended_parsed) =
         scsi_inquiry_cached(drive_letter, &firewire_guid);
 
@@ -497,11 +626,338 @@ fn recover_ipod_info_from_usb(drive_letter: char) -> Option<UsbIpodInfo> {
         firewire_guid,
         pid,
         capacity_bytes,
-        disk_number,
+        disk_number: Some(disk_number),
         identity,
         sysinfo_extended_xml,
         sysinfo_extended_parsed,
     })
+}
+
+// =========================================================================
+// Native Win32 helpers for `recover_ipod_info_from_usb`.
+//
+// Replaces a PowerShell shellout (`Get-Volume | Get-Partition | Get-Disk`
+// pipeline + `Get-CimInstance Win32_PnPEntity` lookup) with direct IOCTL
+// + SetupAPI + Cfgmgr32 calls. Tradeoff: ~150 LOC of FFI here in exchange
+// for ~300-500ms saved on every iPod plug-in's cold-path identification
+// and no PowerShell dependency on the user's machine.
+// =========================================================================
+
+/// Open `\\.\<letter>:` with zero `dwDesiredAccess` so the OS treats
+/// it as an IOCTL-only handle (no read or write data path granted).
+/// This is the documented non-admin codepath for sending device-info
+/// IOCTLs to a raw volume — same trick `scsi_inquiry.rs::open_volume`
+/// uses, see that file for the longer KB-articles-and-empirical-testing
+/// explanation.
+#[cfg(windows)]
+fn open_volume_for_query(drive_letter: char) -> Option<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::FromRawHandle;
+    use std::ptr;
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let path = format!(r"\\.\{}:", drive_letter.to_ascii_uppercase());
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let h: HANDLE = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            ptr::null_mut(),
+        )
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    // SAFETY: CreateFileW returned a valid handle we own exclusively.
+    Some(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(h as *mut _) })
+}
+
+/// `IOCTL_STORAGE_GET_DEVICE_NUMBER` → physical drive number for the
+/// volume. Stable Win32 ABI; pinned locally rather than chased through
+/// windows-sys re-export hierarchy.
+#[cfg(windows)]
+fn query_storage_device_number(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<u32> {
+    use std::ffi::c_void;
+    use std::ptr;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
+
+    #[repr(C)]
+    struct StorageDeviceNumber {
+        device_type: u32,
+        device_number: u32,
+        partition_number: u32,
+    }
+
+    let mut sdn: StorageDeviceNumber = unsafe { std::mem::zeroed() };
+    let mut returned: u32 = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_GET_DEVICE_NUMBER,
+            ptr::null_mut(),
+            0,
+            &mut sdn as *mut _ as *mut c_void,
+            std::mem::size_of::<StorageDeviceNumber>() as u32,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(sdn.device_number)
+}
+
+/// `IOCTL_DISK_GET_LENGTH_INFO` → volume length in bytes. Works through
+/// the volume handle (no need to open the underlying physical drive).
+#[cfg(windows)]
+fn query_disk_length(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> {
+    use std::ffi::c_void;
+    use std::ptr;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C;
+
+    #[repr(C)]
+    struct GetLengthInformation {
+        length: i64,
+    }
+
+    let mut info: GetLengthInformation = unsafe { std::mem::zeroed() };
+    let mut returned: u32 = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_DISK_GET_LENGTH_INFO,
+            ptr::null_mut(),
+            0,
+            &mut info as *mut _ as *mut c_void,
+            std::mem::size_of::<GetLengthInformation>() as u32,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    if info.length < 0 {
+        return None;
+    }
+    Some(info.length as u64)
+}
+
+/// GUID_DEVINTERFACE_DISK: device-interface class GUID for disk
+/// devices. Pinned locally rather than depending on windows-sys'
+/// constants module (the constant moves around between feature sets
+/// and minor versions).
+#[cfg(windows)]
+const GUID_DEVINTERFACE_DISK: windows_sys::core::GUID = windows_sys::core::GUID {
+    data1: 0x53F5_6307,
+    data2: 0xB6BF,
+    data3: 0x11D0,
+    data4: [0x94, 0xF2, 0x00, 0xA0, 0xC9, 0x1E, 0xFB, 0x8B],
+};
+
+/// Enumerate present disk-class device interfaces, find the one whose
+/// underlying physical drive number matches `target_disk_number`, and
+/// return `(device_path, DevInst)`. The device path is the USBSTOR
+/// interface string (contains the FirewireGuid); the DevInst is the
+/// handle Cfgmgr32 uses for parent-lookup.
+#[cfg(windows)]
+fn find_disk_device_by_number(target_disk_number: u32) -> Option<(String, u32)> {
+    use std::ptr;
+    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+        SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
+        SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
+    };
+
+    // HDEVINFO is an isize handle; -1 is the documented invalid value.
+    const INVALID_HDEVINFO: isize = -1;
+    let hdev = unsafe {
+        SetupDiGetClassDevsW(
+            &GUID_DEVINTERFACE_DISK,
+            ptr::null(),
+            ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    if hdev == INVALID_HDEVINFO {
+        return None;
+    }
+
+    let mut result: Option<(String, u32)> = None;
+    let mut index: u32 = 0;
+    loop {
+        let mut iface: SP_DEVICE_INTERFACE_DATA = unsafe { std::mem::zeroed() };
+        iface.cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
+        let ok = unsafe {
+            SetupDiEnumDeviceInterfaces(
+                hdev,
+                ptr::null_mut(),
+                &GUID_DEVINTERFACE_DISK,
+                index,
+                &mut iface,
+            )
+        };
+        if ok == 0 {
+            break;
+        }
+        index += 1;
+
+        // First call: get required buffer size for the detail data.
+        let mut required: u32 = 0;
+        unsafe {
+            SetupDiGetDeviceInterfaceDetailW(
+                hdev,
+                &iface,
+                ptr::null_mut(),
+                0,
+                &mut required,
+                ptr::null_mut(),
+            );
+        }
+        if required == 0 {
+            continue;
+        }
+
+        // Second call: real fetch. cbSize at the head of the buffer
+        // is the size of the *struct header* (not the buffer); on
+        // 64-bit Windows that's 8 (DWORD cbSize + WCHAR DevicePath[1]
+        // padded to 8). std::mem::size_of mirrors what the windows-sys
+        // binding's C layout dictates, so it stays correct across
+        // architectures.
+        let mut buf = vec![0u8; required as usize];
+        unsafe {
+            *(buf.as_mut_ptr() as *mut u32) =
+                std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+        }
+        let mut devinfo: SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
+        devinfo.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+        let ok = unsafe {
+            SetupDiGetDeviceInterfaceDetailW(
+                hdev,
+                &iface,
+                buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+                required,
+                ptr::null_mut(),
+                &mut devinfo,
+            )
+        };
+        if ok == 0 {
+            continue;
+        }
+
+        // The DevicePath field begins immediately after cbSize. Read
+        // it as a wide string, find the null terminator.
+        let path_offset = std::mem::size_of::<u32>();
+        let path_bytes = &buf[path_offset..];
+        let path_u16: &[u16] = unsafe {
+            std::slice::from_raw_parts(path_bytes.as_ptr() as *const u16, path_bytes.len() / 2)
+        };
+        let nul = path_u16
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(path_u16.len());
+        let device_path = String::from_utf16_lossy(&path_u16[..nul]);
+
+        // Open the device, IOCTL_STORAGE_GET_DEVICE_NUMBER, compare
+        // against the target. Zero-access open + IOCTL works here
+        // exactly like it does for the volume handle.
+        let dev_disk_number = match query_disk_number_for_device_path(&device_path) {
+            Some(n) => n,
+            None => continue,
+        };
+        if dev_disk_number == target_disk_number {
+            result = Some((device_path, devinfo.DevInst));
+            break;
+        }
+        // Mark `buf` read so the borrow ends before the next iteration.
+        let _ = buf;
+    }
+
+    unsafe {
+        SetupDiDestroyDeviceInfoList(hdev);
+    }
+    result
+}
+
+/// Open an arbitrary device path with zero access (IOCTL-only) and
+/// query its STORAGE_DEVICE_NUMBER. Used by the disk-class
+/// enumeration to filter for the volume we care about.
+#[cfg(windows)]
+fn query_disk_number_for_device_path(device_path: &str) -> Option<u32> {
+    use std::os::windows::io::FromRawHandle;
+    use std::ptr;
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = device_path
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let h: HANDLE = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            ptr::null_mut(),
+        )
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let owned = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(h as *mut _) };
+    let raw = std::os::windows::io::AsRawHandle::as_raw_handle(&owned) as HANDLE;
+    query_storage_device_number(raw)
+}
+
+/// Walk from a disk device's DevInst to its USB parent, return the
+/// parent's instance ID (e.g. `USB\VID_05AC&PID_1261\000A27002138B0A8`).
+/// `None` if the disk has no Cfgmgr32 parent, or the parent's ID
+/// query fails.
+#[cfg(windows)]
+fn usb_parent_instance_id(disk_devinst: u32) -> Option<String> {
+    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+        CM_Get_Device_IDW, CM_Get_Device_ID_Size, CM_Get_Parent,
+    };
+
+    const CR_SUCCESS: u32 = 0;
+
+    let mut parent: u32 = 0;
+    let cr = unsafe { CM_Get_Parent(&mut parent, disk_devinst, 0) };
+    if cr != CR_SUCCESS {
+        return None;
+    }
+
+    let mut id_size: u32 = 0;
+    let cr = unsafe { CM_Get_Device_ID_Size(&mut id_size, parent, 0) };
+    if cr != CR_SUCCESS || id_size == 0 {
+        return None;
+    }
+
+    // +1 for the null terminator that CM_Get_Device_IDW writes but
+    // CM_Get_Device_ID_Size doesn't count.
+    let mut buf = vec![0u16; (id_size + 1) as usize];
+    let cr = unsafe { CM_Get_Device_IDW(parent, buf.as_mut_ptr(), buf.len() as u32, 0) };
+    if cr != CR_SUCCESS {
+        return None;
+    }
+    let nul = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..nul]))
 }
 
 /// Parse the 4-hex-digit USB Product ID out of an Apple USB device
@@ -781,28 +1237,100 @@ fn family_label_for_pid(pid: u16) -> Option<&'static str> {
     }
 }
 
-/// Enumerate Windows drive letters A-Z, find drives that look like an iPod
-/// (have `iPod_Control\iTunes\iTunesDB`), and return the unique mount.
+/// Find every mounted volume that looks like an iPod and return the
+/// unique mount path. Errors if zero or more than one match — caller
+/// must then ask for `--ipod <drive>` to disambiguate.
 pub fn detect_ipod_mount() -> Result<String> {
-    let candidates = candidate_drives()
+    let candidates = candidate_mount_points()
         .into_iter()
-        .filter(looks_like_ipod)
+        .filter(|p| crate::ipod::layout::is_ipod_mount(p))
+        .map(|p| p.to_string_lossy().into_owned())
         .collect();
     pick_mount(candidates)
 }
 
-/// Return all currently-existing drive letters A:\\ through Z:\\.
-fn candidate_drives() -> Vec<String> {
-    ('A'..='Z')
-        .map(|c| format!("{c}:\\"))
-        .filter(|d| std::path::Path::new(d).exists())
-        .collect()
+/// Enumerate mount-point candidates that might host an iPod.
+///
+/// **Windows:** Native enumeration via `GetLogicalDrives` (one bitmask
+/// call returning which drive letters are currently present) + a per-
+/// present-letter `GetDriveTypeW` lookup to keep only removable / fixed
+/// volumes. Drops the previous A-Z `Path::exists()` walk's 26 I/O probes
+/// per poll down to ~1 syscall + one per-present-letter type query, and
+/// avoids hanging on slow network shares (`DRIVE_REMOTE`) or empty
+/// optical drives (`DRIVE_CDROM`) that happened to share a letter.
+///
+/// **Non-Windows:** Returns empty. Native mount enumeration on Linux
+/// (`/proc/mounts`) and macOS (DiskArbitration) is not yet wired up;
+/// auto-detect is therefore Windows-only for now, but the TUI still
+/// works when the user passes `--ipod <path>` explicitly. Daemon mode
+/// compiles on non-Windows (see Phase 1 cfg lift) but the device
+/// watcher will idle without observing any devices until this enum
+/// gets a non-Windows arm.
+///
+/// FUTURE: swap the Windows path for `FindFirstVolumeW` +
+/// `GetVolumePathNamesForVolumeNameW`. That surfaces every mount point
+/// of every volume (including folder mounts like `C:\Mounts\iPod`) and
+/// gives back the stable `\\?\Volume{GUID}\` path — useful both for
+/// folder-mounted iPods and for persisted config keyed on volume GUID
+/// instead of the easily-shuffled drive letter.
+fn candidate_mount_points() -> Vec<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        windows_drive_letters_for_mountable_volumes()
+            .into_iter()
+            .map(|letter| std::path::PathBuf::from(format!("{letter}:\\")))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
 }
 
-/// True if `drive` looks like a mounted iPod. Uses the canonical predicate
-/// (both SysInfo and iTunesDB present); see findings F-09.
-fn looks_like_ipod(drive: &String) -> bool {
-    crate::ipod::layout::is_ipod_mount(std::path::Path::new(drive))
+/// Return drive letters that exist AND are removable or fixed. Skips
+/// `DRIVE_REMOTE` (UNC mounts can wedge the polling watcher on probe),
+/// `DRIVE_CDROM` (mounted ISOs / USB-CD adapters), and the absence
+/// types (`DRIVE_UNKNOWN`, `DRIVE_NO_ROOT_DIR`).
+///
+/// iPod Classic 7G reports as `DRIVE_FIXED` (USB-attached HDD); Nano /
+/// Shuffle / flash-based families report as `DRIVE_REMOVABLE`. Both
+/// pass the filter.
+#[cfg(windows)]
+fn windows_drive_letters_for_mountable_volumes() -> Vec<char> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+
+    // Stable Win32 ABI values for `GetDriveTypeW`'s return code (see
+    // `<fileapi.h>`). windows-sys 0.59 doesn't re-export them, so we
+    // pin the values directly rather than chase a feature-flag/version
+    // mismatch.
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+
+    // GetLogicalDrives returns a bitmask where bit N = drive (b'A' + N).
+    // Returns 0 only on outright failure (which on modern Windows is
+    // essentially never — the API is non-failing for a normal user).
+    let mask = unsafe { GetLogicalDrives() };
+    if mask == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for i in 0..26u32 {
+        if mask & (1 << i) == 0 {
+            continue;
+        }
+        let letter = (b'A' + i as u8) as char;
+        let root = format!("{letter}:\\");
+        let wide: Vec<u16> = std::ffi::OsStr::new(&root)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let dt = unsafe { GetDriveTypeW(wide.as_ptr()) };
+        if dt == DRIVE_REMOVABLE || dt == DRIVE_FIXED {
+            out.push(letter);
+        }
+    }
+    out
 }
 
 /// Given a set of iPod-looking mounts, return the unique one or an error.

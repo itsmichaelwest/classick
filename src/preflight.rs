@@ -147,47 +147,66 @@ struct AppleProcess {
     is_blocking: bool,
 }
 
-/// Enumerate `iTunes.exe` and `AppleMobileDeviceService.exe`. Uses the
-/// same `Get-CimInstance` shell-out pattern as `recover_ipod_info_from_usb`
-/// to avoid pulling in a process-enumeration crate for one preflight call.
-/// If the shell-out itself fails (PowerShell missing, permissions), we
-/// log and return empty — better to let the sync proceed than block on
-/// a faulty diagnostic.
+/// Enumerate `iTunes.exe` and `AppleMobileDeviceService.exe` via the
+/// Toolhelp32 process-snapshot API. Single-digit milliseconds vs. the
+/// 200-400ms PowerShell shellout this replaced, no console-flash risk,
+/// no locale fragility, no extra spawn surface for the user's AV to
+/// flag. If the snapshot itself fails (rare — permission-denied on
+/// locked-down corporate machines is the realistic case), log and
+/// return empty so the sync proceeds rather than blocking on a faulty
+/// diagnostic.
 #[cfg(windows)]
 fn detect_apple_processes() -> Vec<AppleProcess> {
-    let script = "Get-Process -ErrorAction SilentlyContinue iTunes,AppleMobileDeviceService | \
-                  ForEach-Object { \"$($_.Name)|$($_.Id)\" }";
-    use crate::windows_proc::NoConsoleWindow;
-    let out = match std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .no_console()
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        Ok(o) => {
-            tracing::warn!(
-                "preflight: PowerShell exited {:?} probing iTunes; skipping check. stderr: {}",
-                o.status.code(),
-                String::from_utf8_lossy(&o.stderr).trim()
-            );
-            return Vec::new();
-        }
-        Err(e) => {
-            tracing::warn!("preflight: failed to spawn PowerShell for iTunes check: {e}");
-            return Vec::new();
-        }
+    use std::mem::size_of;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
     };
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    stdout
-        .lines()
-        .filter_map(|line| {
-            let (name, pid) = line.split_once('|')?;
-            let pid: u32 = pid.trim().parse().ok()?;
-            let name = name.trim().to_string();
-            let is_blocking = name.eq_ignore_ascii_case("iTunes");
-            Some(AppleProcess { name, pid, is_blocking })
-        })
-        .collect()
+
+    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snap == INVALID_HANDLE_VALUE {
+        tracing::warn!(
+            "preflight: CreateToolhelp32Snapshot failed ({}); skipping iTunes check",
+            std::io::Error::last_os_error()
+        );
+        return Vec::new();
+    }
+
+    // SAFETY-ish: zero-init a PROCESSENTRY32W and set dwSize per the
+    // documented contract before the first call.
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+
+    let mut out = Vec::new();
+    let mut have_entry = unsafe { Process32FirstW(snap, &mut entry) } != 0;
+    while have_entry {
+        // szExeFile is a null-terminated UTF-16 array of MAX_PATH. PowerShell's
+        // Get-Process surfaced the process name without the .exe suffix, so we
+        // strip it for parity — the user-visible message says "iTunes (PID …)".
+        let nul = entry
+            .szExeFile
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let name = String::from_utf16_lossy(&entry.szExeFile[..nul]);
+        let stem = name.strip_suffix(".exe").unwrap_or(&name);
+        let is_itunes = stem.eq_ignore_ascii_case("iTunes");
+        let is_amds = stem.eq_ignore_ascii_case("AppleMobileDeviceService");
+        if is_itunes || is_amds {
+            out.push(AppleProcess {
+                name: stem.to_string(),
+                pid: entry.th32ProcessID,
+                is_blocking: is_itunes,
+            });
+        }
+        have_entry = unsafe { Process32NextW(snap, &mut entry) } != 0;
+    }
+
+    unsafe {
+        CloseHandle(snap);
+    }
+    out
 }
 
 /// Loop on `transcode::verify_refalac_available` until refalac64 is reachable
