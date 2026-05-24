@@ -1,106 +1,142 @@
 using System;
-using System.Threading;
+using System.ComponentModel;
 using System.Threading.Tasks;
 using IpodSync_UI.Ipc;
 using IpodSync_UI.ViewModels;
+using Microsoft.UI;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.Storage.Pickers;
+using Microsoft.UI.Xaml.Media.Animation;
 using WinRT.Interop;
 
 namespace IpodSync_UI.Views;
 
-/// <summary>
-/// M3 first-launch wizard. Hosts a <see cref="WizardViewModel"/> wired with:
-/// <list type="bullet">
-///   <item><description>A device-wait func that subscribes to daemon
-///     <see cref="SubscribeDeviceEventsCommand"/> and awaits the next
-///     <see cref="DeviceConnectedEvent"/> from <see cref="DaemonClient.Events"/>.</description></item>
-///   <item><description>A save-config func that sends a <see cref="SaveConfigCommand"/>
-///     through the persistent <c>App.Daemon</c> client.</description></item>
-/// </list>
-///
-/// <para>
-/// File picker initialization uses <see cref="App.WindowHandle"/> via
-/// <c>InitializeWithWindow</c>, the standard WinUI 3 pattern for COM-based
-/// pickers that need an HWND to parent against.
-/// </para>
-/// </summary>
 public sealed partial class WizardWindow : Window
 {
+    private const int FixedWidthDip = 640;
+    private const int FixedHeightDip = 500;
+
     public WizardViewModel ViewModel { get; }
+
+    private int _previousStep;
+    private bool _hasNavigatedOnce;
+    private bool _centered;
 
     public WizardWindow()
     {
-        ViewModel = new WizardViewModel(
-            waitForDeviceFunc: WaitForDeviceFromDaemonAsync,
-            sendConfigFunc: SendSaveConfigAsync);
-        // Note: WinUI 3 Window does not have a DataContext property.
-        // The XAML uses x:Bind ViewModel.* which references the
-        // public ViewModel property on this code-behind directly.
+        ViewModel = new WizardViewModel(sendConfigFunc: SendSaveConfigAsync);
         ViewModel.WizardFinished += () => DispatcherQueue.TryEnqueue(Close);
-        this.Closed += (_, _) => ViewModel.CancelWait();
-        this.InitializeComponent();
+        ViewModel.PropertyChanged += OnViewModelPropertyChanged;
+
+        InitializeComponent();
+
+        // Footer bindings resolve {StaticResource BoolToVis} via the Grid's
+        // DataContext — x:Bind's compile-time converter lookup requires a
+        // FrameworkElement root and Window isn't one.
+        WizardRoot.DataContext = ViewModel;
+
+        var hwnd = WindowNative.GetWindowHandle(this);
+        var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
+
+        if (appWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.IsResizable = false;
+            presenter.IsMaximizable = false;
+            presenter.IsMinimizable = false;
+        }
+
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(WizardTitleBar);
+
+        if (AppWindowTitleBar.IsCustomizationSupported())
+        {
+            appWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        }
+
+        SystemBackdrop = new MicaBackdrop();
+
+        WindowAnchor.DisableTransitions(hwnd);
+        WindowAnchor.SizeClientArea(hwnd, appWindow, FixedWidthDip, FixedHeightDip);
+        CenterOnDisplay(hwnd, appWindow);
+
+        Activated += OnFirstActivated;
+
+        NavigateToCurrentStep();
     }
 
-    private async Task<IpodIdentityCandidate?> WaitForDeviceFromDaemonAsync(CancellationToken ct)
+    private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
     {
-        var daemon = App.Daemon;
-        var router = App.Router;
-        if (daemon is null || router is null) return null;
-
-        var tcs = new TaskCompletionSource<IpodIdentityCandidate?>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-
-        void Handler(DeviceConnectedEvent dc)
-        {
-            tcs.TrySetResult(new IpodIdentityCandidate(dc.Serial, dc.ModelLabel, dc.Drive));
-        }
-        router.DeviceConnected += Handler;
-        await daemon.SendAsync(new SubscribeDeviceEventsCommand(), ct);
-
-        using var reg = ct.Register(() => tcs.TrySetResult(null));
-        try { return await tcs.Task; }
-        finally
-        {
-            router.DeviceConnected -= Handler;
-            try { await daemon.SendAsync(new UnsubscribeDeviceEventsCommand()); } catch { }
-        }
+        if (_centered) return;
+        _centered = true;
+        Activated -= OnFirstActivated;
+        var hwnd = WindowNative.GetWindowHandle(this);
+        var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
+        CenterOnDisplay(hwnd, appWindow);
     }
+
+    private static void CenterOnDisplay(IntPtr hwnd, AppWindow appWindow)
+    {
+        var display = DisplayArea.GetFromWindowId(
+            Win32Interop.GetWindowIdFromWindow(hwnd),
+            DisplayAreaFallback.Primary);
+        var work = display.WorkArea;
+        var x = work.X + (work.Width - appWindow.Size.Width) / 2;
+        var y = work.Y + (work.Height - appWindow.Size.Height) / 2;
+        appWindow.Move(new Windows.Graphics.PointInt32(x, y));
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(WizardViewModel.CurrentStep)) return;
+        DispatcherQueue.TryEnqueue(NavigateToCurrentStep);
+    }
+
+    private void NavigateToCurrentStep()
+    {
+        var pageType = ViewModel.CurrentStep switch
+        {
+            1 => typeof(WizardWelcomePage),
+            2 => typeof(WizardFolderPage),
+            3 => typeof(WizardDevicePage),
+            4 => typeof(WizardSyncSettingsPage),
+            5 => typeof(WizardDonePage),
+            _ => typeof(WizardWelcomePage),
+        };
+        NavigationTransitionInfo info;
+        if (!_hasNavigatedOnce)
+        {
+            info = new SuppressNavigationTransitionInfo();
+            _hasNavigatedOnce = true;
+        }
+        else if (ViewModel.CurrentStep < _previousStep)
+        {
+            info = new SlideNavigationTransitionInfo { Effect = SlideNavigationTransitionEffect.FromLeft };
+        }
+        else
+        {
+            info = new SlideNavigationTransitionInfo { Effect = SlideNavigationTransitionEffect.FromRight };
+        }
+        _previousStep = ViewModel.CurrentStep;
+        StepFrame.Navigate(pageType, ViewModel, info);
+    }
+
+    private void OnBackRequested(TitleBar sender, object args) => ViewModel.BackCommand.Execute(null);
 
     private async Task SendSaveConfigAsync(SaveConfigPayload payload)
     {
-        var daemon = App.Daemon;
-        if (daemon is null) return;
+        var daemon = App.Daemon ?? throw new InvalidOperationException("daemon not connected");
+        var daemonSettings = new DaemonSettings(
+            Enabled: true,
+            AutostartWithWindows: payload.AutostartWithWindows,
+            FirstSyncMode: "review",
+            SubsequentSyncMode: payload.SubsequentSyncMode,
+            ScheduleMinutes: payload.ScheduleMinutes,
+            NotifyOn: "all");
         await daemon.SendAsync(new SaveConfigCommand(
             Source: payload.Source,
-            Ipod: new IpodIdentity(payload.IpodSerial, payload.IpodModelLabel)));
+            Daemon: daemonSettings,
+            Ipod: new IpodIdentity(payload.IpodSerial, payload.IpodModelLabel, payload.IpodName)));
     }
-
-    private async void OnBrowseClick(object sender, RoutedEventArgs e)
-    {
-        var picker = new FolderPicker();
-        picker.FileTypeFilter.Add("*");
-        InitializeWithWindow.Initialize(picker, App.WindowHandle);
-        var folder = await picker.PickSingleFolderAsync();
-        if (folder is not null) ViewModel.SourcePath = folder.Path;
-    }
-
-    private void OnRetryScan(object sender, RoutedEventArgs e) => ViewModel.TriggerScanCommand.Execute(null);
-
-    private void OnCancelClick(object sender, RoutedEventArgs e) => this.Close();
-
-    // x:Bind helper accessors
-    public Visibility IsStep(int n, int current) => n == current ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility NotStep(int n, int current) => n == current ? Visibility.Collapsed : Visibility.Visible;
-    public Brush StepDotFill(int n, int current)
-        => new SolidColorBrush(n <= current
-            ? Microsoft.UI.Colors.SteelBlue
-            : Microsoft.UI.Colors.LightGray);
-    public Visibility HasDetection(IpodIdentityCandidate? ipod)
-        => ipod is null ? Visibility.Collapsed : Visibility.Visible;
-    public string FormatSerial(IpodIdentityCandidate? ipod)
-        => ipod is null ? "" : $"Serial: {ipod.Serial}";
-    public string FormatIpodSummary(IpodIdentityCandidate? ipod)
-        => ipod is null ? "(none)" : $"{ipod.ModelLabel} · {ipod.Serial}";
 }

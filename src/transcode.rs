@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Deserialize)]
 pub struct ProbeOutput {
@@ -136,6 +136,13 @@ pub fn ffprobe_path_for(ffmpeg: &Path) -> PathBuf {
 /// Extracted so we can unit-test the arg construction without spawning ffmpeg.
 pub fn ffmpeg_args(src: &Path, dst: &Path) -> Vec<String> {
     vec![
+        // `-nostdin` disables ffmpeg's interactive stdin reader, which
+        // otherwise blocks during finalization when ffmpeg inherits a
+        // pipe-stdin (as it does when invoked from the daemon's sync
+        // subprocess — that subprocess's stdin is the daemon's cancel
+        // pipe and is never closed). Observed in the wild as ffmpeg
+        // wedging at ~97% of a track for the entire session.
+        "-nostdin".into(),
         "-loglevel".into(), "error".into(),
         "-y".into(),  // overwrite output without prompting
         "-i".into(), src.to_string_lossy().into_owned(),
@@ -174,8 +181,12 @@ pub fn probe(src: &Path, ffmpeg_path: &Path) -> Result<ProbeOutput> {
 /// Transcode `src` (FLAC) → `dst` (ALAC in MP4/ipod container, art passed through).
 /// `ffmpeg_path` is the configured ffmpeg binary (F-16).
 pub fn transcode_to_alac(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<()> {
+    // Belt + braces with the `-nostdin` flag in ffmpeg_args: explicitly
+    // null out stdin so the inherited pipe (from the sync subprocess's
+    // stdin → daemon cancel channel) can't possibly be read.
     let status = Command::new(ffmpeg_path)
         .args(ffmpeg_args(src, dst))
+        .stdin(Stdio::null())
         .status()
         .map_err(|e| anyhow!("failed to spawn {} (is it on PATH?): {e}", ffmpeg_path.display()))?;
     if !status.success() {
@@ -435,12 +446,14 @@ pub fn transcode_via_refalac(
     }
 
     // Step 1: ffmpeg decode source → temp.wav. -vn drops any attached_pic
-    // video stream so refalac sees a pure-audio WAV.
+    // video stream so refalac sees a pure-audio WAV. `-nostdin` + stdin
+    // null prevents ffmpeg from blocking on inherited pipe-stdin.
     let mut ffmpeg = Command::new(ffmpeg_path);
-    ffmpeg.args(["-hide_banner", "-loglevel", "warning", "-y", "-i"]);
+    ffmpeg.args(["-nostdin", "-hide_banner", "-loglevel", "warning", "-y", "-i"]);
     ffmpeg.arg(src);
     ffmpeg.args(["-vn", "-acodec", "pcm_s16le"]);
     ffmpeg.arg(&temp_wav);
+    ffmpeg.stdin(Stdio::null());
     let ffmpeg_out = ffmpeg
         .output()
         .with_context(|| format!("ffmpeg decode of {} to WAV", src.display()))?;
@@ -484,11 +497,12 @@ pub fn transcode_via_refalac(
 /// before calling. `ffmpeg_path` is the configured ffmpeg binary (F-16).
 pub fn extract_cover_art(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<()> {
     let status = Command::new(ffmpeg_path)
-        .args(["-loglevel", "error", "-y"])
+        .args(["-nostdin", "-loglevel", "error", "-y"])
         .args(["-i"])
         .arg(src)
         .args(["-an", "-c:v", "copy", "-map", "0:v:0", "-frames:v", "1"])
         .arg(dst)
+        .stdin(Stdio::null())
         .status()
         .map_err(|e| anyhow!("failed to spawn {} for art extract: {e}", ffmpeg_path.display()))?;
     if !status.success() {

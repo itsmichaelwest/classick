@@ -2,6 +2,47 @@
 
 Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+## Graceful Stop sync: poll decision_rx between tracks (2026-05-24)
+
+- **Symptom (before fix):** Click "Stop sync" in the tray; daemon sends `{"type":"cancel"}` to the subprocess; nothing visible happens for 5 seconds; daemon's `bounded_kill` then `TerminateProcess`s the subprocess. Every track copied via `itdb_cp_track_to_ipod` so far becomes an orphan because `db.write()` never ran.
+- **Root cause:** `IpcCommand::Cancel` in `src/ipc.rs` maps to `Decision::Review(ReviewDecision::Quit)` and pushes it onto `decision_rx`. But `src/apply_loop.rs`'s `for action in actions` loop never reads from `decision_rx` except inside per-track `try_with_prompt` error-retry paths. On a healthy sync those retries never fire, so the queued Quit just sits there. Documented as "M1 limitation" in the source.
+- **Fix:** At the top of each iteration of the apply loop, non-blocking `decision_rx.try_recv()`. If we see `Decision::Review(ReviewDecision::Quit)`, set a `cancelled` flag and `break`. The post-loop code (`db.write()` + `manifest::save_atomic`) still runs, so completed tracks get registered in the iTunesDB and a "Sync cancelled. Completed tracks were saved." log line replaces the normal "Done." Other (stray) decisions are dropped — they have no consumer at this point.
+- **Why this is the right fix:** the orchestrator's `cancel_rx` → write-cancel-to-stdin → `bounded_kill` chain is fine; it just needed the subprocess side to ACT on the cancel within the grace window. Anything more invasive (per-action cancellation tokens, async apply loop) would be a much bigger rewrite for the same observable behaviour.
+
+## ffmpeg without `-nostdin` hangs at ~97% of a track (2026-05-24)
+
+- **Symptom:** Sync subprocess starts, ffmpeg writes ~97% of the source FLAC's bytes to the ALAC temp file in under 2 seconds, then **completely stalls** — ffmpeg process stays alive and "responding" but CPU stops accumulating and the temp file's mtime + size never change. Manual reproduction of the exact ffmpeg command in a PowerShell shell completes in <1 second.
+- **Root cause:** `transcode.rs` invoked ffmpeg via `Command::new(...).status()` without setting stdin. By Rust default, `.status()` inherits the parent's stdin. The parent (the daemon's sync subprocess) was launched with `Stdio::piped()` for stdin (the daemon's cancel-command channel). So ffmpeg inherited an *open pipe* with no data. Without `-nostdin`, ffmpeg's interactive-keypress reader blocks on that stdin during stream finalization, even though it never actually receives any data.
+- **Fix:** Two layers in `src/transcode.rs`:
+  1. Added `-nostdin` to `ffmpeg_args()` (covers the main `transcode_to_alac` path) and to the ffmpeg invocations inside `transcode_via_refalac` and `extract_cover_art`.
+  2. Added `.stdin(Stdio::null())` to every `Command::new(ffmpeg_path)` call site as defense in depth — if a future ffmpeg ignores `-nostdin` or a new call site forgets the flag, the inherited-pipe stdin scenario becomes structurally impossible.
+- **Diagnostic that nailed it:** running the *exact* failing ffmpeg command manually completed in 0.9s vs 3+ minutes wedged when spawned by the sync subprocess. Same args, same source, same output — the only difference is inherited stdio. Always check this when ffmpeg works standalone but hangs when subprocess-launched.
+
+## Daemon Shutdown leaks the sync subprocess (2026-05-24)
+
+- **Symptom:** User closes the UI, daemon receives the `shutdown` IPC command, the daemon process dies — but the spawned `ipod-sync.exe --ipc-mode --apply` keeps running indefinitely, transcoding tracks via SMB + ffmpeg, writing events to a broken stdout pipe. Caught in the wild with PID 57120 still alive 3+ hours after its daemon (PID 48596) had received `shutdown`. The orphan locks the iPod and can collide with the next daemon's sync.
+- **Root cause:** `handle_client_command`'s `Shutdown` arm called `std::process::exit(0)`, which skips Drop. Tokio's `Child` Drop (which would run `TerminateProcess` if `kill_on_drop(true)` is set) never fires. On Windows there is no SIGHUP-style parent-death signal, so the child becomes a true orphan.
+- **Fix:** Two layers in `runtime.rs` + `sync_orchestrator.rs`:
+  1. `build_command()` now sets `.kill_on_drop(true)` so any unexpected drop of the `Child` (panic, runtime teardown) kills the subprocess.
+  2. `handle_client_command` returns `bool` ("should exit"); `Shutdown` returns true instead of `std::process::exit`. The main `select!` loop breaks with `ExitReason::Shutdown`, the post-loop code signals cancel + drains for up to `SHUTDOWN_DRAIN_BUDGET` (8s), then returns `Ok(())` so the tokio runtime drops cleanly and `kill_on_drop` is the backstop.
+- **Important: do NOT remove the drain.** Hard-killing the subprocess mid-`itdb_write` would corrupt the iPod's iTunesDB. The drain gives the orchestrator's `cancel\n`-then-`bounded_kill(SYNC_KILL_GRACE)` sequence time to complete first.
+
+## Daemon's configured_serial was captured-once at startup (2026-05-24)
+
+- **Symptom:** Pair an iPod via the wizard in a fresh daemon session, plug it in — auto-sync never fires until you restart the daemon. Same for `TriggerSync`, which rejects with `not_configured` even though the config file on disk has the identity.
+- **Root cause:** `run_daemon_with_deps` read `configured_serial` once at startup via `deps.configured_serial` and held it as an immutable local. `SaveConfig` and `ForgetIpod` wrote the config file but never touched the in-memory value. So the wizard's first SaveConfig was invisible to the daemon's auto-sync gate for the lifetime of that daemon process.
+- **Fix:** `let mut configured_serial = configured_serial;`, thread `&mut configured_serial` into `handle_client_command`, mutate it in the SaveConfig arm (mirror the persisted `ipod_identity.serial`) and the ForgetIpod arm (set to None). Plug-in auto-sync now sees the post-wizard state on the same daemon session.
+
+## Popover lost sync progress when reopened mid-sync (2026-05-24)
+
+- **Symptom:** Sync is running (subprocess has emitted `TrackStart current=472 total=1275`); user opens the tray popover and sees "Syncing now / Preparing…" — the indeterminate state — even though the sync is clearly past the prepare phase. Stays stuck until either the popover is left open (events arrive live) or the sync finishes.
+- **Root cause:** `App.OnIpcEvent` did `_popover?.ViewModel.ApplyIpcProgress(e)` — when popover was closed, the event was dropped on the floor. The new popover was constructed fresh from `LatestStatus` (which carries only state-machine info, no `(current, total, track-label)`), so it defaulted to `ProgressTotal == 0` → "Preparing…" via `PopoverViewModel.ProgressLabel`.
+- **Fix:** Hoist progress accumulation into `App.xaml.cs` static fields (`_progressCurrent`, `_progressTotal`, `_currentTrackLabel`, `_currentLogLine`). `OnIpcEvent` always updates these regardless of popover existence; `OnPopoverRequested` seeds the new VM from them when daemon state is `"syncing"`. `OnStatusUpdated` clears them on any non-syncing transition so a stale snapshot doesn't leak into the next session.
+
+## Daemon integration tests share the user's real config — fragile (2026-05-24)
+
+- `tests/daemon_runtime_integration.rs` calls `run_daemon_with_deps()` which resolves `config_file::default_path()` → `%APPDATA%\ipod-sync\config.toml`. There is no config-path injection in `DaemonDeps`. So `auto_sync_enabled()` reads the developer's *real* config; if `subsequent_sync_mode = "review"` is set, `auto_sync_fires_when_configured_device_connects` and `runtime_stays_responsive_during_long_sync` start failing with `Elapsed(())` because the auto-sync gate now returns false. Either add `config_path: Option<PathBuf>` to `DaemonDeps` and have tests point at a temp file, or have the tests scoped-set the config to a known state via a guard. Tracked: pre-existing M3-WIP failure mode.
+
 ## Phase 6 M2 gate (2026-05-24) — PASS
 
 - **Result:** PASS. All 4 M2 scenarios validated.

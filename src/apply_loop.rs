@@ -287,7 +287,31 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         }
 
         let mut i = 0usize;
+        let mut cancelled = false;
         for action in actions {
+            // Non-blocking cancel poll. The IPC stdin reader maps a
+            // `{"type":"cancel"}` from the daemon to
+            // Decision::Review(ReviewDecision::Quit) and pushes it onto
+            // decision_rx. Without this check we'd only observe Quit at
+            // the next try_with_prompt error-retry — i.e. never, if the
+            // sync is healthy — and the daemon's bounded_kill would
+            // TerminateProcess us mid-track, orphaning every file
+            // already copied via itdb_cp_track_to_ipod. By bailing here
+            // we fall through to the post-loop db.write() + manifest
+            // save below, so all completed tracks are properly
+            // registered in iTunesDB and no orphans are left behind.
+            match decision_rx.try_recv() {
+                Ok(Decision::Review(ReviewDecision::Quit)) => {
+                    progress.log("Cancel requested — finalising completed tracks before stopping...");
+                    cancelled = true;
+                    break;
+                }
+                // Other decisions at this point are stray (no prompt is
+                // in flight in the action loop body). Drop them; the
+                // alternative — propagating them — has no consumer.
+                Ok(_) => {}
+                Err(_) => {}
+            }
             match action {
                 Action::Unchanged(_) => continue,
                 Action::Remove(entry) => {
@@ -557,6 +581,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         }
 
         // 6. Commit DB + manifest. NEITHER is persisted unless we got this far.
+        // Crucially, this also runs after a `cancelled` break above — we
+        // commit what's been done so the user gets a coherent partial sync
+        // (completed tracks registered in iTunesDB + manifest) instead of
+        // an orphan pile-up under iPod_Control\Music.
         progress.log("Writing iPod DB...");
         db.write()?;
         progress.log("Writing manifest...");
@@ -565,7 +593,11 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         manifest.last_source_root = Some(config.source.clone());
         manifest::save_atomic(&config.manifest_path, &manifest)?;
 
-        progress.log("Done. Eject the iPod before unplugging.");
+        if cancelled {
+            progress.log("Sync cancelled. Completed tracks were saved. Eject the iPod before unplugging.");
+        } else {
+            progress.log("Done. Eject the iPod before unplugging.");
+        }
         Ok(())
     })();
 

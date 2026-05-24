@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="IpodSync_UI.Views.WizardDonePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Spacing="16"
+                MaxWidth="400">
+        <TextBlock Text="🎉"
+                   FontSize="72"
+                   HorizontalAlignment="Center" />
+        <TextBlock Text="You're all set!"
+                   Style="{ThemeResource SubtitleTextBlockStyle}"
+                   HorizontalAlignment="Center" />
+        <TextBlock TextWrapping="Wrap"
+                   TextAlignment="Center"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                   Text="ipod-sync will now start syncing your music. Since this is the first time, the process may take several minutes or even a few hours. You can always monitor progress from the tray icon." />
+    </StackPanel>
+</Page>

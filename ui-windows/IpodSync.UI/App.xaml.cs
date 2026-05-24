@@ -29,6 +29,17 @@ public partial class App : Application
     /// <summary>Latest HistoryUpdate. Used to seed popover activity feed.</summary>
     public static HistoryUpdateEvent? LatestHistory { get; private set; }
 
+    /// <summary>Running snapshot of in-flight sync progress accumulated
+    /// from the daemon's SyncEvent stream. Survives popover open/close so
+    /// reopening mid-sync shows "Track N of M" instead of an
+    /// indefinitely-stuck "Preparing…". Cleared on FinishEvent and on
+    /// daemon-reported Idle transitions so a stale prior-sync snapshot
+    /// doesn't leak into the next session.</summary>
+    private static int _progressCurrent;
+    private static int _progressTotal;
+    private static string _currentTrackLabel = "";
+    private static string _currentLogLine = "";
+
     private static PopoverWindow? _popover;
     private static SettingsWindow? _settings;
 
@@ -141,6 +152,16 @@ public partial class App : Application
 
     private void OnStatusUpdated(StatusUpdateEvent s)
     {
+        // Idle transitions mean the previous sync has fully wound down;
+        // drop the cached progress so a re-opened popover doesn't show
+        // stale "Track 472 of 1275" from the previous run.
+        if (s.State != "syncing")
+        {
+            _progressCurrent = 0;
+            _progressTotal = 0;
+            _currentTrackLabel = "";
+            _currentLogLine = "";
+        }
         LatestStatus = s;
         DispatcherQueue.TryEnqueue(() =>
         {
@@ -200,8 +221,37 @@ public partial class App : Application
 
     private void OnIpcEvent(IpcEvent e)
     {
-        // Forward live sync-subprocess progress to the popover so
-        // ProgressBar + CurrentTrackLabel update during a sync.
+        // First, accumulate into App-level state so a popover opened
+        // mid-sync can be seeded with the latest progress instead of
+        // rendering "Preparing…" indefinitely.
+        switch (e)
+        {
+            case SummaryEvent s:
+                _progressTotal = s.TotalPlanned;
+                _progressCurrent = 0;
+                _currentTrackLabel = "";
+                _currentLogLine = $"{s.Add} to add, {s.Modify} to update, {s.Remove} to remove";
+                break;
+            case TrackStartEvent t:
+                _progressCurrent = t.Current;
+                _progressTotal = t.Total;
+                _currentTrackLabel = t.Label;
+                _currentLogLine = "";
+                break;
+            case HeaderEvent h:
+                _currentLogLine = $"Scanning {h.Source}";
+                break;
+            case LogEvent l:
+                _currentLogLine = l.Message;
+                break;
+            case FinishEvent:
+                _progressCurrent = 0;
+                _progressTotal = 0;
+                _currentTrackLabel = "";
+                _currentLogLine = "";
+                break;
+        }
+        // Then forward to an open popover so it animates in real time.
         DispatcherQueue.TryEnqueue(() => _popover?.ViewModel.ApplyIpcProgress(e));
     }
 
@@ -220,6 +270,22 @@ public partial class App : Application
             vm.SetDeviceLabel(LatestConfig?.Ipod?.Name, LatestConfig?.Ipod?.ModelLabel);
             if (LatestStatus is not null) vm.Update(LatestStatus);
             if (LatestHistory is not null) vm.ApplyHistory(LatestHistory);
+            // Replay accumulated sync progress so the user doesn't see
+            // "Preparing…" when the subprocess is already mid-apply.
+            // Order matters: ProgressTotal sets NoProgressYet, which
+            // controls whether "Preparing…" still renders.
+            if (LatestStatus?.State == "syncing" && _progressTotal > 0)
+            {
+                vm.ProgressTotal = _progressTotal;
+                vm.ProgressCurrent = _progressCurrent;
+                vm.CurrentTrackLabel = _currentTrackLabel;
+                vm.CurrentLogLine = _currentLogLine;
+            }
+            else if (LatestStatus?.State == "syncing" && !string.IsNullOrEmpty(_currentLogLine))
+            {
+                // Pre-summary phase: at least give the user a log line.
+                vm.CurrentLogLine = _currentLogLine;
+            }
             _popover = new PopoverWindow(vm, Daemon!);
             _popover.Closed += (_, _) => _popover = null;
             _popover.Activate();
@@ -266,16 +332,47 @@ public partial class App : Application
     {
         _wizardActive = true;
         UpdateTrayVisibility();
-        Window = new WizardWindow();
-        WindowHandle = WinRT.Interop.WindowNative.GetWindowHandle(Window);
-        Window.Closed += (_, _) =>
+        var wizard = new WizardWindow();
+        Window = wizard;
+        WindowHandle = WinRT.Interop.WindowNative.GetWindowHandle(wizard);
+
+        // Track whether the wizard was completed normally (Finish click on
+        // step 5 fires WizardFinished BEFORE the window closes). If the
+        // window closes any other way the user has bailed out of setup —
+        // exit the app cleanly rather than leaving a half-configured
+        // process holding a tray icon.
+        bool completedNormally = false;
+        wizard.ViewModel.WizardFinished += () => completedNormally = true;
+
+        wizard.Closed += (_, _) =>
         {
             Window = null;
             WindowHandle = IntPtr.Zero;
             _wizardActive = false;
-            UpdateTrayVisibility();
+            if (completedNormally)
+            {
+                UpdateTrayVisibility();
+                return;
+            }
+            // Same shutdown sequence as the tray Quit menu — try a graceful
+            // daemon stop then bail. Fire-and-forget on the UI dispatcher
+            // because Closed runs synchronously and we can't await here.
+            DispatcherQueue.TryEnqueue(async () => await ShutdownAppAsync());
         };
-        Window.Activate();
+        wizard.Activate();
+    }
+
+    private static async Task ShutdownAppAsync()
+    {
+        if (Daemon is not null)
+        {
+            try { await Daemon.SendAsync(new ShutdownCommand()); }
+            catch { /* daemon may already be dead */ }
+            await Daemon.DisposeAsync();
+        }
+        Router?.Stop();
+        Tray?.Dispose();
+        Environment.Exit(0);
     }
 
     private void OnSyncNowRequested()

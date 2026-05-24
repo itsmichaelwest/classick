@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="IpodSync_UI.Views.WizardSyncSettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel Padding="24,16,24,0" Spacing="12">
+        <TextBlock Text="Choose your sync settings"
+                   Style="{ThemeResource SubtitleTextBlockStyle}" />
+        <TextBlock TextWrapping="Wrap"
+                   MaxWidth="420"
+                   HorizontalAlignment="Left"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                   Text="ipod-sync can start with Windows to automatically sync music to your iPod whenever it's connected." />
+
+        <StackPanel Spacing="4" Margin="0,12,0,0">
+            <RadioButton GroupName="WizardSyncMode"
+                         Content="Automatic"
+                         IsChecked="{Binding IsAutomatic, Mode=TwoWay}" />
+            <TextBlock Text="Your iPod will automatically sync whenever it's plugged in"
+                       Margin="32,-6,0,8"
+                       TextWrapping="Wrap"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <StackPanel Orientation="Horizontal"
+                        Spacing="12"
+                        Margin="32,0,0,8">
+                <TextBlock Text="Sync frequency"
+                           VerticalAlignment="Center" />
+                <ComboBox SelectedValue="{Binding ScheduleMinutes, Mode=TwoWay}"
+                          SelectedValuePath="Tag"
+                          IsEnabled="{Binding IsAutomatic}"
+                          MinWidth="160">
+                    <ComboBoxItem Content="Every 15 minutes">
+                        <ComboBoxItem.Tag><x:Int32>15</x:Int32></ComboBoxItem.Tag>
+                    </ComboBoxItem>
+                    <ComboBoxItem Content="Every 30 minutes">
+                        <ComboBoxItem.Tag><x:Int32>30</x:Int32></ComboBoxItem.Tag>
+                    </ComboBoxItem>
+                    <ComboBoxItem Content="Every hour">
+                        <ComboBoxItem.Tag><x:Int32>60</x:Int32></ComboBoxItem.Tag>
+                    </ComboBoxItem>
+                    <ComboBoxItem Content="Every 4 hours">
+                        <ComboBoxItem.Tag><x:Int32>240</x:Int32></ComboBoxItem.Tag>
+                    </ComboBoxItem>
+                    <ComboBoxItem Content="Once a day">
+                        <ComboBoxItem.Tag><x:Int32>1440</x:Int32></ComboBoxItem.Tag>
+                    </ComboBoxItem>
+                </ComboBox>
+            </StackPanel>
+
+            <RadioButton GroupName="WizardSyncMode"
+                         Content="Manual"
+                         IsChecked="{Binding IsManual, Mode=TwoWay}" />
+            <TextBlock Text="You'll need to start each sync manually from the tray"
+                       Margin="32,-6,0,4"
+                       TextWrapping="Wrap"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+
+        <CheckBox Content="Launch ipod-sync on startup"
+                  IsChecked="{Binding AutostartWithWindows, Mode=TwoWay}"
+                  Margin="0,12,0,0" />
+
+        <TextBlock Text="{Binding ScanError}"
+                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                   TextWrapping="Wrap"
+                   Visibility="{Binding HasScanError, Converter={StaticResource BoolToVis}}" />
+    </StackPanel>
+</Page>

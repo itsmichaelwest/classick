@@ -4,13 +4,21 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:IpodSync_UI"
-    xmlns:tb="using:H.NotifyIcon">
+    xmlns:tb="using:H.NotifyIcon"
+    xmlns:conv="using:IpodSync_UI.Converters">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
                 <!-- Other merged dictionaries here -->
             </ResourceDictionary.MergedDictionaries>
+
+            <!--
+                Shared converter so XAML can bind bool → Visibility / string →
+                Visibility (via the HasX bool wrappers on ViewModels) without
+                a code-behind helper on every Window.
+            -->
+            <conv:BoolToVisibilityConverter x:Key="BoolToVis" />
 
             <!--
                 Quit command surfaced through the tray menu. Exposed as an

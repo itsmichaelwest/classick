@@ -23,6 +23,13 @@ pub enum OrchestratorOutcome {
 
 /// Build the command to spawn. Extracted so tests can verify args
 /// without actually spawning a process.
+///
+/// `kill_on_drop(true)` is load-bearing: if the orchestrator task is
+/// dropped (daemon shutdown, runtime teardown, panic), tokio's Child
+/// Drop runs TerminateProcess on the subprocess so it doesn't outlive
+/// its parent. Without it, a graceful daemon Shutdown leaves an
+/// orphaned sync subprocess transcoding for hours and holding ffmpeg
+/// children — observed in the wild on 2026-05-24.
 pub fn build_command(exe: &std::path::Path, drive: &str) -> Command {
     let mut cmd = Command::new(exe);
     cmd.arg("--ipc-mode")
@@ -31,7 +38,8 @@ pub fn build_command(exe: &std::path::Path, drive: &str) -> Command {
         .arg(drive)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
     cmd
 }
 

@@ -139,10 +139,11 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     // by start_sync_session; taken + sent by handle_client_command's
     // CancelSync arm; cleared in handle_internal_event after completion.
     let mut cancel_tx_holder: Option<oneshot::Sender<()>> = None;
+    let mut configured_serial = configured_serial;
 
     tracing::info!("daemon: ready (configured_serial={configured_serial:?})");
 
-    loop {
+    let exit_reason: ExitReason = loop {
         tokio::select! {
             biased;
 
@@ -151,7 +152,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     tracing::info!("daemon: command channel closed; exiting");
                     return Ok(());
                 };
-                handle_client_command(
+                let should_exit = handle_client_command(
                     client_cmd,
                     &history,
                     &config_path,
@@ -161,8 +162,9 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &spawn_sync,
                     &internal_tx,
                     &mut cancel_tx_holder,
-                    &configured_serial,
+                    &mut configured_serial,
                 );
+                if should_exit { break ExitReason::Shutdown; }
             }
 
             device_event = device_rx.recv() => {
@@ -204,7 +206,9 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
             }
 
             _ = scheduler.tick() => {
-                if connected.is_some() && state.is_idle() {
+                // Scheduled syncs also honour the user's auto/manual choice;
+                // schedule_minutes is moot when the user opted into manual.
+                if connected.is_some() && state.is_idle() && auto_sync_enabled(&config_path) {
                     if let Some(drive) = connected.as_ref().map(|d| d.drive.clone()) {
                         start_sync_session(
                             SyncTrigger::Scheduled,
@@ -220,7 +224,53 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                 }
             }
         }
+    };
+
+    // Graceful shutdown: if a sync is in flight, give the orchestrator a
+    // bounded window to drain (it writes Cancel to subprocess stdin and
+    // force-kills after SYNC_KILL_GRACE). The kill_on_drop flag on the
+    // child Command is the backstop — when this function returns and the
+    // tokio runtime tears down, the orchestrator task is dropped and any
+    // still-living subprocess gets TerminateProcess'd. Without this drain,
+    // the OS would yank the subprocess mid-itdb_write and risk corrupting
+    // the iPod's iTunesDB.
+    match exit_reason {
+        ExitReason::Shutdown => {
+            if cancel_tx_holder.is_none() && state.is_idle() {
+                tracing::info!("daemon: clean shutdown — no in-flight sync to drain");
+            } else {
+                if let Some(tx) = cancel_tx_holder.take() {
+                    let _ = tx.send(());
+                    tracing::info!("daemon: signalled in-flight sync to cancel before exit");
+                }
+                let drain = tokio::time::timeout(
+                    crate::daemon::SHUTDOWN_DRAIN_BUDGET,
+                    async {
+                        while let Some(internal) = internal_rx.recv().await {
+                            if matches!(internal, InternalEvent::SyncCompleted { .. }) {
+                                return;
+                            }
+                        }
+                    },
+                ).await;
+                match drain {
+                    Ok(()) => tracing::info!("daemon: in-flight sync drained cleanly"),
+                    Err(_) => tracing::warn!(
+                        "daemon: shutdown drain timed out after {:?}; subprocess will be killed by kill_on_drop",
+                        crate::daemon::SHUTDOWN_DRAIN_BUDGET,
+                    ),
+                }
+            }
+        }
     }
+    Ok(())
+}
+
+/// Reason we exited the main select loop. Currently only Shutdown; the
+/// enum exists so a future channel-closed / panic-recovery branch can
+/// take a different drain path.
+enum ExitReason {
+    Shutdown,
 }
 
 /// Apply a sync's outcome to state + history, then broadcast a fresh
@@ -317,6 +367,18 @@ fn handle_internal_event(
     }
 }
 
+/// True when `daemon.subsequent_sync_mode` is set to `auto_apply` (or the
+/// config simply isn't there yet, in which case the daemon's
+/// `DaemonSettings::default()` already chooses `AutoApply`). When the user
+/// has explicitly picked Manual mode in the wizard or settings, plug-in
+/// and scheduled triggers no-op and the only way to start a sync is the
+/// tray's Sync Now action.
+fn auto_sync_enabled(config_path: &std::path::Path) -> bool {
+    let Some(cfg) = config_file::load(config_path).ok().flatten() else { return true };
+    let Some(daemon) = cfg.daemon else { return true };
+    daemon.subsequent_sync_mode == config_file::SyncMode::AutoApply
+}
+
 fn handle_device_event(
     event: DeviceEvent,
     connected: &mut Option<DetectedIpod>,
@@ -370,8 +432,13 @@ fn handle_device_event(
                 });
             });
 
-            // Auto-sync only fires for the configured serial.
-            if configured_serial == Some(ipod.serial.as_str()) && state.is_idle() {
+            // Auto-sync only fires for the configured serial AND when the
+            // user has opted into automatic mode. Manual mode means they
+            // want to drive sync explicitly via the tray's Sync Now action.
+            if configured_serial == Some(ipod.serial.as_str())
+                && state.is_idle()
+                && auto_sync_enabled(config_path)
+            {
                 start_sync_session(
                     SyncTrigger::PlugIn,
                     ipod.serial.clone(),
@@ -521,6 +588,10 @@ fn current_storage(connected: &Option<DetectedIpod>) -> Option<StorageInfo> {
         .and_then(|d| device_storage::query_storage(&d.drive))
 }
 
+/// Handle one client command. Returns `true` iff the daemon should exit
+/// its main loop (currently only the Shutdown command sets this — the
+/// outer loop then runs the graceful-drain sequence so the in-flight
+/// sync subprocess doesn't get yanked mid-write).
 fn handle_client_command(
     ClientCommand { client_id, command, reply }: ClientCommand,
     history: &HistoryService,
@@ -531,8 +602,8 @@ fn handle_client_command(
     spawn_sync: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
-    configured_serial: &Option<String>,
-) {
+    configured_serial: &mut Option<String>,
+) -> bool {
     tracing::info!("daemon: client {client_id} command: {command:?}");
     match command {
         DaemonCommand::GetStatus => {
@@ -574,8 +645,14 @@ fn handle_client_command(
             }
             if let Err(e) = config_file::save(config_path, &current) {
                 tracing::error!("daemon: failed to save config: {e}");
-                return;
+                return false;
             }
+            // Mirror the persisted ipod identity into the in-memory
+            // `configured_serial` so subsequent plug-in / TriggerSync
+            // checks see the post-wizard state without needing a daemon
+            // restart. Without this, the wizard's first SaveConfig is
+            // invisible to the daemon's auto-sync gate.
+            *configured_serial = current.ipod_identity.as_ref().map(|id| id.serial.clone());
             let _ = event_tx.send(build_config_update(Some(current)));
         }
         DaemonCommand::ForgetIpod => {
@@ -583,8 +660,9 @@ fn handle_client_command(
             current.ipod_identity = None;
             if let Err(e) = config_file::save(config_path, &current) {
                 tracing::error!("daemon: failed to save config after forget_ipod: {e}");
-                return;
+                return false;
             }
+            *configured_serial = None;
             tracing::info!("daemon: client {client_id} cleared the persisted iPod identity");
             let _ = event_tx.send(build_config_update(Some(current)));
             // Re-announce the currently-attached device (if any) so a
@@ -613,17 +691,17 @@ fn handle_client_command(
                 let _ = reply.send(DaemonEvent::SyncRejected {
                     reason: SyncRejectReason::AlreadySyncing,
                 });
-                return;
+                return false;
             }
             let Some(device) = connected.as_ref() else {
                 let _ = reply.send(DaemonEvent::SyncRejected { reason: SyncRejectReason::NoIpod });
-                return;
+                return false;
             };
             if configured_serial.is_none() {
                 let _ = reply.send(DaemonEvent::SyncRejected {
                     reason: SyncRejectReason::NotConfigured,
                 });
-                return;
+                return false;
             }
             let trigger = match trigger_source {
                 TriggerSource::Manual => SyncTrigger::Manual,
@@ -677,9 +755,10 @@ fn handle_client_command(
         }
         DaemonCommand::Shutdown => {
             tracing::info!("daemon: shutdown requested by client {client_id}; exiting loop");
-            std::process::exit(0);
+            return true;
         }
     }
+    false
 }
 
 fn build_config_update(cfg: Option<PersistedConfig>) -> DaemonEvent {

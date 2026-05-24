@@ -55,3 +55,10 @@ pub const DEVICE_EVENT_CHANNEL_CAPACITY: usize = 32;
 /// command. The subprocess gets `cancel\n` on stdin, then this long to exit
 /// cleanly before we hard-kill it.
 pub const SYNC_KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long the daemon waits, after a graceful Shutdown command, for an
+/// in-flight sync to drain (cancel → write iTunesDB → exit cleanly) before
+/// returning from the main loop. Must be larger than `SYNC_KILL_GRACE` so
+/// the orchestrator's own bounded_kill has time to fire first; the +3s
+/// padding covers libgpod's final `itdb_write` on a large library.
+pub const SHUTDOWN_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
