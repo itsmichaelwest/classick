@@ -81,7 +81,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     }
 
     // Pre-resolve gates: ffmpeg, iPod mount, source walk. Each runs its own
-    // Retry/Abort (or Retry/Change/Abort) prompt loop on failure.
+    // Retry/Abort (or Retry/Change/Abort) prompt loop on failure. The iTunes
+    // guard runs first because it's cheap and refusing early avoids any
+    // wasted ffprobe/walk work if the user has iTunes open.
+    preflight::verify_itunes_not_running(progress, decision_rx)?;
     preflight::verify_ffmpeg(config, progress, decision_rx)?;
     // Refalac is opt-in via --encoder refalac; only probe when the user asked
     // for it (per Phase 3 addendum Change 4). The resolved version string is
@@ -284,6 +287,29 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         unsafe {
             let device_ptr = (*db.as_ptr()).device;
             device::set_firewire_guid(device_ptr, &guid)?;
+        }
+
+        // Defensive backup of iTunesDB before we touch it. If a sync
+        // crashes mid-write and corrupts the live DB, the user can
+        // restore from `iTunesDB.ipod-sync-backup`. See
+        // `crate::ipod::db::backup_itunesdb` for the why.
+        if let Err(e) = crate::ipod::db::backup_itunesdb(Path::new(&mount)) {
+            progress.log(format!(
+                "Pre-sync DB backup failed: {e}; sync will proceed without a fresh backup."
+            ));
+        }
+
+        // Reconcile DB with disk before the diff so we see a 1:1
+        // baseline. Cleans up orphan .m4a files from previous crashed
+        // syncs AND removes DB entries whose files were deleted out
+        // from under us. Cheap (~1s for a 1,400-track library) and
+        // eliminates a whole class of compounding corruption.
+        let report = db.reconcile_with_disk(Path::new(&mount));
+        if !report.is_clean() {
+            progress.log(format!(
+                "Pre-sync reconcile: removed {} orphan file(s), {} dangling DB ref(s); {} orphan deletion(s) failed.",
+                report.orphans_deleted, report.dangling_removed, report.orphans_failed,
+            ));
         }
 
         let mut i = 0usize;

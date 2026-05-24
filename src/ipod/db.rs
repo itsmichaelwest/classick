@@ -300,6 +300,121 @@ impl OwnedDb {
         }
         out
     }
+
+    /// Reconcile the in-memory iTunesDB with the iPod's on-disk
+    /// `iPod_Control\Music\F**\` folder. Two failure modes this fixes:
+    ///
+    /// 1. **Orphans on disk** — files no track in the DB references.
+    ///    Created when a previous sync called `itdb_cp_track_to_ipod`
+    ///    (which copies the file AND adds to in-memory DB) but died
+    ///    before `db.write()` persisted. Deleted from disk.
+    /// 2. **Dangling DB refs** — DB tracks whose `ipod_path` points to
+    ///    a file that no longer exists. Created when files are deleted
+    ///    behind libgpod's back (the user, a previous botched sync,
+    ///    iTunes Restore that wiped the partition). Removed from the
+    ///    DB via `delete_track` (its `remove_file` step is a no-op
+    ///    when the file is already gone).
+    ///
+    /// Both classes leave the system in an internally-inconsistent
+    /// state that compounds across runs. Sweeping at sync start
+    /// guarantees the diff sees a 1:1 baseline.
+    ///
+    /// The caller is expected to invoke this BEFORE the action-plan
+    /// diff (otherwise the diff sees stale state) and AFTER
+    /// `set_firewire_guid` (so subsequent `db.write()` is signed).
+    /// Mutations only land on disk when the caller eventually calls
+    /// `db.write()`; until then, DB removals are in-memory only and
+    /// the per-orphan file deletions are independent of the DB write.
+    pub fn reconcile_with_disk(&self, ipod_mount: &Path) -> ReconcileReport {
+        let music_root = ipod_mount.join("iPod_Control").join("Music");
+
+        // Set of relpaths the DB currently references (e.g.
+        // `iPod_Control\Music\F38\libgpod794620.m4a`).
+        let db_paths: std::collections::HashSet<String> = self
+            .list_tracks_for_rebuild()
+            .into_iter()
+            .map(|t| t.ipod_relpath)
+            .filter(|p| !p.is_empty())
+            .collect();
+
+        // Set of relpaths actually present under Music\. Same encoding
+        // (Windows backslashes, relative to the mount root) so the two
+        // sets are comparable.
+        let disk_paths: std::collections::HashSet<String> = walkdir::WalkDir::new(&music_root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter_map(|e| {
+                e.path()
+                    .strip_prefix(ipod_mount)
+                    .ok()
+                    .map(|p| p.to_string_lossy().replace('/', "\\"))
+            })
+            .collect();
+
+        // Orphans = on disk, not in DB. Delete the file directly.
+        let mut orphans_deleted = 0;
+        let mut orphans_failed = 0;
+        for relpath in disk_paths.difference(&db_paths) {
+            let full = ipod_mount.join(relpath);
+            match std::fs::remove_file(&full) {
+                Ok(()) => {
+                    tracing::debug!("reconcile: deleted orphan {}", full.display());
+                    orphans_deleted += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "reconcile: failed to delete orphan {}: {e}",
+                        full.display()
+                    );
+                    orphans_failed += 1;
+                }
+            }
+        }
+
+        // Dangling = in DB, file missing. Collect dbids first to avoid
+        // mutation-during-iteration on the GList that
+        // `list_tracks_for_rebuild` walked. Then `delete_track` each.
+        let dangling_dbids: Vec<u64> = self
+            .list_tracks_for_rebuild()
+            .into_iter()
+            .filter(|t| !t.ipod_relpath.is_empty() && !disk_paths.contains(&t.ipod_relpath))
+            .map(|t| t.dbid)
+            .collect();
+        let mut dangling_removed = 0;
+        for dbid in dangling_dbids {
+            if self.delete_track(dbid).is_ok() {
+                tracing::debug!("reconcile: removed dangling DB ref dbid={dbid}");
+                dangling_removed += 1;
+            }
+        }
+
+        ReconcileReport {
+            orphans_deleted,
+            orphans_failed,
+            dangling_removed,
+        }
+    }
+}
+
+/// Result of `OwnedDb::reconcile_with_disk`. All counts are zero on a
+/// healthy iPod where DB and disk agree.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReconcileReport {
+    /// On-disk files removed because no DB track referenced them.
+    pub orphans_deleted: usize,
+    /// Orphans we couldn't remove (file in use, permissions, etc.).
+    pub orphans_failed: usize,
+    /// DB tracks removed because their referenced file was gone.
+    pub dangling_removed: usize,
+}
+
+impl ReconcileReport {
+    /// True when nothing was wrong; useful for the apply_loop's "log a
+    /// summary line only if something happened" pattern.
+    pub fn is_clean(&self) -> bool {
+        self.orphans_deleted == 0 && self.orphans_failed == 0 && self.dangling_removed == 0
+    }
 }
 
 impl Drop for OwnedDb {
@@ -308,6 +423,65 @@ impl Drop for OwnedDb {
             ffi::itdb_free(self.0);
         }
     }
+}
+
+/// File name (under `iPod_Control\iTunes\`) we copy `iTunesDB` to
+/// before each sync session, providing a known-good restore point if
+/// the sync crashes mid-write and corrupts the live DB.
+///
+/// Strategy:
+///   * Empirically, libgpod's `itdb_write` uses MSVCRT `rename` which
+///     on Windows 10+ resolves to `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`
+///     — atomic at the FS layer.
+///   * BUT the path isn't 100% audited (libgpod is many years of C),
+///     and we've already had to patch one Windows-rename quirk for
+///     `Play Counts` → `Play Counts.bak`. Defense in depth.
+///   * One backup per sync session (NOT per checkpoint) is enough —
+///     each new session restores from a clean prior-session state.
+///   * Recovery is manual today: if `iTunesDB` is corrupted, copy this
+///     file over it. A future `--restore-db-backup` subcommand can
+///     automate that; for now the LEARNINGS entry documents the steps.
+pub const ITUNESDB_BACKUP_NAME: &str = "iTunesDB.ipod-sync-backup";
+
+/// Make a session-start backup of `iTunesDB` at
+/// `iPod_Control\iTunes\iTunesDB.ipod-sync-backup`. No-op when there
+/// is no iTunesDB to copy (fresh-from-iTunes-Restore device — there's
+/// nothing to lose yet). Returns `Ok(())` on success or if the source
+/// is missing; logs a warning and returns `Ok(())` on copy failure so
+/// a backup write hiccup doesn't block a healthy sync.
+pub fn backup_itunesdb(ipod_mount: &Path) -> std::io::Result<()> {
+    let src = crate::ipod::layout::itunes_db_path(ipod_mount);
+    if !src.exists() {
+        return Ok(());
+    }
+    let dst = ipod_mount
+        .join("iPod_Control")
+        .join("iTunes")
+        .join(ITUNESDB_BACKUP_NAME);
+    // Copy via a `.tmp` intermediate + rename so an interrupted backup
+    // copy doesn't itself corrupt the prior backup. On Windows 10+ the
+    // rename is MoveFileExW(REPLACE_EXISTING) — atomic.
+    let tmp = dst.with_extension("ipod-sync-backup.tmp");
+    match std::fs::copy(&src, &tmp) {
+        Ok(_) => {
+            if let Err(e) = std::fs::rename(&tmp, &dst) {
+                tracing::warn!(
+                    "backup_itunesdb: rename {} -> {} failed: {e}",
+                    tmp.display(),
+                    dst.display()
+                );
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "backup_itunesdb: copy {} -> {} failed: {e}; sync will proceed without a fresh backup",
+                src.display(),
+                tmp.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Read the iPod's user-set name (the master playlist's `name` field

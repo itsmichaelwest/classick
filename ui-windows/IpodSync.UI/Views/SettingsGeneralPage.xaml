@@ -108,6 +108,15 @@
                 </tk:SettingsCard>
             </StackPanel>
 
+            <!-- ============ iTunes interop notice ============ -->
+            <TextBlock Text="iTunes" Style="{ThemeResource BodyStrongTextBlockStyle}" Margin="0,12,0,0" />
+            <tk:SettingsCard Header="Don't use iTunes with this iPod"
+                             Description="iTunes will refuse this iPod's library (&quot;cannot read contents&quot;) once ipod-sync has written to it. That's expected — never click Restore in iTunes; your iPod is fine. Keep iTunes closed before any sync.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE7BA;" />
+                </tk:SettingsCard.HeaderIcon>
+            </tk:SettingsCard>
+
             <!-- ============ About section ============ -->
             <TextBlock Text="About" Style="{ThemeResource BodyStrongTextBlockStyle}" Margin="0,12,0,0" />
             <tk:SettingsCard Header="{x:Bind ViewModel.About.AppName, Mode=OneWay}"

@@ -2,6 +2,29 @@
 
 Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+## iTunes will always reject a libgpod-managed iPod (2026-05-24)
+
+- **Fundamental:** libgpod's iTunesDB writes are byte-compatible with what the iPod firmware accepts (Phase 1 gate proved this) but the signature does NOT match Apple's stricter check. iTunes 12.x on Windows will pop a "cannot read contents of the iPod, please Restore" dialog whenever it sees a libgpod-managed device. **This is not a bug we can fix without reverse-engineering Apple's signing algorithm exactly.**
+- **Recovery from the panic-Restore loop:** the user hit this on 2026-05-24, factory-restored from iTunes, lost ~30 min of sync work. The right answer for them was "ignore the dialog and close iTunes," not Restore.
+- **Mitigations shipped to keep users out of this trap:**
+  1. **iTunes-running guard** (`preflight::verify_itunes_not_running`) — refuses to start a sync if `iTunes.exe` is running, with a clear "close iTunes, do NOT click Restore" message and a Retry option. Detects `AppleMobileDeviceService.exe` too but only as advisory (some users keep it for iPhone syncing). PowerShell `Get-Process` shell-out, no new deps.
+  2. **Warning copy in wizard's Done page + Settings General page** — explains the iTunes-rejection behavior up-front so the user knows the "cannot read" dialog is expected and how to respond.
+
+## DB-vs-disk reconciliation at sync start (2026-05-24)
+
+- **What it covers:** two pre-existing corruption classes that compounded across crashed syncs:
+  - **Orphans on disk** — files under `iPod_Control\Music\F**\` that no DB track references (left by an `itdb_cp_track_to_ipod` call whose process died before `db.write()`).
+  - **Dangling DB refs** — tracks in the DB whose `ipod_path` points to files that no longer exist (e.g. user deleted with Explorer, third-party tool, iTunes Restore that wiped the partition).
+- **Fix:** `OwnedDb::reconcile_with_disk(mount)` walks both sides into HashSets and: deletes the set-difference orphans from disk; calls `delete_track` for the set-difference dangling DB entries (which also removes them from the in-memory DB). Runs from `apply_loop.rs` after `set_firewire_guid` and before the diff, so the action plan sees a 1:1-consistent baseline. Cheap (~1s on a 1,400-track library — bounded by walkdir over the F-folders).
+- **Why both directions matter:** orphan-only cleanup leaves a clean disk but a DB with dangling refs that iTunes/iPod firmware then complains about. DB-cleanup-only leaves orphans wasting space. The single bidirectional sweep is the only state that's actually coherent.
+
+## iTunesDB session-start backup as crash defense (2026-05-24)
+
+- **Concern:** libgpod's `itdb_write` uses MSVCRT `rename` (confirmed via `strings gpod.dll` — symbols include `__imp_rename`, `itdb_rename_files`, `ITDB_FILE_ERROR_RENAME`). On Windows 10+ MSVCRT rename is `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` which IS atomic. But the path isn't 100% audited, and we've already had to patch one Windows-rename quirk for `Play Counts` → `Play Counts.bak`. Worth defense in depth.
+- **What we ship:** `crate::ipod::db::backup_itunesdb(mount)` copies the current `iTunesDB` to `iPod_Control\iTunes\iTunesDB.ipod-sync-backup` via a `.tmp` intermediate + atomic rename. Called once per sync session (NOT per checkpoint — one good backup per session is enough). If a sync crash corrupts the live DB, manual recovery is `copy iTunesDB.ipod-sync-backup iTunesDB`. A future `--restore-db-backup` subcommand could automate this; for now the manual command is documented here.
+- **Cost:** one ~10 KB–2 MB file copy per sync session. Negligible.
+- **What this does NOT cover:** mid-checkpoint corruption (an in-flight write that lands a partial DB). For that we'd need to either (a) checkpoint-write to `iTunesDB.tmp` and rename ourselves rather than trust libgpod, or (b) keep a rolling N-deep backup. Both are larger projects; the session-start backup catches the common "crash before any successful db.write" case which is what bit the user.
+
 ## Periodic db.write checkpoints bound the orphan-on-crash window (2026-05-24)
 
 - **Problem (before fix):** `apply_loop.rs` only called `db.write()` + `manifest::save_atomic` at the very end. A daemon crash / USB unplug / power loss / hard-kill mid-sync left every track copied so far via `itdb_cp_track_to_ipod` as an orphan — present under `iPod_Control\Music\F**` but unreferenced by the iTunesDB on disk. The graceful-Shutdown and graceful-Cancel fixes only cover *signalled* exits; everything else still produced orphan piles.

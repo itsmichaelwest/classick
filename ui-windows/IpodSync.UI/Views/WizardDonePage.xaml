@@ -17,5 +17,21 @@
                    TextAlignment="Center"
                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                    Text="ipod-sync will now start syncing your music. Since this is the first time, the process may take several minutes or even a few hours. You can always monitor progress from the tray icon." />
+
+        <Border Background="{ThemeResource SystemFillColorCautionBackgroundBrush}"
+                BorderBrush="{ThemeResource SystemFillColorCautionBrush}"
+                BorderThickness="1"
+                CornerRadius="4"
+                Padding="12,10"
+                Margin="0,8,0,0">
+            <StackPanel Spacing="4">
+                <TextBlock Text="Heads-up about iTunes"
+                           FontWeight="SemiBold"
+                           FontSize="13" />
+                <TextBlock TextWrapping="Wrap"
+                           FontSize="12"
+                           Text="Once ipod-sync has touched your iPod, iTunes will refuse to recognize it (&quot;cannot read the contents&quot;) and offer to Restore. Don't click Restore — your iPod is fine, iTunes just doesn't recognize this DB format. Close iTunes and keep using ipod-sync." />
+            </StackPanel>
+        </Border>
     </StackPanel>
 </Page>

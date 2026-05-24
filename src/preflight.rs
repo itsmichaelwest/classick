@@ -53,6 +53,141 @@ pub fn verify_ffmpeg(
     }
 }
 
+/// Refuse to sync if iTunes (or its mobile-device helper) is running.
+/// Background: libgpod's signed iTunesDB writes are byte-compatible with
+/// what the iPod firmware accepts, but iTunes itself uses a stricter
+/// signature check and will (a) reject the iPod with a "cannot read
+/// contents — please Restore" dialog if it polls the device while
+/// libgpod has been touching it, and (b) race us for exclusive access
+/// to the iPod's pipe/file handles during a sync, producing partial
+/// writes. Both failure modes have bitten the user; both are eliminated
+/// by simply not letting the two coexist on the same machine while a
+/// sync is in flight. We don't kill iTunes — we tell the user, give
+/// them a Retry, and let them choose to close it. Windows-only because
+/// iTunes is Windows/macOS, and macOS handling is left to the
+/// macOS-port-someday work.
+///
+/// Side note on Apple's services: `AppleMobileDeviceService` is the
+/// long-running device daemon iTunes installs. It owns the iPod's
+/// IOCTL pipe even when iTunes itself is closed and is the more
+/// invasive of the two — we surface it in the message but don't
+/// refuse on its presence alone (some users keep it running for
+/// iPhone/iPad syncing and forcing them to disable it system-wide is
+/// hostile). Only `iTunes.exe` is hard-fail.
+#[cfg(windows)]
+pub fn verify_itunes_not_running(
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<()> {
+    loop {
+        let conflicts = detect_apple_processes();
+        let blocking = conflicts.iter().filter(|p| p.is_blocking).collect::<Vec<_>>();
+        if blocking.is_empty() {
+            return Ok(());
+        }
+        let names = blocking
+            .iter()
+            .map(|p| format!("{} (PID {})", p.name, p.pid))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let advisory = if conflicts.iter().any(|p| !p.is_blocking) {
+            let advisory_names = conflicts
+                .iter()
+                .filter(|p| !p.is_blocking)
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "\n\nAlso detected (not blocking, but may cause flaky sync): {}.",
+                advisory_names
+            )
+        } else {
+            String::new()
+        };
+        let msg = format!(
+            "Cannot sync while iTunes is running.\n\n\
+             Detected: {names}.\n\n\
+             iTunes and ipod-sync both want exclusive access to the iPod.\n\
+             If iTunes auto-launched on plug-in, close it (do NOT click\n\
+             Restore if it asks — your iPod is fine).{advisory}\n\n\
+             Choose:"
+        );
+        let outcome = await_prompt(
+            progress,
+            decision_rx,
+            msg,
+            &["Retry (after closing iTunes)", "Abort"],
+            &[PromptOutcome::Retry, PromptOutcome::Abort],
+        )?;
+        match outcome {
+            PromptOutcome::Retry => continue,
+            _ => return Err(anyhow!("iTunes is running; aborted")),
+        }
+    }
+}
+
+/// Non-Windows no-op stub so the apply_loop call site doesn't need cfg
+/// guards. macOS port: implement a `pgrep -x iTunes` equivalent later.
+#[cfg(not(windows))]
+pub fn verify_itunes_not_running(
+    _progress: &Progress,
+    _decision_rx: &Receiver<Decision>,
+) -> Result<()> {
+    Ok(())
+}
+
+/// One Apple-side process whose presence affects sync safety. `is_blocking`
+/// is true when running it concurrently with a sync is known to corrupt
+/// state (iTunes proper). False means "advisory, mention it" (the daemon).
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+struct AppleProcess {
+    name: String,
+    pid: u32,
+    is_blocking: bool,
+}
+
+/// Enumerate `iTunes.exe` and `AppleMobileDeviceService.exe`. Uses the
+/// same `Get-CimInstance` shell-out pattern as `recover_ipod_info_from_usb`
+/// to avoid pulling in a process-enumeration crate for one preflight call.
+/// If the shell-out itself fails (PowerShell missing, permissions), we
+/// log and return empty — better to let the sync proceed than block on
+/// a faulty diagnostic.
+#[cfg(windows)]
+fn detect_apple_processes() -> Vec<AppleProcess> {
+    let script = "Get-Process -ErrorAction SilentlyContinue iTunes,AppleMobileDeviceService | \
+                  ForEach-Object { \"$($_.Name)|$($_.Id)\" }";
+    let out = match std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            tracing::warn!(
+                "preflight: PowerShell exited {:?} probing iTunes; skipping check. stderr: {}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::warn!("preflight: failed to spawn PowerShell for iTunes check: {e}");
+            return Vec::new();
+        }
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (name, pid) = line.split_once('|')?;
+            let pid: u32 = pid.trim().parse().ok()?;
+            let name = name.trim().to_string();
+            let is_blocking = name.eq_ignore_ascii_case("iTunes");
+            Some(AppleProcess { name, pid, is_blocking })
+        })
+        .collect()
+}
+
 /// Loop on `transcode::verify_refalac_available` until refalac64 is reachable
 /// or the user aborts. Only invoked when `config.encoder == EncoderChoice::Refalac`
 /// (caller's responsibility — default ffmpeg encoder doesn't need this probe).
