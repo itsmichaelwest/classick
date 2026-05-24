@@ -1,5 +1,6 @@
 //! ffprobe metadata extraction + ffmpeg FLAC→ALAC transcoding.
 
+use crate::windows_proc::NoConsoleWindow;
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -164,6 +165,7 @@ pub fn probe(src: &Path, ffmpeg_path: &Path) -> Result<ProbeOutput> {
     let out = Command::new(&ffprobe)
         .args(["-loglevel", "error", "-of", "json", "-show_format", "-show_streams"])
         .arg(src)
+        .no_console()
         .output()
         .map_err(|e| anyhow!("failed to spawn {} (is it on PATH?): {e}", ffprobe.display()))?;
     if !out.status.success() {
@@ -187,6 +189,7 @@ pub fn transcode_to_alac(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<(
     let status = Command::new(ffmpeg_path)
         .args(ffmpeg_args(src, dst))
         .stdin(Stdio::null())
+        .no_console()
         .status()
         .map_err(|e| anyhow!("failed to spawn {} (is it on PATH?): {e}", ffmpeg_path.display()))?;
     if !status.success() {
@@ -207,6 +210,7 @@ pub fn transcode_to_alac(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<(
 pub fn verify_refalac_available(refalac_path: &Path) -> Result<String> {
     let output = Command::new(refalac_path)
         .arg("--help")
+        .no_console()
         .output()
         .with_context(|| {
             format!(
@@ -243,7 +247,7 @@ pub fn verify_refalac_available(refalac_path: &Path) -> Result<String> {
 pub fn verify_tools_available(ffmpeg_path: &Path) -> Result<()> {
     let ffprobe = ffprobe_path_for(ffmpeg_path);
     for (label, tool) in [("ffmpeg", ffmpeg_path.to_path_buf()), ("ffprobe", ffprobe)] {
-        let r = Command::new(&tool).arg("-version").output();
+        let r = Command::new(&tool).arg("-version").no_console().output();
         match r {
             Ok(o) if o.status.success() => {}
             Ok(o) => return Err(anyhow!(
@@ -453,7 +457,7 @@ pub fn transcode_via_refalac(
     ffmpeg.arg(src);
     ffmpeg.args(["-vn", "-acodec", "pcm_s16le"]);
     ffmpeg.arg(&temp_wav);
-    ffmpeg.stdin(Stdio::null());
+    ffmpeg.stdin(Stdio::null()).no_console();
     let ffmpeg_out = ffmpeg
         .output()
         .with_context(|| format!("ffmpeg decode of {} to WAV", src.display()))?;
@@ -475,6 +479,7 @@ pub fn transcode_via_refalac(
         refalac.arg(art);
     }
     refalac.arg(&temp_wav);
+    refalac.no_console();
     let refalac_out = refalac
         .output()
         .with_context(|| format!("refalac encode of {} to ALAC", temp_wav.display()));
@@ -503,6 +508,7 @@ pub fn extract_cover_art(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<(
         .args(["-an", "-c:v", "copy", "-map", "0:v:0", "-frames:v", "1"])
         .arg(dst)
         .stdin(Stdio::null())
+        .no_console()
         .status()
         .map_err(|e| anyhow!("failed to spawn {} for art extract: {e}", ffmpeg_path.display()))?;
     if !status.success() {

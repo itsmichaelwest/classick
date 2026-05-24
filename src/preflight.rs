@@ -157,8 +157,10 @@ struct AppleProcess {
 fn detect_apple_processes() -> Vec<AppleProcess> {
     let script = "Get-Process -ErrorAction SilentlyContinue iTunes,AppleMobileDeviceService | \
                   ForEach-Object { \"$($_.Name)|$($_.Id)\" }";
+    use crate::windows_proc::NoConsoleWindow;
     let out = match std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .no_console()
         .output()
     {
         Ok(o) if o.status.success() => o,

@@ -38,4 +38,5 @@ pub mod source;
 pub mod tags;
 pub mod transcode;
 pub mod try_with_prompt;
+pub mod windows_proc;
 pub mod wizard;

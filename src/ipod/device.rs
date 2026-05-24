@@ -214,8 +214,10 @@ fn recover_ipod_info_from_usb(drive_letter: char) -> Option<UsbIpodInfo> {
          Write-Output \"$diskPath|$usbPath\"",
         drive_letter
     );
+    use crate::windows_proc::NoConsoleWindow;
     let output = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .no_console()
         .output()
         .ok()?;
     if !output.status.success() { return None; }

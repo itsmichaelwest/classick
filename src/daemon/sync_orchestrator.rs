@@ -31,6 +31,7 @@ pub enum OrchestratorOutcome {
 /// orphaned sync subprocess transcoding for hours and holding ffmpeg
 /// children — observed in the wild on 2026-05-24.
 pub fn build_command(exe: &std::path::Path, drive: &str) -> Command {
+    use crate::windows_proc::NoConsoleWindow;
     let mut cmd = Command::new(exe);
     cmd.arg("--ipc-mode")
         .arg("--apply")
@@ -39,7 +40,12 @@ pub fn build_command(exe: &std::path::Path, drive: &str) -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true);
+        .kill_on_drop(true)
+        // Without CREATE_NO_WINDOW the sync subprocess gets its own
+        // freshly-allocated console window (the daemon is windowless
+        // when launched from the UI, so there's nothing to inherit).
+        // That console would flash on screen at every Sync Now click.
+        .no_console();
     cmd
 }
 

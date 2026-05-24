@@ -56,8 +56,10 @@ pub(crate) fn source_format_from_probe(probe: &ProbeOutput) -> String {
 /// encoder that wrote it. Returns Err if ffmpeg isn't spawnable. `ffmpeg_path`
 /// is the configured ffmpeg binary (F-21 / F-16).
 pub(crate) fn ffmpeg_version(ffmpeg_path: &std::path::Path) -> Result<String> {
+    use crate::windows_proc::NoConsoleWindow;
     let out = std::process::Command::new(ffmpeg_path)
         .args(["-hide_banner", "-version"])
+        .no_console()
         .output()
         .with_context(|| format!("invoking {} -version", ffmpeg_path.display()))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
