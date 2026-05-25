@@ -56,7 +56,7 @@
     building the UI.
   -->
   <ItemGroup>
-    <Content Include="..\..\target\release\ipod-sync.exe" Condition="Exists('..\..\target\release\ipod-sync.exe')">
+    <Content Include="..\..\..\target\release\ipod-sync.exe" Condition="Exists('..\..\..\target\release\ipod-sync.exe')">
       <Link>ipod-sync.exe</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -65,7 +65,7 @@
       target\release\ alongside ipod-sync.exe). Without these the core
       crashes immediately with "gpod.dll was not found".
     -->
-    <Content Include="..\..\target\release\*.dll" Condition="Exists('..\..\target\release\ipod-sync.exe')">
+    <Content Include="..\..\..\target\release\*.dll" Condition="Exists('..\..\..\target\release\ipod-sync.exe')">
       <Link>%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -78,8 +78,8 @@
   -->
   <Target Name="WarnIfCoreMissing" BeforeTargets="Build">
     <Warning
-      Condition="!Exists('..\..\target\release\ipod-sync.exe')"
-      Text="ipod-sync.exe not found at ..\..\target\release\. Run `cargo build` with the release flag from the repo root, then rebuild this project. The UI will start but show a 'core not found' dialog until the binary exists." />
+      Condition="!Exists('..\..\..\target\release\ipod-sync.exe')"
+      Text="ipod-sync.exe not found at ..\..\..\target\release\. Run `cargo build` with the release flag from the repo root, then rebuild this project. The UI will start but show a 'core not found' dialog until the binary exists." />
   </Target>
 
   <ItemGroup>

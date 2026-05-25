@@ -4,9 +4,9 @@ Native WinUI 3 / .NET 10 tray app for ipod-sync. Runs in the system tray, talks
 to the long-lived `ipod-sync.exe --daemon` over a named pipe, and surfaces
 device state, sync progress, settings, and a first-run wizard. The daemon in
 turn spawns `ipod-sync.exe --ipc-mode --apply` subprocesses to do the actual
-sync work — see `..\docs\ipc-protocol.md` for the JSON wire format.
+sync work — see `..\..\docs\ipc-protocol.md` for the JSON wire format.
 
-For repo-wide context (Rust core, layout, conventions), see `..\AGENTS.md`.
+For repo-wide context (Rust core, layout, conventions), see `..\..\AGENTS.md`.
 
 ## Prerequisites
 
@@ -30,7 +30,7 @@ dotnet build IpodSync.UI.slnx -c Release
 `ARM64` only — `AnyCPU` is intentionally absent because WinUI 3 needs an
 explicit RID for the WinAppSDK runtime.
 
-The UI csproj bundles `..\..\target\release\ipod-sync.exe` plus the libgpod
+The UI csproj bundles `..\..\..\target\release\ipod-sync.exe` plus the libgpod
 runtime DLLs as content, so they're copied next to `IpodSync.UI.exe` at build
 time and shipped inside the MSIX. Build the Rust core first or expect a
 "core not found" dialog at startup:
@@ -74,14 +74,14 @@ output directory at build time, so the dev loop and the packaged install both
 satisfy the "sibling to UI exe" probe.
 
 The named-pipe label is `\\.\pipe\ipod-sync`, set on the Rust side by
-`PROJECT_DIR` in `src/lib.rs` and mirrored on the UI side by
-`IpodSync.UI.Core.AppIdentity`. **These two MUST stay in sync** — the pipe
-label is the IPC contract.
+`PIPE_NAME` in `crates/ipod-sync/src/daemon/ipc_server.rs` and mirrored on
+the UI side by `IpodSync.UI.Core.AppIdentity`. **These two MUST stay in
+sync** — the pipe label is the IPC contract.
 
 ## Project layout
 
 ```
-ui-windows\
+ui\windows\
 ├── IpodSync.UI.slnx                  .NET 10 XML solution; x64 + ARM64
 ├── README.md                         (this file)
 │
@@ -175,7 +175,7 @@ touches the WinAppSDK module initializer.
   but the `winui-mvvm` template's packaged + debug-identity setup is what
   keeps `dotnet run` ergonomic; staying with it makes the future MSIX
   milestone smaller. Trade documented in
-  `..\docs\superpowers\specs\2026-05-24-phase-6-winui-app.md`.
+  `..\..\docs\superpowers\specs\2026-05-24-phase-6-winui-app.md`.
 - **Live UI changes need a real device.** Most VM logic is exercised by unit
   tests, but window positioning, tray theming, popover anchoring, and toast
   delivery only show their real behaviour against a running daemon with an

@@ -8,12 +8,13 @@ the specific area you're touching.
 Windows-native sync tool that copies a FLAC library to an iPod Classic,
 transcoding to ALAC on the fly. Two halves:
 
-1. **Rust core (`src/`)** — single self-contained `ipod-sync.exe`. Wraps
-   libgpod via FFI; spawns ffmpeg (or refalac) for transcode; writes the
+1. **Rust core (`crates/ipod-sync/`)** — single self-contained `ipod-sync.exe`.
+   Wraps libgpod via FFI; spawns ffmpeg (or refalac) for transcode; writes the
    iTunesDB. Runs in three modes: `--ipc-mode` (subprocess driven by a GUI),
    `--daemon` (long-lived tray companion), or interactive TUI (default when
-   stdout is a TTY).
-2. **WinUI 3 tray app (`ui-windows/`)** — .NET 10 desktop app. Lives in the
+   stdout is a TTY). Daemon mode compiles cross-platform (Unix-socket
+   transport on non-Windows); the device-detection layer is still Windows-only.
+2. **WinUI 3 tray app (`ui/windows/`)** — .NET 10 desktop app. Lives in the
    system tray, owns the daemon process, surfaces device state + sync progress
    + settings + first-run wizard.
 
@@ -29,20 +30,26 @@ For the full design rationale and the rejected-alternatives table, see
 ## Top-level layout
 
 ```
-ipod-sync/
-├── src/                    Rust core: CLI, orchestrator, apply loop, IPC,
-│                           daemon, libgpod FFI, transcode, manifest, …
-├── tests/                  Cargo integration tests + fixtures
+ipod-sync/                  Cargo workspace root
+├── Cargo.toml              Workspace manifest (members + shared package fields)
+├── Cargo.lock              Workspace lockfile
+├── crates/
+│   └── ipod-sync/          The Rust crate (lib + bin)
+│       ├── Cargo.toml      Package manifest
+│       ├── build.rs        Bindgen for libgpod headers + DLL copy
+│       ├── src/            CLI, orchestrator, apply loop, IPC, daemon,
+│       │                   libgpod FFI, transcode, manifest, …
+│       ├── tests/          Cargo integration tests + fixtures
+│       ├── examples/       Standalone Rust spike binaries
+│       └── vendor/         Vendored libgpod build artefacts (DLLs, headers)
+├── ui/
+│   └── windows/            WinUI 3 / .NET 10 tray app (see its own README).
+│                           Future: ui/macos, ui/linux when those land.
 ├── docs/
 │   ├── ipc-protocol.md     Wire format (Rust ↔ UI). Source of truth.
 │   └── superpowers/        Phase specs, plans, code reviews
-├── ui-windows/             WinUI 3 / .NET 10 tray app (see its own README)
-├── vendor/                 Vendored libgpod build artefacts (DLLs, headers)
-├── examples/               Standalone Rust spike binaries
 ├── scripts/                One-off PowerShell helpers (e.g. probe-daemon.ps1)
-├── target/                 Cargo build output (gitignored)
-├── Cargo.toml              Crate manifest
-├── build.rs                Bindgen for libgpod headers + DLL copy
+├── target/                 Cargo workspace build output (gitignored)
 ├── README.md               One-paragraph repo description
 ├── SPEC.md                 Full original design spec
 ├── SCSI.md                 SCSI INQUIRY notes (SysInfoExtended path)
@@ -50,7 +57,7 @@ ipod-sync/
 └── AGENTS.md               (this file)
 ```
 
-## Rust core (`src/`)
+## Rust core (`crates/ipod-sync/src/`)
 
 Single `ipod-sync` binary, library + bin layout (`lib.rs` re-exports modules,
 `main.rs` is a thin wrapper).
@@ -88,21 +95,26 @@ Prerequisites:
   uses MSYS2's MinGW64 sysroot for GLib headers (bindgen input — libgpod's
   `itdb.h` includes `<glib.h>`) and copies `gdk-pixbuf-query-loaders.exe` plus
   pixbuf loader DLLs into the output dir for runtime image decoding.
-- Vendored libgpod under `vendor/libgpod/` (already committed; nothing to do).
+- Vendored libgpod under `crates/ipod-sync/vendor/libgpod/` (already
+  committed; nothing to do).
 
 ```powershell
-# From repo root, in a normal PowerShell prompt
+# From repo root (workspace root), in a normal PowerShell prompt
 cargo build --release            # release build → target/release/ipod-sync.exe
 cargo build                      # debug build  → target/debug/ipod-sync.exe
 cargo test                       # unit + integration tests
 cargo test -- --test-threads=1   # serialize when poking the real pipe
 ```
 
+Cargo workspace target dir is at the repo root, so `target/release/` and
+`target/debug/` paths are unchanged from the pre-workspace layout — handy for
+the .NET csproj that bundles the binary as build-time content.
+
 A successful build also copies the vendored libgpod runtime DLLs into the
 target directory (handled by `build.rs`). Missing those DLLs is the most
 common cause of "gpod.dll was not found" at startup.
 
-The daemon-integration tests under `tests/daemon_runtime_integration.rs`
+The daemon-integration tests under `crates/ipod-sync/tests/daemon_runtime_integration.rs`
 need a per-test config + pipe sandbox; see the `sandbox()` helper there and
 the corresponding entry in `LEARNINGS.md` if you're touching them.
 
@@ -120,24 +132,25 @@ the corresponding entry in `LEARNINGS.md` if you're touching them.
 - Long-running subprocess invocations on Windows MUST go through
   `windows_proc::NoConsoleWindow` to suppress the cmd-window flash.
 
-## Windows UI (`ui-windows/`)
+## Windows UI (`ui/windows/`)
 
-WinUI 3 tray app, .NET 10, x64 + ARM64. See `ui-windows/README.md` for full
+WinUI 3 tray app, .NET 10, x64 + ARM64. See `ui/windows/README.md` for full
 detail; the short version:
 
 ```powershell
-cd ui-windows
+cd ui\windows
 dotnet build IpodSync.UI.slnx -c Debug
 dotnet test  IpodSync.UI.Tests/IpodSync.UI.Tests.csproj
 dotnet run --project IpodSync.UI/IpodSync.UI.csproj
 ```
 
-The UI csproj bundles `..\..\target\release\ipod-sync.exe` (+ libgpod DLLs)
+The UI csproj bundles `..\..\..\target\release\ipod-sync.exe` (+ libgpod DLLs)
 into its output directory at build time, so a clean dev loop is:
 
 ```powershell
+# From workspace root:
 cargo build --release
-cd ui-windows
+cd ui\windows
 dotnet run --project IpodSync.UI/IpodSync.UI.csproj
 ```
 
@@ -148,25 +161,29 @@ binary hasn't been built yet.
 
 `docs/ipc-protocol.md` is the source of truth. Implementations on each side:
 
-- Rust: `src/ipc.rs` (event/command records) + `src/progress.rs::run_ipc`
-  (channel-to-wire backend)
-- C#: `ui-windows/IpodSync.UI.Core/Ipc/IpcEvent.cs` and `IpcCommand.cs`
+- Rust: `crates/ipod-sync/src/ipc.rs` (event/command records) +
+  `crates/ipod-sync/src/progress.rs::run_ipc` (channel-to-wire backend)
+- C#: `ui/windows/IpodSync.UI.Core/Ipc/IpcEvent.cs` and `IpcCommand.cs`
   (subprocess wire), `DaemonEvent.cs` / `DaemonCommand.cs` (daemon-pipe wire)
 
 Versioning is semver with a `hello` handshake — see §1 of the protocol doc.
 A breaking change anywhere on the wire is a major bump and both sides must
 move together.
 
-The named-pipe label `\\.\pipe\ipod-sync` is set by `PROJECT_DIR` in
-`src/lib.rs` and mirrored by `IpodSync.UI.Core.AppIdentity`. **These two MUST
-stay in sync.**
+The named-pipe label `\\.\pipe\ipod-sync` is set by `PIPE_NAME` in
+`crates/ipod-sync/src/daemon/ipc_server.rs` (with `default_pipe_name()`
+returning a Unix-socket path on non-Windows) and mirrored on the .NET side by
+`IpodSync.UI.Core.AppIdentity`. **These two MUST stay in sync** — the pipe
+label is the IPC contract.
 
 ## Conventions across the repo
 
 - **Conventional Commits.** `feat(scope): …`, `fix(scope): …`, etc. Scopes in
-  use: `daemon`, `ui`, `ui-windows`, `ipc`, `apply-loop`, `transcode`, `tags`,
+  use: `daemon`, `ui`, `ipc`, `apply-loop`, `transcode`, `tags`,
   `manifest`, `wizard`, `preflight`, `progress`, `docs`, `build`, `ci`,
-  `chore`. The recent `git log` is the best style guide.
+  `chore`. The recent `git log` is the best style guide. (The older
+  `ui-windows` scope was renamed to `ui` when the directory moved under
+  `ui/windows/`.)
 - **`LEARNINGS.md`.** New gotchas, debugging insights, and non-obvious
   conventions go here, one bullet per learning. Check for duplicates before
   adding. Don't log routine info.
@@ -192,9 +209,9 @@ These hit hard in practice — see `LEARNINGS.md` for the full incident reports:
   `preflight::verify_itunes_not_running` guard and explicit warning copy in
   the wizard + Settings to keep users out of the Restore-loop trap.
 - **db.write() checkpointing matters.** Every Nth track
-  (`SYNC_CHECKPOINT_EVERY` in `src/lib.rs`) the apply loop flushes the in-
-  memory DB + manifest so a crash leaves at most N orphans, not the whole
-  library.
+  (`SYNC_CHECKPOINT_EVERY` in `crates/ipod-sync/src/lib.rs`) the apply loop
+  flushes the in-memory DB + manifest so a crash leaves at most N orphans,
+  not the whole library.
 - **ffmpeg needs `-nostdin` + `.stdin(Stdio::null())`.** Inherited piped
   stdin from a daemon-spawned subprocess wedges ffmpeg at ~97% of a track
   during stream finalization. Both layers stay.
@@ -213,5 +230,5 @@ These hit hard in practice — see `LEARNINGS.md` for the full incident reports:
 - `LEARNINGS.md` — incidents, gotchas, debugging insights (chronological)
 - `docs/ipc-protocol.md` — wire format authority
 - `docs/superpowers/specs/` — per-phase design docs (read the newest first)
-- `ui-windows/README.md` — WinUI-specific build/run/test/conventions
+- `ui/windows/README.md` — WinUI-specific build/run/test/conventions
 - `git log` — recent commits are the best signal for what's in flux
