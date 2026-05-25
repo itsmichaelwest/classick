@@ -15,10 +15,18 @@ use crate::transcode;
 use crate::try_with_prompt::{await_prompt, PromptOutcome};
 use crate::wizard;
 
-/// Append a trailing backslash to a Windows path if missing. Lives here
-/// (rather than the orchestrator) because the only caller is mount resolution.
-pub fn ensure_trailing_backslash(s: &str) -> String {
-    if s.ends_with('\\') { s.to_string() } else { format!("{s}\\") }
+/// Append the platform's path separator if missing. Lives here (rather than
+/// the orchestrator) because the only caller is mount resolution. On Windows
+/// this is `\`; on Linux/macOS this is `/` — appending `\` on those targets
+/// would corrupt the path (`\` is a valid Linux filename character) and the
+/// subsequent `Path::join` would look up `/mnt/ipod\/iPod_Control` instead
+/// of `/mnt/ipod/iPod_Control`.
+pub fn ensure_trailing_separator(s: &str) -> String {
+    if s.ends_with('\\') || s.ends_with('/') {
+        s.to_string()
+    } else {
+        format!("{}{}", s, std::path::MAIN_SEPARATOR)
+    }
 }
 
 /// Loop on `transcode::verify_tools_available` until ffmpeg/ffprobe are
@@ -266,7 +274,7 @@ pub fn resolve_ipod_mount(
 ) -> Result<String> {
     match &config.ipod {
         Some(m) => {
-            let p = ensure_trailing_backslash(m);
+            let p = ensure_trailing_separator(m);
             loop {
                 if crate::ipod::layout::itunes_db_path(Path::new(&p)).exists() {
                     return Ok(p);

@@ -218,6 +218,11 @@ pub fn scan_for_ipod() -> Option<DetectedIpod> {
 /// USB descriptor as `iSerialNumber`) and write a synthetic SysInfo
 /// so apply_loop's read_firewire_guid finds it and libgpod can sign
 /// the iTunesDB on write.
+// `serial`, `model_num`, `model_label_override` below are mutated only
+// inside the `#[cfg(windows)]` USB-recovery block. On non-Windows they're
+// effectively immutable. `#[allow(unused_mut)]` keeps the warning quiet
+// without splitting the function body into two cfg-shaped halves.
+#[allow(unused_mut)]
 pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
     // F-09: require BOTH SysInfo and iTunesDB. A device with only SysInfo
     // is mid-restore (no DB written yet); the daemon would announce
@@ -487,6 +492,13 @@ struct UsbIpodInfo {
 /// `src/itdb_device.c` recognises — otherwise the hash58 codepath
 /// silently degrades to `ITDB_CHECKSUM_NONE` and iTunes refuses the
 /// resulting iTunesDB. `label` is the user-facing string.
+///
+/// `#[allow(dead_code)]` because the only consumer (`identify_ipod`,
+/// reached from `recover_ipod_info_from_usb`) is `#[cfg(windows)]`. The
+/// struct + its consumer still want to live in platform-neutral test
+/// territory — `identify_ipod`'s PID-disambiguation tests cover real
+/// product logic that's worth running on Linux/macOS CI too.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IpodIdentity {
     model_num: &'static str,
@@ -964,6 +976,8 @@ fn usb_parent_instance_id(disk_devinst: u32) -> Option<String> {
 /// instance path like `USB\VID_05AC&PID_1261\000A27002138B0A8`.
 /// Case-insensitive on the `PID_` token because Windows surfaces the
 /// instance ID in either case depending on which API the caller used.
+#[allow(dead_code)] // Only called from Windows `recover_ipod_info_from_usb`;
+                    // kept platform-neutral so its parser tests still run on Linux/macOS CI.
 fn extract_pid_from_apple_usb_path(path: &str) -> Option<u16> {
     let upper = path.to_ascii_uppercase();
     let needle = "PID_";
@@ -1025,6 +1039,8 @@ fn extract_pid_from_apple_usb_path(path: &str) -> Option<u16> {
 /// reports of ~size×10⁹ bytes. We use generous bands so a slightly-
 /// under-spec drive (formatting overhead, firmware partition, retired
 /// block remapping) still classifies correctly.
+#[allow(dead_code)] // See IpodIdentity — only consumed from Windows but the PID
+                    // disambiguation logic is platform-neutral and unit-tested.
 fn identify_ipod(pid: u16, capacity_bytes: Option<u64>) -> Option<IpodIdentity> {
     let gb = capacity_bytes.map(|b| b / 1_000_000_000); // marketed decimal GB
 
@@ -1147,6 +1163,7 @@ fn identify_ipod(pid: u16, capacity_bytes: Option<u64>) -> Option<IpodIdentity> 
 /// Anchors on word-boundary-like checks (hex chars not adjacent on
 /// either side) so we don't accidentally lop a 16-char substring out
 /// of a longer hex sequence elsewhere in the path.
+#[allow(dead_code)] // Windows-only consumer; kept platform-neutral for its tests.
 fn extract_firewire_guid_from_usb_path(path: &str) -> Option<String> {
     let bytes = path.as_bytes();
     if bytes.len() < 16 { return None; }
@@ -1249,30 +1266,34 @@ pub fn detect_ipod_mount() -> Result<String> {
     pick_mount(candidates)
 }
 
-/// Enumerate mount-point candidates that might host an iPod.
+/// Enumerate mount-point candidates that might host an iPod. The caller
+/// applies `is_ipod_mount` (which checks for `iPod_Control/Device/SysInfo`
+/// + `iPod_Control/iTunes/iTunesDB`) to reject non-iPod candidates, so
+/// false positives here are cheap. Native enumeration per OS:
 ///
-/// **Windows:** Native enumeration via `GetLogicalDrives` (one bitmask
-/// call returning which drive letters are currently present) + a per-
-/// present-letter `GetDriveTypeW` lookup to keep only removable / fixed
-/// volumes. Drops the previous A-Z `Path::exists()` walk's 26 I/O probes
-/// per poll down to ~1 syscall + one per-present-letter type query, and
-/// avoids hanging on slow network shares (`DRIVE_REMOTE`) or empty
-/// optical drives (`DRIVE_CDROM`) that happened to share a letter.
+/// **Windows:** `GetLogicalDrives` (one bitmask call returning which
+/// drive letters are currently present) + per-present-letter
+/// `GetDriveTypeW` lookup, keeping only removable / fixed volumes.
+/// Avoids hanging on slow network shares (`DRIVE_REMOTE`) or empty
+/// optical drives (`DRIVE_CDROM`).
 ///
-/// **Non-Windows:** Returns empty. Native mount enumeration on Linux
-/// (`/proc/mounts`) and macOS (DiskArbitration) is not yet wired up;
-/// auto-detect is therefore Windows-only for now, but the TUI still
-/// works when the user passes `--ipod <path>` explicitly. Daemon mode
-/// compiles on non-Windows (see Phase 1 cfg lift) but the device
-/// watcher will idle without observing any devices until this enum
-/// gets a non-Windows arm.
+/// **Linux:** Parse `/proc/mounts`, filter out pseudo-FSes (proc, sysfs,
+/// cgroup, tmpfs, etc.) that can't host iPod content. Real iPod mounts
+/// land here as `vfat` (Classic, Nano, Shuffle) or `hfsplus` (older
+/// Mac-formatted iPods on Linux with hfsplus-utils).
 ///
-/// FUTURE: swap the Windows path for `FindFirstVolumeW` +
-/// `GetVolumePathNamesForVolumeNameW`. That surfaces every mount point
-/// of every volume (including folder mounts like `C:\Mounts\iPod`) and
-/// gives back the stable `\\?\Volume{GUID}\` path — useful both for
-/// folder-mounted iPods and for persisted config keyed on volume GUID
-/// instead of the easily-shuffled drive letter.
+/// **macOS:** Enumerate `/Volumes/<name>/`. macOS auto-mounts every
+/// removable volume there by name; the boot disk is at `/` and
+/// intentionally not in `/Volumes`.
+///
+/// **Other Unix (BSD, etc.):** Empty for now. The TUI still works when
+/// the user passes `--ipod <path>` explicitly.
+///
+/// FUTURE: on Windows, swap for `FindFirstVolumeW` +
+/// `GetVolumePathNamesForVolumeNameW` to support folder-mounted iPods
+/// (`C:\Mounts\iPod`) and surface the stable `\\?\Volume{GUID}\` path
+/// for persisted config keyed on volume identity rather than the
+/// shufflable drive letter.
 fn candidate_mount_points() -> Vec<std::path::PathBuf> {
     #[cfg(windows)]
     {
@@ -1281,9 +1302,107 @@ fn candidate_mount_points() -> Vec<std::path::PathBuf> {
             .map(|letter| std::path::PathBuf::from(format!("{letter}:\\")))
             .collect()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_mount_candidates()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_volume_candidates()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Vec::new()
+    }
+}
+
+/// Parse `/proc/mounts` and return the mount points of every "real"
+/// filesystem — skipping the long list of kernel pseudo-FSes that can
+/// never host an iPod.
+///
+/// Per-line layout (procfs(5)): `device mountpoint fstype options dump pass`.
+/// Whitespace-separated, but paths containing spaces are escaped as `\040`;
+/// since iPod mounts almost never have spaces in their path (and the
+/// `is_ipod_mount` probe just fails on the escaped path, no harm done) we
+/// don't bother unescaping for this filter pass.
+#[cfg(target_os = "linux")]
+fn linux_mount_candidates() -> Vec<std::path::PathBuf> {
+    let body = match std::fs::read_to_string("/proc/mounts") {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!("device: cannot read /proc/mounts: {e}; auto-detect disabled");
+            return Vec::new();
+        }
+    };
+    body.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let _device = parts.next()?;
+            let mount = parts.next()?;
+            let fstype = parts.next()?;
+            // Kernel pseudo-FSes — these can never host iPod content.
+            // The set isn't exhaustive but covers what Ubuntu / Fedora /
+            // Arch / WSL report by default; an unknown pseudo-FS just
+            // takes the slow path through is_ipod_mount, no correctness
+            // issue.
+            if matches!(
+                fstype,
+                "proc"
+                    | "sysfs"
+                    | "cgroup"
+                    | "cgroup2"
+                    | "tmpfs"
+                    | "devpts"
+                    | "devtmpfs"
+                    | "rpc_pipefs"
+                    | "binfmt_misc"
+                    | "mqueue"
+                    | "hugetlbfs"
+                    | "fusectl"
+                    | "configfs"
+                    | "pstore"
+                    | "tracefs"
+                    | "securityfs"
+                    | "debugfs"
+                    | "bpf"
+                    | "autofs"
+                    | "nsfs"
+                    | "selinuxfs"
+                    | "ramfs"
+                    | "squashfs"
+                    | "overlay"
+            ) {
+                return None;
+            }
+            // FUSE mounts under fuse.* are usually app-specific (gvfs,
+            // portal, snap-fuse, sshfs) and not iPod hosts. Skip the
+            // common ones; a real iPod mounted via fuse (rare) would
+            // still pass.
+            if fstype.starts_with("fuse.") {
+                return None;
+            }
+            Some(std::path::PathBuf::from(mount))
+        })
+        .collect()
+}
+
+/// Enumerate `/Volumes/<name>/` — macOS's standard mount point for
+/// removable volumes. The system disk lives at `/` and is intentionally
+/// excluded. Failed reads (Volumes missing, permission denied) return
+/// empty rather than panicking — auto-detect just degrades to "no iPod
+/// found" and the user can pass `--ipod` explicitly.
+#[cfg(target_os = "macos")]
+fn macos_volume_candidates() -> Vec<std::path::PathBuf> {
+    match std::fs::read_dir("/Volumes") {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect(),
+        Err(e) => {
+            tracing::debug!("device: cannot read /Volumes: {e}; auto-detect disabled");
+            Vec::new()
+        }
     }
 }
 
