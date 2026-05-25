@@ -120,12 +120,11 @@ pub fn resolve_libgpod_identity(ipod_mount: &Path) -> Result<LibgpodIdentity> {
         return Ok(LibgpodIdentity { firewire_guid: guid, model_num_str });
     }
 
-    // Path 2+3: shell to PowerShell to get USB info + SCSI INQUIRY
-    // for the authoritative ModelNumStr.
-    let letter = drive_letter(ipod_mount)
-        .ok_or_else(|| anyhow!("path {} has no drive letter", ipod_mount.display()))?;
-    let recovered = recover_ipod_info_from_usb(letter)
-        .ok_or_else(|| anyhow!("USB recovery failed for drive {letter}"))?;
+    // Path 2+3: native USB descriptor enumeration (Windows: SetupAPI +
+    // Cfgmgr32) to recover guid + PID, plus SCSI INQUIRY for the
+    // authoritative ModelNumStr when admin is granted.
+    let recovered = recover_ipod_info_from_usb(ipod_mount)
+        .ok_or_else(|| anyhow!("USB recovery failed for {}", ipod_mount.display()))?;
 
     let firewire_guid = disk_guid.unwrap_or_else(|| recovered.firewire_guid.clone());
 
@@ -256,53 +255,52 @@ pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
         // disk** — that file is iTunes' territory and writing to it
         // is what was breaking the iPod's ability to be re-managed
         // with iTunes.
-        #[cfg(windows)]
-        if let Some(letter) = drive_letter(drive) {
-            if let Some(recovered) = recover_ipod_info_from_usb(letter) {
-                tracing::info!(
-                    "ipod: USB recovery for {}:\\ → guid={}, pid={:?}, capacity={:?} bytes, \
-                     disk_number={:?}, heuristic_identity={:?}, scsi_xml={} bytes, scsi_parsed={}",
-                    letter,
-                    recovered.firewire_guid,
-                    recovered.pid,
-                    recovered.capacity_bytes,
-                    recovered.disk_number,
-                    recovered.identity,
-                    recovered.sysinfo_extended_xml.as_deref().map(str::len).unwrap_or(0),
-                    recovered.sysinfo_extended_parsed.is_some(),
-                );
-                if need_serial_recovery {
-                    serial = Some(recovered.firewire_guid.clone());
-                }
-                if need_model_recovery {
-                    // Preference order for ModelNumStr:
-                    //   1. SCSI INQUIRY (authoritative — direct from
-                    //      device firmware, matches what iTunes uses)
-                    //   2. USB PID + capacity heuristic (works for
-                    //      Classic + Nano via libgpod's table)
-                    //   3. Legacy xPID_XXXX marker (still parseable
-                    //      by describe_model but breaks libgpod's hash
-                    //      path; only kicks in when both above fail)
-                    if let Some(parsed) = &recovered.sysinfo_extended_parsed {
-                        if let Some(mn) = &parsed.model_num_str {
-                            model_num = mn.clone();
-                            model_label_override = Some(describe_model(mn));
-                        }
-                    }
-                    if model_num.is_empty() {
-                        if let Some(identity) = recovered.identity {
-                            model_num = identity.model_num.to_string();
-                            model_label_override = Some(identity.label.to_string());
-                        } else if let Some(pid) = recovered.pid {
-                            model_num = format!("xPID_{:04X}", pid);
-                        }
-                    }
-                }
-                // NOTE: we do NOT call write_synthesized_sysinfo.
-                // Modern iTunes leaves SysInfo as 0 bytes; we mirror
-                // that. The identity is held in memory (DetectedIpod)
-                // and fed to libgpod via set_sysinfo at apply time.
+        if let Some(recovered) = recover_ipod_info_from_usb(drive) {
+            tracing::info!(
+                "ipod: USB recovery for {} → guid={}, pid={:?}, capacity={:?} bytes, \
+                 disk_number={:?}, heuristic_identity={:?}, scsi_xml={} bytes, scsi_parsed={}",
+                drive.display(),
+                recovered.firewire_guid,
+                recovered.pid,
+                recovered.capacity_bytes,
+                recovered.disk_number,
+                recovered.identity,
+                recovered.sysinfo_extended_xml.as_deref().map(str::len).unwrap_or(0),
+                recovered.sysinfo_extended_parsed.is_some(),
+            );
+            if need_serial_recovery {
+                serial = Some(recovered.firewire_guid.clone());
             }
+            if need_model_recovery {
+                // Preference order for ModelNumStr:
+                //   1. SCSI INQUIRY (authoritative — direct from
+                //      device firmware, matches what iTunes uses;
+                //      Windows-only since it needs elevated IOCTL)
+                //   2. USB PID + capacity heuristic (works for
+                //      Classic + Nano via libgpod's table; available
+                //      on every platform via the USB descriptor)
+                //   3. Legacy xPID_XXXX marker (still parseable
+                //      by describe_model but breaks libgpod's hash
+                //      path; only kicks in when both above fail)
+                if let Some(parsed) = &recovered.sysinfo_extended_parsed {
+                    if let Some(mn) = &parsed.model_num_str {
+                        model_num = mn.clone();
+                        model_label_override = Some(describe_model(mn));
+                    }
+                }
+                if model_num.is_empty() {
+                    if let Some(identity) = recovered.identity {
+                        model_num = identity.model_num.to_string();
+                        model_label_override = Some(identity.label.to_string());
+                    } else if let Some(pid) = recovered.pid {
+                        model_num = format!("xPID_{:04X}", pid);
+                    }
+                }
+            }
+            // NOTE: we do NOT call write_synthesized_sysinfo.
+            // Modern iTunes leaves SysInfo as 0 bytes; we mirror
+            // that. The identity is held in memory (DetectedIpod)
+            // and fed to libgpod via set_sysinfo at apply time.
         }
     }
 
@@ -456,27 +454,34 @@ fn drive_letter(drive: &std::path::Path) -> Option<char> {
     if first.is_ascii_alphabetic() { Some(first.to_ascii_uppercase()) } else { None }
 }
 
-/// Recovered identity for an iPod whose SysInfo file is empty.
+/// Recovered identity for an iPod whose on-disk SysInfo file is empty
+/// (the common case on modern iPods — iTunes leaves it 0 bytes and
+/// reads everything from the device firmware on demand).
 ///
-/// We collect two independent pieces of information:
+/// We collect two independent pieces of information, both populated
+/// best-effort:
 ///
 /// 1. **USB-derived identity** (`firewire_guid`, `pid`, `capacity_bytes`):
-///    the heuristic fallback. PID + capacity together resolve to a
-///    libgpod-recognised `IpodIdentity` for the well-known Classic and
-///    Nano families.
+///    the cross-platform path. iPods burn the FirewireGuid into the
+///    USB iSerialNumber descriptor, and the PID identifies the model
+///    family. Capacity disambiguates iPod Classic generations within
+///    a single PID. Available on every platform via standard USB
+///    descriptor enumeration (Windows: SetupAPI + Cfgmgr32; Linux:
+///    sysfs walk; macOS: `ioreg`/IOKit).
 ///
 /// 2. **SCSI-derived rich identity** (`sysinfo_extended_xml`): the
 ///    full `SysInfoExtended` Apple plist read directly from the
 ///    device firmware via SCSI INQUIRY VPD pages — the same mechanism
 ///    iTunes uses. When available this is **authoritative** — the
 ///    device tells us its exact ModelNumStr, SerialNumber, FamilyID,
-///    artwork formats, etc. with no guessing. The caller prefers
-///    this over the USB heuristic when both are present.
+///    artwork formats, etc. with no guessing. **Windows-only**, and
+///    further gated by admin elevation (the IOCTL needs read+write
+///    access on the raw volume). On Linux/macOS these fields are
+///    always `None` and we fall back to the USB heuristic.
 ///
-/// `disk_number` is the `N` in `\\.\PhysicalDriveN`, captured from
-/// the same PowerShell query so a follow-up SCSI INQUIRY doesn't have
-/// to re-resolve the volume.
-#[cfg(windows)]
+/// `disk_number` is the `N` in `\\.\PhysicalDriveN`, captured so a
+/// follow-up SCSI INQUIRY doesn't have to re-resolve the volume.
+/// **Windows-only**; `None` on Linux/macOS.
 struct UsbIpodInfo {
     firewire_guid: String,
     pid: Option<u16>,
@@ -575,8 +580,37 @@ fn scsi_inquiry_cached(
     }
 }
 
-/// Recover the USB-derived identity of the iPod at `<letter>:\` via
-/// native Win32 calls — no PowerShell shellout.
+/// Recover the USB-derived identity of the iPod at `mount` via native
+/// platform APIs. Dispatches to the platform-specific implementation.
+///
+/// All implementations populate the cross-platform fields
+/// (`firewire_guid`, `pid`, `capacity_bytes`). Only Windows fills the
+/// `disk_number` + SCSI-extended fields; on Linux/macOS those are
+/// always `None` and the caller falls back to the USB heuristic for
+/// model identification.
+fn recover_ipod_info_from_usb(mount: &std::path::Path) -> Option<UsbIpodInfo> {
+    #[cfg(windows)]
+    {
+        let letter = drive_letter(mount)?;
+        windows_recover_ipod_info(letter)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_recover_ipod_info(mount)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_recover_ipod_info(mount)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = mount;
+        None
+    }
+}
+
+/// Windows USB-descriptor recovery via native Win32 calls — no
+/// PowerShell shellout.
 ///
 /// What we need (and where it comes from):
 ///
@@ -593,7 +627,7 @@ fn scsi_inquiry_cached(
 /// PowerShell version it replaced cost 300-500ms (process spawn +
 /// CLR init + CIM query + parse), once per iPod plug-in.
 #[cfg(windows)]
-fn recover_ipod_info_from_usb(drive_letter: char) -> Option<UsbIpodInfo> {
+fn windows_recover_ipod_info(drive_letter: char) -> Option<UsbIpodInfo> {
     // Phase 1: open the volume, query disk number + capacity. The
     // handle can be dropped immediately after these two IOCTLs — the
     // remaining work (SetupAPI walk) talks to the device tree, not
@@ -970,6 +1004,321 @@ fn usb_parent_instance_id(disk_devinst: u32) -> Option<String> {
     }
     let nul = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     Some(String::from_utf16_lossy(&buf[..nul]))
+}
+
+// =========================================================================
+// Linux USB-descriptor recovery via /proc/self/mountinfo + sysfs walk.
+//
+// The Linux kernel exposes USB device metadata under /sys/bus/usb/devices/
+// (and symlinked into /sys/block/<dev>/device's ancestor chain). For a
+// USB-attached block device we:
+//
+//   1. Resolve mount path → /dev/<block> via /proc/self/mountinfo.
+//   2. Strip partition suffix (sdb1 → sdb; nvme0n1p1 → nvme0n1) to get
+//      the disk device.
+//   3. Walk /sys/block/<disk>/device's parent chain looking for a
+//      directory containing `idVendor` + `idProduct` + `serial` files
+//      — that's the USB device node.
+//   4. Validate idVendor == 0x05AC (Apple), pull idProduct (the PID we
+//      already use for libgpod's model lookup) and serial (the iPod's
+//      FirewireGuid, burnt into iSerialNumber).
+//   5. Capacity from /sys/block/<disk>/size, multiplied by the 512-byte
+//      sector unit the kernel reports in.
+//
+// SCSI INQUIRY VPD (the Windows-only authoritative path) has no Linux
+// equivalent in this tree yet — `sysinfo_extended_*` stay None. PID +
+// capacity through identify_ipod() is enough for libgpod to write a
+// signed iTunesDB iTunes accepts on the iPod Classic family (and is
+// what the daemon's been doing on Windows in the non-elevated case).
+// =========================================================================
+
+#[cfg(target_os = "linux")]
+fn linux_recover_ipod_info(mount: &std::path::Path) -> Option<UsbIpodInfo> {
+    let block_dev = linux_block_device_for_mount(mount)?;
+    let disk_name = linux_strip_partition_suffix(&block_dev)?;
+    let usb_dir = linux_find_usb_parent(
+        &std::path::PathBuf::from("/sys/block").join(&disk_name).join("device"),
+    )?;
+
+    // idVendor / idProduct are 4-digit lowercase hex (no 0x prefix).
+    let id_vendor = linux_read_sysfs_hex_u16(&usb_dir.join("idVendor"))?;
+    if id_vendor != 0x05AC {
+        tracing::debug!(
+            "device: USB parent {} has idVendor={:04x} (not Apple); skipping",
+            usb_dir.display(),
+            id_vendor
+        );
+        return None;
+    }
+    let id_product = linux_read_sysfs_hex_u16(&usb_dir.join("idProduct"));
+    let serial_raw = std::fs::read_to_string(usb_dir.join("serial")).ok()?;
+    let serial = serial_raw.trim().to_string();
+    if serial.is_empty() {
+        return None;
+    }
+    // Match the Windows format: "0xUPPERCASE16HEX". libgpod's hash58
+    // path is case-sensitive on the FirewireGuid; matching Windows
+    // formatting keeps the two platforms producing the same key.
+    let firewire_guid = format!("0x{}", serial.to_uppercase());
+
+    // /sys/block/<disk>/size is in 512-byte sectors regardless of the
+    // device's logical block size (a kernel-stable contract; see
+    // Documentation/block/stat.rst).
+    let capacity_bytes = std::fs::read_to_string(format!("/sys/block/{disk_name}/size"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|sectors| sectors * 512);
+
+    let identity = id_product.and_then(|pid| identify_ipod(pid, capacity_bytes));
+
+    Some(UsbIpodInfo {
+        firewire_guid,
+        pid: id_product,
+        capacity_bytes,
+        disk_number: None,
+        identity,
+        sysinfo_extended_xml: None,
+        sysinfo_extended_parsed: None,
+    })
+}
+
+/// Find the block device backing `mount` by parsing `/proc/self/mountinfo`.
+/// Format per proc(5) (excerpt of fields we care about):
+///   `mount-id parent-id major:minor root mount-point mount-opts ... - fs-type source super-opts`
+/// We match on the 5th field (mount point) and return the field two slots
+/// past the `-` separator (the device source).
+#[cfg(target_os = "linux")]
+fn linux_block_device_for_mount(mount: &std::path::Path) -> Option<String> {
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let mount_str = mount.to_string_lossy();
+    let mount_norm = mount_str.trim_end_matches('/');
+    for line in mounts.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 7 {
+            continue;
+        }
+        let mp = parts[4].trim_end_matches('/');
+        if mp != mount_norm {
+            continue;
+        }
+        // Find the "-" separator marking the end of optional fields.
+        let dash = parts.iter().position(|&p| p == "-")?;
+        // After "-": fs-type, source, super-opts. Source is at dash+2.
+        let source = parts.get(dash + 2)?;
+        return Some((*source).to_string());
+    }
+    None
+}
+
+/// Strip the partition suffix from a block-device path. Handles both
+/// the sd/hd/vd naming (digits trail directly, e.g. sdb1 → sdb) and
+/// nvme/mmcblk naming (partition prefixed with `p`, e.g. nvme0n1p1
+/// → nvme0n1). Returns just the disk basename (no `/dev/` prefix).
+///
+/// iPods always present as USB Mass Storage devices, so in practice
+/// they come up as `sdX` on Linux — but the NVMe/mmcblk handling is
+/// here for robustness (e.g. user's home filesystem is on NVMe and
+/// they're poking around with --ipod).
+#[cfg(target_os = "linux")]
+fn linux_strip_partition_suffix(dev_path: &str) -> Option<String> {
+    let basename = std::path::Path::new(dev_path).file_name()?.to_str()?;
+    // nvme0n1p1 / mmcblk0p1: partition is `p<digits>` at the tail; the
+    // disk name itself ends in digits, so a generic "strip trailing
+    // digits" rule would over-strip.
+    if basename.starts_with("nvme") || basename.starts_with("mmcblk") {
+        if let Some(p_pos) = basename.rfind('p') {
+            if basename[p_pos + 1..].chars().all(|c| c.is_ascii_digit()) {
+                return Some(basename[..p_pos].to_string());
+            }
+        }
+        return Some(basename.to_string());
+    }
+    // sdX / hdX / vdX: trailing digits are the partition.
+    Some(
+        basename
+            .trim_end_matches(|c: char| c.is_ascii_digit())
+            .to_string(),
+    )
+}
+
+/// Walk up the symlink chain from `/sys/block/<disk>/device` until we
+/// find a directory containing `idVendor` + `idProduct` files — that's
+/// the USB device node. Returns `None` if we hit the sysfs root or any
+/// step fails to canonicalize (device unplugged mid-walk).
+#[cfg(target_os = "linux")]
+fn linux_find_usb_parent(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut current = start.canonicalize().ok()?;
+    let stop = std::path::Path::new("/sys");
+    loop {
+        if current.join("idVendor").is_file() && current.join("idProduct").is_file() {
+            return Some(current);
+        }
+        if current == stop || current.as_os_str() == "/" {
+            return None;
+        }
+        current = current.parent()?.to_path_buf();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_read_sysfs_hex_u16(path: &std::path::Path) -> Option<u16> {
+    let s = std::fs::read_to_string(path).ok()?;
+    u16::from_str_radix(s.trim(), 16).ok()
+}
+
+// =========================================================================
+// macOS USB-descriptor recovery via ioreg shellout.
+//
+// Pragmatic implementation: shell to `ioreg -p IOUSB -l -a` which dumps
+// the IOUSB plane as an XML plist. Parse with the `plist` crate
+// (already a dep — we use it for SysInfoExtended). Filter by Apple
+// vendor ID (0x05AC = 1452) and match the iPod's USB serial.
+//
+// TODO(macos-iokit): replace the shellout with proper IOKit FFI
+// (`IOServiceMatching("IOUSBDevice")` enumeration via the IOKit
+// framework). The shellout costs ~100-200ms per scan vs <1ms for
+// native, but IOKit FFI is ~200+ LOC of CoreFoundation bindings and
+// out of scope for the initial cross-platform pass. ioreg ships with
+// every macOS so there's no install burden.
+//
+// Mount-to-device mapping (BSD device name) uses `df -P` for now,
+// same TODO applies — `DASessionCreate` / `DADiskCopyDescription`
+// from DiskArbitration is the native equivalent.
+// =========================================================================
+
+#[cfg(target_os = "macos")]
+fn macos_recover_ipod_info(mount: &std::path::Path) -> Option<UsbIpodInfo> {
+    let bsd_name = macos_bsd_name_for_mount(mount)?;
+    // /dev/disk2s1 → disk2 (strip slice suffix). macOS partition names
+    // are `s<digits>` after the whole-disk name.
+    let disk = bsd_name
+        .trim_start_matches("/dev/")
+        .split('s')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    if disk.is_empty() {
+        return None;
+    }
+
+    let ioreg_xml = macos_ioreg_iousb()?;
+    let root: plist::Value = plist::from_bytes(ioreg_xml.as_bytes()).ok()?;
+    let device = macos_find_ipod_device(&root, &disk)?;
+
+    let firewire_guid = device
+        .get("USB Serial Number")
+        .and_then(|v| v.as_string())
+        .map(|s| format!("0x{}", s.to_uppercase()))?;
+    let pid = device
+        .get("idProduct")
+        .and_then(|v| v.as_unsigned_integer())
+        .map(|n| n as u16);
+
+    // Capacity via `diskutil info -plist <disk>` would be cleanest;
+    // for now leave None and let identify_ipod fall back to PID-only.
+    // (iPod Classic 1G 80GB and 1G 160GB share PID so capacity matters
+    // for that disambiguation — flagged in the TODO above.)
+    let capacity_bytes: Option<u64> = None;
+    let identity = pid.and_then(|p| identify_ipod(p, capacity_bytes));
+
+    Some(UsbIpodInfo {
+        firewire_guid,
+        pid,
+        capacity_bytes,
+        disk_number: None,
+        identity,
+        sysinfo_extended_xml: None,
+        sysinfo_extended_parsed: None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bsd_name_for_mount(mount: &std::path::Path) -> Option<String> {
+    use crate::windows_proc::NoConsoleWindow; // no-op on macOS, kept for parity
+    let output = std::process::Command::new("df")
+        .arg("-P")
+        .arg(mount)
+        .no_console()
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Second line, first whitespace-separated field is the device.
+    stdout
+        .lines()
+        .nth(1)
+        .and_then(|line| line.split_whitespace().next())
+        .map(String::from)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ioreg_iousb() -> Option<String> {
+    use crate::windows_proc::NoConsoleWindow;
+    let output = std::process::Command::new("ioreg")
+        .args(["-p", "IOUSB", "-l", "-a"])
+        .no_console()
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+/// Walk the ioreg plist tree looking for an Apple USB device whose
+/// child IOMedia entry's BSD Name matches `disk`.
+#[cfg(target_os = "macos")]
+fn macos_find_ipod_device<'a>(
+    root: &'a plist::Value,
+    disk: &str,
+) -> Option<&'a plist::Dictionary> {
+    fn visit<'a>(node: &'a plist::Value, disk: &str) -> Option<&'a plist::Dictionary> {
+        if let Some(dict) = node.as_dictionary() {
+            let is_apple = dict
+                .get("idVendor")
+                .and_then(|v| v.as_unsigned_integer())
+                .map(|v| v == 0x05AC)
+                .unwrap_or(false);
+            if is_apple && macos_dict_contains_bsd(dict, disk) {
+                return Some(dict);
+            }
+            if let Some(children) = dict.get("IORegistryEntryChildren") {
+                if let Some(arr) = children.as_array() {
+                    for child in arr {
+                        if let Some(found) = visit(child, disk) {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    visit(root, disk)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_dict_contains_bsd(dict: &plist::Dictionary, disk: &str) -> bool {
+    if let Some(name) = dict.get("BSD Name").and_then(|v| v.as_string()) {
+        if name == disk {
+            return true;
+        }
+    }
+    if let Some(children) = dict
+        .get("IORegistryEntryChildren")
+        .and_then(|v| v.as_array())
+    {
+        for child in children {
+            if let Some(d) = child.as_dictionary() {
+                if macos_dict_contains_bsd(d, disk) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Parse the 4-hex-digit USB Product ID out of an Apple USB device
