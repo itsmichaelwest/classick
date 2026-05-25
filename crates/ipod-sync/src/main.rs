@@ -6,7 +6,14 @@ use ipod_sync::progress::Progress;
 use std::io::IsTerminal;
 
 fn main() -> Result<()> {
-    unsafe { std::env::set_var("GDK_PIXBUF_MODULE_FILE", env!("PIXBUF_LOADERS_CACHE")); }
+    // Windows-only: point gdk-pixbuf at the loaders.cache build.rs staged
+    // next to the binary. On Linux/macOS, gdk-pixbuf is system-installed and
+    // discovers loaders via $XDG_DATA_DIRS; we don't override it (setting
+    // GDK_PIXBUF_MODULE_FILE on Unix would actively break the system path).
+    #[cfg(windows)]
+    unsafe {
+        std::env::set_var("GDK_PIXBUF_MODULE_FILE", env!("PIXBUF_LOADERS_CACHE"));
+    }
 
     let cli = Cli::parse();
 

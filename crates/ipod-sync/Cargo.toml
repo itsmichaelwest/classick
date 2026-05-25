@@ -50,3 +50,8 @@ tokio = { version = "1.40", features = ["test-util"] }
 
 [build-dependencies]
 bindgen = "0.72"
+# pkg-config resolves libgpod + glib paths on non-Windows targets. The crate
+# is harmless on Windows (only invokes the pkg-config binary when its API is
+# called, and build.rs only calls it from the non-Windows arm) — keeping it
+# unconditional avoids a target-gated build-dep with surprising behavior.
+pkg-config = "0.3"

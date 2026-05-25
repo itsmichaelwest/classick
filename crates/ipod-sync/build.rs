@@ -1,21 +1,42 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Default MSYS2 install location. Overridable via the `MSYS2_ROOT` env var
-/// for users with a non-default install.
+/// Default MSYS2 install location on Windows. Overridable via the `MSYS2_ROOT`
+/// env var for users with a non-default install.
 const DEFAULT_MSYS2_ROOT: &str = r"C:\msys64";
+
+fn main() {
+    println!("cargo:rerun-if-env-changed=MSYS2_ROOT");
+    println!("cargo:rerun-if-changed=build.rs");
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // Use CARGO_CFG_TARGET_OS (not `cfg!(windows)`) so cross-compilation
+    // takes the right path. In a build script, `cfg(windows)` reflects the
+    // host, not the target.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    match target_os.as_str() {
+        "windows" => build_windows(&manifest_dir, &out_dir),
+        _ => build_pkg_config(&out_dir),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows path: vendored libgpod under crates/ipod-sync/vendor/libgpod,
+// MSYS2 MinGW64 sysroot for the GLib headers bindgen needs, vendored
+// pixbuf loaders + refalac binaries staged into target/.
+// ---------------------------------------------------------------------------
 
 fn msys2_root() -> PathBuf {
     PathBuf::from(env::var("MSYS2_ROOT").unwrap_or_else(|_| DEFAULT_MSYS2_ROOT.to_string()))
 }
 
-fn main() {
-    println!("cargo:rerun-if-env-changed=MSYS2_ROOT");
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+fn build_windows(manifest_dir: &Path, out_dir: &Path) {
     let vendor = manifest_dir.join("vendor").join("libgpod");
     let mingw64 = msys2_root().join("mingw64");
 
-    // Link the import library
+    // Link the vendored import library.
     println!(
         "cargo:rustc-link-search=native={}",
         vendor.join("lib").display()
@@ -26,10 +47,9 @@ fn main() {
     // resolve those symbols at link time.
     println!("cargo:rustc-link-lib=dylib=glib");
 
-    // Re-run if the header changes
+    // Re-run if the header changes.
     let header = vendor.join("include").join("gpod").join("itdb.h");
     println!("cargo:rerun-if-changed={}", header.display());
-    println!("cargo:rerun-if-changed=build.rs");
     println!(
         "cargo:rerun-if-changed={}",
         vendor.join("lib").join("gpod.lib").display()
@@ -40,31 +60,16 @@ fn main() {
     let glib_include = mingw64.join("include").join("glib-2.0");
     let glib_config_include = mingw64.join("lib").join("glib-2.0").join("include");
 
-    // Generate Rust bindings
     let bindings = bindgen::Builder::default()
         .header(header.to_str().unwrap())
         .clang_arg(format!("-I{}", vendor.join("include").display()))
         .clang_arg(format!("-I{}", glib_include.display()))
         .clang_arg(format!("-I{}", glib_config_include.display()))
-        // libgpod surface
-        .allowlist_function("itdb_.*")
-        .allowlist_type("Itdb_.*")
-        .allowlist_var("ITDB_.*")
-        // GError handling is needed by Task 6's spike
-        .allowlist_function("g_error_.*")
-        .allowlist_function("g_strdup")
-        .allowlist_function("g_free")
-        // Task 11: route libgpod's GLib WARNING/CRITICAL messages through tracing.
-        .allowlist_function("g_log_.*")
-        .allowlist_type("GLogLevelFlags")
-        .allowlist_var("G_LOG_.*")
-        .allowlist_type("GError")
-        .allowlist_type("GList")
+        .pipe(allowlists)
         .layout_tests(false)
         .generate()
         .expect("bindgen failed to generate libgpod bindings");
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let out_path = out_dir.join("libgpod_bindings.rs");
     bindings
         .write_to_file(&out_path)
@@ -208,3 +213,111 @@ fn main() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Non-Windows path: pkg-config for libgpod + glib (the standard upstream
+// gtk-pod install path on Linux + macOS). No vendored binaries, no pixbuf
+// staging — gdk-pixbuf's system installation handles loader discovery.
+//
+// Distros that ship libgpod-1.0.pc:
+//   Debian/Ubuntu: apt install libgpod-dev libglib2.0-dev
+//   Fedora:        dnf install libgpod-devel glib2-devel
+//   Arch:          pacman -S libgpod glib2
+//   macOS:         brew install libgpod glib pkg-config
+//
+// pkg-config emits the cargo:rustc-link-search / cargo:rustc-link-lib lines
+// itself when `.probe()` is called; we just collect the include paths to
+// feed bindgen.
+// ---------------------------------------------------------------------------
+
+fn build_pkg_config(out_dir: &Path) {
+    let libgpod = pkg_config::Config::new()
+        .atleast_version("0.8")
+        .probe("libgpod-1.0")
+        .unwrap_or_else(|e| {
+            panic!(
+                "libgpod-1.0 not found via pkg-config: {e}\n\
+                 Install libgpod-dev (Debian/Ubuntu), libgpod-devel (Fedora), \
+                 libgpod (Arch / Homebrew), or build from source. See \
+                 https://gitlab.gnome.org/Archive/libgpod"
+            )
+        });
+    let glib = pkg_config::Config::new()
+        .atleast_version("2.0")
+        .probe("glib-2.0")
+        .unwrap_or_else(|e| {
+            panic!(
+                "glib-2.0 not found via pkg-config: {e}\n\
+                 Install libglib2.0-dev (Debian/Ubuntu), glib2-devel (Fedora), \
+                 glib2 (Arch), or glib (Homebrew)."
+            )
+        });
+
+    // Locate gpod/itdb.h inside one of libgpod's include paths.
+    let header = libgpod
+        .include_paths
+        .iter()
+        .map(|p| p.join("gpod").join("itdb.h"))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "could not locate gpod/itdb.h in libgpod include paths: {:?}",
+                libgpod.include_paths
+            )
+        });
+    println!("cargo:rerun-if-changed={}", header.display());
+
+    let mut builder = bindgen::Builder::default().header(header.to_str().unwrap());
+    for inc in libgpod.include_paths.iter().chain(glib.include_paths.iter()) {
+        builder = builder.clang_arg(format!("-I{}", inc.display()));
+    }
+    let bindings = builder
+        .pipe(allowlists)
+        .layout_tests(false)
+        .generate()
+        .expect("bindgen failed to generate libgpod bindings");
+
+    bindings
+        .write_to_file(out_dir.join("libgpod_bindings.rs"))
+        .expect("failed to write bindings");
+
+    // No DLL copy, no pixbuf staging, no refalac on non-Windows:
+    //   - libgpod + glib are linked from system paths
+    //   - gdk-pixbuf's system installation owns loaders.cache (via
+    //     $XDG_DATA_DIRS); we don't override it. main.rs's
+    //     GDK_PIXBUF_MODULE_FILE setter is cfg(windows) so the system
+    //     default wins here.
+    //   - refalac is Windows-only (it's a qaac binary that needs
+    //     CoreAudioToolbox.dll); the ffmpeg encoder is the universal
+    //     codepath.
+}
+
+// ---------------------------------------------------------------------------
+// Shared bindgen allowlist. Identical for both Windows and non-Windows.
+// ---------------------------------------------------------------------------
+
+fn allowlists(b: bindgen::Builder) -> bindgen::Builder {
+    b.allowlist_function("itdb_.*")
+        .allowlist_type("Itdb_.*")
+        .allowlist_var("ITDB_.*")
+        // GError handling is needed by Task 6's spike
+        .allowlist_function("g_error_.*")
+        .allowlist_function("g_strdup")
+        .allowlist_function("g_free")
+        // Task 11: route libgpod's GLib WARNING/CRITICAL messages through tracing.
+        .allowlist_function("g_log_.*")
+        .allowlist_type("GLogLevelFlags")
+        .allowlist_var("G_LOG_.*")
+        .allowlist_type("GError")
+        .allowlist_type("GList")
+}
+
+/// Pipe combinator so we can apply a function to a builder mid-chain. Stable
+/// idiom; lets `allowlists` be shared between both code paths without
+/// duplicating the long list.
+trait Pipe: Sized {
+    fn pipe<F: FnOnce(Self) -> Self>(self, f: F) -> Self {
+        f(self)
+    }
+}
+impl Pipe for bindgen::Builder {}
