@@ -1,6 +1,6 @@
 # Learnings — ipod-sync
 
-Per global CLAUDE.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
+Per global AGENTS.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
 ## iTunes will always reject a libgpod-managed iPod (2026-05-24)
 

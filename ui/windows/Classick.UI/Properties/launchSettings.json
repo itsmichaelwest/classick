@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Classick.UI (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "Classick.UI (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

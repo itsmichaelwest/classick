@@ -43,7 +43,7 @@ publish/
 *.pubxml
 # Keep template-supplied publish profiles checked in so cloners get the same
 # build target configuration as the original scaffold.
-!IpodSync.UI/Properties/PublishProfiles/*.pubxml
+!Classick.UI/Properties/PublishProfiles/*.pubxml
 PublishScripts/
 
 # Code analysis and tooling

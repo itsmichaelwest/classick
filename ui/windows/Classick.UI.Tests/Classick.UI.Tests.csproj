@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      Plain net10.0 — the IPC types under test live in Classick.UI.Core,
+      which is also plain net10.0 (no WinAppSDK, no windows TFM). Referencing
+      the WinUI app project directly would drag the WindowsAppRuntime module
+      initializer into the test process and blow up with REGDB_E_CLASSNOTREG.
+    -->
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- Match Classick.UI Platforms — see same comment in Classick.UI.Core.csproj. -->
+    <Platforms>x64;ARM64</Platforms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!--
+      ViewModel under test (ReviewViewModel) depends on the MVVM toolkit.
+      We link-compile the VM source rather than project-referencing
+      Classick.UI to avoid pulling in the WindowsAppRuntime module
+      initializer (see csproj header note above).
+    -->
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Classick.UI.Core\Classick.UI.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Linked compile of the ViewModel from the WinUI app project. Keeps the
+      single source of truth in Classick.UI/ViewModels/ while letting plain
+      net10.0 tests exercise it.
+    -->
+    <Compile Include="..\Classick.UI\ViewModels\ReviewViewModel.cs"
+             Link="LinkedViewModels\ReviewViewModel.cs" />
+    <Compile Include="..\Classick.UI\ViewModels\WizardViewModel.cs"
+             Link="LinkedViewModels\WizardViewModel.cs" />
+    <Compile Include="..\Classick.UI\ViewModels\PopoverViewModel.cs"
+             Link="LinkedViewModels\PopoverViewModel.cs" />
+    <Compile Include="..\Classick.UI\ViewModels\HistoryEntryViewModel.cs"
+             Link="LinkedViewModels\HistoryEntryViewModel.cs" />
+    <Compile Include="..\Classick.UI\Notifications\NotificationDecision.cs"
+             Link="LinkedViewModels\NotificationDecision.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

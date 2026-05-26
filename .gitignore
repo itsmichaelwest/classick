@@ -1,5 +1,5 @@
 # Rust — matches workspace target/ at repo root AND any per-crate target/
-# (the daemon-integration tests poke crates/ipod-sync/target/test-tmp/).
+# (the daemon-integration tests poke crates/classick/target/test-tmp/).
 # Trailing-slash-only pattern matches at any depth.
 target/
 

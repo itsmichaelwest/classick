@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="Classick_UI.Views.SettingsNotificationsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:tk="using:CommunityToolkit.WinUI.Controls">
+    <!--
+        Notifications. Three per-event toggles that coalesce into the
+        daemon's single NotifyOn enum (all/errors_only/none) until the
+        protocol grows per-event toggles. Order matches the Figma's
+        Notifications frame.
+    -->
+    <ScrollViewer>
+        <StackPanel Padding="24" Spacing="20" HorizontalAlignment="Stretch">
+            <TextBlock Text="Notifications" Style="{ThemeResource TitleTextBlockStyle}" />
+
+            <TextBlock Text="When to notify" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+            <StackPanel Spacing="4">
+                <tk:SettingsCard Header="Sync completed"
+                                 Description="Show a toast when a sync finishes successfully">
+                    <tk:SettingsCard.HeaderIcon>
+                        <FontIcon Glyph="&#xE73E;" />
+                    </tk:SettingsCard.HeaderIcon>
+                    <ToggleSwitch IsOn="{x:Bind ViewModel.Notifications.NotifyOnSyncComplete, Mode=TwoWay}" />
+                </tk:SettingsCard>
+
+                <tk:SettingsCard Header="Sync failed"
+                                 Description="Show a toast when a sync fails or is cancelled">
+                    <tk:SettingsCard.HeaderIcon>
+                        <FontIcon Glyph="&#xE783;" />
+                    </tk:SettingsCard.HeaderIcon>
+                    <ToggleSwitch IsOn="{x:Bind ViewModel.Notifications.NotifyOnSyncFailed, Mode=TwoWay}" />
+                </tk:SettingsCard>
+
+                <tk:SettingsCard Header="iPod connected"
+                                 Description="Show a toast when your iPod is plugged in">
+                    <tk:SettingsCard.HeaderIcon>
+                        <FontIcon Glyph="&#xE839;" />
+                    </tk:SettingsCard.HeaderIcon>
+                    <ToggleSwitch IsOn="{x:Bind ViewModel.Notifications.NotifyOnDeviceConnected, Mode=TwoWay}" />
+                </tk:SettingsCard>
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

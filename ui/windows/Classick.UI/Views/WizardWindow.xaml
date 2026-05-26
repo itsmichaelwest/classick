@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Classick_UI.Views.WizardWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:animation="using:Microsoft.UI.Xaml.Media.Animation"
+    Title="classick setup">
+    <!--
+        First-launch wizard shell. Fixed 640×500 client, Mica backdrop,
+        tall title bar, no min/max/resize — all configured in
+        WizardWindow.xaml.cs. Each step lives in its own Page navigated
+        through the Frame below; the slide-from-right transition is set
+        once on the Frame so every step uses it.
+    -->
+    <Grid x:Name="WizardRoot">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0"
+                Grid.RowSpan="2"
+                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="0,0,0,1" />
+
+        <TitleBar x:Name="WizardTitleBar"
+                  Grid.Row="0"
+                  Height="48"
+                  Title="classick setup"
+                  IsBackButtonVisible="{x:Bind ViewModel.CanGoBackToPrevious, Mode=OneWay}"
+                  IsBackButtonEnabled="{x:Bind ViewModel.CanGoBackToPrevious, Mode=OneWay}"
+                  BackRequested="OnBackRequested" />
+
+        <Frame x:Name="StepFrame" Grid.Row="1">
+            <Frame.ContentTransitions>
+                <TransitionCollection>
+                    <NavigationThemeTransition>
+                        <NavigationThemeTransition.DefaultNavigationTransitionInfo>
+                            <animation:SlideNavigationTransitionInfo Effect="FromRight" />
+                        </NavigationThemeTransition.DefaultNavigationTransitionInfo>
+                    </NavigationThemeTransition>
+                </TransitionCollection>
+            </Frame.ContentTransitions>
+        </Frame>
+
+        <Grid Grid.Row="2" Padding="24,12,16,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <!-- These three bindings use {Binding} (not x:Bind) so they
+                 can resolve the BoolToVis converter from App resources —
+                 x:Bind's compile-time converter lookup requires a
+                 FrameworkElement root, and Window is not one. The Grid's
+                 DataContext is set to ViewModel in code-behind. -->
+            <StackPanel Grid.Column="0"
+                        Orientation="Horizontal"
+                        Spacing="8"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding Scanning, Converter={StaticResource BoolToVis}}">
+                <ProgressRing IsActive="True" Width="14" Height="14" />
+                <TextBlock Text="Searching for iPods…"
+                           FontSize="12"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           VerticalAlignment="Center" />
+            </StackPanel>
+
+            <Button Grid.Column="1"
+                    Content="Next"
+                    MinWidth="120"
+                    HorizontalAlignment="Right"
+                    Command="{Binding NextCommand}"
+                    Visibility="{Binding ShowNextButton, Converter={StaticResource BoolToVis}}" />
+            <Button Grid.Column="1"
+                    Content="Finish"
+                    MinWidth="120"
+                    HorizontalAlignment="Right"
+                    Command="{Binding FinishCommand}"
+                    Visibility="{Binding ShowFinishButton, Converter={StaticResource BoolToVis}}" />
+        </Grid>
+    </Grid>
+</Window>

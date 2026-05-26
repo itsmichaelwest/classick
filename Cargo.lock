@@ -229,6 +229,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "classick"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "blake3",
+ "clap",
+ "crossterm 0.29.0",
+ "dirs",
+ "pkg-config",
+ "plist",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -520,29 +543,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "ipod-sync"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "bindgen",
- "blake3",
- "clap",
- "crossterm 0.29.0",
- "dirs",
- "pkg-config",
- "plist",
- "ratatui",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "walkdir",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/ipod-sync"]
+members = ["crates/classick"]
 
-# Workspace defaults shared across all crates (currently just ipod-sync;
-# additional members — e.g. crates/ipod-sync-core when the cross-platform
+# Workspace defaults shared across all crates (currently just classick;
+# additional members — e.g. crates/classick-core when the cross-platform
 # split happens — will inherit these).
 [workspace.package]
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
