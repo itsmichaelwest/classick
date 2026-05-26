@@ -4,13 +4,14 @@
 
 # Classick
 
-Sync a FLAC library to an iPod Classic on Windows.
+Sync a FLAC library to an iPod Classic.
 
 [![Status](https://img.shields.io/badge/status-pre--1.0-yellow)](#status)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2B-0078D4)]()
+[![Tray app](https://img.shields.io/badge/tray%20app-Windows%2011%2B-0078D4)]()
+[![CLI](https://img.shields.io/badge/CLI-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-success)]()
 [![Rust](https://img.shields.io/badge/Rust-stable-orange)]()
 [![.NET](https://img.shields.io/badge/.NET-10-512BD4)]()
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](crates/classick/Cargo.toml)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
 
