@@ -91,6 +91,25 @@
       Text="classick.exe not found in target\debug\ or target\release\. Run `cargo build` (or `cargo build --release`) from the repo root, then rebuild this project. The UI will start but show a 'core not found' dialog until the binary exists." />
   </Target>
 
+  <!--
+    Mirror the Rust core into the AppX staging dir so it ships inside the .msix.
+    Content with <Link> lands at $(OutDir) root for the dev F5 loop (the locator's
+    parent-dir fallback finds it there), but the AppX layout / GenerateAppxPackage
+    step won't pull it in automatically — those files only end up in the package
+    if they're physically present in $(OutDir)AppX\. This target stages them.
+  -->
+  <Target Name="CopyClassickCoreToAppX"
+          AfterTargets="Build"
+          Condition="'$(ClassickCoreDir)' != '' And Exists('$(OutDir)AppX')">
+    <ItemGroup>
+      <_ClassickCoreFiles Include="$(ClassickCoreDir)\classick.exe" />
+      <_ClassickCoreFiles Include="$(ClassickCoreDir)\*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ClassickCoreFiles)"
+          DestinationFolder="$(OutDir)AppX\"
+          SkipUnchangedFiles="true" />
+  </Target>
+
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
