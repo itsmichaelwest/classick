@@ -88,6 +88,13 @@ actor DaemonClient {
 
     private func closeSocket() {
         if fd >= 0 {
+            // `shutdown(SHUT_RDWR)` first: the background reader thread is
+            // blocked in a plain `read()` on this fd, and on Darwin a bare
+            // `close()` doesn't reliably unblock a concurrent read on the
+            // same descriptor from another thread. `shutdown` forces that
+            // read to return (EOF/error) so the reader thread's loop exits
+            // and its `resume.resume()` fires instead of hanging forever.
+            Darwin.shutdown(fd, SHUT_RDWR)
             close(fd)
             fd = -1
         }

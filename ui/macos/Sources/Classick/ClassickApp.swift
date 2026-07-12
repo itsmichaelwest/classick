@@ -104,6 +104,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.send(.cancelSync) }
     }
 
+    /// "Retry" from the error phase. There's no dedicated retry command on
+    /// the wire — a fresh `get_status` forces the daemon to push a current
+    /// `status_update`, which recomputes phase out of `.error` if whatever
+    /// caused it has cleared.
+    func retry() {
+        Task { await daemonClient.send(.getStatus) }
+    }
+
     /// Peeks at `sync_event` lines for the `summary`/`finish` pair so a
     /// completion notification can report how many tracks were added.
     /// AppModel's reducer already handles these lines for UI state; this is
@@ -113,6 +121,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
               let data = line.data(using: .utf8),
               let inner = try? syncEventDecoder.decode(SyncEvent.self, from: data) else { return }
         switch inner {
+        case .header:
+            // A new sync just started streaming — clear out whatever count
+            // is left over from the previous run so a `finish` that (for
+            // whatever reason) arrives without an intervening `summary`
+            // can't report a stale, previous-run count.
+            pendingSyncAddCount = 0
         case let .summary(add, _, _, _, _, _):
             pendingSyncAddCount = add
         case let .finish(success):
@@ -125,6 +139,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func applicationWillTerminate(_ notification: Notification) {
         eventTask?.cancel()
+        // Best-effort: actor-isolated socket teardown can't be awaited from
+        // this synchronous delegate callback without risking a delay to
+        // process termination, so this is fire-and-forget.
+        Task { await daemonClient.stop() }
         daemonProcess.stop()
     }
 }
@@ -147,7 +165,8 @@ struct ClassickApp: App {
                 onSetUp: openSetupWindow,
                 onOpenSettings: openSettingsWindow,
                 onSyncNow: appDelegate.syncNow,
-                onCancelSync: appDelegate.cancelSync
+                onCancelSync: appDelegate.cancelSync,
+                onRetry: appDelegate.retry
             )
         }
         .menuBarExtraStyle(.menu)

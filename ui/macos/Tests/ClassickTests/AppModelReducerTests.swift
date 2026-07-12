@@ -46,4 +46,20 @@ final class AppModelReducerTests: XCTestCase {
                               ipod: IpodIdentity(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", name: nil)))
         XCTAssertEqual(m.phase, .idle)
     }
+
+    func testDeviceSwapToUnpairedShowsNotConfigured() {
+        // Regression: "configured" must be checked against the *currently
+        // connected* device's serial, not just "some iPod was ever paired" —
+        // otherwise swapping in an unpaired iPod after a paired one shows
+        // "Sync Now" instead of "Set Up Classick…".
+        let m = AppModel()
+        m.apply(.deviceConnected(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
+        m.apply(.configUpdate(source: "/music", daemon: nil,
+                              ipod: IpodIdentity(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", name: nil)))
+        XCTAssertEqual(m.phase, .idle)
+
+        m.apply(.deviceDisconnected(serial: "0xA"))
+        m.apply(.deviceConnected(serial: "0xB", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
+        XCTAssertEqual(m.phase, .notConfigured)
+    }
 }

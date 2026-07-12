@@ -50,7 +50,28 @@ final class AppModel {
     // own `ipod_connected`/`configured` flags independent of the
     // `device_connected`/`device_disconnected` events.
     private var isIpodConnected = false
-    private var isConfigured = false
+
+    // "Configured" is device-aware: the daemon's persisted iPod identity must
+    // match the *currently connected* device's serial, not just "some iPod
+    // was ever paired". Without this check, swapping in a different,
+    // unpaired iPod while a paired one's config is still cached would show
+    // "Sync Now" instead of "Set Up Classick…".
+    //
+    // `configuredSerial`/`hasSeenConfig` come from `config_update` (the
+    // source of truth once we've seen one). Before the first `config_update`
+    // arrives, `statusConfigured` — the daemon's own device-agnostic
+    // `status_update.configured` flag — is used as a fallback so the menu
+    // doesn't flash "Set Up Classick…" during the startup handshake.
+    private var configuredSerial: String?
+    private var hasSeenConfig = false
+    private var statusConfigured = false
+
+    private var isConfiguredForCurrentDevice: Bool {
+        if let device {
+            return device.serial == configuredSerial
+        }
+        return hasSeenConfig ? configuredSerial != nil : statusConfigured
+    }
 
     private let decoder = JSONDecoder()
 
@@ -65,8 +86,11 @@ final class AppModel {
             // iPod identity (daemon: `configured = configured_serial.is_some()`).
             // It emits `config_update` (not a pushed `status_update`) after a
             // `save_config`, so derive the flag here too or the menu would stay
-            // stuck on "Set Up…" right after first-run setup.
-            isConfigured = ipod != nil
+            // stuck on "Set Up…" right after first-run setup. Track the serial
+            // itself (not just presence) so a later device swap is caught by
+            // `isConfiguredForCurrentDevice`.
+            hasSeenConfig = true
+            configuredSerial = ipod?.serial
             phase = computePhase(targetSyncing: phaseIsSyncing)
 
         case let .deviceConnected(serial, modelLabel, drive, name):
@@ -82,7 +106,7 @@ final class AppModel {
             phase = computePhase(targetSyncing: false)
 
         case let .statusUpdate(info):
-            isConfigured = info.configured
+            statusConfigured = info.configured
             isIpodConnected = info.ipodConnected
             lastSync = info.lastSync
             let targetSyncing: Bool
@@ -116,7 +140,7 @@ final class AppModel {
     /// bypass this and set `.syncing`/`.idle` directly.
     private func computePhase(targetSyncing: Bool) -> Phase {
         guard isIpodConnected else { return .noDevice }
-        guard isConfigured else { return .notConfigured }
+        guard isConfiguredForCurrentDevice else { return .notConfigured }
         guard targetSyncing else { return .idle }
         if case .syncing = phase { return phase }
         return .syncing(current: 0, total: 0, label: "")
