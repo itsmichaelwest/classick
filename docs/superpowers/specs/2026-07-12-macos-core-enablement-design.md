@@ -106,27 +106,37 @@ on the first package and must not be presented as the macOS setup path.
 `Artwork support ..........: yes`; linker line gains `-lgdk_pixbuf-2.0` and
 `-lgcrypt`; `pkg-config --exists libgpod-1.0` succeeds.
 
-### M1.2 — Device identity resolution
+### M1.2 — Device identity resolution (IOKit)
 
 New `#[cfg(target_os = "macos")]` implementation of `resolve_libgpod_identity()`
 in `ipod/device.rs`, returning the same `LibgpodIdentity` struct as the Windows
 path so all downstream signing is untouched.
 
-**Layered, matching the Windows structure (on-disk → recovery):**
+**Layered (on-disk → IOKit recovery), matching the Windows structure:**
 
 - **Layer 1 — on-disk `SysInfo`.** Read `iPod_Control/Device/SysInfo` from the
-  mount, parse `FirewireGuid` + `ModelNumStr` with the existing parse helpers.
-  Instant when present (e.g. iPod previously used with iTunes/another tool).
-- **Layer 2 — IOKit fallback.** Walk the USB device tree via `io-kit-sys` +
-  `core-foundation` crates; find the Apple iPod (USB vendor `0x05AC`); read:
-  - the **USB serial-number string → `FirewireGuid`** (for USB iPods these are
-    the same 16-hex-digit value), formatted as `0x…`;
-  - `idProduct` (PID) + capacity → the **existing PID/capacity model heuristic**
-    already present in `device.rs` → `ModelNumStr`/generation.
+  mount, parse `FirewireGuid` + `ModelNumStr` via the existing
+  `parse_sysinfo_field` helper. Instant when present (older iTunes/prior tool).
+- **Layer 2 — IOKit recovery.** Map the mount to its IOKit device via
+  **DiskArbitration** (`DADiskCreateFromVolumePath` → `DADiskCopyIOMedia`),
+  walk up the registry to the parent Apple USB device (vendor `0x05AC`), and
+  read device properties directly:
+  - `USB Serial Number` string → **`FirewireGuid`** (for USB iPods these are the
+    same 16-hex value), formatted `0x…`;
+  - `idProduct` (PID) + the IOMedia **`Size`** property (capacity) → the
+    existing `identify_ipod(pid, capacity)` heuristic → `ModelNumStr`.
 
-Implementation choice recorded: **IOKit via Rust crates**, not shelling out to
-`system_profiler` — faster, robust, and consistent with the repo's
-direct-platform-API style (the Windows code calls SetupAPI/Cfgmgr32 directly).
+**Decision (informed reversal, 2026-07-12):** implement via the servo
+`core-foundation-rs` crate set (`io-kit-sys`, `core-foundation`,
+`core-foundation-sys`) as new macOS-only dependencies. This **supersedes** the
+existing `ioreg`/`df` shellout path (`macos_recover_ipod_info`,
+`macos_ioreg_iousb`, `macos_bsd_name_for_mount`, `macos_find_ipod_device`,
+`macos_dict_contains_bsd` in `device.rs`), which is removed. Rationale: we are
+also doing the event-driven IOKit watcher (M2.2), so a single native
+IOKit/CoreFoundation layer serves both — and it fixes the ioreg path's
+hardcoded-`None` capacity gap natively (via IOMedia `Size`) instead of adding a
+`diskutil` shellout. This overrides the device.rs:1180–1182 "IOKit FFI out of
+scope for the initial pass" note; the initial pass is over.
 
 ### M1.3 — Music.app guard
 
@@ -174,18 +184,31 @@ connections," plus wiring the pieces below.
 
 ### M2.2 — Event-driven IOKit device watcher
 
-The daemon's device watcher is Windows-only. The macOS impl uses **event-driven
-IOKit notifications** (not polling), on a dedicated CFRunLoop thread:
+The daemon already has a cross-platform `PollingDeviceWatcher` (production impl
+of the `DeviceWatcher` trait in `daemon/device_watcher.rs`) that works on macOS
+via `scan_for_ipod()`. Per the informed decision (2026-07-12), macOS instead
+gets a **new event-driven `IokitDeviceWatcher`** — a second `impl DeviceWatcher`
+— which the daemon runtime selects on macOS; `PollingDeviceWatcher` stays as the
+Windows production watcher and the test double. The trait's own doc comment
+already anticipated this swap ("M5 polish can swap in an event-driven impl
+without touching the runtime").
 
-- Register `IOServiceAddMatchingNotification` for USB match/terminate of the
-  Apple iPod (vendor `0x05AC`).
-- On `kIOMatchedNotification` (attach): a USB attach fires **before** the volume
-  mounts, but identity resolution needs the mount. So: wait/poll briefly for
-  `/Volumes/<name>` to appear → run `resolve_libgpod_identity()` (from M1.2) →
-  emit `device_connected`.
-- On `kIOTerminatedNotification` (detach): emit `device_disconnected`
-  immediately.
-- The CFRunLoop thread bridges these into the daemon's existing async channel.
+`IokitDeviceWatcher::start()` spawns a dedicated `std::thread` running a
+`CFRunLoop`, and bridges events into the trait's `mpsc::Receiver<DeviceEvent>`:
+
+- Register `IOServiceAddMatchingNotification` for `kIOMatchedNotification` +
+  `kIOTerminatedNotification` on the Apple iPod (vendor `0x05AC`); the C
+  callback receives the `mpsc::Sender` via its `refcon`.
+- On **match** (attach): a USB attach fires **before** the volume mounts, but a
+  `DeviceEvent::Connected(DetectedIpod)` needs the mount path (`drive`). So wait
+  for the mount — either a DiskArbitration mount callback or a bounded
+  poll of `/Volumes` — then run `resolve_libgpod_identity()` (M1.2) to fill
+  `serial`/`model_label`, and send `Connected`.
+- On **terminate** (detach): send `Disconnected { serial }` immediately.
+- Reuse the existing `Debouncer` (500ms) unchanged.
+- Watcher shutdown: signal the CFRunLoop to stop (`CFRunLoopStop`) and join the
+  thread when the receiver is dropped, so the daemon's bounded-shutdown path
+  leaks nothing.
 
 ### M2.3 — Path reconciliation (the IPC contract)
 
@@ -206,8 +229,10 @@ and the future Swift client:
   device access, spawns a daemon) — so a container-private `$TMPDIR` is not a
   concern.
 - **Config:** **`~/Library/Application Support/classick/config.toml`** (this is
-  user data, so Application Support is correct), resolved via the
-  `directories`/`dirs` crate. Verify `config_file.rs` resolves it on macOS.
+  user data, so Application Support is correct). Already resolves correctly:
+  `config_file.rs::default_path()` uses `dirs::config_dir()`, which returns
+  `~/Library/Application Support` on macOS. Work here is **verify + fix the
+  misleading `%APPDATA%` comment** — no code change to the path logic.
 
 ### M2.4 — Verification
 
@@ -241,6 +266,15 @@ A throwaway `examples/` socket probe that mimics the Swift client:
 4. **gdk-pixbuf loaders undiscoverable at runtime** → silent artwork failure.
    For the *dev* build the Homebrew loaders + cache are found automatically;
    the relocatable-loaders problem is an SP3 (packaging) concern, flagged there.
+5. **IOKit/CoreFoundation FFI + CFRunLoop lifecycle** (M1.2, M2.2) is the new
+   `unsafe` surface introduced by the full-IOKit decision. Risks: the C
+   notification callback must carry the tokio `Sender` safely via `refcon`
+   (no use-after-free); the CFRunLoop thread must stop cleanly on receiver drop
+   (`CFRunLoopStop` + join) so daemon shutdown leaks nothing; DiskArbitration
+   mount→device mapping can race a not-yet-mounted volume (mitigated by the
+   attach→wait-for-mount step). Mitigate by keeping the FFI in one focused
+   module, unit-testing the pure parts (property parsing, guid formatting), and
+   validating the unsafe paths against the real device.
 
 ---
 
