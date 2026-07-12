@@ -57,9 +57,15 @@ pub fn probe_output_from_lofty(path: &Path) -> Result<ProbeOutput> {
         });
     }
 
+    // Duration → iTunesDB tracklen (ms). Without this the iPod shows -0:00 and
+    // may skip, because classick doesn't otherwise set the track length and
+    // libgpod can't backfill it from afconvert's ALAC container.
+    let duration_ms = u32::try_from(tagged.properties().duration().as_millis()).ok();
+
     Ok(ProbeOutput {
         streams,
         format: ProbeFormat { format_name, tags: Some(tags) },
+        duration_ms,
     })
 }
 

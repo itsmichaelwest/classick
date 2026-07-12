@@ -5,9 +5,10 @@ use crate::transcode::{ProbeOutput, ProbeTags};
 /// struct. Pulls track / disc / year out of the messy "n/N" string formats
 /// using the small parse helpers below.
 pub fn tags_from_probe(p: &ProbeOutput) -> Tags {
+    let duration_ms = p.duration_ms;
     let pt: &ProbeTags = match &p.format.tags {
         Some(t) => t,
-        None => return Tags::default(),
+        None => return Tags { duration_ms, ..Tags::default() },
     };
 
     let track_nr = pt.track.as_deref().and_then(|s| parse_int_first_field(s));
@@ -34,6 +35,7 @@ pub fn tags_from_probe(p: &ProbeOutput) -> Tags {
         tracks,
         disc_nr,
         discs,
+        duration_ms,
     }
 }
 

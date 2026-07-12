@@ -14,6 +14,11 @@ pub struct ProbeOutput {
     #[serde(default)]
     pub streams: Vec<ProbeStream>,
     pub format: ProbeFormat,
+    /// Track duration in milliseconds, used to set the iTunesDB `tracklen`.
+    /// Populated by the macOS (lofty) probe; `None` on the ffprobe path
+    /// (Windows), where libgpod backfills the length from the file.
+    #[serde(default)]
+    pub duration_ms: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

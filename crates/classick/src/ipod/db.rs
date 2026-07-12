@@ -33,6 +33,9 @@ pub struct Tags {
     pub tracks: Option<i32>,
     pub disc_nr: Option<i32>,
     pub discs: Option<i32>,
+    /// Track length in milliseconds → iTunesDB `tracklen`. `None` leaves the
+    /// libgpod default (0); the iPod shows -0:00 without it.
+    pub duration_ms: Option<u32>,
 }
 
 impl OwnedDb {
@@ -538,6 +541,11 @@ unsafe fn apply_tags(track: *mut ffi::Itdb_Track, tags: &Tags) {
     }
     if let Some(t) = tags.discs {
         (*track).cds = t;
+    }
+    // Duration (ms). Without this the iPod shows -0:00 and may cut tracks short;
+    // libgpod doesn't backfill it from afconvert's ALAC container on macOS.
+    if let Some(d) = tags.duration_ms {
+        (*track).tracklen = d as i32;
     }
 }
 
