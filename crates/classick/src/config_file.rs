@@ -100,7 +100,9 @@ pub struct PersistedConfig {
     pub ipod_identity: Option<IpodIdentity>,
 }
 
-/// Default location of the persisted config: %APPDATA%\classick\config.toml.
+/// Default location of the persisted config (cross-platform via dirs::config_dir()):
+/// `~/Library/Application Support/classick/config.toml` on macOS,
+/// `%APPDATA%\classick\config.toml` on Windows.
 pub fn default_path() -> Result<PathBuf> {
     let appdata = dirs::config_dir()
         .ok_or_else(|| anyhow!("could not resolve %APPDATA% via dirs::config_dir"))?;
