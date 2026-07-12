@@ -24,6 +24,8 @@
     <true/>
     <key>NSHumanReadableCopyright</key>
     <string>Classick — LGPL components; see About.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Classick reads and updates your iPod's music library on its mounted volume to sync your files.</string>
     <key>SUFeedURL</key>
     <string>https://itsmichaelwest.github.io/classick/appcast.xml</string>
     <key>SUPublicEDKey</key>

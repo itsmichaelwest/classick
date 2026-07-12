@@ -156,95 +156,154 @@ pub enum UsbChange {
     Removed,
 }
 
+/// IOKit notification / interest-type strings (see `IOKitKeys.h`).
+const KIO_MATCHED_NOTIFICATION: &[u8] = b"IOServiceMatched\0";
+const KIO_GENERAL_INTEREST: &[u8] = b"IOGeneralInterest\0";
+
+/// `kIOMessageServiceIsTerminated` = `iokit_common_msg(0x10)` =
+/// `err_system(0x38) | err_sub(0) | 0x10` (see `IOKit/IOMessage.h`). Delivered
+/// to a `kIOGeneralInterest` interest notification when the watched device is
+/// removed. This per-device interest is how removal is detected — a
+/// `kIOTerminatedNotification` *matching* notification doesn't fire reliably
+/// (the device's property dict, e.g. `idVendor`, isn't matchable as the node
+/// tears down), which is why earlier unplugs went unnoticed.
+const KIO_MESSAGE_SERVICE_IS_TERMINATED: u32 = 0xE000_0010;
+
 /// Run a `CFRunLoop` that invokes `on_event` whenever an Apple (`0x05AC`) USB
 /// device is added or removed. Blocks the calling thread indefinitely (the
 /// notification source keeps the run loop alive) — intended to run on a
 /// dedicated `std::thread` owned by the device watcher. `on_event(Added)` also
-/// fires once at startup for any already-connected Apple device.
+/// fires once at startup for each already-connected Apple device.
+///
+/// Removal is detected the canonical Apple way: for every matched device we
+/// register a per-device `IOServiceAddInterestNotification(kIOGeneralInterest)`
+/// and watch for `kIOMessageServiceIsTerminated`. We hold the device handle, so
+/// there's no property-match-at-teardown problem.
+///
+/// `on_event` runs ON the run-loop thread, so it MUST be fast and non-blocking
+/// (a channel send). Doing blocking work here (e.g. polling for the volume
+/// mount) starves every other IOKit notification — that is what made plug-in
+/// and unplug events go missing.
 pub fn run_usb_notifications(on_event: Box<dyn FnMut(UsbChange) + Send>) {
-    use core_foundation::base::TCFType;
-    use core_foundation::number::CFNumber;
-    use core_foundation::string::CFString;
-    use core_foundation_sys::base::{CFRetain, CFTypeRef};
-    use core_foundation_sys::dictionary::CFDictionarySetValue;
     use core_foundation_sys::runloop::{
         kCFRunLoopDefaultMode, CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRun,
     };
-    use io_kit_sys::types::io_iterator_t;
+    use io_kit_sys::types::{io_iterator_t, io_object_t, io_service_t};
     use io_kit_sys::{
         kIOMasterPortDefault, IONotificationPortCreate, IONotificationPortGetRunLoopSource,
-        IOIteratorNext, IOObjectRelease, IOServiceAddMatchingNotification, IOServiceMatching,
+        IONotificationPortRef, IOIteratorNext, IOObjectRelease, IOServiceAddInterestNotification,
+        IOServiceAddMatchingNotification, IOServiceMatching,
     };
     use std::os::raw::{c_char, c_void};
 
-    // Drain the iterator (re-arms the notification) then fire `on_event` once.
-    unsafe fn dispatch(refcon: *mut c_void, iter: io_iterator_t, change: UsbChange) {
-        loop {
-            let e = IOIteratorNext(iter);
-            if e == 0 {
-                break;
-            }
-            IOObjectRelease(e);
-        }
-        let cb = &mut *(refcon as *mut Box<dyn FnMut(UsbChange) + Send>);
-        cb(change);
+    // Shared by the matched callback and every per-device interest callback.
+    // All run on the single CFRunLoop thread, so the raw-pointer aliasing is
+    // sound (no concurrency). Leaked for the process lifetime (the run loop
+    // never returns).
+    struct Ctx {
+        port: IONotificationPortRef,
+        on_event: Box<dyn FnMut(UsbChange) + Send>,
     }
-    unsafe extern "C" fn added(refcon: *mut c_void, iter: io_iterator_t) {
-        dispatch(refcon, iter, UsbChange::Added);
-    }
-    unsafe extern "C" fn removed(refcon: *mut c_void, iter: io_iterator_t) {
-        dispatch(refcon, iter, UsbChange::Removed);
+    // Per-device termination registration; refcon for its interest callback.
+    // Boxed and leaked into IOKit, reclaimed in `device_terminated`.
+    struct Interest {
+        ctx: *mut Ctx,
+        notification: io_object_t,
+        service: io_service_t,
     }
 
-    let mut cb = on_event;
-    let refcon = &mut cb as *mut Box<dyn FnMut(UsbChange) + Send> as *mut c_void;
+    // A matched Apple USB device appeared. Register a termination interest on
+    // it, then signal Added. Stays fast — no blocking here.
+    unsafe extern "C" fn device_matched(refcon: *mut c_void, iter: io_iterator_t) {
+        let ctx = &mut *(refcon as *mut Ctx);
+        loop {
+            let service = IOIteratorNext(iter);
+            if service == 0 {
+                break;
+            }
+            // Filter to Apple (0x05AC) here — the matching dict can't (see the
+            // registration site). Skip + release anything else.
+            if read_u64_prop(service, "idVendor") != Some(0x05AC) {
+                IOObjectRelease(service);
+                continue;
+            }
+            let interest = Box::into_raw(Box::new(Interest {
+                ctx: refcon as *mut Ctx,
+                notification: 0,
+                service,
+            }));
+            let mut notification: io_object_t = 0;
+            let kr = IOServiceAddInterestNotification(
+                ctx.port,
+                service,
+                KIO_GENERAL_INTEREST.as_ptr() as *mut c_char,
+                device_terminated,
+                interest as *mut c_void,
+                &mut notification,
+            );
+            if kr == 0 {
+                (*interest).notification = notification;
+                // Keep `service` alive — released in device_terminated.
+                (ctx.on_event)(UsbChange::Added);
+            } else {
+                tracing::warn!("IOServiceAddInterestNotification failed: {kr}");
+                drop(Box::from_raw(interest));
+                IOObjectRelease(service);
+            }
+        }
+    }
+
+    // A watched device is being torn down. Signal Removed and release the
+    // device handle + its interest notification.
+    unsafe extern "C" fn device_terminated(
+        refcon: *mut c_void,
+        _service: io_service_t,
+        message_type: u32,
+        _arg: *mut c_void,
+    ) {
+        if message_type != KIO_MESSAGE_SERVICE_IS_TERMINATED {
+            return;
+        }
+        let interest = Box::from_raw(refcon as *mut Interest);
+        let ctx = &mut *interest.ctx;
+        (ctx.on_event)(UsbChange::Removed);
+        IOObjectRelease(interest.notification);
+        IOObjectRelease(interest.service);
+    }
 
     unsafe {
         let port = IONotificationPortCreate(kIOMasterPortDefault);
         let src = IONotificationPortGetRunLoopSource(port);
         CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopDefaultMode);
 
-        // Match Apple USB devices (vendor 0x05AC).
-        let matching = IOServiceMatching(b"IOUSBDevice\0".as_ptr() as *const c_char);
-        let key = CFString::from_static_string("idVendor");
-        let val = CFNumber::from(0x05AC_i32);
-        CFDictionarySetValue(
-            matching as *mut _,
-            key.as_CFTypeRef() as *const c_void,
-            val.as_CFTypeRef() as *const c_void,
-        );
+        let ctx = Box::into_raw(Box::new(Ctx { port, on_event }));
 
-        // Each IOServiceAddMatchingNotification consumes one reference to the
-        // matching dict, so retain once for the second registration.
-        CFRetain(matching as CFTypeRef);
+        // MATCHED: USB host devices, filtered to Apple (0x05AC) in the callback.
+        //
+        // Two hard-won details:
+        //  * Class MUST be `IOUSBHostDevice`. The legacy `IOUSBDevice` class does
+        //    not exist on modern macOS (`ioreg -c IOUSBDevice` returns nothing),
+        //    so matching it yields an always-empty iterator.
+        //  * The `idVendor` filter must NOT go in the matching dict. Setting it
+        //    there makes IOKit's matching engine return an empty iterator (the
+        //    CFNumber doesn't compare the way the engine wants), which silently
+        //    broke every add/remove notification. Filtering by vendor in
+        //    `device_matched` via `read_u64_prop` works reliably.
+        let matching = IOServiceMatching(b"IOUSBHostDevice\0".as_ptr() as *const c_char);
 
         let mut it_add: io_iterator_t = 0;
         let kr_add = IOServiceAddMatchingNotification(
             port,
-            b"IOServiceMatched\0".as_ptr() as *mut c_char,
-            matching,
-            added,
-            refcon,
+            KIO_MATCHED_NOTIFICATION.as_ptr() as *mut c_char,
+            matching, // consumes this reference
+            device_matched,
+            ctx as *mut c_void,
             &mut it_add,
         );
         if kr_add != 0 {
             tracing::warn!("IOServiceAddMatchingNotification(matched) failed: {kr_add}");
         }
-        added(refcon, it_add); // arm + process already-connected devices
-
-        let mut it_rm: io_iterator_t = 0;
-        let kr_rm = IOServiceAddMatchingNotification(
-            port,
-            b"IOServiceTerminated\0".as_ptr() as *mut c_char,
-            matching,
-            removed,
-            refcon,
-            &mut it_rm,
-        );
-        if kr_rm != 0 {
-            tracing::warn!("IOServiceAddMatchingNotification(terminated) failed: {kr_rm}");
-        }
-        removed(refcon, it_rm); // arm (nothing terminating at startup)
+        device_matched(ctx as *mut c_void, it_add); // arm + process already-connected
 
         CFRunLoopRun();
     }
@@ -262,5 +321,16 @@ mod tests {
     #[test]
     fn trims_and_uppercases() {
         assert_eq!(format_firewire_guid("  ab12cd  "), "0xAB12CD");
+    }
+
+    // Regression: pin the IOKit notification/interest constants. The message
+    // type is `kIOMessageServiceIsTerminated = err_system(0x38) | 0x10`; a
+    // wrong value means the per-device termination interest silently never
+    // reports removal.
+    #[test]
+    fn iokit_notification_constants_are_correct() {
+        assert_eq!(KIO_MATCHED_NOTIFICATION, b"IOServiceMatched\0");
+        assert_eq!(KIO_GENERAL_INTEREST, b"IOGeneralInterest\0");
+        assert_eq!(KIO_MESSAGE_SERVICE_IS_TERMINATED, 0xE000_0010);
     }
 }
