@@ -35,4 +35,15 @@ final class AppModelReducerTests: XCTestCase {
         m.apply(.syncRejected(reason: "not_configured"))
         if case .error = m.phase {} else { XCTFail("expected error phase") }
     }
+
+    func testConfigUpdateWithIpodFlipsNotConfiguredToIdle() {
+        // Regression: after first-run save_config the daemon emits config_update
+        // (not a pushed status_update), so the menu must leave .notConfigured.
+        let m = AppModel()
+        m.apply(.deviceConnected(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
+        XCTAssertEqual(m.phase, .notConfigured)
+        m.apply(.configUpdate(source: "/music", daemon: nil,
+                              ipod: IpodIdentity(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", name: nil)))
+        XCTAssertEqual(m.phase, .idle)
+    }
 }

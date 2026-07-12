@@ -61,6 +61,13 @@ final class AppModel {
 
         case let .configUpdate(source, daemon, ipod):
             config = AppConfig(source: source, daemon: daemon, ipod: ipod)
+            // The daemon considers itself configured once it has a persisted
+            // iPod identity (daemon: `configured = configured_serial.is_some()`).
+            // It emits `config_update` (not a pushed `status_update`) after a
+            // `save_config`, so derive the flag here too or the menu would stay
+            // stuck on "Set Up…" right after first-run setup.
+            isConfigured = ipod != nil
+            phase = computePhase(targetSyncing: phaseIsSyncing)
 
         case let .deviceConnected(serial, modelLabel, drive, name):
             device = DeviceState(serial: serial, model: modelLabel, name: name, drive: drive)
