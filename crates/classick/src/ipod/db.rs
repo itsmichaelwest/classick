@@ -156,9 +156,14 @@ impl OwnedDb {
                     bytes.len() as _,
                 );
                 if ok == 0 {
-                    // Track isn't yet attached to db, so we own it.
-                    ffi::itdb_track_free(track);
-                    return Err(anyhow!("itdb_track_set_thumbnails_from_data failed"));
+                    // Non-fatal: thumbnailing needs gdk-pixbuf loader plugins,
+                    // which may be absent in a bundled app on a machine without
+                    // Homebrew. Add the track WITHOUT artwork rather than
+                    // failing the whole sync over a missing cover.
+                    tracing::warn!(
+                        "artwork thumbnail failed (missing gdk-pixbuf loaders?); \
+                         adding track without art"
+                    );
                 }
             }
 

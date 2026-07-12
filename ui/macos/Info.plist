@@ -27,7 +27,7 @@
     <key>SUFeedURL</key>
     <string>https://itsmichaelwest.github.io/classick/appcast.xml</string>
     <key>SUPublicEDKey</key>
-    <string>PLACEHOLDER_REPLACE_WITH_generate_keys_OUTPUT</string>
+    <string>kwXF853KSBy2ltj2p3pYRZwlnmqY2zMdznEjKgxmPaY=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
 </dict>
