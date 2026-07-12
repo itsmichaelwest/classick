@@ -196,19 +196,45 @@ pub fn probe(src: &Path, ffmpeg_path: &Path) -> Result<ProbeOutput> {
 /// `config.ffmpeg`/`_ffmpeg_path` is accepted-but-ignored.
 #[cfg(target_os = "macos")]
 pub fn transcode_to_alac(src: &Path, dst: &Path, _ffmpeg_path: &Path) -> Result<()> {
-    let status = Command::new("/usr/bin/afconvert")
-        .args(["-f", "m4af", "-d", "alac"])
+    // afconvert preserves the source bit depth: FLAC decodes to 32-bit, so a
+    // direct `-d alac` yields 32-bit ALAC that the iPod Classic CANNOT decode
+    // (it plays a few seconds, then skips). Force 16-bit/44.1kHz ALAC — exactly
+    // what iTunes downconverts to when syncing to an iPod — by first decoding to
+    // 16-bit LPCM (a temp CAF), then ALAC-encoding that. afinfo then reports
+    // `alac (0x00000001) from 16-bit source`.
+    let caf = dst.with_extension("caf");
+
+    let decode = Command::new("/usr/bin/afconvert")
+        .args(["-f", "caff", "-d", "LEI16@44100"])
         .arg(src)
+        .arg(&caf)
+        .stdin(Stdio::null())
+        .no_console()
+        .status()
+        .map_err(|e| anyhow!("failed to spawn afconvert: {e}"))?;
+    if !decode.success() {
+        let _ = std::fs::remove_file(&caf);
+        return Err(anyhow!(
+            "afconvert decode failed on {} (exit {:?})",
+            src.display(),
+            decode.code()
+        ));
+    }
+
+    let encode = Command::new("/usr/bin/afconvert")
+        .args(["-f", "m4af", "-d", "alac"])
+        .arg(&caf)
         .arg(dst)
         .stdin(Stdio::null())
         .no_console()
         .status()
         .map_err(|e| anyhow!("failed to spawn afconvert: {e}"))?;
-    if !status.success() {
+    let _ = std::fs::remove_file(&caf);
+    if !encode.success() {
         return Err(anyhow!(
-            "afconvert failed on {} (exit {:?})",
+            "afconvert encode failed on {} (exit {:?})",
             src.display(),
-            status.code()
+            encode.code()
         ));
     }
     Ok(())
