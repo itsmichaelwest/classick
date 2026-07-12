@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
-# Build the Classick executable via SwiftPM and assemble Classick.app around it
-# (LSUIElement menu-bar agent). Ad-hoc signed for dev; real Developer ID
-# signing + notarization is SP3. See ui/macos/README.md.
+# Build Classick.app via the Xcode project (Classick.xcodeproj, generated from
+# project.yml by XcodeGen). xcodebuild produces the .app, embeds the classick
+# daemon (a build phase), and ad-hoc signs it. Result is copied to
+# ui/macos/Classick.app for convenience (`open ui/macos/Classick.app`).
+#
+# Real Developer ID signing + notarization + .dmg is SP3.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-CONFIG="${1:-release}"
-echo "==> swift build -c $CONFIG"
-swift build -c "$CONFIG"
+CONFIG="${1:-Debug}"
 
-APP="Classick.app"
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp Info.plist "$APP/Contents/Info.plist"
-cp ".build/$CONFIG/Classick" "$APP/Contents/MacOS/Classick"
-
-# Dev convenience: embed the freshly built daemon binary so the app can spawn
-# it from Contents/Resources. In SP3 this (plus the libgpod dylib closure) is
-# done properly with signing.
-if [ -f ../../target/release/classick ]; then
-  cp ../../target/release/classick "$APP/Contents/Resources/classick"
-else
-  echo "warn: ../../target/release/classick not found (run: cargo build --release)"
+# The app embeds + spawns the daemon; make sure it's built.
+if [ ! -f ../../target/release/classick ]; then
+  echo "==> building daemon (cargo build --release)"
+  ( cd ../.. && cargo build --release )
 fi
 
-# Ad-hoc sign so the bundle runs and (best-effort) can register notifications.
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || echo "warn: ad-hoc codesign failed"
+# Regenerate the project from project.yml if XcodeGen is available (keeps the
+# committed .xcodeproj in sync); otherwise use the committed one as-is.
+if command -v xcodegen >/dev/null 2>&1; then
+  xcodegen generate >/dev/null
+fi
 
-echo "built $PWD/$APP"
+echo "==> xcodebuild ($CONFIG)"
+xcodebuild -project Classick.xcodeproj -scheme Classick -configuration "$CONFIG" \
+  -derivedDataPath .build-xcode build >/dev/null
+
+SRC=".build-xcode/Build/Products/$CONFIG/Classick.app"
+rm -rf Classick.app
+cp -R "$SRC" Classick.app
+echo "built $PWD/Classick.app"

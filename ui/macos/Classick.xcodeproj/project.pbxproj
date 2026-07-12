@@ -1,0 +1,527 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0A3FEB815A326868D819E58B /* SmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FDB10A10012288F988FE32C /* SmokeTests.swift */; };
+		1EF2D88BD28C5DBB1C00A0EF /* AppModelReducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41284FF3EF16C964A6FDCCEF /* AppModelReducerTests.swift */; };
+		205413F237D7FB0ED719FD80 /* DaemonClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 692B715F0269A14C79855E96 /* DaemonClientTests.swift */; };
+		21C4AD8118E2A87AC6B16D8B /* DaemonProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD34388BC51EFD2420DCC244 /* DaemonProcess.swift */; };
+		22C8CBC1F64EF320711A44B1 /* ClassickApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18857CE62529C7150D78B6EA /* ClassickApp.swift */; };
+		3012B574C1CDDEF574BE97C9 /* WireCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 088D7817D297D30A5DEB28B4 /* WireCodecTests.swift */; };
+		323700F7CDAEA8A69F46AF4D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F6E6E19F0CC4A565F756B34 /* SettingsView.swift */; };
+		34B045E46CB1FFA37A665FA4 /* Storage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61DE80657A5644ED21E4873A /* Storage.swift */; };
+		3BE072B94276C28F1575F44A /* WireModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60A2D7EA38BF7099CA882E0C /* WireModels.swift */; };
+		4FB908A351CF502DE07174A1 /* Notifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 971A1C21B70044C6DB7B777B /* Notifier.swift */; };
+		7DB96D9B60B910D9CADBF471 /* PromptAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAB3C64FBA7F0070A69F92BD /* PromptAlert.swift */; };
+		8C007C9F5695000CBA16E4F7 /* SetupWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82BC8C8CBF9B3ECE8C2C11DC /* SetupWindow.swift */; };
+		A6E2CFE58A8D14C39D2AFBB8 /* MenuContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04854C70583BD2B3841B7139 /* MenuContent.swift */; };
+		ACB102D41EA59D9FCB5F58FE /* DaemonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39CCC1F780C5FA6F22AD6FA7 /* DaemonClient.swift */; };
+		B0544F10C5FBE45035DAE2EA /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F08940741D874678EDEC6A1 /* AppModel.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		17306E36F67315139086AA50 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 31C70EB80F68ACC561BFE8E5 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 256AB20040750E13D90F3FA9;
+			remoteInfo = Classick;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		04854C70583BD2B3841B7139 /* MenuContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuContent.swift; sourceTree = "<group>"; };
+		088D7817D297D30A5DEB28B4 /* WireCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireCodecTests.swift; sourceTree = "<group>"; };
+		18857CE62529C7150D78B6EA /* ClassickApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassickApp.swift; sourceTree = "<group>"; };
+		1F6E6E19F0CC4A565F756B34 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		2FDB10A10012288F988FE32C /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
+		39CCC1F780C5FA6F22AD6FA7 /* DaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClient.swift; sourceTree = "<group>"; };
+		3F08940741D874678EDEC6A1 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		41284FF3EF16C964A6FDCCEF /* AppModelReducerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelReducerTests.swift; sourceTree = "<group>"; };
+		60A2D7EA38BF7099CA882E0C /* WireModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireModels.swift; sourceTree = "<group>"; };
+		61DE80657A5644ED21E4873A /* Storage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Storage.swift; sourceTree = "<group>"; };
+		692B715F0269A14C79855E96 /* DaemonClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClientTests.swift; sourceTree = "<group>"; };
+		6D5FB8D26AA10CB9C052F91B /* Classick.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Classick.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7355B0FEF32DB2EF35F3631E /* ClassickTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ClassickTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		82BC8C8CBF9B3ECE8C2C11DC /* SetupWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupWindow.swift; sourceTree = "<group>"; };
+		971A1C21B70044C6DB7B777B /* Notifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifier.swift; sourceTree = "<group>"; };
+		DAB3C64FBA7F0070A69F92BD /* PromptAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptAlert.swift; sourceTree = "<group>"; };
+		DD34388BC51EFD2420DCC244 /* DaemonProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonProcess.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		1EC9BCC71957F50F2A7DA3F5 /* Ipc */ = {
+			isa = PBXGroup;
+			children = (
+				39CCC1F780C5FA6F22AD6FA7 /* DaemonClient.swift */,
+				60A2D7EA38BF7099CA882E0C /* WireModels.swift */,
+			);
+			path = Ipc;
+			sourceTree = "<group>";
+		};
+		301A3F5136B25C2CD2BAB185 = {
+			isa = PBXGroup;
+			children = (
+				E934EABE00B13A73CCB4E5F3 /* Sources */,
+				33932E1E0F44331472D102DC /* Tests */,
+				33216671D479C11AF86FEFC5 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		33216671D479C11AF86FEFC5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				6D5FB8D26AA10CB9C052F91B /* Classick.app */,
+				7355B0FEF32DB2EF35F3631E /* ClassickTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		33932E1E0F44331472D102DC /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				A7CF07DF2FEDED0DC85BE150 /* ClassickTests */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		462F667BF2363CE6CEEDC689 /* Daemon */ = {
+			isa = PBXGroup;
+			children = (
+				DD34388BC51EFD2420DCC244 /* DaemonProcess.swift */,
+			);
+			path = Daemon;
+			sourceTree = "<group>";
+		};
+		4B26220FE0CFF1E677C328B6 /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				3F08940741D874678EDEC6A1 /* AppModel.swift */,
+				61DE80657A5644ED21E4873A /* Storage.swift */,
+			);
+			path = Model;
+			sourceTree = "<group>";
+		};
+		62E82A176B2E666CAEA3D034 /* Notifications */ = {
+			isa = PBXGroup;
+			children = (
+				971A1C21B70044C6DB7B777B /* Notifier.swift */,
+			);
+			path = Notifications;
+			sourceTree = "<group>";
+		};
+		99D4485C35D1081038D50B0D /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				04854C70583BD2B3841B7139 /* MenuContent.swift */,
+				DAB3C64FBA7F0070A69F92BD /* PromptAlert.swift */,
+				1F6E6E19F0CC4A565F756B34 /* SettingsView.swift */,
+				82BC8C8CBF9B3ECE8C2C11DC /* SetupWindow.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		A7CF07DF2FEDED0DC85BE150 /* ClassickTests */ = {
+			isa = PBXGroup;
+			children = (
+				41284FF3EF16C964A6FDCCEF /* AppModelReducerTests.swift */,
+				692B715F0269A14C79855E96 /* DaemonClientTests.swift */,
+				2FDB10A10012288F988FE32C /* SmokeTests.swift */,
+				088D7817D297D30A5DEB28B4 /* WireCodecTests.swift */,
+			);
+			path = ClassickTests;
+			sourceTree = "<group>";
+		};
+		DD15406B861CCEEF94502873 /* Classick */ = {
+			isa = PBXGroup;
+			children = (
+				18857CE62529C7150D78B6EA /* ClassickApp.swift */,
+				462F667BF2363CE6CEEDC689 /* Daemon */,
+				1EC9BCC71957F50F2A7DA3F5 /* Ipc */,
+				4B26220FE0CFF1E677C328B6 /* Model */,
+				62E82A176B2E666CAEA3D034 /* Notifications */,
+				99D4485C35D1081038D50B0D /* Views */,
+			);
+			path = Classick;
+			sourceTree = "<group>";
+		};
+		E934EABE00B13A73CCB4E5F3 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				DD15406B861CCEEF94502873 /* Classick */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		256AB20040750E13D90F3FA9 /* Classick */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3F02007BD03702B98E3A34EF /* Build configuration list for PBXNativeTarget "Classick" */;
+			buildPhases = (
+				7AA331F5FD77AF9464075783 /* Sources */,
+				2734FAD14C0DD29629DE44EF /* Embed classick daemon */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Classick;
+			packageProductDependencies = (
+			);
+			productName = Classick;
+			productReference = 6D5FB8D26AA10CB9C052F91B /* Classick.app */;
+			productType = "com.apple.product-type.application";
+		};
+		F195166123DBA8F780A7D4CF /* ClassickTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EDFFD253208FDE136966ED75 /* Build configuration list for PBXNativeTarget "ClassickTests" */;
+			buildPhases = (
+				20566CBA64B1F19F359EE121 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FE0B24D8CB9D7E5A0B7EF32C /* PBXTargetDependency */,
+			);
+			name = ClassickTests;
+			packageProductDependencies = (
+			);
+			productName = ClassickTests;
+			productReference = 7355B0FEF32DB2EF35F3631E /* ClassickTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		31C70EB80F68ACC561BFE8E5 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					256AB20040750E13D90F3FA9 = {
+						ProvisioningStyle = Manual;
+					};
+				};
+			};
+			buildConfigurationList = 96407CFE424BD62A59417BCE /* Build configuration list for PBXProject "Classick" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 301A3F5136B25C2CD2BAB185;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 33216671D479C11AF86FEFC5 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				256AB20040750E13D90F3FA9 /* Classick */,
+				F195166123DBA8F780A7D4CF /* ClassickTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		2734FAD14C0DD29629DE44EF /* Embed classick daemon */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Embed classick daemon";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nSRC=\"$SRCROOT/../../target/release/classick\"\nDST=\"$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME/Contents/Resources\"\nif [ -f \"$SRC\" ]; then\n  mkdir -p \"$DST\"\n  cp \"$SRC\" \"$DST/classick\"\n  echo \"embedded daemon from $SRC\"\nelse\n  echo \"warning: $SRC not found — run 'cargo build --release' so the app can spawn the daemon\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		20566CBA64B1F19F359EE121 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1EF2D88BD28C5DBB1C00A0EF /* AppModelReducerTests.swift in Sources */,
+				205413F237D7FB0ED719FD80 /* DaemonClientTests.swift in Sources */,
+				0A3FEB815A326868D819E58B /* SmokeTests.swift in Sources */,
+				3012B574C1CDDEF574BE97C9 /* WireCodecTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7AA331F5FD77AF9464075783 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B0544F10C5FBE45035DAE2EA /* AppModel.swift in Sources */,
+				22C8CBC1F64EF320711A44B1 /* ClassickApp.swift in Sources */,
+				ACB102D41EA59D9FCB5F58FE /* DaemonClient.swift in Sources */,
+				21C4AD8118E2A87AC6B16D8B /* DaemonProcess.swift in Sources */,
+				A6E2CFE58A8D14C39D2AFBB8 /* MenuContent.swift in Sources */,
+				4FB908A351CF502DE07174A1 /* Notifier.swift in Sources */,
+				7DB96D9B60B910D9CADBF471 /* PromptAlert.swift in Sources */,
+				323700F7CDAEA8A69F46AF4D /* SettingsView.swift in Sources */,
+				8C007C9F5695000CBA16E4F7 /* SetupWindow.swift in Sources */,
+				34B045E46CB1FFA37A665FA4 /* Storage.swift in Sources */,
+				3BE072B94276C28F1575F44A /* WireModels.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		FE0B24D8CB9D7E5A0B7EF32C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 256AB20040750E13D90F3FA9 /* Classick */;
+			targetProxy = 17306E36F67315139086AA50 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		20F69D369CF27F6EE452338A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.classick.app.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Classick.app/Contents/MacOS/Classick";
+			};
+			name = Release;
+		};
+		48DB4CD6DC990CA519533DC3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		76A141603577D891D91CA46A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.classick.app.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Classick.app/Contents/MacOS/Classick";
+			};
+			name = Debug;
+		};
+		AC7000EBEBED34D292EC0FB3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_HARDENED_RUNTIME = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.classick.app;
+				PRODUCT_NAME = Classick;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		E837C70B053D4ED545E68624 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		F6D91EA83AB43C5EA597A9D5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_HARDENED_RUNTIME = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.classick.app;
+				PRODUCT_NAME = Classick;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		3F02007BD03702B98E3A34EF /* Build configuration list for PBXNativeTarget "Classick" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F6D91EA83AB43C5EA597A9D5 /* Debug */,
+				AC7000EBEBED34D292EC0FB3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		96407CFE424BD62A59417BCE /* Build configuration list for PBXProject "Classick" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E837C70B053D4ED545E68624 /* Debug */,
+				48DB4CD6DC990CA519533DC3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		EDFFD253208FDE136966ED75 /* Build configuration list for PBXNativeTarget "ClassickTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				76A141603577D891D91CA46A /* Debug */,
+				20F69D369CF27F6EE452338A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 31C70EB80F68ACC561BFE8E5 /* Project object */;
+}

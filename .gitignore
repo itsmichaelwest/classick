@@ -50,3 +50,6 @@ crates/classick/vendor/libgpod/macos-prefix/
 # macOS SwiftUI app build artifacts
 ui/macos/.build/
 ui/macos/Classick.app/
+ui/macos/.build-xcode/
+ui/macos/Classick.xcodeproj/xcuserdata/
+ui/macos/Classick.xcodeproj/project.xcworkspace/xcuserdata/

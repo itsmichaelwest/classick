@@ -1,0 +1,83 @@
+# XcodeGen spec — source of truth for Classick.xcodeproj.
+# Regenerate after adding files or changing settings:  xcodegen generate
+# (run from ui/macos/). The generated Classick.xcodeproj is committed so it can
+# be opened without XcodeGen installed.
+name: Classick
+options:
+  bundleIdPrefix: com.classick
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  minimumXcodeGenVersion: "2.42.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  Classick:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Classick
+      # ── APP ICON ────────────────────────────────────────────────────────
+      # To wire your Icon Composer icon: export it as `AppIcon.icon`, drop it
+      # in ui/macos/, then UNCOMMENT the two lines below (the source entry and
+      # the ASSETCATALOG_COMPILER_APPICON_NAME setting) and run `xcodegen
+      # generate`. Building with the setting on but the file missing makes
+      # actool crash, so both stay off until the file exists.
+      # - path: AppIcon.icon
+      #   buildPhase: resources
+    settings:
+      base:
+        PRODUCT_NAME: Classick
+        PRODUCT_BUNDLE_IDENTIFIER: com.classick.app
+        INFOPLIST_FILE: Info.plist
+        # Uncomment once AppIcon.icon exists (see the APP ICON note above):
+        # ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Ad-hoc sign for dev; SP3 swaps in a Developer ID identity.
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: NO
+    postBuildScripts:
+      - name: Embed classick daemon
+        basedOnDependencyAnalysis: false
+        script: |
+          set -e
+          SRC="$SRCROOT/../../target/release/classick"
+          DST="$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME/Contents/Resources"
+          if [ -f "$SRC" ]; then
+            mkdir -p "$DST"
+            cp "$SRC" "$DST/classick"
+            echo "embedded daemon from $SRC"
+          else
+            echo "warning: $SRC not found — run 'cargo build --release' so the app can spawn the daemon"
+          fi
+
+  ClassickTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/ClassickTests
+    dependencies:
+      - target: Classick
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.classick.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  Classick:
+    build:
+      targets:
+        Classick: all
+        ClassickTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - ClassickTests
