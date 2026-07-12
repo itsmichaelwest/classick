@@ -39,3 +39,6 @@ Thumbs.db
 # Daemon runtime artifacts
 /daemon-stdout.log
 /daemon-stderr.log
+
+# LOCAL macOS libgpod pkg-config env (machine-specific)
+.cargo/config.toml

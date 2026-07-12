@@ -223,7 +223,9 @@ fn build_windows(manifest_dir: &Path, out_dir: &Path) {
 //   Debian/Ubuntu: apt install libgpod-dev libglib2.0-dev
 //   Fedora:        dnf install libgpod-devel glib2-devel
 //   Arch:          pacman -S libgpod glib2
-//   macOS:         brew install libgpod glib pkg-config
+//   macOS:         no libgpod formula exists — run scripts/build-libgpod-macos.sh
+//                  then export PKG_CONFIG_PATH to its prefix (that script prints
+//                  the line; see also vendor/libgpod/BUILD-NOTES.md).
 //
 // pkg-config emits the cargo:rustc-link-search / cargo:rustc-link-lib lines
 // itself when `.probe()` is called; we just collect the include paths to
