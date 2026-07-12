@@ -20,6 +20,12 @@ fn main() {
         "windows" => build_windows(&manifest_dir, &out_dir),
         _ => build_pkg_config(&out_dir),
     }
+
+    // Native macOS device identity + hotplug FFI (src/ipod/macos_iokit.rs).
+    if target_os == "macos" {
+        println!("cargo:rustc-link-lib=framework=IOKit");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+    }
 }
 
 // ---------------------------------------------------------------------------
