@@ -641,10 +641,19 @@ Bumps will append rows here. Don't edit historical rows.
 
 ## v1.1.0 — Daemon extensions (UI ↔ daemon channel)
 
-When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows)
-or Unix domain socket `~/.ipod-sync/daemon.sock` (macOS/Linux), the
-daemon emits `hello` with `protocol_version = "1.1.0"`. The v1.0.0 envelope
-shape is unchanged; v1.1.0 only adds new event and command types.
+When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows) or a
+Unix domain socket (macOS/Linux), the daemon emits `hello` with
+`protocol_version = "1.1.0"`. The v1.0.0 envelope shape is unchanged; v1.1.0
+only adds new event and command types.
+
+On macOS the socket is `$TMPDIR/classick.sock` — the Darwin per-user temp
+directory resolved via `confstr(_CS_DARWIN_USER_TEMP_DIR)`, the same
+directory `$TMPDIR` points at. Swift clients resolve the identical path via
+`NSTemporaryDirectory()`. The app is **not** App-Store-sandboxed, so this
+directory is shared between the daemon and the UI client — no App Group or
+sandbox container entitlement is required for the socket to be visible to
+both processes. (Linux falls back to `$XDG_RUNTIME_DIR`, then `$TMPDIR`,
+then `/tmp`, with the same `classick.sock` file name.)
 
 ### New events (daemon → UI)
 
