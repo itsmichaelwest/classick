@@ -16,11 +16,9 @@ if [ ! -f ../../target/release/classick ]; then
   ( cd ../.. && cargo build --release )
 fi
 
-# Regenerate the project from project.yml if XcodeGen is available (keeps the
-# committed .xcodeproj in sync); otherwise use the committed one as-is.
-if command -v xcodegen >/dev/null 2>&1; then
-  xcodegen generate >/dev/null
-fi
+# NOTE: this does NOT run `xcodegen generate` — the committed Classick.xcodeproj
+# is used as-is (regenerating on every build churns project.pbxproj). After
+# editing project.yml or adding files, run `xcodegen generate` yourself.
 
 echo "==> xcodebuild ($CONFIG)"
 xcodebuild -project Classick.xcodeproj -scheme Classick -configuration "$CONFIG" \

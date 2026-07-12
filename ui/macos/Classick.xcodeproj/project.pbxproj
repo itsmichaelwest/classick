@@ -12,6 +12,7 @@
 		205413F237D7FB0ED719FD80 /* DaemonClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 692B715F0269A14C79855E96 /* DaemonClientTests.swift */; };
 		21C4AD8118E2A87AC6B16D8B /* DaemonProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD34388BC51EFD2420DCC244 /* DaemonProcess.swift */; };
 		22C8CBC1F64EF320711A44B1 /* ClassickApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18857CE62529C7150D78B6EA /* ClassickApp.swift */; };
+		29C0992FEDBBA760E13C131F /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 202553602D0B6CF9B75237B8 /* AppIcon.icon */; };
 		3012B574C1CDDEF574BE97C9 /* WireCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 088D7817D297D30A5DEB28B4 /* WireCodecTests.swift */; };
 		323700F7CDAEA8A69F46AF4D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F6E6E19F0CC4A565F756B34 /* SettingsView.swift */; };
 		34B045E46CB1FFA37A665FA4 /* Storage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61DE80657A5644ED21E4873A /* Storage.swift */; };
@@ -39,6 +40,7 @@
 		088D7817D297D30A5DEB28B4 /* WireCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireCodecTests.swift; sourceTree = "<group>"; };
 		18857CE62529C7150D78B6EA /* ClassickApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassickApp.swift; sourceTree = "<group>"; };
 		1F6E6E19F0CC4A565F756B34 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		202553602D0B6CF9B75237B8 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		2FDB10A10012288F988FE32C /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
 		39CCC1F780C5FA6F22AD6FA7 /* DaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClient.swift; sourceTree = "<group>"; };
 		3F08940741D874678EDEC6A1 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
@@ -67,6 +69,7 @@
 		301A3F5136B25C2CD2BAB185 = {
 			isa = PBXGroup;
 			children = (
+				202553602D0B6CF9B75237B8 /* AppIcon.icon */,
 				E934EABE00B13A73CCB4E5F3 /* Sources */,
 				33932E1E0F44331472D102DC /* Tests */,
 				33216671D479C11AF86FEFC5 /* Products */,
@@ -166,6 +169,7 @@
 			buildConfigurationList = 3F02007BD03702B98E3A34EF /* Build configuration list for PBXNativeTarget "Classick" */;
 			buildPhases = (
 				7AA331F5FD77AF9464075783 /* Sources */,
+				71B111CAEBB7DFCF2D80FF33 /* Resources */,
 				2734FAD14C0DD29629DE44EF /* Embed classick daemon */,
 			);
 			buildRules = (
@@ -230,6 +234,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		71B111CAEBB7DFCF2D80FF33 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				29C0992FEDBBA760E13C131F /* AppIcon.icon in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		2734FAD14C0DD29629DE44EF /* Embed classick daemon */ = {

@@ -23,21 +23,22 @@ targets:
     platform: macOS
     sources:
       - path: Sources/Classick
-      # ── APP ICON ────────────────────────────────────────────────────────
-      # To wire your Icon Composer icon: export it as `AppIcon.icon`, drop it
-      # in ui/macos/, then UNCOMMENT the two lines below (the source entry and
-      # the ASSETCATALOG_COMPILER_APPICON_NAME setting) and run `xcodegen
-      # generate`. Building with the setting on but the file missing makes
-      # actool crash, so both stay off until the file exists.
-      # - path: AppIcon.icon
-      #   buildPhase: resources
+        # The .icon lives at ui/macos/AppIcon.icon (below), not in the source
+        # tree — exclude any stray copy so it isn't double-added by this glob.
+        excludes:
+          - "**/*.icon"
+      # ── APP ICON ─────────────────────────────────────────────────────────
+      # Icon Composer file. To replace it, overwrite ui/macos/AppIcon.icon and
+      # run `xcodegen generate` (its base name must stay "AppIcon" to match the
+      # ASSETCATALOG_COMPILER_APPICON_NAME setting below).
+      - path: AppIcon.icon
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: Classick
         PRODUCT_BUNDLE_IDENTIFIER: com.classick.app
         INFOPLIST_FILE: Info.plist
-        # Uncomment once AppIcon.icon exists (see the APP ICON note above):
-        # ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Ad-hoc sign for dev; SP3 swaps in a Developer ID identity.
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
