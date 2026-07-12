@@ -149,20 +149,37 @@ pub fn resolve_libgpod_identity(ipod_mount: &Path) -> Result<LibgpodIdentity> {
     Ok(LibgpodIdentity { firewire_guid, model_num_str })
 }
 
-/// Non-Windows stub. On other platforms we can only consult the
-/// on-disk SysInfo (no USB shell-out, no SCSI pass-through).
-/// Sufficient for tests and gtkpod-style installs.
+/// Non-Windows identity resolution. Layer 1: on-disk SysInfo (older
+/// firmware / prior tool). Layer 2: USB recovery via
+/// `recover_ipod_info_from_usb` (IOKit on macOS; unavailable elsewhere).
+/// Mirrors the Windows structure so apply-time signing works without a
+/// populated SysInfo file.
 #[cfg(not(windows))]
 pub fn resolve_libgpod_identity(ipod_mount: &Path) -> Result<LibgpodIdentity> {
     let sysinfo_path = crate::ipod::layout::sysinfo_path(ipod_mount);
-    let sysinfo_text = std::fs::read_to_string(&sysinfo_path)
-        .map_err(|e| anyhow!("reading {}: {e}", sysinfo_path.display()))?;
-    let firewire_guid = parse_sysinfo_field(&sysinfo_text, "FirewireGuid")
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("no FirewireGuid in {}", sysinfo_path.display()))?;
-    let model_num_str = parse_sysinfo_field(&sysinfo_text, "ModelNumStr")
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("no ModelNumStr in {}", sysinfo_path.display()))?;
+    let sysinfo_text = std::fs::read_to_string(&sysinfo_path).unwrap_or_default();
+    let disk_guid = parse_sysinfo_field(&sysinfo_text, "FirewireGuid").filter(|s| !s.is_empty());
+    let disk_model = parse_sysinfo_field(&sysinfo_text, "ModelNumStr").filter(|s| !s.is_empty());
+
+    if let (Some(guid), Some(model_num_str)) = (disk_guid.clone(), disk_model.clone()) {
+        return Ok(LibgpodIdentity { firewire_guid: guid, model_num_str });
+    }
+
+    let recovered = recover_ipod_info_from_usb(ipod_mount)
+        .ok_or_else(|| anyhow!("USB recovery failed for {}", ipod_mount.display()))?;
+    let firewire_guid = disk_guid.unwrap_or_else(|| recovered.firewire_guid.clone());
+    let model_num_str = recovered
+        .identity
+        .map(|id| id.model_num.to_string())
+        .or(disk_model)
+        .ok_or_else(|| {
+            anyhow!(
+                "could not determine ModelNumStr for iPod at {} (PID {:?}, capacity {:?} bytes)",
+                ipod_mount.display(),
+                recovered.pid,
+                recovered.capacity_bytes,
+            )
+        })?;
     Ok(LibgpodIdentity { firewire_guid, model_num_str })
 }
 
@@ -1166,159 +1183,20 @@ fn linux_read_sysfs_hex_u16(path: &std::path::Path) -> Option<u16> {
     u16::from_str_radix(s.trim(), 16).ok()
 }
 
-// =========================================================================
-// macOS USB-descriptor recovery via ioreg shellout.
-//
-// Pragmatic implementation: shell to `ioreg -p IOUSB -l -a` which dumps
-// the IOUSB plane as an XML plist. Parse with the `plist` crate
-// (already a dep — we use it for SysInfoExtended). Filter by Apple
-// vendor ID (0x05AC = 1452) and match the iPod's USB serial.
-//
-// TODO(macos-iokit): replace the shellout with proper IOKit FFI
-// (`IOServiceMatching("IOUSBDevice")` enumeration via the IOKit
-// framework). The shellout costs ~100-200ms per scan vs <1ms for
-// native, but IOKit FFI is ~200+ LOC of CoreFoundation bindings and
-// out of scope for the initial cross-platform pass. ioreg ships with
-// every macOS so there's no install burden.
-//
-// Mount-to-device mapping (BSD device name) uses `df -P` for now,
-// same TODO applies — `DASessionCreate` / `DADiskCopyDescription`
-// from DiskArbitration is the native equivalent.
-// =========================================================================
 
 #[cfg(target_os = "macos")]
 fn macos_recover_ipod_info(mount: &std::path::Path) -> Option<UsbIpodInfo> {
-    let bsd_name = macos_bsd_name_for_mount(mount)?;
-    // /dev/disk2s1 → disk2 (strip slice suffix). macOS partition names
-    // are `s<digits>` after the whole-disk name.
-    let disk = bsd_name
-        .trim_start_matches("/dev/")
-        .split('s')
-        .next()
-        .unwrap_or("")
-        .to_string();
-    if disk.is_empty() {
-        return None;
-    }
-
-    let ioreg_xml = macos_ioreg_iousb()?;
-    let root: plist::Value = plist::from_bytes(ioreg_xml.as_bytes()).ok()?;
-    let device = macos_find_ipod_device(&root, &disk)?;
-
-    let firewire_guid = device
-        .get("USB Serial Number")
-        .and_then(|v| v.as_string())
-        .map(|s| format!("0x{}", s.to_uppercase()))?;
-    let pid = device
-        .get("idProduct")
-        .and_then(|v| v.as_unsigned_integer())
-        .map(|n| n as u16);
-
-    // Capacity via `diskutil info -plist <disk>` would be cleanest;
-    // for now leave None and let identify_ipod fall back to PID-only.
-    // (iPod Classic 1G 80GB and 1G 160GB share PID so capacity matters
-    // for that disambiguation — flagged in the TODO above.)
-    let capacity_bytes: Option<u64> = None;
-    let identity = pid.and_then(|p| identify_ipod(p, capacity_bytes));
-
+    let ident = crate::ipod::macos_iokit::identity_for_mount(mount)?;
+    let identity = ident.pid.and_then(|p| identify_ipod(p, ident.capacity_bytes));
     Some(UsbIpodInfo {
-        firewire_guid,
-        pid,
-        capacity_bytes,
+        firewire_guid: ident.firewire_guid,
+        pid: ident.pid,
+        capacity_bytes: ident.capacity_bytes,
         disk_number: None,
         identity,
         sysinfo_extended_xml: None,
         sysinfo_extended_parsed: None,
     })
-}
-
-#[cfg(target_os = "macos")]
-fn macos_bsd_name_for_mount(mount: &std::path::Path) -> Option<String> {
-    use crate::windows_proc::NoConsoleWindow; // no-op on macOS, kept for parity
-    let output = std::process::Command::new("df")
-        .arg("-P")
-        .arg(mount)
-        .no_console()
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Second line, first whitespace-separated field is the device.
-    stdout
-        .lines()
-        .nth(1)
-        .and_then(|line| line.split_whitespace().next())
-        .map(String::from)
-}
-
-#[cfg(target_os = "macos")]
-fn macos_ioreg_iousb() -> Option<String> {
-    use crate::windows_proc::NoConsoleWindow;
-    let output = std::process::Command::new("ioreg")
-        .args(["-p", "IOUSB", "-l", "-a"])
-        .no_console()
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
-}
-
-/// Walk the ioreg plist tree looking for an Apple USB device whose
-/// child IOMedia entry's BSD Name matches `disk`.
-#[cfg(target_os = "macos")]
-fn macos_find_ipod_device<'a>(
-    root: &'a plist::Value,
-    disk: &str,
-) -> Option<&'a plist::Dictionary> {
-    fn visit<'a>(node: &'a plist::Value, disk: &str) -> Option<&'a plist::Dictionary> {
-        if let Some(dict) = node.as_dictionary() {
-            let is_apple = dict
-                .get("idVendor")
-                .and_then(|v| v.as_unsigned_integer())
-                .map(|v| v == 0x05AC)
-                .unwrap_or(false);
-            if is_apple && macos_dict_contains_bsd(dict, disk) {
-                return Some(dict);
-            }
-            if let Some(children) = dict.get("IORegistryEntryChildren") {
-                if let Some(arr) = children.as_array() {
-                    for child in arr {
-                        if let Some(found) = visit(child, disk) {
-                            return Some(found);
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-    visit(root, disk)
-}
-
-#[cfg(target_os = "macos")]
-fn macos_dict_contains_bsd(dict: &plist::Dictionary, disk: &str) -> bool {
-    if let Some(name) = dict.get("BSD Name").and_then(|v| v.as_string()) {
-        if name == disk {
-            return true;
-        }
-    }
-    if let Some(children) = dict
-        .get("IORegistryEntryChildren")
-        .and_then(|v| v.as_array())
-    {
-        for child in children {
-            if let Some(d) = child.as_dictionary() {
-                if macos_dict_contains_bsd(d, disk) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Parse the 4-hex-digit USB Product ID out of an Apple USB device
@@ -1863,6 +1741,25 @@ mod tests {
     fn errors_on_missing_key() {
         let sysinfo = "ModelNumStr: MB029\nOther: value\n";
         assert!(extract_firewire_guid(sysinfo).is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn resolve_identity_reads_on_disk_sysinfo() {
+        // Layer 1 (on-disk SysInfo present) returns without touching USB
+        // recovery — pure, no hardware.
+        let dir = std::env::temp_dir().join(format!("classick-sysinfo-{}", std::process::id()));
+        let device_dir = dir.join("iPod_Control").join("Device");
+        std::fs::create_dir_all(&device_dir).unwrap();
+        std::fs::write(
+            device_dir.join("SysInfo"),
+            "FirewireGuid: 0x000A27002138B0A8\nModelNumStr: MC293\n",
+        )
+        .unwrap();
+        let id = resolve_libgpod_identity(&dir).unwrap();
+        assert_eq!(id.firewire_guid, "0x000A27002138B0A8");
+        assert_eq!(id.model_num_str, "MC293");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
