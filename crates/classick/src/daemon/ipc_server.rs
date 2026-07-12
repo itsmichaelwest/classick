@@ -20,13 +20,44 @@ use tokio::net::windows::named_pipe::ServerOptions;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn confstr(name: std::os::raw::c_int, buf: *mut std::os::raw::c_char, len: usize) -> usize;
+}
+
+/// macOS: the Apple-sanctioned per-user runtime dir (`$TMPDIR` points here,
+/// but confstr is robust against an unset/overridden env var). Stable
+/// per-UID across reboots; ~60-char path stays under the 104-byte sun_path
+/// limit. This is the IPC contract the SwiftUI client must match via
+/// NSTemporaryDirectory().
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
+    use std::os::raw::c_char;
+    const CS_DARWIN_USER_TEMP_DIR: std::os::raw::c_int = 65537; // _CS_DARWIN_USER_TEMP_DIR
+    let need = unsafe { confstr(CS_DARWIN_USER_TEMP_DIR, std::ptr::null_mut(), 0) };
+    if need == 0 {
+        return None;
+    }
+    let mut buf = vec![0 as c_char; need];
+    let got = unsafe { confstr(CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), need) };
+    if got == 0 || got > need {
+        return None;
+    }
+    let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    Some(std::path::PathBuf::from(cstr.to_string_lossy().into_owned()))
+}
+
 /// Resolve the platform-default IPC transport address. Derived from
 /// [`PROJECT_DIR`]; the .NET side mirrors this in
 /// `Classick.UI.Core.AppIdentity`. The two MUST stay in sync — the
 /// pipe label is the IPC contract.
 ///
 /// - **Windows:** `\\.\pipe\<PROJECT_DIR>`.
-/// - **Unix:** a socket path under `$XDG_RUNTIME_DIR` if set and the
+/// - **macOS:** the Darwin per-user temp dir via
+///   `confstr(_CS_DARWIN_USER_TEMP_DIR)` (same directory `$TMPDIR` points at
+///   and that Swift resolves via `NSTemporaryDirectory()`), falling back to
+///   the `$XDG_RUNTIME_DIR`/`$TMPDIR`/`/tmp` chain below if `confstr` fails.
+/// - **Unix (other):** a socket path under `$XDG_RUNTIME_DIR` if set and the
 ///   directory exists, else `$TMPDIR`, else `/tmp`. File name is
 ///   `<PROJECT_DIR>.sock`.
 pub fn default_pipe_name() -> String {
@@ -36,6 +67,14 @@ pub fn default_pipe_name() -> String {
     }
     #[cfg(unix)]
     {
+        #[cfg(target_os = "macos")]
+        if let Some(dir) = darwin_user_temp_dir() {
+            return dir
+                .join(format!("{PROJECT_DIR}.sock"))
+                .to_string_lossy()
+                .into_owned();
+        }
+
         let dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(std::path::PathBuf::from)
             .filter(|p| p.is_dir())
@@ -314,4 +353,17 @@ where
     writer.write_all(b"\n").await?;
     writer.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_pipe_name_is_absolute_sock_under_temp() {
+        let p = default_pipe_name();
+        assert!(p.starts_with('/'), "must be absolute: {p}");
+        assert!(p.ends_with(".sock"), "must be a .sock: {p}");
+    }
 }

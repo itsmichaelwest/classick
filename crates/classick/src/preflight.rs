@@ -134,14 +134,91 @@ pub fn verify_itunes_not_running(
     }
 }
 
-/// Non-Windows no-op stub so the apply_loop call site doesn't need cfg
-/// guards. macOS port: implement a `pgrep -x iTunes` equivalent later.
-#[cfg(not(windows))]
+/// Return true if `name` is a process whose presence should hard-block a
+/// sync. Music.app is the modern iTunes; classic "iTunes" still exists on
+/// older macOS. AMPLibraryAgent is advisory (non-blocking) — handled
+/// by the caller, not here.
+#[cfg(target_os = "macos")]
+fn is_blocking_music_process(name: &str) -> bool {
+    let n = name.trim();
+    n.eq_ignore_ascii_case("Music") || n.eq_ignore_ascii_case("iTunes")
+}
+
+/// macOS: refuse to sync while Music.app (or legacy iTunes) is running —
+/// both want exclusive iPod access, and Music.app's "cannot read, please
+/// Restore" dialog is the trap we keep users out of.
+#[cfg(target_os = "macos")]
+pub fn verify_itunes_not_running(
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<()> {
+    loop {
+        let running = macos_blocking_music_processes();
+        if running.is_empty() {
+            return Ok(());
+        }
+        let names = running.join(", ");
+        let msg = format!(
+            "Cannot sync while Music.app is running.\n\n\
+             Detected: {names}.\n\n\
+             Music and Classick both want exclusive access to the iPod.\n\
+             Quit Music (do NOT click Restore if it asks — your iPod is fine).\n\n\
+             Choose:"
+        );
+        let outcome = await_prompt(
+            progress,
+            decision_rx,
+            msg,
+            &["Retry (after quitting Music)", "Abort"],
+            &[PromptOutcome::Retry, PromptOutcome::Abort],
+        )?;
+        match outcome {
+            PromptOutcome::Retry => continue,
+            _ => return Err(anyhow!("Music.app is running; aborted")),
+        }
+    }
+}
+
+/// Enumerate running blocking processes via `pgrep -x` (ships with macOS;
+/// consistent with the crate's other non-Windows shellouts).
+#[cfg(target_os = "macos")]
+fn macos_blocking_music_processes() -> Vec<String> {
+    use crate::windows_proc::NoConsoleWindow;
+    let mut found = Vec::new();
+    for proc_name in ["Music", "iTunes"] {
+        let ok = std::process::Command::new("pgrep")
+            .arg("-x")
+            .arg(proc_name)
+            .no_console()
+            .output()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false);
+        if ok && is_blocking_music_process(proc_name) {
+            found.push(proc_name.to_string());
+        }
+    }
+    found
+}
+
+/// Other Unix (Linux): no iTunes/Music, no-op.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn verify_itunes_not_running(
     _progress: &Progress,
     _decision_rx: &Receiver<Decision>,
 ) -> Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_guard_tests {
+    use super::*;
+    #[test]
+    fn classifies_music_and_itunes_as_blocking() {
+        assert!(is_blocking_music_process("Music"));
+        assert!(is_blocking_music_process("iTunes"));
+        assert!(!is_blocking_music_process("Finder"));
+        assert!(!is_blocking_music_process("AMPLibraryAgent"));
+    }
 }
 
 /// One Apple-side process whose presence affects sync safety. `is_blocking`

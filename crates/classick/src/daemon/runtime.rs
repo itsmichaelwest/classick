@@ -9,7 +9,9 @@
 
 use crate::config_file::{self, PersistedConfig};
 use crate::daemon::device_storage::{self, StorageInfo};
-use crate::daemon::device_watcher::{Debouncer, DeviceEvent, DeviceWatcher, PollingDeviceWatcher};
+use crate::daemon::device_watcher::{Debouncer, DeviceEvent, DeviceWatcher};
+#[cfg(not(target_os = "macos"))]
+use crate::daemon::device_watcher::PollingDeviceWatcher;
 use crate::daemon::history::{HistoryEntry, HistoryService, SyncOutcome, SyncSummary, SyncTrigger};
 use crate::daemon::ipc_server::ClientCommand;
 use crate::daemon::scheduler::SyncScheduler;
@@ -58,6 +60,9 @@ pub async fn run_daemon() -> Result<()> {
 
     let deps = DaemonDeps {
         configured_serial,
+        #[cfg(target_os = "macos")]
+        watcher: Box::new(crate::daemon::iokit_watcher::IokitDeviceWatcher::new_production()),
+        #[cfg(not(target_os = "macos"))]
         watcher: Box::new(PollingDeviceWatcher::new_production()),
         spawn_sync,
         schedule_minutes,
