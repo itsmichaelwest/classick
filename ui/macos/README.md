@@ -32,8 +32,9 @@ open ui/macos/Classick.app    # menu-bar icon appears; no Dock icon
 ```
 
 `bundle.sh` embeds `target/release/classick` into `Contents/Resources` so the
-app can spawn `classick --daemon`. Real Developer ID signing + notarization +
-`.dmg` is SP3.
+app can spawn `classick --daemon`. It ad-hoc signs for local dev; the
+Developer ID–signed, notarized `.dmg` is produced by `scripts/release-macos.sh`
+(see **Release & distribution** below).
 
 ## Test
 
@@ -64,6 +65,11 @@ presentation; the daemon owns config, device detection, scheduling, sync):
   `AppModel`; `Settings` scene (General + About); first-run setup `Window`;
   daemon-relayed prompts via `NSAlert`. Startup/shutdown run from an
   `AppDelegate` (not a menu `.task`, which only materializes on click).
+- **`Updates/Updater.swift`** — Sparkle 2 auto-updates. Guarded on
+  `#if canImport(Sparkle)`: Sparkle is an **app-target-only** dependency (in
+  `project.yml`, not `Package.swift`), so this file compiles to nothing under
+  `swift test` and is fully live under `xcodebuild`. Feed URL + EdDSA public key
+  live in `Info.plist` (`SUFeedURL` / `SUPublicEDKey`).
 
 ## Scope & idioms
 
@@ -73,3 +79,49 @@ presentation; the daemon owns config, device detection, scheduling, sync):
 - **Deferred to v1.1:** the History browser and the dry-run review flow
   (daemon-triggered syncs `--apply`).
 - Auto-sync defaults on. First-run is a single window, not a wizard.
+
+## Release & distribution
+
+`scripts/release-macos.sh <version>` is a one-command local release. It builds
+the daemon + app (Release config), makes the app self-contained, signs it with
+your **Developer ID**, notarizes + staples it, wraps it in a `.dmg`, and
+generates the Sparkle appcast. It is arm64-only and runs locally (not CI).
+
+```bash
+scripts/release-macos.sh 0.1.0                # -> dist/Classick-0.1.0.dmg + dist/appcast.xml
+RELEASE_GH=1 scripts/release-macos.sh 0.1.0   # also `gh release create v0.1.0`
+```
+
+**Secrets never touch the repo.** All three credentials live only in the
+Keychain and are looked up by name at run time:
+
+1. **Developer ID Application** signing identity — derived via
+   `security find-identity`; used to sign every nested Mach-O (app, daemon,
+   bundled dylibs, and Sparkle's pre-signed `Updater.app`/`Autoupdate`/XPC,
+   which must be re-signed with our cert + a secure timestamp or notarization
+   rejects them).
+2. **`classick-notary`** — a `notarytool` credential profile holding an
+   **App Store Connect API key** (not an app-specific password). Created once:
+   `xcrun notarytool store-credentials classick-notary --key … --key-id … --issuer …`.
+3. **Sparkle EdDSA private key** — in the Keychain (created by Sparkle's
+   `generate_keys`). `generate_appcast` reads it to sign each update; the
+   matching public key is pinned in `Info.plist` as `SUPublicEDKey`.
+
+### Self-containment
+
+`scripts/bundle-macos-libs.sh` walks the daemon's non-system dylib closure
+(libgpod + glib/gobject/gmodule/gdk-pixbuf/gettext/libxml2 + transitive deps),
+copies each into `Contents/Frameworks`, and rewrites install-names to `@rpath`
+so nothing points at `/opt/homebrew` or the build tree. **Known gap:**
+gdk-pixbuf loader modules aren't bundled yet, so embedded cover-art thumbnails
+may not render on a clean machine — art failure is non-fatal (the track still
+syncs); see `LEARNINGS.md`.
+
+### Publishing + auto-update wiring
+
+Sparkle's `SUFeedURL` points at `https://itsmichaelwest.github.io/classick/appcast.xml`
+(GitHub Pages). To ship an update: run the release script for the new version,
+publish the `.dmg` as a `gh release` asset, and upload the regenerated
+`appcast.xml` to Pages. Installed copies check that feed on launch
+(`SUEnableAutomaticChecks`) and offer the update; "Check for Updates…" in the
+menu triggers it on demand.
