@@ -359,7 +359,11 @@ impl OwnedDb {
         let mut orphans_deleted = 0;
         let mut orphans_failed = 0;
         for relpath in disk_paths.difference(&db_paths) {
-            let full = ipod_mount.join(relpath);
+            // `relpath` is Windows-backslash-encoded (to match `db_paths`).
+            // Convert to the native separator so the join yields a real
+            // filesystem path — on macOS a literal-backslash name doesn't exist,
+            // so orphan deletion silently failed and files piled up.
+            let full = ipod_mount.join(relpath.replace('\\', std::path::MAIN_SEPARATOR_STR));
             match std::fs::remove_file(&full) {
                 Ok(()) => {
                     tracing::debug!("reconcile: deleted orphan {}", full.display());
