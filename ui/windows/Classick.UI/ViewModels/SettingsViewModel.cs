@@ -88,6 +88,13 @@ public partial class SettingsViewModel : ObservableObject
     private DaemonSettings? BuildDaemonSettings()
     {
         if (!General.IsAnyDaemonFieldDirty && !Notifications.IsDirty) return null;
+        // TODO(windows-autosync): `Enabled: true` is hardcoded, but the daemon
+        // now gates auto-sync on `daemon.enabled` (see
+        // crates/classick/src/daemon/runtime.rs::auto_sync_enabled), not on
+        // SubsequentSyncMode. So the "Manual" sync mode no longer disables
+        // auto-sync on Windows. Expose an explicit auto-sync on/off control and
+        // map it to Enabled here (leaving SubsequentSyncMode for apply-vs-review
+        // only). Not done this session — no Windows build environment.
         return new DaemonSettings(
             Enabled: true,
             AutostartWithWindows: General.LaunchOnStartup,

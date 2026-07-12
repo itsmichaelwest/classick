@@ -159,6 +159,12 @@ actor DaemonClient {
             continuation?.yield(event)
             await send(.subscribeDeviceEvents)
             await send(.getStatus)
+            // Explicitly pull config on every (re)connect. The daemon only
+            // *pushes* config_update on a name change or after a save, so
+            // without this the app never learns the persisted iPod identity on
+            // a cached-name plug-in — leaving `configuredSerial` nil, the menu
+            // stuck on "Set Up", and Settings showing defaults.
+            await send(.getConfig)
             return
         }
 

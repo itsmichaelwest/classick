@@ -20,6 +20,18 @@ enum Notifier {
         }
     }
 
+    /// Whether a sync-finished banner should fire for the given `notify_on`
+    /// wire value ("all" | "errors_only" | "none"). Unknown/nil defaults to
+    /// "all" so a missing preference still notifies — matching the daemon's
+    /// `NotifyLevel::All` default. Pure so the policy is unit-testable.
+    static func shouldPostSyncFinished(notifyOn: String?, success: Bool) -> Bool {
+        switch notifyOn {
+        case "none": return false
+        case "errors_only": return !success
+        default: return true
+        }
+    }
+
     static func syncFinished(success: Bool, added: Int) {
         let content = UNMutableNotificationContent()
         if success {

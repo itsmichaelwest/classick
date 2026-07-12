@@ -47,6 +47,15 @@ private func writeLine(_ line: String, to fd: Int32) {
     }
 }
 
+/// Thread-safe accumulator for bytes the client writes back, so the server
+/// thread can record them and the test's async body can inspect them.
+private final class CommandSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = ""
+    func append(_ s: String) { lock.lock(); buffer += s; lock.unlock() }
+    var text: String { lock.lock(); defer { lock.unlock() }; return buffer }
+}
+
 final class DaemonClientTests: XCTestCase {
     /// Polls `collector` until it has at least `minCount` events or the
     /// deadline passes, so the test never hangs forever if the client stalls.
@@ -111,6 +120,56 @@ final class DaemonClientTests: XCTestCase {
         XCTAssertEqual(modelLabel, "iPod Classic (3rd gen)")
         XCTAssertEqual(drive, "/Volumes/IPOD")
         XCTAssertEqual(name, "Test iPod")
+    }
+
+    /// Regression for the "stuck on Set Up / Settings shows defaults" bug: the
+    /// daemon only *pushes* config_update on a name change or after a save, so
+    /// the client MUST pull config itself on every handshake. Asserts the
+    /// client emits `get_config` after connecting.
+    func testHandshakeSendsGetConfig() async throws {
+        let path = NSTemporaryDirectory() + "cdgc_\(UUID().uuidString.prefix(8)).sock"
+        defer { unlink(path) }
+
+        let listenFd = makeUnixListener(path: path)
+        defer { close(listenFd) }
+
+        let sink = CommandSink()
+        let serverThread = Thread {
+            let clientFd = accept(listenFd, nil, nil)
+            guard clientFd >= 0 else { return }
+            defer { close(clientFd) }
+            writeLine(#"{"type":"hello","protocol_version":"1.1.0","core_version":"1.1.0"}"# + "\n", to: clientFd)
+
+            // Bounded recv so the drain loop can't hang if the client stalls.
+            var tv = timeval(tv_sec: 0, tv_usec: 500_000)
+            setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            var buf = [UInt8](repeating: 0, count: 4096)
+            let deadline = Date().addingTimeInterval(2)
+            while Date() < deadline {
+                let n = Darwin.read(clientFd, &buf, buf.count)
+                if n <= 0 { break }
+                sink.append(String(decoding: buf[0..<n], as: UTF8.self))
+                if sink.text.contains("get_config") { break }
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        serverThread.start()
+
+        let client = DaemonClient(socketPath: path)
+        let stream = await client.events()
+        let consumer = Task { for await _ in stream {} }
+        await client.start()
+
+        let deadline = Date().addingTimeInterval(5)
+        while !sink.text.contains("get_config") && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        await client.stop()
+        consumer.cancel()
+
+        XCTAssertTrue(
+            sink.text.contains("get_config"),
+            "expected the client to send get_config on handshake, got: \(sink.text)")
     }
 
     /// Bonus: after the server drops the first connection, the client should

@@ -206,6 +206,15 @@ public partial class WizardViewModel : ObservableObject
 
     private SaveConfigPayload BuildPayload()
     {
+        // TODO(windows-autosync): the daemon now gates auto-sync on
+        // `daemon.enabled`, NOT `subsequent_sync_mode` (see
+        // crates/classick/src/daemon/runtime.rs::auto_sync_enabled). This still
+        // encodes the on/off intent in SubsequentSyncMode and never sets
+        // `enabled`, so with the new gate a Windows user who picks Manual mode
+        // will be auto-synced anyway. Map IsAutomatic -> Enabled here (and make
+        // SubsequentSyncMode purely apply-vs-review). Couldn't do it this
+        // session — no Windows build environment. macOS already writes
+        // `enabled` correctly.
         var ipod = SelectedIpod!;
         return new SaveConfigPayload(
             Source: SourcePath,

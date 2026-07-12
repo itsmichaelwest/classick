@@ -216,6 +216,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &mut cancel_tx_holder,
                     &mut prompt_tx_holder,
                     &mut configured_serial,
+                    &mut scheduler,
                 );
                 if should_exit { break ExitReason::Shutdown; }
             }
@@ -425,16 +426,28 @@ fn handle_internal_event(
     }
 }
 
-/// True when `daemon.subsequent_sync_mode` is set to `auto_apply` (or the
-/// config simply isn't there yet, in which case the daemon's
-/// `DaemonSettings::default()` already chooses `AutoApply`). When the user
-/// has explicitly picked Manual mode in the wizard or settings, plug-in
-/// and scheduled triggers no-op and the only way to start a sync is the
-/// tray's Sync Now action.
+/// Whether the daemon should auto-trigger syncs (plug-in + scheduled) for the
+/// configured device. Gated purely on the user's `enabled` toggle ("Sync
+/// automatically on plug-in"). When it's off — or the config can't be read —
+/// plug-in and scheduled triggers no-op and the only way to start a sync is
+/// the tray's Sync Now action. `subsequent_sync_mode` is NOT the gate: it
+/// selects apply-vs-review *once a sync runs* (review is v1.1; today every
+/// sync applies).
+///
+/// TODO(windows): the WinUI app still encodes auto-sync on/off in
+/// `subsequent_sync_mode` (`WizardViewModel`: `IsAutomatic ? "auto_apply" :
+/// "review"`) and always sends `enabled: true`. Until it maps the on/off
+/// intent to `enabled` instead, a Windows user who picks Manual mode will
+/// still be auto-synced. macOS already writes `enabled` correctly.
 fn auto_sync_enabled(config_path: &std::path::Path) -> bool {
-    let Some(cfg) = config_file::load(config_path).ok().flatten() else { return true };
-    let Some(daemon) = cfg.daemon else { return true };
-    daemon.subsequent_sync_mode == config_file::SyncMode::AutoApply
+    config_auto_sync(config_file::load(config_path).ok().flatten().as_ref())
+}
+
+/// Pure decision core of [`auto_sync_enabled`], split out so it can be tested
+/// without touching the filesystem. Fail-safe: no config or no daemon section
+/// means auto-sync is OFF.
+fn config_auto_sync(cfg: Option<&config_file::PersistedConfig>) -> bool {
+    cfg.and_then(|c| c.daemon.as_ref()).map(|d| d.enabled).unwrap_or(false)
 }
 
 fn handle_device_event(
@@ -470,6 +483,12 @@ fn handle_device_event(
                 drive: ipod.drive.clone(),
                 name: ipod.name.clone(),
             });
+            // Pair every attach with a ConfigUpdate. Otherwise a cached-name
+            // plug-in (where IpodNameResolved dedups on unchanged name and
+            // never re-broadcasts) leaves a subscriber that connected before
+            // the attach without the persisted iPod identity — so it can't
+            // match the connected serial and stays stuck on "Set Up".
+            let _ = event_tx.send(build_config_update(config_file::load(config_path).ok().flatten()));
 
             // Off-thread iTunesDB read so the daemon loop stays
             // responsive. Result arrives via IpodNameResolved.
@@ -672,6 +691,7 @@ fn handle_client_command(
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
     prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
     configured_serial: &mut Option<String>,
+    scheduler: &mut SyncScheduler,
 ) -> bool {
     tracing::info!("daemon: client {client_id} command: {command:?}");
     match command {
@@ -722,6 +742,20 @@ fn handle_client_command(
             // restart. Without this, the wizard's first SaveConfig is
             // invisible to the daemon's auto-sync gate.
             *configured_serial = current.ipod_identity.as_ref().map(|id| id.serial.clone());
+            // Live-reload the scheduled-sync interval. The scheduler is built
+            // once at startup, so without this a schedule change in Settings
+            // wouldn't take effect until the daemon restarted. Only re-arm on
+            // an actual change — rearm() resets the countdown, so re-arming on
+            // every save would let frequent edits perpetually postpone a tick.
+            let new_minutes = current.daemon.as_ref().map(|d| d.schedule_minutes).unwrap_or(0);
+            if new_minutes != scheduler.minutes() {
+                tracing::info!(
+                    "daemon: schedule interval {} → {} min; re-arming scheduler",
+                    scheduler.minutes(),
+                    new_minutes,
+                );
+                scheduler.rearm(new_minutes);
+            }
             let _ = event_tx.send(build_config_update(Some(current)));
         }
         DaemonCommand::ForgetIpod => {
@@ -874,3 +908,32 @@ fn history_file_path() -> Result<PathBuf> {
 // Suppress the unused-import warning when the test build doesn't take this path.
 #[allow(dead_code)]
 fn _silence_mpsc_warning(_: mpsc::Sender<DaemonEvent>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config_file::{DaemonSettings, PersistedConfig};
+
+    fn cfg_with(enabled: bool) -> PersistedConfig {
+        PersistedConfig {
+            daemon: Some(DaemonSettings { enabled, ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    // Regression: auto-sync must follow the user's `enabled` toggle, NOT
+    // `subsequent_sync_mode`. The old gate ignored `enabled`, so macOS (which
+    // writes the toggle to `enabled`) auto-synced even when it was turned off.
+    #[test]
+    fn auto_sync_follows_enabled_flag() {
+        assert!(config_auto_sync(Some(&cfg_with(true))));
+        assert!(!config_auto_sync(Some(&cfg_with(false))), "auto-sync must be off when disabled");
+    }
+
+    // Fail-safe: never auto-sync when we can't confirm it's enabled.
+    #[test]
+    fn auto_sync_off_without_config_or_daemon_section() {
+        assert!(!config_auto_sync(None));
+        assert!(!config_auto_sync(Some(&PersistedConfig::default())));
+    }
+}

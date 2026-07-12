@@ -141,7 +141,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         case let .summary(add, _, _, _, _, _):
             pendingSyncAddCount = add
         case let .finish(success):
-            Notifier.syncFinished(success: success, added: pendingSyncAddCount)
+            // Honor the user's notification-level preference (notify_on):
+            // "all" fires always, "errors_only" only on failure, "none" never.
+            if Notifier.shouldPostSyncFinished(
+                notifyOn: model.config?.daemon?.notifyOn, success: success) {
+                Notifier.syncFinished(success: success, added: pendingSyncAddCount)
+            }
             pendingSyncAddCount = 0
         default:
             break
