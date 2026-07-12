@@ -23,6 +23,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let daemonProcess = DaemonProcess()
     private var eventTask: Task<Void, Never>?
 
+    // Set by the most recent inner `summary` line of the sync in progress, so
+    // that when the matching `finish` line arrives we know how many tracks
+    // were added. Decoded straight from `sync_event.line` here (rather than
+    // exposing it on AppModel) since notifications are a side effect of the
+    // event stream, not UI state the reducer needs to track.
+    private var pendingSyncAddCount = 0
+    private let syncEventDecoder = JSONDecoder()
+
     /// Mirrors `daemonClient.lastFatalError` on the main actor. The actor's
     /// own property can't be read synchronously from a SwiftUI `body`, so
     /// this copy is refreshed whenever the event stream ends (which is
@@ -30,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @Published private(set) var daemonFatalError: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Notifier.requestAuth()
         daemonProcess.ensureRunning()
 
         eventTask = Task {
@@ -40,8 +49,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             await self.daemonClient.start()
             for await event in stream {
                 self.model.apply(event)
+                self.observeForNotification(event)
             }
             self.daemonFatalError = await self.daemonClient.lastFatalError
+        }
+    }
+
+    /// Sync Now / Cancel Sync menu actions. `DaemonClient.send` is async
+    /// (actor-isolated socket write); the menu's `Button` actions are sync
+    /// closures, so each hop through here spawns a detached-from-the-caller
+    /// `Task` to bridge to the actor.
+    func syncNow() {
+        Task { await daemonClient.send(.triggerSync(source: .manual)) }
+    }
+
+    func cancelSync() {
+        Task { await daemonClient.send(.cancelSync) }
+    }
+
+    /// Peeks at `sync_event` lines for the `summary`/`finish` pair so a
+    /// completion notification can report how many tracks were added.
+    /// AppModel's reducer already handles these lines for UI state; this is
+    /// a side channel over the same wire data, not a change to the reducer.
+    private func observeForNotification(_ event: DaemonEvent) {
+        guard case let .syncEvent(line) = event,
+              let data = line.data(using: .utf8),
+              let inner = try? syncEventDecoder.decode(SyncEvent.self, from: data) else { return }
+        switch inner {
+        case let .summary(add, _, _, _, _, _):
+            pendingSyncAddCount = add
+        case let .finish(success):
+            Notifier.syncFinished(success: success, added: pendingSyncAddCount)
+            pendingSyncAddCount = 0
+        default:
+            break
         }
     }
 
@@ -59,7 +100,9 @@ struct ClassickApp: App {
         MenuBarExtra("Classick", systemImage: menuBarSystemImage(for: appDelegate.model.phase)) {
             MenuContent(
                 model: appDelegate.model,
-                daemonFatalError: appDelegate.daemonFatalError
+                daemonFatalError: appDelegate.daemonFatalError,
+                onSyncNow: appDelegate.syncNow,
+                onCancelSync: appDelegate.cancelSync
             )
         }
         .menuBarExtraStyle(.menu)
