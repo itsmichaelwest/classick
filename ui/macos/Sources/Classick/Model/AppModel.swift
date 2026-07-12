@@ -26,6 +26,16 @@ struct PendingPrompt: Equatable, Sendable {
     var options: [String]
 }
 
+/// The daemon's last-known persisted configuration, as pushed by
+/// `config_update`. Settings/Setup UI reads this to seed its controls and
+/// writes back via `save_config`; the daemon (not this app) remains the
+/// store of record.
+struct AppConfig: Equatable, Sendable {
+    var source: String?
+    var daemon: DaemonSettings?
+    var ipod: IpodIdentity?
+}
+
 @Observable
 @MainActor
 final class AppModel {
@@ -34,6 +44,7 @@ final class AppModel {
     private(set) var lastSync: HistoryEntry?
     private(set) var pendingPrompt: PendingPrompt?
     private(set) var storageText: String?
+    private(set) var config: AppConfig?
 
     // Tracked separately from `device` because `status_update` carries its
     // own `ipod_connected`/`configured` flags independent of the
@@ -45,8 +56,11 @@ final class AppModel {
 
     func apply(_ ev: DaemonEvent) {
         switch ev {
-        case .hello, .configUpdate, .historyUpdate, .unknown:
+        case .hello, .historyUpdate, .unknown:
             break
+
+        case let .configUpdate(source, daemon, ipod):
+            config = AppConfig(source: source, daemon: daemon, ipod: ipod)
 
         case let .deviceConnected(serial, modelLabel, drive, name):
             device = DeviceState(serial: serial, model: modelLabel, name: name, drive: drive)
@@ -77,6 +91,12 @@ final class AppModel {
         case let .syncRejected(reason):
             phase = .error(Self.humanReadable(rejection: reason))
         }
+    }
+
+    /// Called once a surfaced `pendingPrompt` has been answered (its
+    /// `decide_prompt` sent) so the same prompt isn't re-presented.
+    func clearPendingPrompt() {
+        pendingPrompt = nil
     }
 
     private var phaseIsSyncing: Bool {

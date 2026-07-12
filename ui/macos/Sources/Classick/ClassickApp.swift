@@ -50,9 +50,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             for await event in stream {
                 self.model.apply(event)
                 self.observeForNotification(event)
+                self.presentPromptIfNeeded()
             }
             self.daemonFatalError = await self.daemonClient.lastFatalError
         }
+    }
+
+    /// Sends the setup window's `save_config` (folder + auto-sync + the
+    /// currently-detected iPod, if any) and clears any error banner from a
+    /// prior failed handshake/save.
+    func finishSetup(source: String, autoSync: Bool) {
+        let daemon = DaemonSettings(
+            enabled: autoSync,
+            autostartWithWindows: false,
+            firstSyncMode: "auto_apply",
+            subsequentSyncMode: "auto_apply",
+            scheduleMinutes: 0,
+            notifyOn: "all")
+        let ipod = model.device.map { IpodIdentity(serial: $0.serial, modelLabel: $0.model, name: $0.name) }
+        Task { await daemonClient.send(.saveConfig(source: source, daemon: daemon, ipod: ipod)) }
+    }
+
+    /// Settings window's debounced edits. `ipod` is omitted (nil) so an
+    /// existing iPod pairing isn't disturbed by unrelated setting changes —
+    /// only "Remove this iPod" (`forgetIpod()`) touches that.
+    func saveSettings(source: String?, daemon: DaemonSettings) {
+        Task { await daemonClient.send(.saveConfig(source: source, daemon: daemon, ipod: nil)) }
+    }
+
+    func forgetIpod() {
+        Task { await daemonClient.send(.forgetIpod) }
+    }
+
+    /// Surfaces `model.pendingPrompt` (set by the reducer from a relayed
+    /// `sync_event` prompt/form line) as a blocking `NSAlert`, then replies
+    /// with the chosen option and clears it so it isn't re-shown.
+    private func presentPromptIfNeeded() {
+        guard let prompt = model.pendingPrompt else { return }
+        let choice = PromptAlert.present(prompt)
+        model.clearPendingPrompt()
+        Task { await daemonClient.send(.decidePrompt(id: prompt.id, choice: choice)) }
     }
 
     /// Sync Now / Cancel Sync menu actions. `DaemonClient.send` is async
@@ -96,16 +133,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 struct ClassickApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    // `openWindow`/`openSettings` are ordinary `EnvironmentValues` and are
+    // readable from the `App` conformer itself (not just from `View` bodies)
+    // — the standard way to trigger scenes from `MenuBarExtra` actions.
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
+
     var body: some Scene {
         MenuBarExtra("Classick", systemImage: menuBarSystemImage(for: appDelegate.model.phase)) {
             MenuContent(
                 model: appDelegate.model,
                 daemonFatalError: appDelegate.daemonFatalError,
+                onSetUp: openSetupWindow,
+                onOpenSettings: openSettingsWindow,
                 onSyncNow: appDelegate.syncNow,
                 onCancelSync: appDelegate.cancelSync
             )
         }
         .menuBarExtraStyle(.menu)
+
+        // A regular, single-instance window (not a MenuBarExtra submenu) so
+        // `.fileImporter` and normal window chrome work as expected.
+        Window("Set Up Classick", id: "setup") {
+            SetupWindow(model: appDelegate.model, onDone: appDelegate.finishSetup)
+        }
+        .windowResizability(.contentSize)
+
+        Settings {
+            SettingsView(
+                model: appDelegate.model,
+                onSave: appDelegate.saveSettings,
+                onForgetIpod: appDelegate.forgetIpod
+            )
+        }
+    }
+
+    /// Opening any window from this `LSUIElement` (accessory, no Dock icon)
+    /// app requires activating it first — otherwise the window can open
+    /// behind whatever app currently has focus.
+    private func openSetupWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "setup")
+    }
+
+    private func openSettingsWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        openSettings()
     }
 }
 
