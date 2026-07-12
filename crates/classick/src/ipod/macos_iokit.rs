@@ -219,7 +219,7 @@ pub fn run_usb_notifications(on_event: Box<dyn FnMut(UsbChange) + Send>) {
         CFRetain(matching as CFTypeRef);
 
         let mut it_add: io_iterator_t = 0;
-        IOServiceAddMatchingNotification(
+        let kr_add = IOServiceAddMatchingNotification(
             port,
             b"IOServiceMatched\0".as_ptr() as *mut c_char,
             matching,
@@ -227,10 +227,13 @@ pub fn run_usb_notifications(on_event: Box<dyn FnMut(UsbChange) + Send>) {
             refcon,
             &mut it_add,
         );
+        if kr_add != 0 {
+            tracing::warn!("IOServiceAddMatchingNotification(matched) failed: {kr_add}");
+        }
         added(refcon, it_add); // arm + process already-connected devices
 
         let mut it_rm: io_iterator_t = 0;
-        IOServiceAddMatchingNotification(
+        let kr_rm = IOServiceAddMatchingNotification(
             port,
             b"IOServiceTerminated\0".as_ptr() as *mut c_char,
             matching,
@@ -238,6 +241,9 @@ pub fn run_usb_notifications(on_event: Box<dyn FnMut(UsbChange) + Send>) {
             refcon,
             &mut it_rm,
         );
+        if kr_rm != 0 {
+            tracing::warn!("IOServiceAddMatchingNotification(terminated) failed: {kr_rm}");
+        }
         removed(refcon, it_rm); // arm (nothing terminating at startup)
 
         CFRunLoopRun();

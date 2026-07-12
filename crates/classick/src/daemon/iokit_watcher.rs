@@ -45,9 +45,26 @@ impl DeviceWatcher for IokitDeviceWatcher {
                     }
                 }
                 UsbChange::Removed => {
-                    if let Some(prev) = last.take() {
-                        let _ =
-                            tx.blocking_send(DeviceEvent::Disconnected { serial: prev.serial });
+                    // A terminate fires for ANY Apple USB device (keyboard,
+                    // trackpad, hub), so confirm the iPod itself is gone before
+                    // reporting it. Poll briefly for its volume to disappear: a
+                    // real unplug settles in ~1s, while an unrelated device
+                    // removal leaves the iPod still detectable.
+                    if last.is_some() {
+                        let mut gone = false;
+                        for _ in 0..20 {
+                            if device::scan_for_ipod().is_none() {
+                                gone = true;
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        if gone {
+                            if let Some(prev) = last.take() {
+                                let _ = tx
+                                    .blocking_send(DeviceEvent::Disconnected { serial: prev.serial });
+                            }
+                        }
                     }
                 }
             }));
