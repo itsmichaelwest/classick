@@ -21,6 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let model = AppModel()
     let daemonClient = DaemonClient()
     private let daemonProcess = DaemonProcess()
+    #if canImport(Sparkle)
+    private let updater = Updater()
+    #endif
     private var eventTask: Task<Void, Never>?
 
     // Set by the most recent inner `summary` line of the sync in progress, so
@@ -112,6 +115,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.send(.getStatus) }
     }
 
+    /// No-op under `swift test` (see `Updater.swift`) — SPM's `Package.swift`
+    /// graph doesn't carry the Sparkle dependency.
+    func checkForUpdates() {
+        #if canImport(Sparkle)
+        updater.checkForUpdates()
+        #endif
+    }
+
     /// Peeks at `sync_event` lines for the `summary`/`finish` pair so a
     /// completion notification can report how many tracks were added.
     /// AppModel's reducer already handles these lines for UI state; this is
@@ -166,7 +177,8 @@ struct ClassickApp: App {
                 onOpenSettings: openSettingsWindow,
                 onSyncNow: appDelegate.syncNow,
                 onCancelSync: appDelegate.cancelSync,
-                onRetry: appDelegate.retry
+                onRetry: appDelegate.retry,
+                onCheckForUpdates: appDelegate.checkForUpdates
             )
         }
         .menuBarExtraStyle(.menu)

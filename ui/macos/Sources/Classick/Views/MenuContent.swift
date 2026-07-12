@@ -14,6 +14,7 @@ struct MenuContent: View {
     var onSyncNow: () -> Void = { print("TODO: send(.triggerSync(source: .manual))") }
     var onCancelSync: () -> Void = { print("TODO: send(.cancelSync)") }
     var onRetry: () -> Void = { print("TODO: retry after error") }
+    var onCheckForUpdates: () -> Void = { print("TODO: check for updates") }
 
     var body: some View {
         if let daemonFatalError {
@@ -24,6 +25,7 @@ struct MenuContent: View {
         phaseContent
 
         Divider()
+        Button("Check for Updates…", action: onCheckForUpdates)
         Button("Settings…", action: onOpenSettings)
             .keyboardShortcut(",")
         Button("Quit Classick") { NSApplication.shared.terminate(nil) }

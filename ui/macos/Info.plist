@@ -24,5 +24,11 @@
     <true/>
     <key>NSHumanReadableCopyright</key>
     <string>Classick — LGPL components; see About.</string>
+    <key>SUFeedURL</key>
+    <string>https://itsmichaelwest.github.io/classick/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>PLACEHOLDER_REPLACE_WITH_generate_keys_OUTPUT</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
 </dict>
 </plist>
