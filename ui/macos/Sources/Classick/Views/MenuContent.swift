@@ -27,9 +27,7 @@ struct MenuContent: View {
         Divider()
         Button("Check for Updates…", action: onCheckForUpdates)
         Button("Settings…", action: onOpenSettings)
-            .keyboardShortcut(",")
         Button("Quit Classick") { NSApplication.shared.terminate(nil) }
-            .keyboardShortcut("q")
     }
 
     @ViewBuilder
@@ -50,11 +48,10 @@ struct MenuContent: View {
                 Text(storageText)
             }
             if let lastSync = model.lastSync {
-                Text("Last sync: \(lastSync.timestamp)")
+                Text("Last sync: \(formatLastSync(lastSync.timestamp))")
             }
             Divider()
             Button("Sync Now", action: onSyncNow)
-                .keyboardShortcut("s")
 
         case let .syncing(current, total, label):
             Text("Syncing… \(current) of \(total)")
@@ -68,4 +65,14 @@ struct MenuContent: View {
             Button("Retry", action: onRetry)
         }
     }
+}
+
+/// The daemon sends `HistoryEntry.timestamp` as an ISO-8601/RFC-3339 string
+/// (e.g. "2026-05-24T10:00:00Z"). Render it in the user's locale/timezone
+/// instead of dumping the raw UTC string into the menu. Falls back to the raw
+/// value if it somehow doesn't parse.
+private func formatLastSync(_ iso: String) -> String {
+    let parser = ISO8601DateFormatter()
+    guard let date = parser.date(from: iso) else { return iso }
+    return date.formatted(date: .abbreviated, time: .shortened)
 }
