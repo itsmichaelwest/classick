@@ -1,0 +1,184 @@
+import Foundation
+import Observation
+
+/// Derived UI phase for the menu-bar surface. `.noDevice`/`.notConfigured`
+/// take precedence over sync state when deriving from `status_update`, but
+/// direct sync progress (`sync_event` lines) always wins once a sync is
+/// actually streaming — see AppModel.apply for the precedence rules.
+enum Phase: Equatable, Sendable {
+    case noDevice
+    case notConfigured
+    case idle
+    case syncing(current: Int, total: Int, label: String)
+    case error(String)
+}
+
+struct DeviceState: Equatable, Sendable {
+    var serial: String
+    var model: String
+    var name: String?
+    var drive: String
+}
+
+struct PendingPrompt: Equatable, Sendable {
+    var id: UInt64
+    var message: String
+    var options: [String]
+}
+
+/// The daemon's last-known persisted configuration, as pushed by
+/// `config_update`. Settings/Setup UI reads this to seed its controls and
+/// writes back via `save_config`; the daemon (not this app) remains the
+/// store of record.
+struct AppConfig: Equatable, Sendable {
+    var source: String?
+    var daemon: DaemonSettings?
+    var ipod: IpodIdentity?
+}
+
+@Observable
+@MainActor
+final class AppModel {
+    private(set) var device: DeviceState?
+    private(set) var phase: Phase = .noDevice
+    private(set) var lastSync: HistoryEntry?
+    private(set) var pendingPrompt: PendingPrompt?
+    private(set) var storageText: String?
+    private(set) var config: AppConfig?
+
+    // Tracked separately from `device` because `status_update` carries its
+    // own `ipod_connected`/`configured` flags independent of the
+    // `device_connected`/`device_disconnected` events.
+    private var isIpodConnected = false
+
+    // "Configured" is device-aware: the daemon's persisted iPod identity must
+    // match the *currently connected* device's serial, not just "some iPod
+    // was ever paired". Without this check, swapping in a different,
+    // unpaired iPod while a paired one's config is still cached would show
+    // "Sync Now" instead of "Set Up Classick…".
+    //
+    // `configuredSerial`/`hasSeenConfig` come from `config_update` (the
+    // source of truth once we've seen one). Before the first `config_update`
+    // arrives, `statusConfigured` — the daemon's own device-agnostic
+    // `status_update.configured` flag — is used as a fallback so the menu
+    // doesn't flash "Set Up Classick…" during the startup handshake.
+    private var configuredSerial: String?
+    private var hasSeenConfig = false
+    private var statusConfigured = false
+
+    private var isConfiguredForCurrentDevice: Bool {
+        if let device {
+            return device.serial == configuredSerial
+        }
+        return hasSeenConfig ? configuredSerial != nil : statusConfigured
+    }
+
+    private let decoder = JSONDecoder()
+
+    func apply(_ ev: DaemonEvent) {
+        switch ev {
+        case .hello, .historyUpdate, .unknown:
+            break
+
+        case let .configUpdate(source, daemon, ipod):
+            config = AppConfig(source: source, daemon: daemon, ipod: ipod)
+            // The daemon considers itself configured once it has a persisted
+            // iPod identity (daemon: `configured = configured_serial.is_some()`).
+            // It emits `config_update` (not a pushed `status_update`) after a
+            // `save_config`, so derive the flag here too or the menu would stay
+            // stuck on "Set Up…" right after first-run setup. Track the serial
+            // itself (not just presence) so a later device swap is caught by
+            // `isConfiguredForCurrentDevice`.
+            hasSeenConfig = true
+            configuredSerial = ipod?.serial
+            phase = computePhase(targetSyncing: phaseIsSyncing)
+
+        case let .deviceConnected(serial, modelLabel, drive, name):
+            device = DeviceState(serial: serial, model: modelLabel, name: name, drive: drive)
+            isIpodConnected = true
+            storageText = Self.formatStorage(storageFor(drive: drive))
+            phase = computePhase(targetSyncing: phaseIsSyncing)
+
+        case .deviceDisconnected:
+            device = nil
+            isIpodConnected = false
+            storageText = nil
+            phase = computePhase(targetSyncing: false)
+
+        case let .statusUpdate(info):
+            statusConfigured = info.configured
+            isIpodConnected = info.ipodConnected
+            lastSync = info.lastSync
+            let targetSyncing: Bool
+            switch info.state {
+            case .syncing: targetSyncing = true
+            case .idle: targetSyncing = false
+            }
+            phase = computePhase(targetSyncing: targetSyncing)
+
+        case let .syncEvent(line):
+            applySyncEvent(line)
+
+        case let .syncRejected(reason):
+            phase = .error(Self.humanReadable(rejection: reason))
+        }
+    }
+
+    /// Called once a surfaced `pendingPrompt` has been answered (its
+    /// `decide_prompt` sent) so the same prompt isn't re-presented.
+    func clearPendingPrompt() {
+        pendingPrompt = nil
+    }
+
+    private var phaseIsSyncing: Bool {
+        if case .syncing = phase { return true }
+        return false
+    }
+
+    /// `noDevice`/`notConfigured` precedence used when deriving phase from
+    /// connection/config state. Sync progress events (`sync_event` lines)
+    /// bypass this and set `.syncing`/`.idle` directly.
+    private func computePhase(targetSyncing: Bool) -> Phase {
+        guard isIpodConnected else { return .noDevice }
+        guard isConfiguredForCurrentDevice else { return .notConfigured }
+        guard targetSyncing else { return .idle }
+        if case .syncing = phase { return phase }
+        return .syncing(current: 0, total: 0, label: "")
+    }
+
+    private func applySyncEvent(_ line: String) {
+        guard let data = line.data(using: .utf8),
+              let event = try? decoder.decode(SyncEvent.self, from: data) else { return }
+        switch event {
+        case let .trackStart(current, total, label):
+            phase = .syncing(current: current, total: total, label: label)
+        case .finish:
+            phase = .idle
+        case let .prompt(id, message, options):
+            pendingPrompt = PendingPrompt(id: id, message: message, options: options)
+        case let .form(id, label, initial, hint):
+            pendingPrompt = PendingPrompt(id: id, message: hint ?? label, options: initial.map { [$0] } ?? [])
+        case let .error(message, _):
+            phase = .error(message)
+        case .hello, .header, .summary, .trackDone, .log, .other:
+            break
+        }
+    }
+
+    private static func formatStorage(_ pair: (free: Int64, total: Int64)?) -> String? {
+        guard let pair else { return nil }
+        let freeGB = pair.free / 1_000_000_000
+        let totalGB = pair.total / 1_000_000_000
+        return "\(freeGB) / \(totalGB) GB"
+    }
+
+    private static func humanReadable(rejection reason: String) -> String {
+        switch reason {
+        case "already_syncing": return "A sync is already in progress."
+        case "no_ipod": return "No iPod is connected."
+        case "not_configured": return "Classick isn't configured yet."
+        case "too_many_failures": return "Sync disabled after repeated failures."
+        default: return reason
+        }
+    }
+}
