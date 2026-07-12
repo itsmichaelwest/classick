@@ -14,11 +14,17 @@
 //!   2 — IOCTL succeeded but XML couldn't be parsed
 //!   3 — Bad command-line arguments
 
-#![cfg(windows)]
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("scsi-probe is a Windows-only example (SCSI IOCTL pass-through).");
+}
 
+#[cfg(windows)]
 use classick::scsi_inquiry;
+#[cfg(windows)]
 use classick::sysinfo_extended::ParsedSysInfo;
 
+#[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 2 {

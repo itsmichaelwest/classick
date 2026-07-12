@@ -16,6 +16,10 @@ fn main() -> Result<()> {
     // Required so libgpod's artwork write path can find pixbuf loaders.
     // Not strictly needed for a wipe, but setting it is harmless and avoids
     // a GLib warning if the DB write internally pokes at artwork formats.
+    // Windows stages pixbuf loaders next to the exe (build.rs sets
+    // PIXBUF_LOADERS_CACHE); on macOS/Linux the system gdk-pixbuf loaders are
+    // discovered automatically, so this is Windows-only.
+    #[cfg(windows)]
     unsafe {
         std::env::set_var("GDK_PIXBUF_MODULE_FILE", env!("PIXBUF_LOADERS_CACHE"));
     }
