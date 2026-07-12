@@ -149,6 +149,101 @@ unsafe fn read_string_prop(entry: io_registry_entry_t, key: &str) -> Option<Stri
     Some(s.to_string())
 }
 
+/// A USB attach/detach signal from the IOKit run loop.
+#[derive(Debug, Clone, Copy)]
+pub enum UsbChange {
+    Added,
+    Removed,
+}
+
+/// Run a `CFRunLoop` that invokes `on_event` whenever an Apple (`0x05AC`) USB
+/// device is added or removed. Blocks the calling thread indefinitely (the
+/// notification source keeps the run loop alive) — intended to run on a
+/// dedicated `std::thread` owned by the device watcher. `on_event(Added)` also
+/// fires once at startup for any already-connected Apple device.
+pub fn run_usb_notifications(on_event: Box<dyn FnMut(UsbChange) + Send>) {
+    use core_foundation::base::TCFType;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::base::{CFRetain, CFTypeRef};
+    use core_foundation_sys::dictionary::CFDictionarySetValue;
+    use core_foundation_sys::runloop::{
+        kCFRunLoopDefaultMode, CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRun,
+    };
+    use io_kit_sys::types::io_iterator_t;
+    use io_kit_sys::{
+        kIOMasterPortDefault, IONotificationPortCreate, IONotificationPortGetRunLoopSource,
+        IOIteratorNext, IOObjectRelease, IOServiceAddMatchingNotification, IOServiceMatching,
+    };
+    use std::os::raw::{c_char, c_void};
+
+    // Drain the iterator (re-arms the notification) then fire `on_event` once.
+    unsafe fn dispatch(refcon: *mut c_void, iter: io_iterator_t, change: UsbChange) {
+        loop {
+            let e = IOIteratorNext(iter);
+            if e == 0 {
+                break;
+            }
+            IOObjectRelease(e);
+        }
+        let cb = &mut *(refcon as *mut Box<dyn FnMut(UsbChange) + Send>);
+        cb(change);
+    }
+    unsafe extern "C" fn added(refcon: *mut c_void, iter: io_iterator_t) {
+        dispatch(refcon, iter, UsbChange::Added);
+    }
+    unsafe extern "C" fn removed(refcon: *mut c_void, iter: io_iterator_t) {
+        dispatch(refcon, iter, UsbChange::Removed);
+    }
+
+    let mut cb = on_event;
+    let refcon = &mut cb as *mut Box<dyn FnMut(UsbChange) + Send> as *mut c_void;
+
+    unsafe {
+        let port = IONotificationPortCreate(kIOMasterPortDefault);
+        let src = IONotificationPortGetRunLoopSource(port);
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopDefaultMode);
+
+        // Match Apple USB devices (vendor 0x05AC).
+        let matching = IOServiceMatching(b"IOUSBDevice\0".as_ptr() as *const c_char);
+        let key = CFString::from_static_string("idVendor");
+        let val = CFNumber::from(0x05AC_i32);
+        CFDictionarySetValue(
+            matching as *mut _,
+            key.as_CFTypeRef() as *const c_void,
+            val.as_CFTypeRef() as *const c_void,
+        );
+
+        // Each IOServiceAddMatchingNotification consumes one reference to the
+        // matching dict, so retain once for the second registration.
+        CFRetain(matching as CFTypeRef);
+
+        let mut it_add: io_iterator_t = 0;
+        IOServiceAddMatchingNotification(
+            port,
+            b"IOServiceMatched\0".as_ptr() as *mut c_char,
+            matching,
+            added,
+            refcon,
+            &mut it_add,
+        );
+        added(refcon, it_add); // arm + process already-connected devices
+
+        let mut it_rm: io_iterator_t = 0;
+        IOServiceAddMatchingNotification(
+            port,
+            b"IOServiceTerminated\0".as_ptr() as *mut c_char,
+            matching,
+            removed,
+            refcon,
+            &mut it_rm,
+        );
+        removed(refcon, it_rm); // arm (nothing terminating at startup)
+
+        CFRunLoopRun();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
