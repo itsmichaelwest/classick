@@ -37,11 +37,28 @@ cp target/release/classick "$APP/Contents/Resources/classick"
 echo "==> [3/8] bundle libgpod dylib closure (relocatable @rpath)"
 scripts/bundle-macos-libs.sh "$APP"
 
-echo "==> [4/8] sign inside-out (dylibs + daemon), then the app"
+echo "==> [4/8] sign inside-out (Sparkle components, dylibs, daemon), then the app"
+# Sparkle ships its Updater.app/Autoupdate/XPC services pre-signed with Sparkle's
+# own cert and no secure timestamp; notarization requires OUR Developer ID + a
+# timestamp on each nested Mach-O. Re-sign them deepest-first.
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+if [ -d "$SPARKLE" ]; then
+  V="$(cd "$SPARKLE/Versions" && ls -d [A-Z] 2>/dev/null | head -1)"
+  SV="$SPARKLE/Versions/$V"
+  for c in \
+    "$SV/Updater.app/Contents/MacOS/Updater" \
+    "$SV/Updater.app" \
+    "$SV/XPCServices/Downloader.xpc" \
+    "$SV/XPCServices/Installer.xpc" \
+    "$SV/Autoupdate" \
+    "$SPARKLE" ; do
+    [ -e "$c" ] && codesign --force --options runtime --timestamp --sign "$ID" "$c"
+  done
+fi
 while IFS= read -r f; do
   codesign --force --options runtime --timestamp --sign "$ID" "$f"
 done < <(find "$APP/Contents/Frameworks" -name '*.dylib'; echo "$APP/Contents/Resources/classick")
-# Seal the app last (Sparkle.framework was already signed by xcodebuild).
+# Seal the app last.
 codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$ID" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
