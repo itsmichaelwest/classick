@@ -53,6 +53,8 @@ core-foundation = "0.10"
 core-foundation-sys = "0.8"
 io-kit-sys = "0.4"
 libc = "0.2"
+# Native tag/probe reading (replaces ffprobe on macOS) + cover-art extraction.
+lofty = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["test-util"] }

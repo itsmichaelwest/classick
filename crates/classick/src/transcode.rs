@@ -6,6 +6,9 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "macos")]
+mod macos_probe;
+
 #[derive(Debug, Deserialize)]
 pub struct ProbeOutput {
     #[serde(default)]
@@ -157,9 +160,17 @@ pub fn ffmpeg_args(src: &Path, dst: &Path) -> Vec<String> {
     ]
 }
 
+/// macOS never spawns ffprobe: probe via lofty instead (see `macos_probe`).
+/// `_ffmpeg_path` is accepted-but-ignored so callers stay platform-agnostic.
+#[cfg(target_os = "macos")]
+pub fn probe(src: &Path, _ffmpeg_path: &Path) -> Result<ProbeOutput> {
+    macos_probe::probe_output_from_lofty(src)
+}
+
 /// Spawn ffprobe on `src` and parse its JSON output into a `ProbeOutput`.
 /// `ffmpeg_path` is the configured ffmpeg binary; ffprobe is derived from it
 /// via [`ffprobe_path_for`] (F-16).
+#[cfg(not(target_os = "macos"))]
 pub fn probe(src: &Path, ffmpeg_path: &Path) -> Result<ProbeOutput> {
     let ffprobe = ffprobe_path_for(ffmpeg_path);
     let out = Command::new(&ffprobe)
@@ -180,8 +191,32 @@ pub fn probe(src: &Path, ffmpeg_path: &Path) -> Result<ProbeOutput> {
     Ok(parsed)
 }
 
+/// Transcode `src` → `dst` (ALAC in an M4A container) via the system
+/// `afconvert` binary. No configurable encoder path on macOS —
+/// `config.ffmpeg`/`_ffmpeg_path` is accepted-but-ignored.
+#[cfg(target_os = "macos")]
+pub fn transcode_to_alac(src: &Path, dst: &Path, _ffmpeg_path: &Path) -> Result<()> {
+    let status = Command::new("/usr/bin/afconvert")
+        .args(["-f", "m4af", "-d", "alac"])
+        .arg(src)
+        .arg(dst)
+        .stdin(Stdio::null())
+        .no_console()
+        .status()
+        .map_err(|e| anyhow!("failed to spawn afconvert: {e}"))?;
+    if !status.success() {
+        return Err(anyhow!(
+            "afconvert failed on {} (exit {:?})",
+            src.display(),
+            status.code()
+        ));
+    }
+    Ok(())
+}
+
 /// Transcode `src` (FLAC) → `dst` (ALAC in MP4/ipod container, art passed through).
 /// `ffmpeg_path` is the configured ffmpeg binary (F-16).
+#[cfg(not(target_os = "macos"))]
 pub fn transcode_to_alac(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<()> {
     // Belt + braces with the `-nostdin` flag in ffmpeg_args: explicitly
     // null out stdin so the inherited pipe (from the sync subprocess's
@@ -241,9 +276,24 @@ pub fn verify_refalac_available(refalac_path: &Path) -> Result<String> {
     Ok(version)
 }
 
+/// Verify the macOS toolchain (`afconvert`) is present. Call at startup so
+/// the user gets a clear error before we try anything else. `_ffmpeg_path`
+/// is accepted-but-ignored — macOS has no configurable encoder path.
+#[cfg(target_os = "macos")]
+pub fn verify_tools_available(_ffmpeg_path: &Path) -> Result<()> {
+    if !Path::new("/usr/bin/afconvert").exists() {
+        return Err(anyhow!(
+            "/usr/bin/afconvert not found. This ships with macOS; if it's missing, \
+             the system install is unusual — reinstall macOS Core Audio components."
+        ));
+    }
+    Ok(())
+}
+
 /// Verify ffmpeg and ffprobe are reachable. `ffmpeg_path` is the configured
 /// ffmpeg binary; ffprobe is derived from it via [`ffprobe_path_for`] (F-16).
 /// Call at startup so the user gets a clear error before we try anything else.
+#[cfg(not(target_os = "macos"))]
 pub fn verify_tools_available(ffmpeg_path: &Path) -> Result<()> {
     let ffprobe = ffprobe_path_for(ffmpeg_path);
     for (label, tool) in [("ffmpeg", ffmpeg_path.to_path_buf()), ("ffprobe", ffprobe)] {
@@ -496,10 +546,20 @@ pub fn transcode_via_refalac(
     Ok(())
 }
 
+/// Extract the first embedded picture from `src`'s tags and write its raw
+/// bytes to `dst`. Assumes the source actually has embedded art — caller
+/// should check via `has_embedded_art` before calling. `_ffmpeg_path` is
+/// accepted-but-ignored (lofty reads tags directly, no shellout).
+#[cfg(target_os = "macos")]
+pub fn extract_cover_art(src: &Path, dst: &Path, _ffmpeg_path: &Path) -> Result<()> {
+    macos_probe::extract_cover_art_via_lofty(src, dst)
+}
+
 /// Extract the first video stream (assumed to be the attached_pic / cover art)
 /// from `src` to `dst` as a single still image. Assumes the source actually
 /// has an attached_pic stream — caller should check via `has_embedded_art`
 /// before calling. `ffmpeg_path` is the configured ffmpeg binary (F-16).
+#[cfg(not(target_os = "macos"))]
 pub fn extract_cover_art(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<()> {
     let status = Command::new(ffmpeg_path)
         .args(["-nostdin", "-loglevel", "error", "-y"])
@@ -748,5 +808,52 @@ mod tests {
                 .and_then(|s| s.to_str()),
             Some("bin")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // macOS-only: afconvert encode + lofty cover-art extraction against the
+    // real `tagged.flac` fixture (no hardware, no mocked subprocess — these
+    // exercise the actual system tools).
+    // -----------------------------------------------------------------------
+
+    #[cfg(target_os = "macos")]
+    const FIXTURE_FLAC: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tagged.flac");
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_transcode_to_alac_produces_nonempty_m4a() {
+        let dst = std::env::temp_dir().join(format!(
+            "classick-test-transcode-{}.m4a",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&dst);
+
+        transcode_to_alac(Path::new(FIXTURE_FLAC), &dst, Path::new("afconvert")).unwrap();
+
+        let meta = std::fs::metadata(&dst).expect("output file exists");
+        assert!(meta.len() > 0, "afconvert output should be non-empty");
+
+        std::fs::remove_file(&dst).ok();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_extract_cover_art_writes_image_with_valid_header() {
+        let dst = std::env::temp_dir().join(format!(
+            "classick-test-art-{}.img",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&dst);
+
+        extract_cover_art(Path::new(FIXTURE_FLAC), &dst, Path::new("afconvert")).unwrap();
+
+        let bytes = std::fs::read(&dst).expect("art file exists");
+        assert!(!bytes.is_empty());
+        let is_png = bytes.starts_with(&[0x89, b'P', b'N', b'G']);
+        let is_jpeg = bytes.starts_with(&[0xFF, 0xD8]);
+        assert!(is_png || is_jpeg, "expected PNG or JPEG header, got {:02X?}", &bytes[..bytes.len().min(8)]);
+
+        std::fs::remove_file(&dst).ok();
     }
 }
