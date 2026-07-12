@@ -402,3 +402,5 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
 - **Purpose:** Connect to `\.\pipe\ipod-sync`, dump every event, and probe with `get_status`. Bypasses the C# UI entirely so we can see exactly what the daemon emits on the wire.
 - **When to use:** Any time the UI seems to misrepresent daemon state — proves whether the bug is daemon-side or client-side.
 - **Usage:** `pwsh F:\repos\ipod-sync\scripts\probe-daemon.ps1`
+
+- **macOS IOKit device identity:** the Apple vendor id (0x05AC) appears on multiple IORegistry nodes up the parent chain (USB interfaces, then the device). Only the `IOUSBHostDevice` node carries the `USB Serial Number` (= FirewireGuid). Match on `idVendor==0x05AC` AND serial-present, or you stop at an interface node and get a `None` identity. Capacity comes from the IOMedia `Size` property (fixes the old ioreg path's hardcoded-None capacity). See `ipod/macos_iokit.rs`.

@@ -86,9 +86,14 @@ unsafe fn identity_for_bsd_name(bsd: &str) -> Option<IokitUsbIdentity> {
     let mut entry = media;
     // Bounded to avoid any pathological cycle; the USB device is a handful of
     // levels above the IOMedia.
+    // The Apple vendor id (0x05AC) appears on several nodes up the chain
+    // (USB interfaces, then the device). Only the IOUSBHostDevice carries the
+    // serial number, so require BOTH the vendor id and a serial before
+    // accepting a node — otherwise we stop at an interface and miss the guid.
     for _ in 0..32 {
-        if read_u64_prop(entry, "idVendor") == Some(0x05AC) {
-            guid = read_string_prop(entry, "USB Serial Number").map(|s| format_firewire_guid(&s));
+        let ser = read_string_prop(entry, "USB Serial Number");
+        if read_u64_prop(entry, "idVendor") == Some(0x05AC) && ser.is_some() {
+            guid = ser.map(|s| format_firewire_guid(&s));
             pid = read_u64_prop(entry, "idProduct").map(|v| v as u16);
             break;
         }
