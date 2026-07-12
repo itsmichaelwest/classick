@@ -42,3 +42,4 @@ Thumbs.db
 
 # LOCAL macOS libgpod pkg-config env (machine-specific)
 .cargo/config.toml
+.superpowers/
