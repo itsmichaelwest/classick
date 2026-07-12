@@ -53,3 +53,6 @@ ui/macos/Classick.app/
 ui/macos/.build-xcode/
 ui/macos/Classick.xcodeproj/xcuserdata/
 ui/macos/Classick.xcodeproj/project.xcworkspace/xcuserdata/
+
+# macOS release artifacts
+dist/
