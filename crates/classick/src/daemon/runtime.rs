@@ -144,6 +144,12 @@ enum InternalEvent {
         serial: String,
         name: Option<String>,
     },
+    /// Result of an off-thread source-library walk (see `spawn_library_count`).
+    /// Populates the cached `library_count` (Y in "X of Y synced") so the menu
+    /// can show a total on a cold start, before any sync has run.
+    LibraryCountComputed {
+        count: usize,
+    },
 }
 
 /// Test-friendly entry. Production wraps real impls and calls this.
@@ -197,15 +203,21 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     // cancel_tx_holder, but the orchestrator's pause arm doesn't
     // force-kill — see sync_orchestrator::run's doc comment.
     let mut pause_tx_holder: Option<oneshot::Sender<()>> = None;
-    // Cached source-library track count (Y in "X of Y synced"). `None`
-    // until a sync computes it. Walking the source on every status tick
-    // would stall the daemon loop, so this is only refreshed from a
-    // sync's already-performed diff (add + modify + unchanged == current
-    // source count) and invalidated when the source path changes.
+    // Cached source-library track count (Y in "X of Y synced"). Walking the
+    // source on every status tick would stall the daemon loop, so it's cached:
+    // filled by an off-thread walk at startup + after SaveConfig (see
+    // `spawn_library_count`), and also refreshed for free from each sync's
+    // already-performed diff (add + modify + unchanged + metadata_only ==
+    // current source count). `None` only until the first walk/sync lands.
     let mut library_count_cache: Option<usize> = None;
     let mut configured_serial = configured_serial;
 
     tracing::info!("daemon: ready (configured_serial={configured_serial:?})");
+
+    // Proactively count the source library so "X of Y synced" shows a total on
+    // a cold start, before any sync has run. Fills `library_count_cache`
+    // asynchronously via InternalEvent::LibraryCountComputed.
+    spawn_library_count(&config_path, &internal_tx);
 
     let exit_reason: ExitReason = loop {
         tokio::select! {
@@ -365,6 +377,10 @@ fn handle_internal_event(
     library_count_cache: &mut Option<usize>,
 ) {
     match event {
+        InternalEvent::LibraryCountComputed { count } => {
+            *library_count_cache = Some(count);
+            broadcast_status(event_tx, state, connected, config_path, history, *library_count_cache);
+        }
         InternalEvent::IpodNameResolved { serial, name } => {
             // Apply only if the resolved-name's serial still matches
             // the currently-connected device. (Device could've been
@@ -738,6 +754,56 @@ fn synced_track_count() -> usize {
         .unwrap_or(0)
 }
 
+/// Kick off an off-thread walk of the configured source library to fill the
+/// cached `library_count` (Y in "X of Y synced"), delivered back via
+/// `InternalEvent::LibraryCountComputed`. No-op when no source is configured.
+///
+/// Runs on `spawn_blocking` because a large library on a slow/spinning volume
+/// can take a while to walk — doing it inline would stall the daemon loop.
+/// This is what lets "X of Y" appear on a cold start (fresh daemon, before any
+/// sync): the walk fills Y proactively instead of waiting for a sync's diff.
+/// Called at startup and after `SaveConfig` (the source path may have changed).
+fn spawn_library_count(
+    config_path: &std::path::Path,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+) {
+    let config_path = config_path.to_path_buf();
+    let tx = internal_tx.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Some(count) = count_source_library(&config_path) {
+            let _ = tx.send(InternalEvent::LibraryCountComputed { count });
+        }
+    });
+}
+
+/// Resolve the configured source path and count its library tracks (Y in
+/// "X of Y synced"), applying the same `*.flac` + skip rules as a real sync
+/// (`source::walk`). `None` when no source is configured yet, or the walk
+/// failed (e.g. the source volume is unreachable — better to keep the last
+/// known Y than to flap). Extracted from `spawn_library_count` so the
+/// config-resolve + count logic is unit-testable without a tokio runtime.
+fn count_source_library(config_path: &std::path::Path) -> Option<usize> {
+    let source = config_file::load(config_path)
+        .ok()
+        .flatten()
+        .and_then(|c| c.source)?;
+    let started = std::time::Instant::now();
+    match crate::source::walk(&source) {
+        Ok(entries) => {
+            tracing::info!(
+                "daemon: counted source library ({} tracks) in {}ms",
+                entries.len(),
+                started.elapsed().as_millis()
+            );
+            Some(entries.len())
+        }
+        Err(e) => {
+            tracing::warn!("daemon: source-library count walk failed: {e:#}");
+            None
+        }
+    }
+}
+
 /// Query free + total bytes for the connected iPod's drive. `None` when
 /// no device is connected OR when the volume query failed (drive may
 /// have been unplugged mid-tick). UI treats absence as "no info yet".
@@ -813,9 +879,11 @@ fn handle_client_command(
                 return false;
             }
             // Invalidate the cached library count — the source path may
-            // have changed, which would make the cached Y stale. It's
-            // repopulated for free the next time a sync computes it.
+            // have changed, which would make the cached Y stale — then kick
+            // off a fresh walk so "X of Y" refreshes without waiting for the
+            // next sync. (A sync diff also refreshes it; whichever lands first.)
             *library_count_cache = None;
+            spawn_library_count(config_path, internal_tx);
             // Mirror the persisted ipod identity into the in-memory
             // `configured_serial` so subsequent plug-in / TriggerSync
             // checks see the post-wizard state without needing a daemon
@@ -1029,5 +1097,34 @@ mod tests {
     fn auto_sync_off_without_config_or_daemon_section() {
         assert!(!config_auto_sync(None));
         assert!(!config_auto_sync(Some(&PersistedConfig::default())));
+    }
+
+    // Cold-start "X of Y": count_source_library resolves the config's source
+    // and counts flac tracks with the same skip rules as a real sync, so Y is
+    // known before any sync runs. Returns None when no source is configured.
+    #[test]
+    fn count_source_library_counts_flac_respecting_skip_rules() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("classick-libcount-{}", std::process::id()));
+        let src = base.join("music");
+        fs::create_dir_all(&src).unwrap();
+        for n in ["a.flac", "b.flac", "c.flac"] {
+            fs::write(src.join(n), b"x").unwrap();
+        }
+        fs::write(src.join("notes.txt"), b"x").unwrap(); // not flac → ignored
+        fs::create_dir_all(src.join("_excluded")).unwrap();
+        fs::write(src.join("_excluded/skip.flac"), b"x").unwrap(); // skipped dir → ignored
+
+        let cfg_path = base.join("config.toml");
+        let cfg = PersistedConfig { source: Some(src.clone()), ..Default::default() };
+        crate::config_file::save(&cfg_path, &cfg).unwrap();
+        assert_eq!(count_source_library(&cfg_path), Some(3));
+
+        // No source configured → None (Y stays unknown, menu shows "X synced").
+        let empty_path = base.join("empty.toml");
+        crate::config_file::save(&empty_path, &PersistedConfig::default()).unwrap();
+        assert_eq!(count_source_library(&empty_path), None);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
