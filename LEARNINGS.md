@@ -432,3 +432,12 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   format set and omits ones the firmware reads (e.g. `F1069` on Classic
   Late-2009) → valid thumbnails written but never displayed. classick provisions
   it (`ipod::sysinfo_provision`) from embedded CC0 templates.
+- Rockbox reads track tags + cover art from the FILE, not the iTunesDB, and
+  ignores embedded art in FLAC/Vorbis. classick's afconvert path produced bare
+  .m4a (no tags/art). The `rockbox_compat` toggle embeds MP4 tags + a
+  normalized (≤600px baseline JPEG) covr atom into transcoded output
+  (`artwork.rs`), and the "Update existing library" backfill embeds them into
+  already-synced files in place. One normalized image feeds both the covr atom
+  (Rockbox) and libgpod's ithmb thumbnails (Apple). Keep hand-copied Rockbox
+  files OUTSIDE iPod_Control/ — reconcile deletes non-DB files under
+  iPod_Control/Music as orphans.
