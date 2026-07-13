@@ -31,12 +31,6 @@ pub enum IpcEvent {
         manifest: String,
     },
     /// Action-plan counts. Mirrors `ProgressEvent::Summary`. See §4.3.
-    ///
-    /// Known M1 limitation: the internal `ProgressEvent::Summary` doesn't
-    /// carry `metadata_only`, so this serializes `0` for it. The `review`
-    /// event below carries the accurate count via `ActionPlanSummary`; the
-    /// UI should prefer that for action-plan rendering. Widening the
-    /// internal variant is a post-M1 follow-up.
     Summary {
         add: usize,
         modify: usize,
@@ -158,15 +152,14 @@ impl IpcEvent {
             PE::Summary {
                 add,
                 modify,
+                metadata_only,
                 remove,
                 unchanged,
                 total_planned,
             } => IpcEvent::Summary {
                 add: *add,
                 modify: *modify,
-                // See doc comment on IpcEvent::Summary above: internal variant
-                // doesn't carry metadata_only. UI uses Review.summary instead.
-                metadata_only: 0,
+                metadata_only: *metadata_only,
                 remove: *remove,
                 unchanged: *unchanged,
                 total_planned: *total_planned,
@@ -273,6 +266,28 @@ mod tests {
             "got: {json}"
         );
         assert!(json.contains(r#""core_version":"0.0.1""#), "got: {json}");
+    }
+
+    #[test]
+    fn summary_event_carries_metadata_only_through() {
+        // Regression test: IpcEvent::Summary used to hardcode metadata_only
+        // to 0 regardless of the internal ProgressEvent's value (a documented
+        // "post-M1 follow-up" that was never done), so the daemon's
+        // library_count cache (which reads this event's metadata_only) always
+        // undercounted metadata-only tracks. from_progress must now carry the
+        // real value through unchanged.
+        use crate::progress::ProgressEvent;
+        let event = ProgressEvent::Summary {
+            add: 12,
+            modify: 3,
+            metadata_only: 7,
+            remove: 0,
+            unchanged: 1260,
+            total_planned: 15,
+        };
+        let wire = IpcEvent::from_progress(&event).unwrap();
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(json.contains(r#""metadata_only":7"#), "got: {json}");
     }
 
     #[test]

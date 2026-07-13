@@ -235,7 +235,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         let no_delete = config.no_delete || safeguard_force_no_delete;
         let effective_remove = if no_delete { 0 } else { remove };
         let total_planned = add + modify + metadata_only + effective_remove;
-        progress.summary(add, modify, remove, unchanged, total_planned);
+        progress.summary(add, modify, metadata_only, remove, unchanged, total_planned);
         progress.log("Dry run; nothing was written.");
         return Ok(RunOutcome::Completed);
     } else if config.apply || !config.use_tui {
@@ -243,7 +243,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         let no_delete = config.no_delete || safeguard_force_no_delete;
         let effective_remove = if no_delete { 0 } else { remove };
         let total_planned = add + modify + metadata_only + effective_remove;
-        progress.summary(add, modify, remove, unchanged, total_planned);
+        progress.summary(add, modify, metadata_only, remove, unchanged, total_planned);
         no_delete
     } else {
         // Interactive review.
@@ -253,7 +253,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 let no_delete = no_delete || safeguard_force_no_delete;
                 let effective_remove = if no_delete { 0 } else { remove };
                 let total_planned = add + modify + metadata_only + effective_remove;
-                progress.summary(add, modify, remove, unchanged, total_planned);
+                progress.summary(add, modify, metadata_only, remove, unchanged, total_planned);
                 no_delete
             }
             Ok(Decision::Review(ReviewDecision::DryRun)) => {

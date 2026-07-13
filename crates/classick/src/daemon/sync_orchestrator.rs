@@ -216,6 +216,13 @@ fn summary_from_value(v: &Value) -> SyncSummary {
         remove: v.get("remove").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
         unchanged: v.get("unchanged").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
         skipped: 0,
+        // Matches the `metadata_only` key on the wire `summary` event (see
+        // `IpcEvent::Summary` in ipc.rs / §4.3 of docs/ipc-protocol.md).
+        // Metadata-only tracks ARE in the source and ARE already on the
+        // iPod, so dropping this made the daemon's cached library_count
+        // undercount (runtime.rs), letting "X of Y synced" show X > Y after
+        // a tag-only sync.
+        metadata_only: v.get("metadata_only").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
     }
 }
 
@@ -263,5 +270,35 @@ mod tests {
     fn tracker_does_not_bail_at_exactly_50_percent() {
         let t = FailureTracker { total_planned: 10, tracks_completed: 5, tracks_errored: 5 };
         assert!(!t.should_bail(), "exactly 50% must not bail (strict >50%)");
+    }
+
+    #[test]
+    fn summary_from_value_parses_metadata_only() {
+        // Regression test: metadata_only tracks are already on the iPod, so
+        // dropping this field from the parsed SyncSummary made the daemon's
+        // cached library_count undercount (see runtime.rs), producing
+        // "X of Y synced" with X > Y after a tag-only sync.
+        let v = serde_json::json!({
+            "type": "summary",
+            "add": 12,
+            "modify": 3,
+            "metadata_only": 7,
+            "remove": 0,
+            "unchanged": 1260,
+            "total_planned": 15
+        });
+        let summary = summary_from_value(&v);
+        assert_eq!(summary.add, 12);
+        assert_eq!(summary.modify, 3);
+        assert_eq!(summary.metadata_only, 7);
+        assert_eq!(summary.remove, 0);
+        assert_eq!(summary.unchanged, 1260);
+    }
+
+    #[test]
+    fn summary_from_value_defaults_metadata_only_when_absent() {
+        let v = serde_json::json!({"add": 1, "modify": 0, "remove": 0, "unchanged": 5});
+        let summary = summary_from_value(&v);
+        assert_eq!(summary.metadata_only, 0);
     }
 }

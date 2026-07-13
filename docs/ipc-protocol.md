@@ -173,14 +173,8 @@ integers. Mirrors `ProgressEvent::Summary`.
 | `unchanged`     | `number` | Tracks already in sync; no work needed.               |
 | `total_planned` | `number` | Sum of `add + modify + metadata_only + remove`.       |
 
-> **Known M1 limitation.** The current `ProgressEvent::Summary` variant
-> does not carry `metadata_only`; the IPC backend serializes `0` for it.
-> The `review` event below carries the accurate count via its nested
-> `summary` object, which is what the UI should use for action-plan
-> rendering. Widening `ProgressEvent::Summary` is a post-M1 follow-up.
-
 ```json
-{"type":"summary","add":12,"modify":3,"metadata_only":0,"remove":0,"unchanged":1260,"total_planned":15}
+{"type":"summary","add":12,"modify":3,"metadata_only":2,"remove":0,"unchanged":1260,"total_planned":15}
 ```
 
 ### 4.4 `review`
@@ -206,7 +200,7 @@ Mirrors `ProgressEvent::Review`.
 | `unchanged`     | `number` |                                                  |
 
 ```json
-{"type":"review","summary":{"add":12,"modify":3,"metadata_only":0,"remove":0,"unchanged":1260},"no_delete":false}
+{"type":"review","summary":{"add":12,"modify":3,"metadata_only":2,"remove":0,"unchanged":1260},"no_delete":false}
 ```
 
 ### 4.5 `prompt`

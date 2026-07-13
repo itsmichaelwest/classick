@@ -32,6 +32,15 @@ pub struct SyncSummary {
     pub unchanged: usize,
     #[serde(default)]
     pub skipped: usize,
+    /// Tracks whose tags/art were rewritten in place (no audio re-transcode).
+    /// These ARE in the source and ARE already on the iPod, so they must be
+    /// counted into `library_count` alongside add/modify/unchanged — omitting
+    /// them made the daemon's cached total undercount, so "X of Y synced"
+    /// could show X > Y after a tag-only sync. `#[serde(default)]` keeps
+    /// deserialization of pre-existing `history.json` entries backward
+    /// compatible (they predate this field).
+    #[serde(default)]
+    pub metadata_only: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,7 +131,7 @@ mod tests {
             trigger: SyncTrigger::Manual,
             outcome,
             error_message: None,
-            summary: Some(SyncSummary { add: 1, modify: 0, remove: 0, unchanged: 0, skipped: 0 }),
+            summary: Some(SyncSummary { add: 1, modify: 0, remove: 0, unchanged: 0, skipped: 0, metadata_only: 0 }),
         }
     }
 
@@ -180,6 +189,15 @@ mod tests {
         assert_eq!(read_back.len(), 1);
         assert_eq!(read_back[0].outcome, SyncOutcome::Aborted);
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn sync_summary_without_metadata_only_field_defaults_to_zero() {
+        // Pre-existing history.json entries were written before `metadata_only`
+        // existed. `#[serde(default)]` must let them keep deserializing.
+        let json = r#"{"add":1,"modify":2,"remove":0,"unchanged":10,"skipped":0}"#;
+        let summary: SyncSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(summary.metadata_only, 0);
     }
 
     #[test]

@@ -436,11 +436,15 @@ fn handle_internal_event(
 
             // Refresh the library-count cache from this sync's diff — free,
             // since the apply loop already walked the source to compute it.
-            // add + modify + unchanged are the tracks currently present in
-            // the source (remove is present in the manifest but gone from
-            // source, so it's excluded from "current library size").
+            // add + modify + unchanged + metadata_only are the tracks
+            // currently present in the source (remove is present in the
+            // manifest but gone from source, so it's excluded from "current
+            // library size"). metadata_only tracks are already on the iPod
+            // (only their tags/art were rewritten) — omitting them here
+            // undercounts the total, so the UI's "X of Y synced" could show
+            // X > Y after a tag-only sync.
             if let Some(s) = summary.as_ref() {
-                *library_count_cache = Some(s.add + s.modify + s.unchanged);
+                *library_count_cache = Some(s.add + s.modify + s.unchanged + s.metadata_only);
             }
 
             let entry = make_history_entry(

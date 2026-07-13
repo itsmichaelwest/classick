@@ -73,7 +73,7 @@ pub enum Decision {
 /// Events sent from the main thread to the progress thread.
 pub enum ProgressEvent {
     Header { source: String, ipod: String, manifest: String },
-    Summary { add: usize, modify: usize, remove: usize, unchanged: usize, total_planned: usize },
+    Summary { add: usize, modify: usize, metadata_only: usize, remove: usize, unchanged: usize, total_planned: usize },
     Review { summary: ActionPlanSummary, no_delete: bool },
     Prompt(PromptRequest),
     Form(FormRequest),
@@ -143,8 +143,8 @@ impl Progress {
     pub fn header(&self, source: String, ipod: String, manifest: String) {
         let _ = self.sender.send(ProgressEvent::Header { source, ipod, manifest });
     }
-    pub fn summary(&self, add: usize, modify: usize, remove: usize, unchanged: usize, total_planned: usize) {
-        let _ = self.sender.send(ProgressEvent::Summary { add, modify, remove, unchanged, total_planned });
+    pub fn summary(&self, add: usize, modify: usize, metadata_only: usize, remove: usize, unchanged: usize, total_planned: usize) {
+        let _ = self.sender.send(ProgressEvent::Summary { add, modify, metadata_only, remove, unchanged, total_planned });
     }
     /// Send the action plan to the TUI for interactive Review. The caller
     /// must then `recv()` on the decision channel to await the user's choice.
@@ -246,9 +246,9 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
                 println!("iPod    : {ipod}");
                 println!("Manifest: {manifest}");
             }
-            ProgressEvent::Summary { add, modify, remove, unchanged, .. } => {
+            ProgressEvent::Summary { add, modify, metadata_only, remove, unchanged, .. } => {
                 println!();
-                println!("Action plan: add={add} modify={modify} remove={remove} unchanged={unchanged}");
+                println!("Action plan: add={add} modify={modify} metadata={metadata_only} remove={remove} unchanged={unchanged}");
             }
             ProgressEvent::Review { .. } => {
                 // Non-TTY can't interactively review. The orchestrator should
@@ -644,7 +644,7 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
         ProgressEvent::Header { source, ipod, manifest } => {
             state.source = source; state.ipod = ipod; state.manifest = manifest;
         }
-        ProgressEvent::Summary { add, modify, remove, unchanged, total_planned } => {
+        ProgressEvent::Summary { add, modify, metadata_only: _, remove, unchanged, total_planned } => {
             state.add = add; state.modify = modify; state.remove = remove;
             state.unchanged = unchanged; state.total_planned = total_planned;
             state.started_at = Instant::now();  // reset clock for ETA

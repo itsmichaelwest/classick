@@ -75,7 +75,16 @@ impl<T: Send + 'static> OrderedTranscoder<T> {
                     Ok(pair) => pair,
                     Err(_) => break, // feeder dropped job_tx
                 };
-                let out = transcode(&job);
+                // Guard against a panicking transcode (e.g. a filesystem
+                // invariant violated, an ffmpeg/afconvert wrapper bug): without
+                // this, the panic unwinds the worker thread with NO entry
+                // inserted for `seq`, and the committer's `take(seq)` blocks
+                // on the condvar forever — the sync never finalizes, never
+                // checkpoints, and the daemon wedges in `Syncing`. Converting
+                // the panic to an `Err` lets `take` surface a deterministic,
+                // non-retried failure and the track is skipped gracefully.
+                let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| transcode(&job)))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("transcode worker panicked")));
                 let mut ready = results.ready.lock().unwrap();
                 ready.insert(seq, out);
                 results.cv.notify_all();
@@ -102,8 +111,19 @@ impl<T: Send + 'static> OrderedTranscoder<T> {
         }
     }
 
-    /// Idempotent best-effort: wake the feeder so it can observe a dropped
-    /// consumer. (Workers exit when job_tx drops; the struct's Drop joins.)
+    /// Idempotent best-effort nudge for a dropped consumer. There is no
+    /// `Drop` impl on this struct: the feeder/worker `JoinHandle`s are held
+    /// but never joined, so on drop the threads are simply leaked and die
+    /// with the process. That's acceptable here — `OrderedTranscoder` only
+    /// ever lives for the duration of one short-lived sync subprocess, which
+    /// exits shortly after the apply loop finishes.
+    ///
+    /// The `permits.cv.notify_all()` below is best-effort, not a guaranteed
+    /// wakeup: a permit-starved feeder is blocked in `while *n == 0 { wait }`,
+    /// so it re-checks the predicate and goes right back to sleep unless a
+    /// permit was actually released (via `take`) in the meantime. This just
+    /// covers the case where a notification was already pending when
+    /// `stop` was called; it does not itself unblock the feeder.
     pub fn stop(&self) {
         self.permits.cv.notify_all();
         self.results.cv.notify_all();
@@ -160,5 +180,31 @@ mod tests {
         assert_eq!(ot.take(0).unwrap(), 0);
         assert!(ot.take(1).is_err());
         assert_eq!(ot.take(2).unwrap(), 2);
+    }
+
+    // Regression test: a panic inside a worker's transcode closure used to
+    // unwind the worker thread with no entry inserted for that `seq`, so the
+    // committer's `take(seq)` blocked on the condvar forever (the whole sync
+    // wedges). The worker loop now wraps the call in `catch_unwind` and turns
+    // a panic into an ordinary `Err`, so `take` returns instead of hanging —
+    // and delivery for every OTHER seq still proceeds in order.
+    #[test]
+    fn panicking_job_surfaces_as_error_without_hanging_other_seqs() {
+        let jobs: Vec<(usize, usize)> = (0..5).map(|i| (i, i)).collect();
+        let ot = OrderedTranscoder::start(jobs, 4, 8, |&i: &usize| {
+            if i == 2 {
+                panic!("simulated transcode panic for seq {i}");
+            }
+            Ok::<usize, anyhow::Error>(i * 10)
+        });
+
+        for seq in 0..5 {
+            let result = ot.take(seq);
+            if seq == 2 {
+                assert!(result.is_err(), "panicking job should surface as Err, not hang");
+            } else {
+                assert_eq!(result.unwrap(), seq * 10);
+            }
+        }
     }
 }
