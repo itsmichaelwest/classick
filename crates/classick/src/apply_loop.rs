@@ -301,7 +301,6 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // out of this closure would trigger the misleading "orphan files /
     // --rebuild-manifest" recovery block. Hoisted below.
     let sync_result: Result<RunOutcome> = (|| -> Result<RunOutcome> {
-        let db = OwnedDb::open(Path::new(&mount))?;
         // Resolve the (FirewireGuid, ModelNumStr) pair libgpod needs
         // to sign the iTunesDB iTunes will accept on read. Source
         // preference: on-disk SysInfo > SCSI INQUIRY VPD pages
@@ -310,11 +309,24 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // to NONE and iTunes refuses the DB ("cannot read the
         // contents of the iPod"), even though the iPod's firmware
         // would still play the music.
+        //
+        // Resolved BEFORE OwnedDb::open: ModelNumStr also picks the
+        // SysInfoExtended template below, and libgpod reads that file
+        // during open.
         let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
         progress.log(format!(
             "iPod identity: FirewireGuid={}, ModelNumStr={}",
             identity.firewire_guid, identity.model_num_str,
         ));
+        // Provision the per-model SysInfoExtended so libgpod emits the
+        // artwork ithmb formats the firmware reads (notably F1069).
+        // Non-fatal: art is best-effort, never abort a sync over it.
+        if let Err(e) = crate::ipod::sysinfo_provision::provision(Path::new(&mount), &identity) {
+            progress.log(format!(
+                "SysInfoExtended provisioning failed (art may not display): {e:#}"
+            ));
+        }
+        let db = OwnedDb::open(Path::new(&mount))?;
         unsafe {
             let device_ptr = (*db.as_ptr()).device;
             device::set_firewire_guid(device_ptr, &identity.firewire_guid)?;
