@@ -1151,6 +1151,23 @@ pub fn backfill_rockbox(
     // such function exists); match that exactly so a first-ever backfill
     // against a fresh manifest.json doesn't hard-error.
     let manifest = manifest::load_or_default(&config.manifest_path)?;
+    // Skip passthrough entries: their on-device file keeps the source
+    // container/extension (e.g. .wav/.mp3) and already carries its own tags/art
+    // (Rockbox-ready as-is). Only transcoded ALAC (.m4a) output was ever bare,
+    // and embed_track_metadata only supports MP4 tags anyway.
+    let entries: Vec<&crate::manifest::ManifestEntry> = manifest
+        .tracks
+        .iter()
+        .filter(|e| e.source_known && !e.ipod_relpath.is_empty() && e.encoder != "passthrough")
+        .collect();
+    let total = entries.len();
+    // Drive the UI's "X of Y" + progress bar. A backfill is N in-place metadata
+    // updates; emit a summary (so the total is known) + per-track start/done
+    // (so it advances). Without these the UI sat frozen at "0 of 0" for the
+    // whole run and looked stuck. total_planned == metadata_only == N.
+    progress.summary(0, 0, total, 0, 0, total);
+    progress.log(format!("Rockbox backfill: {total} track(s) to update…"));
+
     // Same checkpoint cadence as run() (~L387).
     let mut ckpt = CheckpointClock::new(
         crate::CHECKPOINT_MAX_TRACKS,
@@ -1158,19 +1175,18 @@ pub fn backfill_rockbox(
         Instant::now(),
     );
     let (mut updated, mut skipped) = (0usize, 0usize);
-    // Skip passthrough entries: their on-device file keeps the source
-    // container/extension (e.g. .wav/.mp3) and already carries its own tags/art
-    // (Rockbox-ready as-is). Only transcoded ALAC (.m4a) output was ever bare,
-    // and embed_track_metadata only supports MP4 tags anyway.
-    for entry in manifest
-        .tracks
-        .iter()
-        .filter(|e| e.source_known && !e.ipod_relpath.is_empty() && e.encoder != "passthrough")
-    {
+    for (i, entry) in entries.iter().enumerate() {
+        let label = entry
+            .source_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        progress.track_start(i + 1, total, label);
         let device_file = Path::new(&mount)
             .join(entry.ipod_relpath.replace('\\', std::path::MAIN_SEPARATOR_STR));
         if !device_file.exists() || !entry.source_path.exists() {
             skipped += 1;
+            progress.track_done();
             continue;
         }
         match backfill_one_file(&device_file, &entry.source_path, &config.ffmpeg) {
@@ -1183,11 +1199,9 @@ pub fn backfill_rockbox(
                 skipped += 1;
             }
         }
-        progress.log(format!("backfill: {updated} updated, {skipped} skipped"));
-        // record() is a tick-and-check: it must be called exactly once per
-        // processed track (mirrors run()'s post-action-loop record() call),
-        // unlike the brief's guessed `should_checkpoint(updated)` which isn't
-        // a real CheckpointClock method.
+        progress.track_done();
+        // record() is a tick-and-check: call it exactly once per processed
+        // track (mirrors run()'s post-action-loop record()).
         if ckpt.record(Instant::now()) {
             progress.log(format!("Checkpoint: persisting state after {updated} track(s)…"));
             db.write().context("checkpoint: db.write")?;
