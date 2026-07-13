@@ -441,3 +441,15 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   (Rockbox) and libgpod's ithmb thumbnails (Apple). Keep hand-copied Rockbox
   files OUTSIDE iPod_Control/ — reconcile deletes non-DB files under
   iPod_Control/Music as orphans.
+- **`itdb_write` DELETES cover-art thumbnails (F1069) when rewriting a parsed
+  DB.** Verified on-device: `OwnedDb::open` + `db.write()` alone — no provision,
+  no changes, not even re-setting thumbnails via
+  `itdb_track_set_thumbnails_from_data` — deletes `F1069_1.ithmb` and blanks
+  Apple-firmware cover art. libgpod's *rewrite/rearrange* path drops thumbnails
+  loaded from disk as references; only its *fresh-build* path (no stale ithmb
+  present) writes them correctly. To regenerate Apple artwork in-place (no track
+  re-copy): re-thumbnail every track from source art, **delete the stale
+  ithmb + ArtworkDB**, THEN `db.write()` — this forces the fresh-build path.
+  See `apply_loop::rebuild_apple_artwork`. Corollary: any op that opens + writes
+  the DB without re-thumbnailing every track drops existing art — suspect the
+  normal incremental-sync / `do_metadata_only` path has the same latent bug.
