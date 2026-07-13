@@ -75,7 +75,19 @@ pub(crate) fn ffmpeg_version(ffmpeg_path: &std::path::Path) -> Result<String> {
         .to_string())
 }
 
-pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<()> {
+/// Outcome of `run`'s apply phase, distinct from the `anyhow::Result` outer
+/// layer (which carries hard failures). `Completed` covers both a normal
+/// finish and the early-return no-op paths (dry-run, nothing-to-do, review
+/// Quit/DryRun) — none of those can have been paused. `Paused` means the
+/// action loop broke early on `Decision::Pause`; the final db.write() +
+/// manifest save already ran, so completed tracks are committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Completed,
+    Paused,
+}
+
+pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<RunOutcome> {
     if config.dry_run && config.apply {
         return Err(anyhow!("--dry-run and --apply are mutually exclusive"));
     }
@@ -225,7 +237,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         let total_planned = add + modify + metadata_only + effective_remove;
         progress.summary(add, modify, remove, unchanged, total_planned);
         progress.log("Dry run; nothing was written.");
-        return Ok(());
+        return Ok(RunOutcome::Completed);
     } else if config.apply || !config.use_tui {
         // Non-interactive: just apply with the configured no_delete.
         let no_delete = config.no_delete || safeguard_force_no_delete;
@@ -246,11 +258,11 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
             }
             Ok(Decision::Review(ReviewDecision::DryRun)) => {
                 progress.log("Dry run; nothing was written.");
-                return Ok(());
+                return Ok(RunOutcome::Completed);
             }
             Ok(Decision::Review(ReviewDecision::Quit)) => {
                 progress.log("Aborted; nothing was written.");
-                return Ok(());
+                return Ok(RunOutcome::Completed);
             }
             Ok(Decision::Prompt { .. }) | Ok(Decision::Form { .. }) | Ok(Decision::Pause) => {
                 // Unexpected at this stage (no try_with_prompt / wizard caller
@@ -276,7 +288,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         && (remove == 0 || effective_no_delete)
     {
         progress.log("Nothing to do.");
-        return Ok(());
+        return Ok(RunOutcome::Completed);
     }
 
     // 5. Apply actions + 6. Commit DB + manifest.
@@ -288,7 +300,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // already succeeded, so there are no orphans to recover from — bubbling it
     // out of this closure would trigger the misleading "orphan files /
     // --rebuild-manifest" recovery block. Hoisted below.
-    let sync_result: Result<()> = (|| -> Result<()> {
+    let sync_result: Result<RunOutcome> = (|| -> Result<RunOutcome> {
         let db = OwnedDb::open(Path::new(&mount))?;
         // Resolve the (FirewireGuid, ModelNumStr) pair libgpod needs
         // to sign the iTunesDB iTunes will accept on read. Source
@@ -652,7 +664,11 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         } else {
             progress.log("Done. Eject the iPod before unplugging.");
         }
-        Ok(())
+        if paused {
+            Ok(RunOutcome::Paused)
+        } else {
+            Ok(RunOutcome::Completed)
+        }
     })();
 
     if let Err(e) = &sync_result {

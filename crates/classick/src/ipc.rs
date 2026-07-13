@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Current wire-protocol semver. Bumped per the rules in
 /// `docs/ipc-protocol.md` §1.
-pub const PROTOCOL_VERSION: &str = "1.0.0";
+pub const PROTOCOL_VERSION: &str = "1.1.0";
 
 /// Events emitted from the core to the UI on stdout.
 ///
@@ -83,6 +83,10 @@ pub enum IpcEvent {
     },
     /// Terminal event. The core closes stdout shortly after. See §4.11.
     Finish { success: bool },
+    /// Terminal event: the sync was gracefully paused (Task 6). Completed
+    /// tracks were committed to the iTunesDB + manifest before this was
+    /// emitted; the core exits shortly after, same as `finish`. No fields.
+    Paused,
 }
 
 /// Action-plan summary carried inside `IpcEvent::Review`. See §4.4.
@@ -115,6 +119,11 @@ pub enum IpcCommand {
     /// review-decision recv() point; the UI must back this with a 5s
     /// force-kill timer (see §5.5 and §7).
     Cancel,
+    /// Graceful pause: finish in-flight/completed tracks, checkpoint, then
+    /// stop. Unlike `cancel`, this is not a shutdown request — the core
+    /// exits after emitting `paused`, and a later run resumes from the
+    /// manifest. Mapped to `Decision::Pause` at the next action-loop poll.
+    Pause,
 }
 
 /// Nested `decision` object inside `review_decision`. See §5.1.
@@ -205,6 +214,7 @@ impl IpcEvent {
             // (so the UI gets the message) and then this `finish` with
             // success: false; the process exits non-zero shortly after.
             PE::Finish { success } => IpcEvent::Finish { success: *success },
+            PE::Paused => IpcEvent::Paused,
         })
     }
 }
@@ -241,6 +251,7 @@ impl IpcCommand {
             // takes over. The UI is expected to back this with a 5s
             // force-kill timer (§5.5).
             IpcCommand::Cancel => Decision::Review(ReviewDecision::Quit),
+            IpcCommand::Pause => Decision::Pause,
         })
     }
 }
@@ -276,6 +287,12 @@ mod tests {
             Decision::Review(ReviewDecision::Apply { no_delete }) => assert!(no_delete),
             other => panic!("expected Apply with no_delete=true, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pause_command_maps_to_pause_decision() {
+        let cmd: IpcCommand = serde_json::from_str(r#"{"type":"pause"}"#).unwrap();
+        assert!(matches!(cmd.to_decision(), Some(crate::progress::Decision::Pause)));
     }
 
     #[test]

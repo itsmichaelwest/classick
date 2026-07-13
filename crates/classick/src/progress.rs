@@ -87,6 +87,10 @@ pub enum ProgressEvent {
     /// `Termination` impl on the Err path already maps to a non-zero exit;
     /// this just makes sure the Finish event itself agrees).
     Finish { success: bool },
+    /// Terminal event: graceful pause (see `Decision::Pause`). Completed
+    /// tracks were already committed to the iTunesDB + manifest by the apply
+    /// loop's final checkpoint before this is sent. No fields.
+    Paused,
 }
 
 pub struct Progress {
@@ -176,6 +180,11 @@ impl Progress {
     }
     pub fn error(&self, msg: impl Into<String>) {
         let _ = self.sender.send(ProgressEvent::Error(msg.into()));
+    }
+    /// Sends the terminal `Paused` event. Caller (main.rs) sends this before
+    /// `finish(true)` so the wire/plain output carries the pause outcome.
+    pub fn paused(&self) {
+        let _ = self.sender.send(ProgressEvent::Paused);
     }
 
     /// Drains the channel and joins the worker thread. Call once at the end.
@@ -273,6 +282,10 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
             // success bool is ignored in plain mode (the process exit code
             // conveys it; we don't print a banner either way).
             ProgressEvent::Finish { .. } => break,
+            ProgressEvent::Paused => {
+                println!("Paused. Completed tracks were saved.");
+                break;
+            }
         }
     }
 }
@@ -350,21 +363,25 @@ fn run_ipc(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
     });
 
     // 3. Event loop: drain internal channel, write each event as a JSON line.
-    //    Loop ends when we see Finish (normal) or the channel closes (sender
-    //    dropped without sending Finish — should not happen in practice).
+    //    Loop ends when we see Finish or Paused (both terminal) or the
+    //    channel closes (sender dropped without sending either — should not
+    //    happen in practice).
     tracing::info!("ipc: event loop entering");
     for event in rx {
-        let is_finish = matches!(event, ProgressEvent::Finish { .. });
+        let is_terminal = matches!(
+            event,
+            ProgressEvent::Finish { .. } | ProgressEvent::Paused
+        );
         if let Some(ipc_event) = IpcEvent::from_progress(&event) {
             tracing::info!("ipc: emitting event: {ipc_event:?}");
             write_ipc_event(&ipc_event).context("ipc: event write failed")?;
         }
-        if is_finish {
-            tracing::info!("ipc: received Finish event, exiting event loop");
+        if is_terminal {
+            tracing::info!("ipc: received terminal event, exiting event loop");
             break;
         }
     }
-    tracing::info!("ipc: event loop exited (channel closed or Finish seen)");
+    tracing::info!("ipc: event loop exited (channel closed or terminal event seen)");
 
     Ok(())
 }
@@ -654,6 +671,10 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
         // TUI doesn't surface success/failure directly here — the process
         // exit code carries it. We just tear down the draw loop.
         ProgressEvent::Finish { .. } => { *finished = true; }
+        ProgressEvent::Paused => {
+            state.push_log("Paused. Completed tracks were saved.".to_string());
+            *finished = true;
+        }
     }
 }
 
