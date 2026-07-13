@@ -53,6 +53,14 @@ guess entirely, making artwork correct and *deterministic* everywhere).
 These validations justify a **persistent** (write-and-leave) design rather than
 a transient write-then-delete. No cleanup logic is needed.
 
+**Known gap (accepted):** this safety validation is **macOS-only**. iTunes on
+Windows with a persistent `SysInfoExtended` present is **untested** (no Windows
+hardware available this session). Decision: keep persistent anyway — macOS app
+stability is the current priority — and re-test the Windows/iTunes case later.
+If Windows iTunes turns out to object, the fallback is trivial: switch to the
+transient variant (write before open → delete at sync end), since libgpod only
+needs the file at DB-open time. No architectural change required to pivot.
+
 ## Architecture
 
 A single provisioning step, invoked at sync start immediately **before**
@@ -87,11 +95,17 @@ that have cover-art displays. Candidate set, keyed by generation:
 - iPod nano 1G–4G
 
 nano 5G+ (hash72/hashAB) cannot be synced by classick at all → excluded until
-that signing work exists. Shuffle/mini have no artwork → excluded. **The plan
-must confirm HASH58-syncability per candidate before vendoring its plist**; any
-model classick cannot sign is dropped (embedding its art spec would be dead
-weight). The iPod Classic family is the committed deliverable; the rest is
-bonus coverage from the same mechanism.
+that signing work exists. Shuffle/mini have no artwork → excluded.
+
+**Decision (best-effort bonus):** embed the full believed-HASH58 + artwork set
+above. The **iPod Classic family is the only hardware-verified deliverable**
+(the user's device); the other generations' templates ship **unverified on real
+hardware** as best-effort bonus coverage — they use the same proven mechanism
+and correct-per-generation data, but no one has confirmed art renders on a real
+Photo/Video/nano. Acceptable because provisioning is non-fatal (a wrong-or-
+absent template only degrades to "art may not display", never breaks a sync).
+Each model is a drop-in `(ModelNumStr → generation)` row + one plist, so
+promoting one from "unverified" to "verified" later costs nothing.
 
 ### 2. Model → template resolution
 Reuse `resolve_libgpod_identity()`'s `model_num_str` (e.g. `MC293`). Templates
