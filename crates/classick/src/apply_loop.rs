@@ -693,6 +693,56 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         }
     }
 
+    // Incremental-sync artwork repair. When a sync CHANGED the DB but KEPT
+    // existing tracks (unchanged > 0), libgpod's final `itdb_write` drops the
+    // existing tracks' Apple cover-art thumbnails — it only writes thumbnails
+    // re-set in memory this session, and existing tracks were loaded as
+    // references (see `rebuild_apple_artwork`, verified on-device). So rebuild
+    // the ArtworkDB fresh from source art for the whole library, and re-embed
+    // the Rockbox `.m4a` tags/art for those tracks when `rockbox_compat` is on.
+    // A fresh/full sync (unchanged == 0) needs none of this — every track got
+    // fresh thumbnails as it was added. Skipped on pause and rebuild-manifest.
+    // (Cost: re-reads + re-thumbnails the whole library — no audio re-copy.)
+    let changed = add + modify + metadata_only + remove;
+    if matches!(sync_result, Ok(RunOutcome::Completed))
+        && !config.rebuild_manifest
+        && changed > 0
+        && unchanged > 0
+    {
+        progress.log("Refreshing artwork for existing tracks (no re-copy)…".to_string());
+        let mut refreshed: Vec<(u64, crate::ipod::db::Tags, Option<Vec<u8>>)> = Vec::new();
+        for entry in manifest
+            .tracks
+            .iter()
+            .filter(|e| e.source_known && !e.ipod_relpath.is_empty())
+        {
+            let device_file = Path::new(&mount)
+                .join(entry.ipod_relpath.replace('\\', std::path::MAIN_SEPARATOR_STR));
+            if !device_file.exists() || !entry.source_path.exists() {
+                continue;
+            }
+            match source_tags_and_art(&entry.source_path, &config.ffmpeg) {
+                Ok((tags, art)) => {
+                    if config.rockbox_compat && entry.encoder != "passthrough" {
+                        let _ = crate::artwork::embed_track_metadata(
+                            &device_file,
+                            &tags,
+                            art.as_deref(),
+                        );
+                    }
+                    refreshed.push((entry.ipod_dbid, tags, art));
+                }
+                Err(e) => {
+                    tracing::warn!("art refresh: {} skipped: {e:#}", entry.source_path.display())
+                }
+            }
+        }
+        match rebuild_apple_artwork(Path::new(&mount), &refreshed) {
+            Ok(()) => progress.log("Artwork refreshed.".to_string()),
+            Err(e) => progress.log(format!("Apple artwork not refreshed ({e:#}).")),
+        }
+    }
+
     // save_config is independent of the sync closure: it only runs on success
     // and a failure here is a warning (config-file write), not a reason to
     // print the orphan-files recovery block.
