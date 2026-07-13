@@ -830,6 +830,7 @@ pub(crate) fn transcode_one(
     };
     let action = transcode::classify(&probe, &classify_cfg)
         .with_context(|| format!("classify {}", src.path.display()))?;
+    let is_transcode = matches!(action, SourceAction::Transcode);
 
     // Resolve the on-disk file we'll feed into libgpod, plus the
     // encoder identity to record in the manifest.
@@ -874,18 +875,38 @@ pub(crate) fn transcode_one(
         },
     };
 
-    // libgpod still writes its own thumbnail copy, so we extract once more
-    // here for the apply_tags path. Source-side bytes are unchanged; this
-    // is independent of refalac's own --artwork embed.
-    let art = if has_embedded_art(&probe) {
+    // Extract source art once; normalize to a small baseline JPEG that feeds
+    // BOTH libgpod's Apple thumbnails AND (when rockbox_compat) the embedded
+    // covr atom. Non-fatal: on any art failure, fall back to no art.
+    let art: Option<Vec<u8>> = if has_embedded_art(&probe) {
         let art_path = transcode::temp_art_path();
-        transcode::extract_cover_art(&src.path, &art_path, &config.ffmpeg)?;
-        let bytes = std::fs::read(&art_path)?;
+        let raw = transcode::extract_cover_art(&src.path, &art_path, &config.ffmpeg)
+            .and_then(|()| std::fs::read(&art_path).map_err(Into::into));
         let _ = std::fs::remove_file(&art_path);
-        Some(bytes)
+        match raw {
+            Ok(bytes) => match crate::artwork::normalize(&bytes) {
+                Ok(norm) => Some(norm),
+                Err(e) => {
+                    tracing::warn!("art normalize failed for {}: {e:#}; using raw bytes", src.path.display());
+                    Some(bytes)
+                }
+            },
+            Err(e) => {
+                tracing::warn!("art extract failed for {}: {e:#}", src.path.display());
+                None
+            }
+        }
     } else {
         None
     };
+
+    // Rockbox: make the transcoded .m4a self-describing (tags + art). Only for
+    // transcoded output — passthrough files keep their own metadata. Non-fatal.
+    if config.rockbox_compat && is_transcode {
+        if let Err(e) = crate::artwork::embed_track_metadata(&temp, &tags, art.as_deref()) {
+            tracing::warn!("rockbox embed failed for {}: {e:#}", src.path.display());
+        }
+    }
 
     let fingerprint = source::fingerprint(&src.path)
         .with_context(|| format!("fingerprint {}", src.path.display()))?;
