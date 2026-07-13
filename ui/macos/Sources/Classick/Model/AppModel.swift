@@ -10,6 +10,7 @@ enum Phase: Equatable, Sendable {
     case notConfigured
     case idle
     case syncing(current: Int, total: Int, label: String)
+    case paused(synced: Int, total: Int?)
     case error(String)
 }
 
@@ -45,6 +46,8 @@ final class AppModel {
     private(set) var pendingPrompt: PendingPrompt?
     private(set) var storageText: String?
     private(set) var config: AppConfig?
+    private(set) var syncedCount: Int = 0
+    private(set) var libraryCount: Int?
 
     // Tracked separately from `device` because `status_update` carries its
     // own `ipod_connected`/`configured` flags independent of the
@@ -129,6 +132,8 @@ final class AppModel {
             statusConfigured = info.configured
             isIpodConnected = info.ipodConnected
             lastSync = info.lastSync
+            syncedCount = info.syncedCount
+            libraryCount = info.libraryCount
             let targetSyncing: Bool
             switch info.state {
             case .syncing: targetSyncing = true
@@ -180,6 +185,8 @@ final class AppModel {
             pendingPrompt = PendingPrompt(id: id, message: hint ?? label, options: initial.map { [$0] } ?? [])
         case let .error(message, _):
             phase = .error(message)
+        case .paused:
+            phase = .paused(synced: syncedCount, total: libraryCount)
         case .hello, .header, .summary, .trackDone, .log, .other:
             break
         }

@@ -13,6 +13,8 @@ struct MenuContent: View {
     var onOpenSettings: () -> Void = { print("TODO: open settings window") }
     var onSyncNow: () -> Void = { print("TODO: send(.triggerSync(source: .manual))") }
     var onCancelSync: () -> Void = { print("TODO: send(.cancelSync)") }
+    var onPause: () -> Void = { print("TODO: send(.pause)") }
+    var onResume: () -> Void = { print("TODO: send(.triggerSync(source: .manual))") }
     var onRetry: () -> Void = { print("TODO: retry after error") }
     var onCheckForUpdates: () -> Void = { print("TODO: check for updates") }
 
@@ -44,6 +46,9 @@ struct MenuContent: View {
             if let device = model.device {
                 Text(device.name ?? device.model)
             }
+            if let syncedSummary {
+                Text(syncedSummary)
+            }
             if let storageText = model.storageText {
                 Text(storageText)
             }
@@ -58,12 +63,31 @@ struct MenuContent: View {
             if !label.isEmpty {
                 Text(label)
             }
+            Button("Pause", action: onPause)
             Button("Cancel Sync", action: onCancelSync)
+
+        case let .paused(synced, total):
+            Text("Paused — \(pausedSummary(synced: synced, total: total)) synced")
+            Button("Resume", action: onResume)
 
         case let .error(message):
             Text(message)
             Button("Retry", action: onRetry)
         }
+    }
+
+    /// "X of Y synced" when the library size is known, else just "X synced".
+    /// Hidden entirely when there's nothing to report yet (no counts seen).
+    private var syncedSummary: String? {
+        guard model.libraryCount != nil || model.syncedCount > 0 else { return nil }
+        return pausedSummary(synced: model.syncedCount, total: model.libraryCount) + " synced"
+    }
+
+    private func pausedSummary(synced: Int, total: Int?) -> String {
+        if let total {
+            return "\(synced) of \(total)"
+        }
+        return "\(synced)"
     }
 }
 
