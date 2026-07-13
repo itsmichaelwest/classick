@@ -1103,7 +1103,15 @@ pub(crate) fn entry_from(
 /// Embed tags + normalized art from `source` into the on-device `.m4a` at
 /// `device_file`, in place (no re-transcode). Returns the new file size.
 /// Non-fatal caller decides skip vs abort. Public(crate) for unit tests.
-pub(crate) fn backfill_one_file(device_file: &Path, source: &Path, ffmpeg: &Path) -> Result<u64> {
+/// Probe `source`, normalize its cover art, and embed tags + art into the
+/// on-device `.m4a` (the Rockbox side). Returns `(tags, normalized_art,
+/// new_size)` so the caller can ALSO refresh the Apple ithmb thumbnail from the
+/// same normalized art — see `backfill_rockbox`. Pure file I/O; no libgpod.
+pub(crate) fn backfill_one_file(
+    device_file: &Path,
+    source: &Path,
+    ffmpeg: &Path,
+) -> Result<(crate::ipod::db::Tags, Option<Vec<u8>>, u64)> {
     let probe = transcode::probe(source, ffmpeg)
         .with_context(|| format!("probe {}", source.display()))?;
     let tags = tags_from_probe(&probe);
@@ -1118,7 +1126,8 @@ pub(crate) fn backfill_one_file(device_file: &Path, source: &Path, ffmpeg: &Path
     };
     crate::artwork::embed_track_metadata(device_file, &tags, art.as_deref())
         .with_context(|| format!("embed into {}", device_file.display()))?;
-    Ok(std::fs::metadata(device_file)?.len())
+    let size = std::fs::metadata(device_file)?.len();
+    Ok((tags, art, size))
 }
 
 /// Backfill the existing on-device library: for each manifest entry with a
@@ -1190,7 +1199,15 @@ pub fn backfill_rockbox(
             continue;
         }
         match backfill_one_file(&device_file, &entry.source_path, &config.ffmpeg) {
-            Ok(size) => {
+            Ok((tags, art, size)) => {
+                // Rockbox side done (covr embedded in the .m4a above). Apple
+                // side: db.write() below rewrites the ArtworkDB, and if the
+                // track's thumbnail isn't re-set in memory libgpod writes a
+                // blanked entry (the 0.2.1 backfill art-break). Re-generate the
+                // ithmb thumbnail from the SAME normalized art so the rewrite is
+                // correct — this both preserves and repairs Apple artwork.
+                db.update_track_metadata(entry.ipod_dbid, &tags, art.as_deref())
+                    .unwrap_or_else(|e| tracing::warn!("re-thumbnail dbid {}: {e:#}", entry.ipod_dbid));
                 db.set_track_size(entry.ipod_dbid, size.min(u32::MAX as u64) as u32).ok();
                 updated += 1;
             }
@@ -1307,9 +1324,15 @@ mod backfill_tests {
         // The per-track backfill step: probe source tags → normalize art → embed.
         let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tagged.flac")); // existing fixture: tags + embedded PNG art
         let before = std::fs::metadata(&dev).unwrap().len();
-        backfill_one_file(&dev, src, &std::path::PathBuf::from("ffmpeg")).unwrap();
+        let (tags, art, size) =
+            backfill_one_file(&dev, src, &std::path::PathBuf::from("ffmpeg")).unwrap();
         let after = std::fs::metadata(&dev).unwrap().len();
         assert!(after >= before, "embedding should not shrink the file");
+        assert_eq!(size, after, "returned size must match the embedded file");
+        // The returned tags + normalized art are what the caller re-applies to
+        // the Apple ithmb (the art-break fix); a tagged source must yield them.
+        assert!(tags.title.is_some() || tags.artist.is_some(), "tags extracted from source");
+        assert!(art.is_some(), "normalized cover art returned for a track with embedded art");
 
         use lofty::file::TaggedFileExt;
         let tag = lofty::read_from_path(&dev).unwrap();
