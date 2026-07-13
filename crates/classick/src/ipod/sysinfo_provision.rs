@@ -156,6 +156,31 @@ pub fn template_for_model(model_num_str: &str) -> Option<&'static [u8]> {
     TABLE.iter().find(|(m, _)| *m == model_num_str).map(|(_, t)| *t)
 }
 
+/// Write the per-model `SysInfoExtended` (with the device's real GUID) to
+/// `<mount>/iPod_Control/Device/SysInfoExtended` so libgpod generates correct
+/// artwork ithmb formats. MUST run before `OwnedDb::open`. Non-fatal to callers:
+/// returns Ok when it provisioned OR skipped an unknown model; returns Err only
+/// on a real write/inject failure, which the caller logs and continues past.
+pub fn provision(mount: &Path, identity: &crate::ipod::device::LibgpodIdentity) -> Result<()> {
+    let Some(template) = template_for_model(&identity.model_num_str) else {
+        tracing::warn!(
+            "no SysInfoExtended template for ModelNumStr {:?}; artwork may not display. \
+             Add a template + table row to support this model.",
+            identity.model_num_str
+        );
+        return Ok(());
+    };
+    let xml = inject_guid(template, &identity.firewire_guid)?;
+    let path = mount.join("iPod_Control").join("Device").join("SysInfoExtended");
+    std::fs::write(&path, &xml)
+        .map_err(|e| anyhow!("writing {}: {e}", path.display()))?;
+    tracing::info!(
+        "provisioned SysInfoExtended for {} ({} bytes)",
+        identity.model_num_str, xml.len()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +239,37 @@ mod tests {
                 "{model}: template missing ImageSpecifications"
             );
         }
+    }
+
+    use crate::ipod::device::LibgpodIdentity;
+    use std::path::PathBuf;
+
+    fn temp_mount() -> PathBuf {
+        // Unique per-process temp mount with the Device dir libgpod expects.
+        let base = std::env::temp_dir().join(format!("classick-provision-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("iPod_Control/Device")).unwrap();
+        base
+    }
+
+    #[test]
+    fn provision_writes_sysinfoextended_for_known_model() {
+        let mount = temp_mount();
+        let id = LibgpodIdentity { firewire_guid: "0x000A27002138B0A8".into(), model_num_str: "MC293".into() };
+        provision(&mount, &id).unwrap();
+        let written = std::fs::read_to_string(mount.join("iPod_Control/Device/SysInfoExtended")).unwrap();
+        assert!(written.contains("<string>000A27002138B0A8</string>"));
+        assert!(written.contains("<integer>1069</integer>"));
+        // Idempotent: running again is fine.
+        provision(&mount, &id).unwrap();
+        let _ = std::fs::remove_dir_all(&mount);
+    }
+
+    #[test]
+    fn provision_skips_unknown_model_without_writing() {
+        let mount = temp_mount();
+        let id = LibgpodIdentity { firewire_guid: "0x000A27002138B0A8".into(), model_num_str: "XPID_9999".into() };
+        provision(&mount, &id).unwrap(); // Ok, but no file
+        assert!(!mount.join("iPod_Control/Device/SysInfoExtended").exists());
+        let _ = std::fs::remove_dir_all(&mount);
     }
 }
