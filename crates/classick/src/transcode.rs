@@ -376,7 +376,7 @@ pub fn temp_art_path() -> PathBuf {
 // Phase 3: source classification + passthrough pipeline.
 // ---------------------------------------------------------------------------
 
-/// Outcome of [`classify`] — tells `apply_loop::add_one` which pipeline to run.
+/// Outcome of [`classify`] — tells `apply_loop::transcode_one` which pipeline to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceAction {
     /// Copy the source byte-for-byte; iPod plays it natively (mp3, aac, alac,
@@ -473,7 +473,7 @@ pub fn classify(probe: &ProbeOutput, config: &ClassifyConfig) -> Result<SourceAc
 }
 
 /// Copy `src` to `dst` byte-for-byte. The destination's parent dir is created
-/// if missing. Used by `apply_loop::add_one` when [`classify`] returns
+/// if missing. Used by `apply_loop::transcode_one` when [`classify`] returns
 /// [`SourceAction::Passthrough`].
 ///
 /// Tags are NOT touched here — libgpod handles them via `apply_tags`, separate

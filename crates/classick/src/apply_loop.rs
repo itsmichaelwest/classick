@@ -1,7 +1,8 @@
 //! Per-Action match arms (Add / Modify / MetadataOnly / Remove / Unchanged)
-//! plus their supporting helpers — `add_one`, `do_metadata_only`, `entry_from`,
-//! `build_rebuild_manifest`, `count_actions`. Also owns the top-level `run`
-//! function that ties preflight, diff, review, and apply together.
+//! plus their supporting helpers — `transcode_one`, `commit_transcoded`,
+//! `do_metadata_only`, `entry_from`, `build_rebuild_manifest`, `count_actions`.
+//! Also owns the top-level `run` function that ties preflight, diff, review,
+//! and apply together.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
@@ -370,9 +371,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // intact: the track is still on the iPod (delete failed),
                     // so the manifest stays in sync with iPod state.
                     let removed = loop {
-                        match db.delete_track(entry.ipod_dbid)
-                            .with_context(|| format!("delete dbid {}", entry.ipod_dbid))
-                        {
+                        match crate::try_with_prompt::retry_transient(&crate::RETRY_BACKOFF, || {
+                            db.delete_track(entry.ipod_dbid)
+                                .with_context(|| format!("delete dbid {}", entry.ipod_dbid))
+                        }) {
                             Ok(()) => break true,
                             Err(e) => {
                                 let msg = format!(
@@ -433,9 +435,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // Skip here means we never touched the iPod, so the
                     // manifest entry stays as-is.
                     let deleted = loop {
-                        match db.delete_track(old.ipod_dbid)
-                            .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))
-                        {
+                        match crate::try_with_prompt::retry_transient(&crate::RETRY_BACKOFF, || {
+                            db.delete_track(old.ipod_dbid)
+                                .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))
+                        }) {
                             Ok(()) => break true,
                             Err(e) => {
                                 let msg = format!(
@@ -469,47 +472,43 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // Second half: re-add. Only runs if delete succeeded.
                     // (The --no-delete short-circuit above already returned.)
                     if deleted {
-                        let added: Option<AddOneOutcome> = loop {
-                            match add_one(&db, &src, config, &refalac_version) {
-                                Ok(outcome) => break Some(outcome),
-                                Err(e) => {
-                                    let msg = format!(
-                                        "Failed to add new version of {}:\n  {e:#}\n\nChoose:",
-                                        src.path.display()
-                                    );
-                                    let outcome = await_prompt(
-                                        progress, decision_rx, msg,
-                                        &["Retry", "Skip this track", "Abort"],
-                                        &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
-                                    )?;
-                                    match outcome {
+                        let transcoded: Option<Transcoded> = loop {
+                            match transcode_one(&src, config, &refalac_version) {
+                                Ok(t) => break Some(t),
+                                Err(e) => match prompt_retry_skip_abort(progress, decision_rx, &src, &e)? {
+                                    PromptOutcome::Retry => continue,
+                                    PromptOutcome::Skip => {
+                                        // iPod state is "in-between": old
+                                        // track gone, new not added. Next
+                                        // run's diff will see the missing
+                                        // iPod entry and re-add naturally.
+                                        progress.log(format!(
+                                            "Skipped Modify after partial delete for {}",
+                                            src.path.display()
+                                        ));
+                                        break None;
+                                    }
+                                    _ => return Err(e),
+                                },
+                            }
+                        };
+                        if let Some(t) = transcoded {
+                            loop {
+                                match commit_transcoded(&db, &mut manifest, &src, &t) {
+                                    Ok(()) => break,
+                                    Err(e) => match prompt_retry_skip_abort(progress, decision_rx, &src, &e)? {
                                         PromptOutcome::Retry => continue,
                                         PromptOutcome::Skip => {
-                                            // iPod state is "in-between": old
-                                            // track gone, new not added. Next
-                                            // run's diff will see the missing
-                                            // iPod entry and re-add naturally.
                                             progress.log(format!(
                                                 "Skipped Modify after partial delete for {}",
                                                 src.path.display()
                                             ));
-                                            break None;
+                                            break;
                                         }
                                         _ => return Err(e),
-                                    }
+                                    },
                                 }
                             }
-                        };
-                        if let Some(o) = added {
-                            manifest.tracks.push(entry_from(
-                                &src,
-                                &o.handle,
-                                &o.fingerprint,
-                                &o.audio_fingerprint,
-                                &o.encoder,
-                                &o.encoder_version,
-                                &o.source_format,
-                            ));
                         }
                     }
                     progress.track_done();
@@ -522,40 +521,33 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                         format!("ADD {}", display_path(&src.path)),
                     );
                     // Skip is clean here: no iPod state changes, no manifest update.
-                    let added: Option<AddOneOutcome> = loop {
-                        match add_one(&db, &src, config, &refalac_version) {
-                            Ok(outcome) => break Some(outcome),
-                            Err(e) => {
-                                let msg = format!(
-                                    "Failed to add {}:\n  {e:#}\n\nChoose:",
-                                    src.path.display()
-                                );
-                                let outcome = await_prompt(
-                                    progress, decision_rx, msg,
-                                    &["Retry", "Skip this track", "Abort"],
-                                    &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
-                                )?;
-                                match outcome {
+                    let transcoded: Option<Transcoded> = loop {
+                        match transcode_one(&src, config, &refalac_version) {
+                            Ok(t) => break Some(t),
+                            Err(e) => match prompt_retry_skip_abort(progress, decision_rx, &src, &e)? {
+                                PromptOutcome::Retry => continue,
+                                PromptOutcome::Skip => {
+                                    progress.log(format!("Skipped Add for {}", src.path.display()));
+                                    break None;
+                                }
+                                _ => return Err(e),
+                            },
+                        }
+                    };
+                    if let Some(t) = transcoded {
+                        loop {
+                            match commit_transcoded(&db, &mut manifest, &src, &t) {
+                                Ok(()) => break,
+                                Err(e) => match prompt_retry_skip_abort(progress, decision_rx, &src, &e)? {
                                     PromptOutcome::Retry => continue,
                                     PromptOutcome::Skip => {
                                         progress.log(format!("Skipped Add for {}", src.path.display()));
-                                        break None;
+                                        break;
                                     }
                                     _ => return Err(e),
-                                }
+                                },
                             }
                         }
-                    };
-                    if let Some(o) = added {
-                        manifest.tracks.push(entry_from(
-                            &src,
-                            &o.handle,
-                            &o.fingerprint,
-                            &o.audio_fingerprint,
-                            &o.encoder,
-                            &o.encoder_version,
-                            &o.source_format,
-                        ));
                     }
                     progress.track_done();
                 }
@@ -760,13 +752,14 @@ pub(crate) fn do_metadata_only(
     })
 }
 
-/// Per-track result of `add_one`. A struct rather than a 6-tuple because
-/// the Modify/Add arms in `run` and the manifest entry builder both consume
-/// it; positional access would obscure intent at the call sites.
-pub(crate) struct AddOneOutcome {
-    pub handle: TrackHandle,
-    pub fingerprint: String,
-    pub audio_fingerprint: String,
+/// Result of the worker-safe transcode half (`transcode_one`) for one source.
+/// Carries every field the committer half (`commit_transcoded`) needs to add
+/// the file to libgpod and build the manifest entry, so the committer never
+/// has to re-read or re-probe the source file.
+pub(crate) struct Transcoded {
+    pub temp: std::path::PathBuf,
+    pub tags: crate::ipod::db::Tags,
+    pub art: Option<Vec<u8>>,
     /// "ffmpeg" | "refalac" | "passthrough" — matches the manifest field.
     pub encoder: String,
     /// Forensic version string (e.g. "ffmpeg version n7.0 ..." or
@@ -774,15 +767,18 @@ pub(crate) struct AddOneOutcome {
     pub encoder_version: String,
     /// ffprobe codec_name of the source (e.g. "flac", "mp3", "aac").
     pub source_format: String,
+    pub fingerprint: String,
+    pub audio_fingerprint: String,
 }
 
-/// Probe → classify → branch on Passthrough/Transcode(encoder) for one source.
-/// Adds the resulting file to the iPod via libgpod, then computes both file +
-/// audio-only fingerprints for the manifest. Both fingerprints are computed
-/// here (not by the walker) because Add/Modify are the only code paths that
-/// need them — the steady-state Unchanged path stays stat-only. The audio
-/// fingerprint lets future runs detect tag-only edits and take the
-/// MetadataOnly fast path.
+/// Worker-safe half of the old `add_one`: probe → classify → branch on
+/// Passthrough/Transcode(encoder) → extract art → compute both file + audio
+/// fingerprints. Touches ONLY the filesystem — NEVER libgpod — so pipeline
+/// worker threads can run this concurrently while a single committer thread
+/// owns `OwnedDb`. Both fingerprints are computed here (not by the walker)
+/// because Add/Modify are the only code paths that need them — the
+/// steady-state Unchanged path stays stat-only. The audio fingerprint lets
+/// future runs detect tag-only edits and take the MetadataOnly fast path.
 ///
 /// The encoder branch:
 /// - Passthrough: byte-for-byte copy of the source (mp3 / aac / alac /
@@ -792,12 +788,11 @@ pub(crate) struct AddOneOutcome {
 ///   FLAC→ALAC, art passthrough).
 /// - Transcode + Refalac: 2-step `transcode_via_refalac` (ffmpeg-decode to
 ///   WAV, then refalac to ALAC, with optional --artwork from a temp jpg).
-pub(crate) fn add_one(
-    db: &OwnedDb,
+pub(crate) fn transcode_one(
     src: &SourceEntry,
     config: &Config,
     refalac_version: &Option<String>,
-) -> Result<AddOneOutcome> {
+) -> Result<Transcoded> {
     let probe = transcode::probe(&src.path, &config.ffmpeg)
         .with_context(|| format!("probe {}", src.path.display()))?;
     let tags = tags_from_probe(&probe);
@@ -880,24 +875,77 @@ pub(crate) fn add_one(
         None
     };
 
-    let handle = db
-        .add_track_with_file(&temp, &tags, art.as_deref())
-        .with_context(|| format!("add_track_with_file for {}", src.path.display()))?;
-
-    let _ = std::fs::remove_file(&temp);
-
     let fingerprint = source::fingerprint(&src.path)
         .with_context(|| format!("fingerprint {}", src.path.display()))?;
     let audio_fingerprint = source::audio_fingerprint(&src.path)
         .with_context(|| format!("audio_fingerprint {}", src.path.display()))?;
-    Ok(AddOneOutcome {
-        handle,
-        fingerprint,
-        audio_fingerprint,
+
+    Ok(Transcoded {
+        temp,
+        tags,
+        art,
         encoder,
         encoder_version,
         source_format,
+        fingerprint,
+        audio_fingerprint,
     })
+}
+
+/// Committer half of the old `add_one`: add the already-transcoded file to
+/// libgpod (wrapped in `retry_transient` — iPod writes are the transient
+/// failure class this whole feature exists to smooth over) and push the
+/// manifest entry. MUST run on the single committer thread — this is the
+/// only function in the Add/Modify path that touches `OwnedDb`.
+///
+/// Borrows `Transcoded` rather than consuming it so a caller's Retry/Skip/
+/// Abort loop can re-attempt the commit against the SAME transcoded temp
+/// file without re-running the (expensive, and already-succeeded) transcode.
+/// The temp file is removed ONLY after a successful add, so a failed attempt
+/// leaves it in place for the retry.
+fn commit_transcoded(
+    db: &OwnedDb,
+    manifest: &mut Manifest,
+    src: &SourceEntry,
+    t: &Transcoded,
+) -> Result<()> {
+    let handle = crate::try_with_prompt::retry_transient(&crate::RETRY_BACKOFF, || {
+        db.add_track_with_file(&t.temp, &t.tags, t.art.as_deref())
+    })
+    .with_context(|| format!("add_track_with_file for {}", src.path.display()))?;
+
+    let _ = std::fs::remove_file(&t.temp);
+
+    manifest.tracks.push(entry_from(
+        src,
+        &handle,
+        &t.fingerprint,
+        &t.audio_fingerprint,
+        &t.encoder,
+        &t.encoder_version,
+        &t.source_format,
+    ));
+    Ok(())
+}
+
+/// Shared Retry/Skip/Abort prompt for `transcode_one`/`commit_transcoded`
+/// failures in the Add arm and the Modify arm's re-add half. Extracted here
+/// because both arms previously duplicated the identical prompt wording,
+/// options, and outcome mapping.
+fn prompt_retry_skip_abort(
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+    src: &SourceEntry,
+    e: &anyhow::Error,
+) -> Result<PromptOutcome> {
+    let msg = format!("Failed to add {}:\n  {e:#}\n\nChoose:", src.path.display());
+    await_prompt(
+        progress,
+        decision_rx,
+        msg,
+        &["Retry", "Skip this track", "Abort"],
+        &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+    )
 }
 
 /// Take the last 2 path components for display ("Album\Track.flac"). Falls
@@ -954,7 +1002,7 @@ pub(crate) fn entry_from(
         ipod_relpath: handle.ipod_relpath.clone(),
         source_known: true,
         audio_fingerprint: audio_fingerprint.to_string(),
-        // Recorded per-track from add_one's classify+encoder branch so
+        // Recorded per-track from transcode_one's classify+encoder branch so
         // future runs can detect encoder-mismatch (or carve out passthrough
         // entries that have no encoder identity to mismatch against).
         encoder: encoder.to_string(),
@@ -993,7 +1041,7 @@ mod tests {
     use super::*;
 
     /// encoder_str is what `run` feeds into `manifest::diff` as the target
-    /// encoder name and what `add_one` records on each new entry. Mismatches
+    /// encoder name and what `transcode_one` records on each new entry. Mismatches
     /// here would silently break the encoder-mismatch diff branch — every
     /// fresh entry would look like a mismatch against itself.
     #[test]
@@ -1040,5 +1088,26 @@ mod tests {
         let json = r#"{"streams":[],"format":{}}"#;
         let probe: ProbeOutput = serde_json::from_str(json).unwrap();
         assert_eq!(source_format_from_probe(&probe), "unknown");
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    // Ensures Transcoded carries every field the manifest entry needs, so the
+    // committer half can build an entry without re-reading the source.
+    #[test]
+    fn transcoded_has_manifest_fields() {
+        let t = super::Transcoded {
+            temp: std::path::PathBuf::from("/tmp/x.m4a"),
+            tags: crate::ipod::db::Tags::default(),
+            art: None,
+            encoder: "ffmpeg".into(),
+            encoder_version: "v".into(),
+            source_format: "flac".into(),
+            fingerprint: "fp".into(),
+            audio_fingerprint: "afp".into(),
+        };
+        assert_eq!(t.encoder, "ffmpeg");
+        assert_eq!(t.source_format, "flac");
     }
 }
