@@ -109,6 +109,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.send(.forgetIpod) }
     }
 
+    /// "Update existing library for Rockbox" button in Settings — asks the
+    /// daemon to re-embed tags/art into already-synced tracks so an iPod
+    /// running Rockbox (which doesn't read the iTunesDB) can display them.
+    func backfillRockbox() {
+        Task { await daemonClient.send(.backfillRockbox) }
+    }
+
     /// Surfaces `model.pendingPrompt` (set by the reducer from a relayed
     /// `sync_event` prompt/form line) as a blocking `NSAlert`, then replies
     /// with the chosen option and clears it so it isn't re-shown.
@@ -229,7 +236,8 @@ struct ClassickApp: App {
             SettingsView(
                 model: appDelegate.model,
                 onSave: appDelegate.saveSettings,
-                onForgetIpod: appDelegate.forgetIpod
+                onForgetIpod: appDelegate.forgetIpod,
+                onBackfill: appDelegate.backfillRockbox
             )
         }
     }

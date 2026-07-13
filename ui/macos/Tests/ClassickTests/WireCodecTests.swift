@@ -46,4 +46,32 @@ final class WireCodecTests: XCTestCase {
         XCTAssertEqual(obj["type"] as? String, "trigger_sync")
         XCTAssertEqual(obj["source"] as? String, "manual")
     }
+
+    func testBackfillRockboxEncodes() throws {
+        let data = try JSONEncoder().encode(DaemonCommand.backfillRockbox)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "backfill_rockbox")
+    }
+
+    func testDaemonSettingsRoundTripsRockboxCompat() throws {
+        let settings = DaemonSettings(
+            enabled: true,
+            autostartWithWindows: false,
+            firstSyncMode: "auto_apply",
+            subsequentSyncMode: "auto_apply",
+            scheduleMinutes: 0,
+            notifyOn: "all",
+            rockboxCompat: true)
+        let data = try JSONEncoder().encode(settings)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["rockbox_compat"] as? Bool, true)
+        let decoded = try JSONDecoder().decode(DaemonSettings.self, from: data)
+        XCTAssertEqual(decoded, settings)
+    }
+
+    func testDaemonSettingsDecodesMissingRockboxCompatAsFalse() throws {
+        let json = #"{"enabled":true,"autostart_with_windows":false,"first_sync_mode":"auto_apply","subsequent_sync_mode":"auto_apply","schedule_minutes":0,"notify_on":"all"}"#
+        let decoded = try JSONDecoder().decode(DaemonSettings.self, from: Data(json.utf8))
+        XCTAssertFalse(decoded.rockboxCompat)
+    }
 }
