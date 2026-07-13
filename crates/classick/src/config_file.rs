@@ -37,6 +37,11 @@ pub struct DaemonSettings {
     pub schedule_minutes: u32,
     #[serde(default)]
     pub notify_on: NotifyLevel,
+    /// When true, transcoded .m4a files are made self-describing (embedded
+    /// tags + normalized cover art) so Rockbox can read the library. Default
+    /// false. See the Rockbox-compatibility design.
+    #[serde(default)]
+    pub rockbox_compat: bool,
 }
 
 impl Default for DaemonSettings {
@@ -48,6 +53,7 @@ impl Default for DaemonSettings {
             subsequent_sync_mode: SyncMode::AutoApply,
             schedule_minutes: 30,
             notify_on: NotifyLevel::All,
+            rockbox_compat: false,
         }
     }
 }
@@ -276,6 +282,7 @@ encoder = "ffmpeg"
                 subsequent_sync_mode: SyncMode::AutoApply,
                 schedule_minutes: 60,
                 notify_on: NotifyLevel::ErrorsOnly,
+                rockbox_compat: true,
             }),
             ipod_identity: Some(IpodIdentity {
                 serial: "EXAMPLE1234".to_string(),

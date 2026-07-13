@@ -122,6 +122,17 @@ pub struct Cli {
     /// to switch encoders for an existing library.
     #[arg(long)]
     pub force_reencode: bool,
+
+    /// Make transcoded .m4a files self-describing (embed tags + cover art) so
+    /// an iPod running Rockbox can read the library. Persist with --save-config.
+    #[arg(long)]
+    pub rockbox_compat: bool,
+
+    /// Embed tags + cover art into the EXISTING on-iPod .m4a files in place
+    /// (no re-transcode), then exit. Makes an already-synced library
+    /// Rockbox-readable. Requires --ipod (or auto-detect).
+    #[arg(long)]
+    pub backfill_rockbox: bool,
 }
 
 #[cfg(test)]
@@ -258,5 +269,24 @@ mod tests {
     fn daemon_and_ipc_mode_conflict() {
         let result = Cli::try_parse_from(["classick", "--daemon", "--ipc-mode"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rockbox_compat_and_backfill_rockbox_default_false() {
+        let cli = Cli::try_parse_from(["classick"]).unwrap();
+        assert!(!cli.rockbox_compat);
+        assert!(!cli.backfill_rockbox);
+    }
+
+    #[test]
+    fn parses_rockbox_compat_and_backfill_rockbox_flags() {
+        let cli = Cli::try_parse_from([
+            "classick",
+            "--rockbox-compat",
+            "--backfill-rockbox",
+        ])
+        .unwrap();
+        assert!(cli.rockbox_compat);
+        assert!(cli.backfill_rockbox);
     }
 }

@@ -29,6 +29,8 @@ pub struct Config {
     pub refalac_path: PathBuf,
     pub passthrough_wav: bool,
     pub force_reencode: bool,
+    pub rockbox_compat: bool,
+    pub backfill_rockbox: bool,
 }
 
 impl Config {
@@ -118,6 +120,14 @@ pub fn resolve_with(
             .and_then(|p| p.force_reencode)
             .unwrap_or(false);
 
+    // Rockbox-compat: CLI flag (on-only) OR persisted daemon setting OR false.
+    let rockbox_compat = cli.rockbox_compat
+        || persisted
+            .as_ref()
+            .and_then(|p| p.daemon.as_ref())
+            .map(|d| d.rockbox_compat)
+            .unwrap_or(false);
+
     Ok(Config {
         source,
         ipod,
@@ -134,6 +144,8 @@ pub fn resolve_with(
         refalac_path,
         passthrough_wav,
         force_reencode,
+        rockbox_compat,
+        backfill_rockbox: cli.backfill_rockbox,
     })
 }
 
@@ -232,6 +244,8 @@ mod tests {
         assert_eq!(config.refalac_path, PathBuf::from("refalac64"));
         assert!(!config.passthrough_wav);
         assert!(!config.force_reencode);
+        assert!(!config.rockbox_compat);
+        assert!(!config.backfill_rockbox);
     }
 
     #[test]
@@ -366,6 +380,51 @@ mod tests {
         let cli = Cli::try_parse_from(["classick", "--source", r"D:\m"]).unwrap();
         let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
         assert!(!cfg.force_reencode);
+    }
+
+    #[test]
+    fn rockbox_compat_defaults_false() {
+        let cli = Cli::try_parse_from(["classick", "--source", r"D:\m"]).unwrap();
+        let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
+        assert!(!cfg.rockbox_compat);
+    }
+
+    #[test]
+    fn rockbox_compat_from_persisted_daemon_settings() {
+        let cli = Cli::try_parse_from(["classick", "--source", r"D:\m"]).unwrap();
+        let persisted = PersistedConfig {
+            source: Some(PathBuf::from(r"X:\x")),
+            daemon: Some(crate::config_file::DaemonSettings {
+                rockbox_compat: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
+            .unwrap();
+        assert!(cfg.rockbox_compat);
+    }
+
+    #[test]
+    fn rockbox_compat_cli_flag_overrides_off_persisted() {
+        let cli = Cli::try_parse_from([
+            "classick",
+            "--source",
+            r"D:\m",
+            "--rockbox-compat",
+        ])
+        .unwrap();
+        let persisted = PersistedConfig {
+            source: Some(PathBuf::from(r"X:\x")),
+            daemon: Some(crate::config_file::DaemonSettings {
+                rockbox_compat: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
+            .unwrap();
+        assert!(cfg.rockbox_compat);
     }
 
     #[test]
