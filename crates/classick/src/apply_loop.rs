@@ -700,14 +700,17 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // references (see `rebuild_apple_artwork`, verified on-device). So rebuild
     // the ArtworkDB fresh from source art for the whole library, and re-embed
     // the Rockbox `.m4a` tags/art for those tracks when `rockbox_compat` is on.
-    // A fresh/full sync (unchanged == 0) needs none of this — every track got
-    // fresh thumbnails as it was added. Skipped on pause and rebuild-manifest.
-    // (Cost: re-reads + re-thumbnails the whole library — no audio re-copy.)
+    // Runs after ANY DB-changing completed sync (gate on `changed > 0` alone —
+    // NOT `&& unchanged > 0`): a bulk retag applied to the whole library is all
+    // MetadataOnly with zero unchanged tracks, yet the closure's write already
+    // ran over stale ithmb, so it still needs the rebuild. On a fresh/full sync
+    // it's a redundant (idempotent, guarded) re-thumbnail — cheap vs. the sync
+    // itself, and robust regardless of libgpod's exact preservation behavior.
+    // Skipped on pause and rebuild-manifest. (No audio re-copy.)
     let changed = add + modify + metadata_only + remove;
     if matches!(sync_result, Ok(RunOutcome::Completed))
         && !config.rebuild_manifest
         && changed > 0
-        && unchanged > 0
     {
         progress.log("Refreshing artwork for existing tracks (no re-copy)…".to_string());
         let mut refreshed: Vec<(u64, crate::ipod::db::Tags, Option<Vec<u8>>)> = Vec::new();
