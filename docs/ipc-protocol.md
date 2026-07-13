@@ -1,4 +1,4 @@
-# ipod-sync IPC protocol v1.0.0
+# ipod-sync IPC protocol v1.1.0
 
 Newline-delimited JSON over stdin/stdout, UTF-8, custom typed-envelope.
 Every message is a single-line JSON object with a `type` discriminator
@@ -18,7 +18,7 @@ custom-envelope instead of JSON-RPC 2.0, why WinUI 3 — see
 
 ## 1. Versioning
 
-Protocol version follows **semver**. The current version is **`1.0.0`**.
+Protocol version follows **semver**. The current version is **`1.1.0`**.
 
 The core **MUST** emit a `hello` event (see §4.1) as its first line of
 stdout, carrying the protocol version it speaks. The UI **MUST** read
@@ -123,6 +123,7 @@ Rules:
 | `log`         | `message`                                                                                    | Informational log line                    |
 | `error`       | `message`, `recovery_hints?`                                                                 | Non-fatal or fatal error                  |
 | `finish`      | `success`                                                                                    | Run complete; core will close stdout      |
+| `paused`      | (none)                                                                                       | Run gracefully paused; core will close stdout (new in **1.1.0**) |
 
 The Rust-side enum the events derive from is `ProgressEvent` in
 `src/progress.rs`. `hello` is new in IPC mode (not part of
@@ -136,7 +137,7 @@ then proceeds with the rest of the protocol.
 
 | Field              | Type     | Notes                                                       |
 |--------------------|----------|-------------------------------------------------------------|
-| `protocol_version` | `string` | Semver of the wire protocol the core speaks. Currently `1.0.0`. |
+| `protocol_version` | `string` | Semver of the wire protocol the core speaks. Currently `1.1.0`. |
 | `core_version`     | `string` | `CARGO_PKG_VERSION` of the core binary. Informational.       |
 
 ```json
@@ -172,14 +173,8 @@ integers. Mirrors `ProgressEvent::Summary`.
 | `unchanged`     | `number` | Tracks already in sync; no work needed.               |
 | `total_planned` | `number` | Sum of `add + modify + metadata_only + remove`.       |
 
-> **Known M1 limitation.** The current `ProgressEvent::Summary` variant
-> does not carry `metadata_only`; the IPC backend serializes `0` for it.
-> The `review` event below carries the accurate count via its nested
-> `summary` object, which is what the UI should use for action-plan
-> rendering. Widening `ProgressEvent::Summary` is a post-M1 follow-up.
-
 ```json
-{"type":"summary","add":12,"modify":3,"metadata_only":0,"remove":0,"unchanged":1260,"total_planned":15}
+{"type":"summary","add":12,"modify":3,"metadata_only":2,"remove":0,"unchanged":1260,"total_planned":15}
 ```
 
 ### 4.4 `review`
@@ -205,7 +200,7 @@ Mirrors `ProgressEvent::Review`.
 | `unchanged`     | `number` |                                                  |
 
 ```json
-{"type":"review","summary":{"add":12,"modify":3,"metadata_only":0,"remove":0,"unchanged":1260},"no_delete":false}
+{"type":"review","summary":{"add":12,"modify":3,"metadata_only":2,"remove":0,"unchanged":1260},"no_delete":false}
 ```
 
 ### 4.5 `prompt`
@@ -332,6 +327,25 @@ cases; rely on `success` for the user-facing verdict). Mirrors
 {"type":"finish","success":false}
 ```
 
+### 4.12 `paused`
+
+**New in v1.1.0.** Terminal event emitted when the core gracefully honors a
+`pause` command (§5.6) instead of running to completion. By the time this
+event is written, the apply loop has drained its in-flight transcode window,
+committed every track it had already reached in plan order, run a final
+`db.write()` + manifest save (the same checkpoint the periodic time-or-count
+checkpoint uses — see `checkpoint::CheckpointClock`), and stopped. No fields.
+
+The core closes stdout shortly after, same as `finish` — the UI should treat
+`paused` as a **third terminal outcome** alongside `finish{success:true}` and
+`finish{success:false}`, not as a sub-case of either. A subsequent run is a
+perfectly normal invocation: the diff-based plan naturally picks up wherever
+the manifest left off, so there is no separate "resume" command (see §5.6).
+
+```json
+{"type":"paused"}
+```
+
 ---
 
 ## 5. Commands (UI → core)
@@ -342,6 +356,7 @@ cases; rely on `success` for the user-facing verdict). Mirrors
 | `prompt_decision`  | `id`, `choice`                    | Reply to a `prompt` event                        |
 | `form_decision`    | `id`, `value`                     | Reply to a `form` event                          |
 | `cancel`           | (none)                            | Graceful shutdown request                        |
+| `pause`            | (none)                            | Graceful pause request (new in **1.1.0**)        |
 
 A `start` command (`{"type":"start"}`) is **reserved** for future
 milestones — M1 begins orchestration implicitly on spawn. Older cores
@@ -462,6 +477,35 @@ Request a graceful shutdown. No fields.
 Future milestones will plumb `cancel` deeper into the orchestrator so
 it can interrupt mid-track work.
 
+### 5.6 `pause`
+
+**New in v1.1.0.** Request a graceful pause. No fields.
+
+```json
+{"type":"pause"}
+```
+
+Unlike `cancel`, `pause` is **not** a shutdown-and-discard request — it is
+the "stop cleanly and let me come back later" command:
+
+- The orchestrator polls for a queued `Decision::Pause` between actions in
+  the same non-blocking `try_recv()` spot that already polls for the
+  cancel-mapped `Decision::Review(ReviewDecision::Quit)`. On seeing it, the
+  apply loop stops accepting new actions, drains the in-flight transcode
+  pipeline window (`pipeline::OrderedTranscoder`), commits everything it
+  already reached in plan order, runs a final checkpoint (`db.write()` +
+  manifest save), and returns.
+- The core then emits `{"type":"paused"}` (§4.12) and closes stdout — the UI
+  should treat this like `finish`, not wait for a separate `finish` too.
+- **There is no `resume` command.** Because sync is diff-based against the
+  manifest, resuming is just starting a normal new run (a plain re-spawn of
+  `ipod-sync.exe --ipc-mode --apply`, or — on the daemon-pipe wire — an
+  ordinary `trigger_sync`, §"Daemon v1.2.0" below). The plan naturally picks
+  up only the tracks that weren't committed before the pause.
+- Like `cancel`, `pause` is **best-effort while mid-track**: the core
+  finishes whatever an in-flight worker is transcoding before treating the
+  slot as drained. It does not interrupt a single transcode partway through.
+
 ---
 
 ## 6. Correlation rules
@@ -530,6 +574,23 @@ it can interrupt mid-track work.
     `Process.Kill(entireProcessTree: true)` (or the OS equivalent on
     macOS/Linux frontends) and surfaces a warning in the log panel. No
     orphan core processes should remain.
+
+### Graceful pause
+
+13. UI sends `{"type":"pause"}` on stdin (§5.6).
+14. The core finishes draining its in-flight transcode window, commits
+    everything already reached in plan order, checkpoints, and emits
+    `{"type":"paused"}` (§4.12).
+15. The UI expects a `paused` event, then stdout EOF, then a clean process
+    exit — no force-kill timer needed; pause is not racing a shutdown
+    deadline the way `cancel` is. If the process doesn't exit within a
+    generous bound (tens of seconds — draining the window can legitimately
+    take as long as one transcode), fall back to the same force-kill path
+    as §"Graceful cancel" and log it as unexpected.
+16. A later sync is an ordinary new run: the UI spawns the core again (or,
+    over the daemon-pipe wire, sends `trigger_sync`); the diff-based plan
+    resumes from the manifest automatically. There is no dedicated
+    "resume" message on either wire.
 
 This mirrors the bounded-join pattern already used by
 `Progress::finish` in `src/progress.rs` (5 s deadline, force-exit on
@@ -611,8 +672,9 @@ Deliberately **not** in v1 — listed so they don't accidentally creep in:
   resolved by the UI directly from disk (the source file path is in the
   manifest the UI can read locally).
 - **Bidirectional notifications during apply.** The only mid-sync UI →
-  core message is `cancel`, and it is best-effort in M1. No pause /
-  resume / skip-current-track commands yet.
+  core messages are `cancel` and (since v1.1.0) `pause`, both best-effort.
+  No skip-current-track command yet. There is still no dedicated `resume`
+  command — see §5.6; resuming after a pause is an ordinary new run.
 - **Authentication / authorization.** Single-user local tool. The
   parent process owns the child by construction; no auth needed.
 - **Multiplexing multiple iPods over one IPC channel.** M1 assumes one
@@ -634,12 +696,21 @@ Deliberately **not** in v1 — listed so they don't accidentally creep in:
 | Protocol | Core version | UI version | Status     | Notes                                  |
 |----------|--------------|------------|------------|----------------------------------------|
 | 1.0.0    | 0.1.x        | 0.1.x      | Initial M1 | Windows-only UI; cross-platform TUI fallback remains. |
+| 1.1.0    | 0.1.x        | 0.1.x      | Current    | Additive: `pause` command (§5.6) + terminal `paused` event (§4.12). Handshake still requires major version `1` on both sides. |
 
 Bumps will append rows here. Don't edit historical rows.
 
 ---
 
 ## v1.1.0 — Daemon extensions (UI ↔ daemon channel)
+
+> **Namespace note:** the daemon-pipe protocol versions independently of the
+> subprocess stdio protocol documented in §§1–11 above — they share the
+> `major.minor.patch` scheme and both currently sit on major `1`, but their
+> minor versions move on separate schedules and a matching number (e.g. both
+> once being `1.1.0`) is coincidence, not a shared release train. As of this
+> writing the daemon protocol is at **`1.2.0`** — see "Daemon v1.2.0" below;
+> this section is kept as the historical record of the `1.1.0` daemon bump.
 
 When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows) or a
 Unix domain socket (macOS/Linux), the daemon emits `hello` with
@@ -740,3 +811,43 @@ being synced, the daemon:
 3. Lets the orchestrator subprocess error out naturally as libgpod
    writes start failing. The subprocess's own Finish event arrives
    later and is ignored (state is already Idle).
+
+## Daemon v1.2.0 — Pause forwarding + "X of Y synced" counts (2026-07-13)
+
+The daemon now emits `hello` with `protocol_version = "1.2.0"`. Purely
+additive over v1.1.0 above: one new command, two new `status_update` fields.
+Handshake compatibility is unaffected — both sides still only refuse to
+proceed on a major-version mismatch (§1).
+
+### New command: `pause`
+
+```json
+{"type":"pause"}
+```
+
+Forwards to the running sync subprocess as `{"type":"pause"}` on its stdin
+(the subprocess-protocol `pause` command, §5.6) — it does **not** force-kill
+or start a grace-period timer the way `cancel_sync` does, because pause is
+meant to let the subprocess drain and exit on its own. The daemon still
+keeps the same bounded-kill backstop as a defensive fallback in case the
+subprocess never exits. **No-op if the daemon is idle** (no sync running).
+When the subprocess emits its terminal `{"type":"paused"}` line, the
+orchestrator records the sync as paused (not aborted, not completed), and
+the daemon broadcasts an Idle `status_update`. Resuming is not a distinct
+command — it's an ordinary `trigger_sync` (manual or scheduled), which the
+diff-based plan picks up from wherever the manifest left off.
+
+### `status_update` gains `synced_count` and `library_count`
+
+```json
+{"type":"status_update","state":"idle","configured":true,"ipod_connected":true,"synced_count":812,"library_count":1500}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `synced_count` | `number` | Tracks currently on the iPod per the manifest — the "X" in "X of Y synced". Always present; a fresh manifest-length read, so it's cheap and never stale. |
+| `library_count` | `number \| omitted` | Source-library track count — the "Y". Omitted (not `null`) until known. The daemon doesn't walk the source library on every status tick; this is populated from the most recent sync's action-plan diff (which already walks the source) and cached from there. Older clients that don't know this field ignore it per the standard additive-field rule (§1). |
+
+Both fields are additive to the existing `status_update` shape from v1.1.0
+(`state`, `configured`, `ipod_connected`, `last_sync`,
+`next_scheduled_unix_secs`, `storage`) — no existing field changed meaning.

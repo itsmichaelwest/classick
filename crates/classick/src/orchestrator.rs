@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use std::io::IsTerminal;
 use std::sync::mpsc::Receiver;
 
-use crate::apply_loop;
+use crate::apply_loop::{self, RunOutcome};
 use crate::cli::Cli;
 use crate::config;
 use crate::config_file;
@@ -16,7 +16,10 @@ use crate::wizard;
 
 /// Renamed wrapper that contains all the post-Progress work. Errors bubble up
 /// through this and into main; progress.finish() runs unconditionally afterwards.
-pub fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<()> {
+/// The `RunOutcome` (Completed vs Paused) is passed through from
+/// `apply_loop::run` so main.rs can decide which terminal progress event to
+/// emit before tearing down.
+pub fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<RunOutcome> {
     // Surface config.toml parse errors with a TUI prompt + reset option BEFORE
     // anything else touches the persisted config (ensure_source_or_wizard
     // itself calls config_file::load and would otherwise blow up on a corrupt

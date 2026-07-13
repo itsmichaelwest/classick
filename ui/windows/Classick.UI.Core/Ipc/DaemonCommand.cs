@@ -2,6 +2,19 @@ using System.Text.Json.Serialization;
 
 namespace Classick_UI.Ipc;
 
+// TODO(windows): pause/resume + X-of-Y not yet wired on Windows.
+// Daemon protocol bumped to 1.2.0 with a new `DaemonCommand::Pause`
+// ({"type":"pause"}, no payload, no-op if idle) that forwards a graceful
+// pause to the running sync subprocess — see docs/ipc-protocol.md "Daemon
+// v1.2.0". This DaemonCommand hierarchy has no PauseCommand yet. There is
+// no separate resume command by design: resuming is an ordinary
+// TriggerSyncCommand (the sync is diff-based and continues from the last
+// checkpoint). Mirror the Rust daemon
+// (crates/classick/src/ipc_daemon.rs::DaemonCommand::Pause) and the macOS
+// client (ui/macos/Sources/Classick/Ipc/WireModels.swift,
+// `DaemonCommand.pause`) plus a Pause/Resume affordance in the tray UI.
+// Can't build/verify Windows in this environment — see docs/ipc-protocol.md.
+
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(GetStatusCommand), "get_status")]
 [JsonDerivedType(typeof(GetConfigCommand), "get_config")]

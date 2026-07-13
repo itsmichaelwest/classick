@@ -131,6 +131,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.send(.cancelSync) }
     }
 
+    /// Pause / Resume menu actions. Pause requests a graceful drain +
+    /// checkpoint on the daemon side; resume is just a normal sync trigger —
+    /// the sync is diff-based, so it continues where it left off.
+    func pause() {
+        Task { await daemonClient.send(.pause) }
+    }
+
+    func resume() {
+        Task { await daemonClient.send(.triggerSync(source: .manual)) }
+    }
+
     /// "Retry" from the error phase. There's no dedicated retry command on
     /// the wire — a fresh `get_status` forces the daemon to push a current
     /// `status_update`, which recomputes phase out of `.error` if whatever
@@ -206,6 +217,8 @@ struct ClassickApp: App {
                 onOpenSettings: openSettingsWindow,
                 onSyncNow: appDelegate.syncNow,
                 onCancelSync: appDelegate.cancelSync,
+                onPause: appDelegate.pause,
+                onResume: appDelegate.resume,
                 onRetry: appDelegate.retry,
                 onCheckForUpdates: appDelegate.checkForUpdates
             )
@@ -236,6 +249,8 @@ private func menuBarSystemImage(for phase: Phase) -> String {
         return "ipod"
     case .syncing:
         return "arrow.triangle.2.circlepath"
+    case .paused:
+        return "pause.circle"
     case .error:
         return "exclamationmark.triangle"
     }

@@ -346,23 +346,35 @@ pub fn verify_tools_available(ffmpeg_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Per-process temp file under `%TEMP%\<PROJECT_DIR>\` with an optional
-/// filename infix and the given extension. Centralizes the
-/// `%TEMP%/classick/classick-<infix>-<pid>.<ext>` pattern used by the
-/// transcode pipeline (alac, wav, art, passthrough).
+/// Monotonic per-process counter mixed into every [`project_temp_path`]
+/// result. Up to 4 pipeline worker threads (`pipeline::OrderedTranscoder`)
+/// call `transcode_one` concurrently, each of which derives its temp paths
+/// from this function — without a per-job-unique component, concurrent jobs
+/// collide on the SAME filename (same pid), stomping each other's audio/art
+/// mid-write and racing `remove_file` against a job that still needs the
+/// file. The pid keeps paths unique across processes; the counter keeps
+/// them unique across concurrent jobs within one process.
+static NEXT_TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Per-job temp file under `%TEMP%\<PROJECT_DIR>\` with an optional filename
+/// infix and the given extension. Centralizes the
+/// `%TEMP%/classick/classick-<infix>-<pid>-<seq>.<ext>` pattern used by the
+/// transcode pipeline (alac, wav, art, passthrough). Every call returns a
+/// distinct path (see `NEXT_TEMP_SEQ`).
 fn project_temp_path(infix: &str, ext: &str) -> PathBuf {
+    let seq = NEXT_TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut p = std::env::temp_dir();
     p.push(crate::PROJECT_DIR);
     let filename = if infix.is_empty() {
-        format!("{}-{}.{ext}", crate::PROJECT_DIR, std::process::id())
+        format!("{}-{}-{seq}.{ext}", crate::PROJECT_DIR, std::process::id())
     } else {
-        format!("{}-{infix}-{}.{ext}", crate::PROJECT_DIR, std::process::id())
+        format!("{}-{infix}-{}-{seq}.{ext}", crate::PROJECT_DIR, std::process::id())
     };
     p.push(filename);
     p
 }
 
-/// Build the path to the Phase 1 temp file: %TEMP%\classick\classick-<pid>.m4a.
+/// Build the path to a per-job ALAC temp file: %TEMP%\classick\classick-<pid>-<seq>.m4a.
 pub fn temp_alac_path() -> PathBuf {
     project_temp_path("", "m4a")
 }
@@ -376,7 +388,7 @@ pub fn temp_art_path() -> PathBuf {
 // Phase 3: source classification + passthrough pipeline.
 // ---------------------------------------------------------------------------
 
-/// Outcome of [`classify`] — tells `apply_loop::add_one` which pipeline to run.
+/// Outcome of [`classify`] — tells `apply_loop::transcode_one` which pipeline to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceAction {
     /// Copy the source byte-for-byte; iPod plays it natively (mp3, aac, alac,
@@ -473,7 +485,7 @@ pub fn classify(probe: &ProbeOutput, config: &ClassifyConfig) -> Result<SourceAc
 }
 
 /// Copy `src` to `dst` byte-for-byte. The destination's parent dir is created
-/// if missing. Used by `apply_loop::add_one` when [`classify`] returns
+/// if missing. Used by `apply_loop::transcode_one` when [`classify`] returns
 /// [`SourceAction::Passthrough`].
 ///
 /// Tags are NOT touched here — libgpod handles them via `apply_tags`, separate
@@ -492,7 +504,7 @@ pub fn passthrough(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Path for the refalac 2-step pipeline's WAV intermediate.
-/// `%TEMP%\classick\classick-<pid>.wav`.
+/// `%TEMP%\classick\classick-<pid>-<seq>.wav`.
 pub fn temp_wav_path() -> PathBuf {
     project_temp_path("", "wav")
 }
@@ -839,6 +851,41 @@ mod tests {
                 .and_then(|s| s.to_str()),
             Some("bin")
         );
+    }
+
+    // Regression test for the parallel-transcode temp-path collision bug:
+    // up to 4 pipeline workers call `transcode_one` concurrently, and each
+    // used to derive its temp filename from ONLY the process id, so
+    // concurrent jobs clobbered each other's audio/art mid-write. Every
+    // `project_temp_path`-backed helper must now return a distinct path
+    // per call.
+    #[test]
+    fn temp_alac_path_is_unique_per_call() {
+        let a = temp_alac_path();
+        let b = temp_alac_path();
+        assert_ne!(a, b, "concurrent transcode jobs must not share a temp ALAC path");
+    }
+
+    #[test]
+    fn temp_art_path_is_unique_per_call() {
+        let a = temp_art_path();
+        let b = temp_art_path();
+        assert_ne!(a, b, "concurrent transcode jobs must not share a temp art path");
+    }
+
+    #[test]
+    fn temp_wav_path_is_unique_per_call() {
+        let a = temp_wav_path();
+        let b = temp_wav_path();
+        assert_ne!(a, b, "concurrent transcode jobs must not share a temp WAV path");
+    }
+
+    #[test]
+    fn temp_passthrough_path_is_unique_per_call() {
+        let src = Path::new(r"C:\a.mp3");
+        let a = temp_passthrough_path(src);
+        let b = temp_passthrough_path(src);
+        assert_ne!(a, b, "concurrent transcode jobs must not share a temp passthrough path");
     }
 
     // -----------------------------------------------------------------------

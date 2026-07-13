@@ -67,6 +67,8 @@ struct StatusInfo: Equatable, Sendable {
     var lastSync: HistoryEntry?
     var nextScheduledUnixSecs: UInt64?
     var storage: Storage?            // always nil on macOS wire; see Storage.swift
+    var syncedCount: Int = 0          // X in "X of Y synced" — manifest track count
+    var libraryCount: Int?            // Y — source-library track count; nil until known
 }
 
 extension StatusInfo: Codable {
@@ -77,6 +79,8 @@ extension StatusInfo: Codable {
         case lastSync = "last_sync"
         case nextScheduledUnixSecs = "next_scheduled_unix_secs"
         case storage
+        case syncedCount = "synced_count"
+        case libraryCount = "library_count"
     }
 }
 
@@ -90,6 +94,7 @@ enum DaemonCommand: Encodable, Sendable {
     case forgetIpod
     case triggerSync(source: Trigger)
     case cancelSync
+    case pause
     case decidePrompt(id: UInt64, choice: Int32)
 
     enum Trigger: String, Encodable, Sendable {
@@ -127,6 +132,8 @@ enum DaemonCommand: Encodable, Sendable {
             try container.encode(source, forKey: .source)
         case .cancelSync:
             try container.encode("cancel_sync", forKey: .type)
+        case .pause:
+            try container.encode("pause", forKey: .type)
         case let .decidePrompt(id, choice):
             try container.encode("decide_prompt", forKey: .type)
             try container.encode(id, forKey: .id)
@@ -168,6 +175,8 @@ enum DaemonEvent: Decodable, Sendable {
         case name
         case reason
         case line
+        case syncedCount = "synced_count"
+        case libraryCount = "library_count"
     }
 
     init(from decoder: Decoder) throws {
@@ -185,13 +194,17 @@ enum DaemonEvent: Decodable, Sendable {
             let lastSync = try container.decodeIfPresent(HistoryEntry.self, forKey: .lastSync)
             let nextScheduledUnixSecs = try container.decodeIfPresent(UInt64.self, forKey: .nextScheduledUnixSecs)
             let storage = try container.decodeIfPresent(StatusInfo.Storage.self, forKey: .storage)
+            let syncedCount = try container.decodeIfPresent(Int.self, forKey: .syncedCount) ?? 0
+            let libraryCount = try container.decodeIfPresent(Int.self, forKey: .libraryCount)
             self = .statusUpdate(StatusInfo(
                 state: state,
                 configured: configured,
                 ipodConnected: ipodConnected,
                 lastSync: lastSync,
                 nextScheduledUnixSecs: nextScheduledUnixSecs,
-                storage: storage))
+                storage: storage,
+                syncedCount: syncedCount,
+                libraryCount: libraryCount))
         case "config_update":
             let source = try container.decodeIfPresent(String.self, forKey: .source)
             let daemon = try container.decodeIfPresent(DaemonSettings.self, forKey: .daemon)
@@ -234,6 +247,7 @@ enum SyncEvent: Decodable, Sendable {
     case form(id: UInt64, label: String, initial: String?, hint: String?)
     case error(message: String, recoveryHints: [String]?)
     case finish(success: Bool)
+    case paused
     case other            // forward-compat: unknown inner types (e.g. `review`)
 
     private enum CodingKeys: String, CodingKey {
@@ -310,6 +324,8 @@ enum SyncEvent: Decodable, Sendable {
         case "finish":
             let success = try container.decode(Bool.self, forKey: .success)
             self = .finish(success: success)
+        case "paused":
+            self = .paused
         default:
             self = .other
         }

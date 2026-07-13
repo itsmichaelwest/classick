@@ -4,14 +4,14 @@
 //! JSON, snake_case "type" discriminator, additive.
 //!
 //! Spec §7. Protocol semver: daemon emits hello with
-//! `protocol_version = "1.1.0"` since this extends M1's "1.0.0".
+//! `protocol_version = "1.2.0"` since this extends M1's "1.0.0".
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
 use crate::daemon::device_storage::StorageInfo;
 use crate::daemon::history::HistoryEntry;
 use serde::{Deserialize, Serialize};
 
-pub const DAEMON_PROTOCOL_VERSION: &str = "1.1.0";
+pub const DAEMON_PROTOCOL_VERSION: &str = "1.2.0";
 
 /// Events from daemon → UI clients (in addition to forwarded sync-
 /// subprocess events from `src/ipc.rs`).
@@ -36,6 +36,15 @@ pub enum DaemonEvent {
         /// platforms until a native `statvfs`/`statfs` impl lands.
         #[serde(skip_serializing_if = "Option::is_none")]
         storage: Option<StorageInfo>,
+        /// Tracks currently on the iPod per the manifest (X in "X of Y
+        /// synced"). Always available — a fresh manifest read.
+        synced_count: usize,
+        /// Source-library track count (Y). `None` until known — the
+        /// daemon doesn't walk the source on every status tick; this is
+        /// populated from the most recent sync's action-plan diff (which
+        /// already walks the source) and cached from there.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        library_count: Option<usize>,
     },
     ConfigUpdate {
         source: Option<String>,
@@ -122,6 +131,9 @@ pub enum DaemonCommand {
     /// History entry records outcome=Aborted with reason "user_cancelled".
     /// No-op if no sync is in progress.
     CancelSync,
+    /// Gracefully pause the running sync — drains in-flight, checkpoints,
+    /// → Paused. No-op if idle.
+    Pause,
     /// Forward a user's reply to a `PromptEvent` from the sync
     /// subprocess. The daemon writes `{"type":"prompt_decision",
     /// "id":<id>,"choice":<choice>}` to the subprocess stdin. Without
@@ -158,7 +170,7 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"hello""#));
-        assert!(json.contains(r#""protocol_version":"1.1.0""#));
+        assert!(json.contains(r#""protocol_version":"1.2.0""#));
     }
 
     #[test]
@@ -166,6 +178,12 @@ mod tests {
         let cmd: DaemonCommand =
             serde_json::from_str(r#"{"type":"get_status"}"#).unwrap();
         assert!(matches!(cmd, DaemonCommand::GetStatus));
+    }
+
+    #[test]
+    fn decodes_pause_command() {
+        let cmd: DaemonCommand = serde_json::from_str(r#"{"type":"pause"}"#).unwrap();
+        assert!(matches!(cmd, DaemonCommand::Pause));
     }
 
     #[test]

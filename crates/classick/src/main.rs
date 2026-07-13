@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use classick::apply_loop::RunOutcome;
 use classick::cli::Cli;
 use classick::orchestrator;
 use classick::progress::Progress;
@@ -63,6 +64,15 @@ fn main() -> Result<()> {
         progress.error(format!("{e:#}"));
     }
 
+    // A graceful pause is not a failure — emit the terminal `Paused` event
+    // BEFORE `finish` so the wire/plain output carries it (see ipc-protocol
+    // §4.11-adjacent; `finish` alone can't distinguish Paused from a normal
+    // Completed run). `finish(true)` still runs on the Paused path: pausing
+    // is a clean stop, not an error, so the exit code stays 0.
+    if matches!(result, Ok(RunOutcome::Paused)) {
+        progress.paused();
+    }
+
     // Tear down the backend. `finish` consumes `progress` and now carries
     // success so the IPC `finish.success` field agrees with the process exit
     // code. anyhow's Termination impl maps `Err(_)` to exit code 1 already;
@@ -75,5 +85,5 @@ fn main() -> Result<()> {
     // secondary.
     let finish_result = progress.finish(result.is_ok());
 
-    result.and(finish_result)
+    result.map(|_| ()).and(finish_result)
 }

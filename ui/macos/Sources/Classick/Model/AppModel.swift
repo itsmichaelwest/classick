@@ -10,6 +10,7 @@ enum Phase: Equatable, Sendable {
     case notConfigured
     case idle
     case syncing(current: Int, total: Int, label: String)
+    case paused(synced: Int, total: Int?)
     case error(String)
 }
 
@@ -45,6 +46,8 @@ final class AppModel {
     private(set) var pendingPrompt: PendingPrompt?
     private(set) var storageText: String?
     private(set) var config: AppConfig?
+    private(set) var syncedCount: Int = 0
+    private(set) var libraryCount: Int?
 
     // Tracked separately from `device` because `status_update` carries its
     // own `ipod_connected`/`configured` flags independent of the
@@ -129,6 +132,8 @@ final class AppModel {
             statusConfigured = info.configured
             isIpodConnected = info.ipodConnected
             lastSync = info.lastSync
+            syncedCount = info.syncedCount
+            libraryCount = info.libraryCount
             let targetSyncing: Bool
             switch info.state {
             case .syncing: targetSyncing = true
@@ -161,7 +166,19 @@ final class AppModel {
     private func computePhase(targetSyncing: Bool) -> Phase {
         guard isIpodConnected else { return .noDevice }
         guard isConfiguredForCurrentDevice else { return .notConfigured }
-        guard targetSyncing else { return .idle }
+        guard targetSyncing else {
+            // A paused sync is a resting state, not plain idle: the sync
+            // subprocess has already emitted `paused` and exited, so the daemon
+            // now broadcasts `idle`. Without this, that trailing idle status
+            // would wipe `.paused` and the menu would silently drop the Resume
+            // affordance. Hold `.paused` (refreshing its X/Y from the latest
+            // status) until the user resumes (targetSyncing → `.syncing`
+            // below), the device disconnects (guard above), or the app restarts
+            // (phase starts at `.noDevice`, so a cold idle status shows the
+            // normal "X synced" count, never a phantom pause).
+            if case .paused = phase { return .paused(synced: syncedCount, total: libraryCount) }
+            return .idle
+        }
         if case .syncing = phase { return phase }
         return .syncing(current: 0, total: 0, label: "")
     }
@@ -180,6 +197,8 @@ final class AppModel {
             pendingPrompt = PendingPrompt(id: id, message: hint ?? label, options: initial.map { [$0] } ?? [])
         case let .error(message, _):
             phase = .error(message)
+        case .paused:
+            phase = .paused(synced: syncedCount, total: libraryCount)
         case .hello, .header, .summary, .trackDone, .log, .other:
             break
         }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Current wire-protocol semver. Bumped per the rules in
 /// `docs/ipc-protocol.md` §1.
-pub const PROTOCOL_VERSION: &str = "1.0.0";
+pub const PROTOCOL_VERSION: &str = "1.1.0";
 
 /// Events emitted from the core to the UI on stdout.
 ///
@@ -31,12 +31,6 @@ pub enum IpcEvent {
         manifest: String,
     },
     /// Action-plan counts. Mirrors `ProgressEvent::Summary`. See §4.3.
-    ///
-    /// Known M1 limitation: the internal `ProgressEvent::Summary` doesn't
-    /// carry `metadata_only`, so this serializes `0` for it. The `review`
-    /// event below carries the accurate count via `ActionPlanSummary`; the
-    /// UI should prefer that for action-plan rendering. Widening the
-    /// internal variant is a post-M1 follow-up.
     Summary {
         add: usize,
         modify: usize,
@@ -83,6 +77,10 @@ pub enum IpcEvent {
     },
     /// Terminal event. The core closes stdout shortly after. See §4.11.
     Finish { success: bool },
+    /// Terminal event: the sync was gracefully paused (Task 6). Completed
+    /// tracks were committed to the iTunesDB + manifest before this was
+    /// emitted; the core exits shortly after, same as `finish`. No fields.
+    Paused,
 }
 
 /// Action-plan summary carried inside `IpcEvent::Review`. See §4.4.
@@ -115,6 +113,11 @@ pub enum IpcCommand {
     /// review-decision recv() point; the UI must back this with a 5s
     /// force-kill timer (see §5.5 and §7).
     Cancel,
+    /// Graceful pause: finish in-flight/completed tracks, checkpoint, then
+    /// stop. Unlike `cancel`, this is not a shutdown request — the core
+    /// exits after emitting `paused`, and a later run resumes from the
+    /// manifest. Mapped to `Decision::Pause` at the next action-loop poll.
+    Pause,
 }
 
 /// Nested `decision` object inside `review_decision`. See §5.1.
@@ -149,15 +152,14 @@ impl IpcEvent {
             PE::Summary {
                 add,
                 modify,
+                metadata_only,
                 remove,
                 unchanged,
                 total_planned,
             } => IpcEvent::Summary {
                 add: *add,
                 modify: *modify,
-                // See doc comment on IpcEvent::Summary above: internal variant
-                // doesn't carry metadata_only. UI uses Review.summary instead.
-                metadata_only: 0,
+                metadata_only: *metadata_only,
                 remove: *remove,
                 unchanged: *unchanged,
                 total_planned: *total_planned,
@@ -205,6 +207,7 @@ impl IpcEvent {
             // (so the UI gets the message) and then this `finish` with
             // success: false; the process exits non-zero shortly after.
             PE::Finish { success } => IpcEvent::Finish { success: *success },
+            PE::Paused => IpcEvent::Paused,
         })
     }
 }
@@ -241,6 +244,7 @@ impl IpcCommand {
             // takes over. The UI is expected to back this with a 5s
             // force-kill timer (§5.5).
             IpcCommand::Cancel => Decision::Review(ReviewDecision::Quit),
+            IpcCommand::Pause => Decision::Pause,
         })
     }
 }
@@ -265,6 +269,28 @@ mod tests {
     }
 
     #[test]
+    fn summary_event_carries_metadata_only_through() {
+        // Regression test: IpcEvent::Summary used to hardcode metadata_only
+        // to 0 regardless of the internal ProgressEvent's value (a documented
+        // "post-M1 follow-up" that was never done), so the daemon's
+        // library_count cache (which reads this event's metadata_only) always
+        // undercounted metadata-only tracks. from_progress must now carry the
+        // real value through unchanged.
+        use crate::progress::ProgressEvent;
+        let event = ProgressEvent::Summary {
+            add: 12,
+            modify: 3,
+            metadata_only: 7,
+            remove: 0,
+            unchanged: 1260,
+            total_planned: 15,
+        };
+        let wire = IpcEvent::from_progress(&event).unwrap();
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(json.contains(r#""metadata_only":7"#), "got: {json}");
+    }
+
+    #[test]
     fn review_decision_nested_envelope_round_trips() {
         // This is the critical nuance from docs/ipc-protocol.md §5.1: the
         // `decision` field is a nested typed envelope, NOT a flat shape.
@@ -276,6 +302,12 @@ mod tests {
             Decision::Review(ReviewDecision::Apply { no_delete }) => assert!(no_delete),
             other => panic!("expected Apply with no_delete=true, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pause_command_maps_to_pause_decision() {
+        let cmd: IpcCommand = serde_json::from_str(r#"{"type":"pause"}"#).unwrap();
+        assert!(matches!(cmd.to_decision(), Some(crate::progress::Decision::Pause)));
     }
 
     #[test]

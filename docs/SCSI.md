@@ -362,6 +362,18 @@ We have NOT (and have decided NOT to):
   setter — would unlock hash72/hashAB but adds vendor patch
   maintenance burden; out of scope for current Classic-only goal.
 
+### 2026-07-13 update: we now DO write SysInfoExtended (for artwork)
+
+The "we have NOT / decided NOT to write SysInfoExtended to disk" decision above
+is reversed for macOS artwork. Root cause: without SysInfoExtended, libgpod's
+built-in per-model format guess omits cover-art formats the firmware reads (e.g.
+F1069 on the Late-2009 Classic), so art never displays. classick now writes a
+per-model SysInfoExtended (embedded CC0 templates, GUID injected) to
+`iPod_Control/Device/SysInfoExtended` before DB open. Validated on-device: art
+displays, the iPod firmware reads the DB, and macOS Music.app reads the iPod
+identically with or without the file (safe + inert). Windows/iTunes re-test
+pending. See docs/superpowers/specs/2026-07-13-sysinfoextended-provisioning-design.md.
+
 ---
 
 ## Decision matrix (open)
