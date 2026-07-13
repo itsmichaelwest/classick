@@ -50,11 +50,33 @@ pub async fn run_daemon() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<DaemonEvent>(crate::daemon::BROADCAST_CHANNEL_CAPACITY);
     let exe = std::env::current_exe()?;
     let event_tx_for_spawn = event_tx.clone();
+    // The spawn closure re-reads the persisted config at spawn time (same
+    // pattern as the GetConfig/SaveConfig command arms) rather than
+    // capturing a snapshot at daemon startup — so a Settings change to
+    // `rockbox_compat` takes effect on the very next sync without a
+    // daemon restart.
+    let config_path_for_spawn = config_path.clone();
     let spawn_sync: SpawnFn = Arc::new(move |drive: String, cancel_rx, pause_rx, prompt_rx| {
         let exe = exe.clone();
         let event_tx = event_tx_for_spawn.clone();
+        let rockbox_compat = config_file::load(&config_path_for_spawn)
+            .ok()
+            .flatten()
+            .and_then(|c| c.daemon)
+            .map(|d| d.rockbox_compat)
+            .unwrap_or(false);
         Box::pin(async move {
-            sync_orchestrator::run(exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx).await
+            sync_orchestrator::run(exe, drive, rockbox_compat, cancel_rx, pause_rx, prompt_rx, event_tx).await
+        })
+    });
+
+    let exe_for_backfill = std::env::current_exe()?;
+    let event_tx_for_backfill = event_tx.clone();
+    let spawn_backfill: SpawnFn = Arc::new(move |drive: String, cancel_rx, pause_rx, prompt_rx| {
+        let exe = exe_for_backfill.clone();
+        let event_tx = event_tx_for_backfill.clone();
+        Box::pin(async move {
+            sync_orchestrator::run_backfill(exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx).await
         })
     });
 
@@ -65,6 +87,7 @@ pub async fn run_daemon() -> Result<()> {
         #[cfg(not(target_os = "macos"))]
         watcher: Box::new(PollingDeviceWatcher::new_production()),
         spawn_sync,
+        spawn_backfill,
         schedule_minutes,
         preset_event_tx: Some(event_tx),
         config_path: None,
@@ -97,6 +120,13 @@ pub struct DaemonDeps {
     pub configured_serial: Option<String>,
     pub watcher: Box<dyn DeviceWatcher>,
     pub spawn_sync: SpawnFn,
+    /// Same shape as `spawn_sync`, but drives a `--backfill-rockbox`
+    /// subprocess (`sync_orchestrator::run_backfill` in production) instead
+    /// of `--apply`. Used by the `DaemonCommand::BackfillRockbox` arm,
+    /// which reuses `start_sync_session` — the same state-machine guard,
+    /// cancel/pause/prompt channels, and event relay as a normal sync — so
+    /// a backfill and a sync can never run concurrently.
+    pub spawn_backfill: SpawnFn,
     pub schedule_minutes: u32,
     /// If Some, the runtime uses this pre-built sender instead of
     /// constructing its own. Production passes the same one it gave
@@ -189,6 +219,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let mut device_rx = deps.watcher.start();
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
     let spawn_sync = deps.spawn_sync;
+    let spawn_backfill = deps.spawn_backfill;
     // Cancellation signal for the currently-running sync (if any). Set
     // by start_sync_session; taken + sent by handle_client_command's
     // CancelSync arm; cleared in handle_internal_event after completion.
@@ -236,6 +267,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &event_tx,
                     &connected,
                     &spawn_sync,
+                    &spawn_backfill,
                     &internal_tx,
                     &mut cancel_tx_holder,
                     &mut prompt_tx_holder,
@@ -825,6 +857,7 @@ fn handle_client_command(
     event_tx: &broadcast::Sender<DaemonEvent>,
     connected: &Option<DetectedIpod>,
     spawn_sync: &SpawnFn,
+    spawn_backfill: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
     prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
@@ -967,6 +1000,44 @@ fn handle_client_command(
                 state,
                 event_tx,
                 spawn_sync,
+                internal_tx,
+                cancel_tx_holder,
+                prompt_tx_holder,
+                pause_tx_holder,
+                *library_count_cache,
+            );
+        }
+        DaemonCommand::BackfillRockbox => {
+            // Mirrors TriggerSync's guard + spawn + relay path exactly,
+            // just pointed at `spawn_backfill` (a `--backfill-rockbox`
+            // subprocess) instead of `spawn_sync` (`--apply`).
+            // `start_sync_session`'s state-machine check is what makes a
+            // backfill and a sync mutually exclusive — whichever gets
+            // there first flips state to Syncing and the other is
+            // dropped/no-op.
+            if !state.is_idle() {
+                tracing::debug!(
+                    "daemon: client {client_id} sent backfill_rockbox but a sync is already in progress"
+                );
+                return false;
+            }
+            let Some(device) = connected.as_ref() else {
+                tracing::debug!(
+                    "daemon: client {client_id} sent backfill_rockbox but no iPod is connected"
+                );
+                return false;
+            };
+            tracing::info!(
+                "daemon: client {client_id} triggered a Rockbox-compat backfill for {}",
+                device.serial
+            );
+            start_sync_session(
+                SyncTrigger::Manual,
+                device.serial.clone(),
+                device.drive.clone(),
+                state,
+                event_tx,
+                spawn_backfill,
                 internal_tx,
                 cancel_tx_holder,
                 prompt_tx_holder,

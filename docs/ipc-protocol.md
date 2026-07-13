@@ -709,7 +709,7 @@ Bumps will append rows here. Don't edit historical rows.
 > `major.minor.patch` scheme and both currently sit on major `1`, but their
 > minor versions move on separate schedules and a matching number (e.g. both
 > once being `1.1.0`) is coincidence, not a shared release train. As of this
-> writing the daemon protocol is at **`1.2.0`** — see "Daemon v1.2.0" below;
+> writing the daemon protocol is at **`1.3.0`** — see "Daemon v1.3.0" below;
 > this section is kept as the historical record of the `1.1.0` daemon bump.
 
 When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows) or a
@@ -851,3 +851,54 @@ diff-based plan picks up from wherever the manifest left off.
 Both fields are additive to the existing `status_update` shape from v1.1.0
 (`state`, `configured`, `ipod_connected`, `last_sync`,
 `next_scheduled_unix_secs`, `storage`) — no existing field changed meaning.
+
+## Daemon v1.3.0 — Rockbox compatibility: `rockbox_compat` setting + `backfill_rockbox` (2026-07-13)
+
+The daemon now emits `hello` with `protocol_version = "1.3.0"`. Purely
+additive over v1.2.0 above: one new field on an existing settings struct,
+and one new command. Handshake compatibility is unaffected — both sides
+still only refuse to proceed on a major-version mismatch (§1). See
+`docs/superpowers/specs/2026-07-13-rockbox-compatibility-design.md` for the
+full feature design.
+
+### `DaemonSettings` gains `rockbox_compat`
+
+```json
+{"type":"save_config","daemon":{"enabled":true,"autostart_with_windows":false,"first_sync_mode":"review","subsequent_sync_mode":"auto_apply","schedule_minutes":30,"notify_on":"all","rockbox_compat":true}}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `rockbox_compat` | `bool` | Default `false`. When `true`, every subsequently-transcoded `.m4a` is made self-describing (embedded ID3/MP4 tags + normalized cover art) so Rockbox firmware can read the library directly off the iPod, alongside the libgpod-managed iTunesDB. Read and written via the existing `get_config`/`save_config`/`config_update` commands (§"New commands"/"New events" above) — no new command is needed just to toggle it. Older clients that don't send this field get the persisted default (`false`) on load; older UI builds that don't know the field simply never render its toggle. |
+
+When `rockbox_compat` is on, the daemon appends `--rockbox-compat` to the
+`--ipc-mode --apply --ipod <drive>` sync-subprocess command line (§"Sync
+orchestration" above) — read fresh from the persisted config at the moment
+each sync is spawned, so a Settings change takes effect on the very next
+sync without a daemon restart.
+
+### New command: `backfill_rockbox`
+
+```json
+{"type":"backfill_rockbox"}
+```
+
+One-shot, user-triggered retrofit for a library that was already synced
+with `rockbox_compat` off (or before this feature existed): embeds tags +
+cover art into the **existing** on-iPod `.m4a` files in place, without
+re-transcoding or touching the add/modify/remove plan. The daemon spawns
+`classick.exe --ipc-mode --backfill-rockbox --ipod <drive>` and reports
+progress through the **same forwarded-event vocabulary** as a normal sync
+(`summary`, `track_start`, `track_done`, `log`, `error`, `finish` — see
+"Forwarded sync-subprocess events" above) — UI clients don't need to
+special-case a backfill's progress display.
+
+`backfill_rockbox` reuses the exact same state-machine guard, cancel/pause
+signaling, and prompt-decision relay as `trigger_sync`: it is **no-op if a
+sync (or another backfill) is already in progress**, and no-op if no iPod
+is currently connected. Because it shares the guard with `trigger_sync`, a
+sync and a backfill can never run concurrently — whichever request lands
+first occupies the `Syncing` state until it completes. Unlike
+`trigger_sync`, it does not reply with `sync_rejected` on those no-op
+paths; the daemon just logs and drops the request, matching the existing
+`pause`/`cancel_sync` no-op style.

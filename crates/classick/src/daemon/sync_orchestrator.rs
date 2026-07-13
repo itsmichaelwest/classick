@@ -44,11 +44,30 @@ pub enum OrchestratorOutcome {
 /// its parent. Without it, a graceful daemon Shutdown leaves an
 /// orphaned sync subprocess transcoding for hours and holding ffmpeg
 /// children — observed in the wild on 2026-05-24.
-pub fn build_command(exe: &std::path::Path, drive: &str) -> Command {
+pub fn build_command(exe: &std::path::Path, drive: &str, rockbox_compat: bool) -> Command {
+    let mut cmd = base_command(exe, drive, "--apply");
+    if rockbox_compat {
+        cmd.arg("--rockbox-compat");
+    }
+    cmd
+}
+
+/// Build the one-shot backfill subprocess command: same stdio/no-console
+/// setup as `build_command`, but `--backfill-rockbox` instead of `--apply`
+/// — it embeds tags + art into the existing on-iPod library in place
+/// rather than running a full add/modify/remove sync.
+pub fn build_backfill_command(exe: &std::path::Path, drive: &str) -> Command {
+    base_command(exe, drive, "--backfill-rockbox")
+}
+
+/// Shared stdio/no-console setup for both the normal-sync and backfill
+/// subprocess commands. See `build_command`'s doc comment for why
+/// `kill_on_drop(true)` is load-bearing.
+fn base_command(exe: &std::path::Path, drive: &str, mode_flag: &str) -> Command {
     use crate::windows_proc::NoConsoleWindow;
     let mut cmd = Command::new(exe);
     cmd.arg("--ipc-mode")
-        .arg("--apply")
+        .arg(mode_flag)
         .arg("--ipod")
         .arg(drive)
         .stdin(Stdio::piped())
@@ -107,12 +126,43 @@ impl FailureTracker {
 pub async fn run(
     exe: PathBuf,
     drive: String,
+    rockbox_compat: bool,
+    cancel_rx: oneshot::Receiver<()>,
+    pause_rx: oneshot::Receiver<()>,
+    prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
+    event_tx: broadcast::Sender<DaemonEvent>,
+) -> Result<OrchestratorOutcome> {
+    let cmd = build_command(&exe, &drive, rockbox_compat);
+    drive_child(exe, cmd, cancel_rx, pause_rx, prompt_decisions_rx, event_tx).await
+}
+
+/// Run the one-shot backfill subprocess (`--backfill-rockbox`) through the
+/// same drive-to-completion machinery as `run` — identical event
+/// forwarding, failure-bail threshold, cancel/pause handling — so the UI
+/// sees sync-style progress for a backfill with no special-casing on its
+/// side. `event_tx` is the SAME broadcast channel `run` uses, so a
+/// `DecidePrompt`/`CancelSync`/`Pause` sent while a backfill is in flight
+/// behaves exactly as it would during a normal sync.
+pub async fn run_backfill(
+    exe: PathBuf,
+    drive: String,
+    cancel_rx: oneshot::Receiver<()>,
+    pause_rx: oneshot::Receiver<()>,
+    prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
+    event_tx: broadcast::Sender<DaemonEvent>,
+) -> Result<OrchestratorOutcome> {
+    let cmd = build_backfill_command(&exe, &drive);
+    drive_child(exe, cmd, cancel_rx, pause_rx, prompt_decisions_rx, event_tx).await
+}
+
+async fn drive_child(
+    exe: PathBuf,
+    mut cmd: Command,
     mut cancel_rx: oneshot::Receiver<()>,
     mut pause_rx: oneshot::Receiver<()>,
     mut prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
 ) -> Result<OrchestratorOutcome> {
-    let mut cmd = build_command(&exe, &drive);
     let mut child = cmd.spawn().with_context(|| format!("spawn {}", exe.display()))?;
     let stdout = child.stdout.take().context("child stdout missing")?;
     let mut stdin = child.stdin.take().context("child stdin missing")?;
@@ -326,10 +376,28 @@ mod tests {
 
     #[test]
     fn build_command_passes_apply_and_ipod_flags() {
-        let cmd = build_command(&PathBuf::from("classick.exe"), "G:\\");
+        let cmd = build_command(&PathBuf::from("classick.exe"), "G:\\", false);
         let dbg = format!("{cmd:?}");
         assert!(dbg.contains("--ipc-mode"));
         assert!(dbg.contains("--apply"));
+        assert!(dbg.contains("--ipod"));
+        assert!(dbg.contains("G:\\"));
+        assert!(!dbg.contains("--rockbox-compat"));
+    }
+
+    #[test]
+    fn build_command_adds_rockbox_flag_when_enabled() {
+        let cmd = build_command(&PathBuf::from("classick.exe"), "G:\\", true);
+        assert!(format!("{cmd:?}").contains("--rockbox-compat"));
+    }
+
+    #[test]
+    fn build_backfill_command_passes_backfill_and_ipod_flags() {
+        let cmd = build_backfill_command(&PathBuf::from("classick.exe"), "G:\\");
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("--ipc-mode"));
+        assert!(dbg.contains("--backfill-rockbox"));
+        assert!(!dbg.contains("--apply"));
         assert!(dbg.contains("--ipod"));
         assert!(dbg.contains("G:\\"));
     }

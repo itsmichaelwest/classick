@@ -4,14 +4,14 @@
 //! JSON, snake_case "type" discriminator, additive.
 //!
 //! Spec §7. Protocol semver: daemon emits hello with
-//! `protocol_version = "1.2.0"` since this extends M1's "1.0.0".
+//! `protocol_version = "1.3.0"` since this extends M1's "1.0.0".
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
 use crate::daemon::device_storage::StorageInfo;
 use crate::daemon::history::HistoryEntry;
 use serde::{Deserialize, Serialize};
 
-pub const DAEMON_PROTOCOL_VERSION: &str = "1.2.0";
+pub const DAEMON_PROTOCOL_VERSION: &str = "1.3.0";
 
 /// Events from daemon → UI clients (in addition to forwarded sync-
 /// subprocess events from `src/ipc.rs`).
@@ -145,6 +145,10 @@ pub enum DaemonCommand {
         id: u64,
         choice: i32,
     },
+    /// Embed tags + cover art into the existing on-iPod library in place so
+    /// Rockbox can read it. Spawns a `--backfill-rockbox` subprocess; reports
+    /// sync-style progress. No-op if a sync is already running.
+    BackfillRockbox,
     Shutdown,
 }
 
@@ -170,7 +174,7 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"hello""#));
-        assert!(json.contains(r#""protocol_version":"1.2.0""#));
+        assert!(json.contains(r#""protocol_version":"1.3.0""#));
     }
 
     #[test]
@@ -200,6 +204,15 @@ mod tests {
             }
             _ => panic!("expected SaveConfig"),
         }
+    }
+
+    #[test]
+    fn backfill_rockbox_deserializes() {
+        let json = r#"{"type":"backfill_rockbox"}"#;
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(json).unwrap(),
+            DaemonCommand::BackfillRockbox
+        ));
     }
 
     #[test]
