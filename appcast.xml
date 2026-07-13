@@ -3,12 +3,12 @@
     <channel>
         <title>Classick</title>
         <item>
-            <title>0.2.1</title>
-            <pubDate>Mon, 13 Jul 2026 21:11:58 +0100</pubDate>
-            <sparkle:version>3</sparkle:version>
-            <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
+            <title>0.2.2</title>
+            <pubDate>Mon, 13 Jul 2026 23:59:07 +0100</pubDate>
+            <sparkle:version>4</sparkle:version>
+            <sparkle:shortVersionString>0.2.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/itsmichaelwest/classick/releases/download/v0.2.1/Classick-0.2.1.dmg" length="9015076" type="application/octet-stream" sparkle:edSignature="wtvmgK0qX8imZkVYG5xvaiR6wnpeJ04DdNV1fPFscXT9wxxbUSe9hctlp5PDYqTM3eaYbsaW4oV+G7crtSMnCQ=="/>
+            <enclosure url="https://github.com/itsmichaelwest/classick/releases/download/v0.2.2/Classick-0.2.2.dmg" length="9039212" type="application/octet-stream" sparkle:edSignature="dfhlPt6gL/kj+xtoEtu3U7r+tBr9DZ5SQO6xmwn6tcewFf1qtZtoSYwAoujhderAw5hhILr+rI3O/NLjUUy8BA=="/>
         </item>
     </channel>
 </rss>
