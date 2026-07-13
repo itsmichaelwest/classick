@@ -376,7 +376,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                             Ok(()) => break true,
                             Err(e) => {
                                 let msg = format!(
-                                    "Failed to remove {} (dbid {}):\n  {e}\n\nChoose:",
+                                    "Failed to remove {} (dbid {}):\n  {e:#}\n\nChoose:",
                                     entry.source_path.display(),
                                     entry.ipod_dbid
                                 );
@@ -439,7 +439,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                             Ok(()) => break true,
                             Err(e) => {
                                 let msg = format!(
-                                    "Failed to delete old version of {} (dbid {}) before re-adding:\n  {e}\n\nChoose:",
+                                    "Failed to delete old version of {} (dbid {}) before re-adding:\n  {e:#}\n\nChoose:",
                                     src.path.display(),
                                     old.ipod_dbid
                                 );
@@ -474,7 +474,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                                 Ok(outcome) => break Some(outcome),
                                 Err(e) => {
                                     let msg = format!(
-                                        "Failed to add new version of {}:\n  {e}\n\nChoose:",
+                                        "Failed to add new version of {}:\n  {e:#}\n\nChoose:",
                                         src.path.display()
                                     );
                                     let outcome = await_prompt(
@@ -527,7 +527,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                             Ok(outcome) => break Some(outcome),
                             Err(e) => {
                                 let msg = format!(
-                                    "Failed to add {}:\n  {e}\n\nChoose:",
+                                    "Failed to add {}:\n  {e:#}\n\nChoose:",
                                     src.path.display()
                                 );
                                 let outcome = await_prompt(
@@ -574,7 +574,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                             Ok(new_entry) => break Some(new_entry),
                             Err(e) => {
                                 let msg = format!(
-                                    "Failed to update metadata for {}:\n  {e}\n\nChoose:",
+                                    "Failed to update metadata for {}:\n  {e:#}\n\nChoose:",
                                     source.path.display()
                                 );
                                 let outcome = await_prompt(
@@ -668,7 +668,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // While the TUI is up, push the recovery block into log_tail so users
         // see it inline. The same text is ALSO attached to the bubbled error
         // (see below) so it survives the TUI teardown that wipes log_tail.
-        progress.error(format!("Sync failed: {e}"));
+        progress.error(format!("Sync failed: {e:#}"));
         for line in RECOVERY_HINT_LINES {
             progress.error((*line).to_string());
         }
@@ -697,7 +697,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // down and log_tail is gone, the user still sees how to recover on stderr.
     sync_result.map_err(|e| {
         let hint = RECOVERY_HINT_LINES.join("\n  ");
-        anyhow!("sync failed: {e}\n\nRecovery:\n  {hint}")
+        anyhow!("sync failed: {e:#}\n\nRecovery:\n  {hint}")
     })
 }
 
