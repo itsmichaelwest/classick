@@ -19,6 +19,11 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 pub enum OrchestratorOutcome {
     Completed { outcome: SyncOutcome, summary: Option<SyncSummary> },
     Aborted { reason: String, summary: Option<SyncSummary> },
+    /// The subprocess emitted `{"type":"paused"}` (graceful drain +
+    /// checkpoint) and then exited on its own. Distinct from `Aborted`:
+    /// nothing failed, the user asked to stop, and a later `TriggerSync`
+    /// resumes from the checkpoint via the normal diff.
+    Paused { summary: Option<SyncSummary> },
 }
 
 /// Build the command to spawn. Extracted so tests can verify args
@@ -64,10 +69,18 @@ impl FailureTracker {
     }
 }
 
-/// Drive the spawned child to completion, until bail, or until cancelled.
+/// Drive the spawned child to completion, until bail, until cancelled, or
+/// until paused.
 ///
 /// `cancel_rx` fires when the user clicks Cancel in the UI; the orchestrator
 /// writes a Cancel command to the subprocess stdin and force-kills after 5s.
+///
+/// `pause_rx` fires when the user clicks Pause in the UI; the orchestrator
+/// writes a Pause command to the subprocess stdin and, unlike cancel, does
+/// NOT force-kill — pause is graceful, so the subprocess finishes draining
+/// its in-flight window, checkpoints, emits `{"type":"paused"}`, and exits
+/// on its own. The existing `bounded_kill` 5s grace remains only as the
+/// cancel/bail backstop; a paused sync is trusted to exit cleanly.
 ///
 /// `prompt_decisions_rx` carries `(id, choice)` pairs from
 /// `DaemonCommand::DecidePrompt`; each is serialised as
@@ -81,6 +94,7 @@ pub async fn run(
     exe: PathBuf,
     drive: String,
     mut cancel_rx: oneshot::Receiver<()>,
+    mut pause_rx: oneshot::Receiver<()>,
     mut prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
 ) -> Result<OrchestratorOutcome> {
@@ -93,6 +107,11 @@ pub async fn run(
     let mut tracker = FailureTracker::default();
     let mut last_summary: Option<SyncSummary> = None;
     let mut finish_success: Option<bool> = None;
+    let mut paused = false;
+    // Guards re-polling `pause_rx` after it has already fired once — a
+    // oneshot::Receiver panics if polled again past Ready. Once the pause
+    // is forwarded we just keep relaying lines until the subprocess exits.
+    let mut pause_requested = false;
 
     loop {
         tokio::select! {
@@ -136,6 +155,9 @@ pub async fn run(
                     "finish" => {
                         finish_success = value.get("success").and_then(|v| v.as_bool());
                     }
+                    "paused" => {
+                        paused = true;
+                    }
                     _ => {}
                 }
             }
@@ -149,6 +171,13 @@ pub async fn run(
                     reason: "user_cancelled".to_string(),
                     summary: last_summary,
                 });
+            }
+            _ = &mut pause_rx, if !pause_requested => {
+                pause_requested = true;
+                let _ = stdin.write_all(b"{\"type\":\"pause\"}\n").await;
+                let _ = stdin.flush().await;
+                // No force-kill: keep looping, relaying lines, until the
+                // subprocess drains + checkpoints + emits "paused" + exits.
             }
             Some((id, choice)) = prompt_decisions_rx.recv() => {
                 // User replied to a daemon-relayed prompt. Forward the
@@ -168,6 +197,10 @@ pub async fn run(
     }
 
     let _ = child.wait().await;
+
+    if paused {
+        return Ok(OrchestratorOutcome::Paused { summary: last_summary });
+    }
 
     let outcome = match finish_success {
         Some(true) => SyncOutcome::Ok,

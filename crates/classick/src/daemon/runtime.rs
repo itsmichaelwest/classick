@@ -50,11 +50,11 @@ pub async fn run_daemon() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<DaemonEvent>(crate::daemon::BROADCAST_CHANNEL_CAPACITY);
     let exe = std::env::current_exe()?;
     let event_tx_for_spawn = event_tx.clone();
-    let spawn_sync: SpawnFn = Arc::new(move |drive: String, cancel_rx, prompt_rx| {
+    let spawn_sync: SpawnFn = Arc::new(move |drive: String, cancel_rx, pause_rx, prompt_rx| {
         let exe = exe.clone();
         let event_tx = event_tx_for_spawn.clone();
         Box::pin(async move {
-            sync_orchestrator::run(exe, drive, cancel_rx, prompt_rx, event_tx).await
+            sync_orchestrator::run(exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx).await
         })
     });
 
@@ -78,12 +78,14 @@ pub async fn run_daemon() -> Result<()> {
 /// runtime can clone it into a tokio::spawn'd task without consuming the
 /// daemon's only copy.
 ///
-/// Args: `(drive, cancel_rx, prompt_decisions_rx)`. The prompt channel
-/// lets `DaemonCommand::DecidePrompt` ferry user replies through to
-/// the running subprocess's stdin without blocking the runtime loop.
+/// Args: `(drive, cancel_rx, pause_rx, prompt_decisions_rx)`. The prompt
+/// channel lets `DaemonCommand::DecidePrompt` ferry user replies through to
+/// the running subprocess's stdin without blocking the runtime loop. The
+/// pause channel lets `DaemonCommand::Pause` request a graceful stop.
 pub type SpawnFn = Arc<
     dyn Fn(
             String,
+            oneshot::Receiver<()>,
             oneshot::Receiver<()>,
             tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
         ) -> Pin<Box<dyn std::future::Future<Output = Result<OrchestratorOutcome>> + Send>>
@@ -191,6 +193,16 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     // ...}\n line to the subprocess stdin. Set alongside cancel_tx
     // at sync-start; cleared on completion.
     let mut prompt_tx_holder: Option<mpsc::UnboundedSender<(u64, i32)>> = None;
+    // Pause signal for the currently-running sync (if any). Mirrors
+    // cancel_tx_holder, but the orchestrator's pause arm doesn't
+    // force-kill — see sync_orchestrator::run's doc comment.
+    let mut pause_tx_holder: Option<oneshot::Sender<()>> = None;
+    // Cached source-library track count (Y in "X of Y synced"). `None`
+    // until a sync computes it. Walking the source on every status tick
+    // would stall the daemon loop, so this is only refreshed from a
+    // sync's already-performed diff (add + modify + unchanged == current
+    // source count) and invalidated when the source path changes.
+    let mut library_count_cache: Option<usize> = None;
     let mut configured_serial = configured_serial;
 
     tracing::info!("daemon: ready (configured_serial={configured_serial:?})");
@@ -215,8 +227,10 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &internal_tx,
                     &mut cancel_tx_holder,
                     &mut prompt_tx_holder,
+                    &mut pause_tx_holder,
                     &mut configured_serial,
                     &mut scheduler,
+                    &mut library_count_cache,
                 );
                 if should_exit { break ExitReason::Shutdown; }
             }
@@ -237,10 +251,12 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &internal_tx,
                     &mut cancel_tx_holder,
                     &mut prompt_tx_holder,
+                    &mut pause_tx_holder,
                     configured_serial.as_deref(),
                     &config_path,
+                    library_count_cache,
                 );
-                broadcast_status(&event_tx, &state, &connected, &config_path, &history);
+                broadcast_status(&event_tx, &state, &connected, &config_path, &history, library_count_cache);
             }
 
             Some(internal) = internal_rx.recv() => {
@@ -250,8 +266,9 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                 if is_sync_completion {
                     cancel_tx_holder = None;
                     prompt_tx_holder = None;
+                    pause_tx_holder = None;
                 }
-                handle_internal_event(internal, &mut state, &event_tx, &history, &mut connected, &config_path);
+                handle_internal_event(internal, &mut state, &event_tx, &history, &mut connected, &config_path, &mut library_count_cache);
             }
 
             Some(()) = new_client_rx.recv() => {
@@ -260,7 +277,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                 // with current state, even if earlier broadcasts (e.g.
                 // DeviceConnected from polling at daemon startup) went
                 // out before they subscribed.
-                broadcast_status(&event_tx, &state, &connected, &config_path, &history);
+                broadcast_status(&event_tx, &state, &connected, &config_path, &history, library_count_cache);
             }
 
             _ = scheduler.tick() => {
@@ -278,6 +295,8 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                             &internal_tx,
                             &mut cancel_tx_holder,
                             &mut prompt_tx_holder,
+                            &mut pause_tx_holder,
+                            library_count_cache,
                         );
                     }
                 }
@@ -343,6 +362,7 @@ fn handle_internal_event(
     history: &HistoryService,
     connected: &mut Option<DetectedIpod>,
     config_path: &std::path::Path,
+    library_count_cache: &mut Option<usize>,
 ) {
     match event {
         InternalEvent::IpodNameResolved { serial, name } => {
@@ -401,10 +421,27 @@ fn handle_internal_event(
                 Ok(OrchestratorOutcome::Aborted { reason, summary }) => {
                     (SyncOutcome::Aborted, Some(reason), summary)
                 }
+                // A graceful pause isn't a failure or a user-driven abort of
+                // the *library* — it's recorded as Aborted (reason "paused")
+                // so history still reflects "didn't fully complete", while
+                // the live "paused" signal itself rode the raw SyncEvent
+                // stream the UI's Phase.paused reducer watches directly.
+                Ok(OrchestratorOutcome::Paused { summary }) => {
+                    (SyncOutcome::Aborted, Some("paused".to_string()), summary)
+                }
                 Err(e) => {
                     (SyncOutcome::Error, Some(format!("orchestrator: {e:#}")), None)
                 }
             };
+
+            // Refresh the library-count cache from this sync's diff — free,
+            // since the apply loop already walked the source to compute it.
+            // add + modify + unchanged are the tracks currently present in
+            // the source (remove is present in the manifest but gone from
+            // source, so it's excluded from "current library size").
+            if let Some(s) = summary.as_ref() {
+                *library_count_cache = Some(s.add + s.modify + s.unchanged);
+            }
 
             let entry = make_history_entry(
                 trigger, history_outcome, error_message, summary, started_at_unix_secs,
@@ -421,6 +458,8 @@ fn handle_internal_event(
                 last_sync,
                 next_scheduled_unix_secs: None,
                 storage: current_storage(connected),
+                synced_count: synced_track_count(),
+                library_count: *library_count_cache,
             });
         }
     }
@@ -460,8 +499,10 @@ fn handle_device_event(
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
     prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
+    pause_tx_holder: &mut Option<oneshot::Sender<()>>,
     configured_serial: Option<&str>,
     config_path: &std::path::Path,
+    library_count_cache: Option<usize>,
 ) {
     match event {
         DeviceEvent::Connected(mut ipod) => {
@@ -527,6 +568,8 @@ fn handle_device_event(
                     internal_tx,
                     cancel_tx_holder,
                     prompt_tx_holder,
+                    pause_tx_holder,
+                    library_count_cache,
                 );
             }
         }
@@ -569,6 +612,8 @@ fn start_sync_session(
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
     prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
+    pause_tx_holder: &mut Option<oneshot::Sender<()>>,
+    library_count_cache: Option<usize>,
 ) {
     if state.try_start_sync_for_device(trigger.clone(), serial.clone(), drive.clone())
         != TriggerOutcome::Accepted
@@ -586,6 +631,8 @@ fn start_sync_session(
         last_sync: None,
         next_scheduled_unix_secs: None,
         storage: device_storage::query_storage(&drive),
+        synced_count: synced_track_count(),
+        library_count: library_count_cache,
     });
 
     // Per-sync cancel channel. Sender held by the runtime so the
@@ -601,13 +648,19 @@ fn start_sync_session(
     let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<(u64, i32)>();
     *prompt_tx_holder = Some(prompt_tx);
 
+    // Per-sync pause channel. Sender held by the runtime so the Pause
+    // IPC command can wake the orchestrator; Receiver passed into the
+    // spawn closure.
+    let (pause_tx, pause_rx) = oneshot::channel::<()>();
+    *pause_tx_holder = Some(pause_tx);
+
     let spawn_sync = spawn_sync.clone();
     let internal_tx = internal_tx.clone();
     let drive_for_task = drive.clone();
     let trigger_for_task = trigger.clone();
     let serial_for_task = serial.clone();
     tokio::spawn(async move {
-        let outcome = (spawn_sync)(drive_for_task, cancel_rx, prompt_rx).await;
+        let outcome = (spawn_sync)(drive_for_task, cancel_rx, pause_rx, prompt_rx).await;
         let _ = internal_tx.send(InternalEvent::SyncCompleted {
             trigger: trigger_for_task,
             serial: serial_for_task,
@@ -645,6 +698,7 @@ fn broadcast_status(
     connected: &Option<DetectedIpod>,
     config_path: &std::path::Path,
     history: &HistoryService,
+    library_count: Option<usize>,
 ) {
     let configured = config_file::load(config_path)
         .ok()
@@ -663,7 +717,21 @@ fn broadcast_status(
         last_sync: entries.last().cloned(),
         next_scheduled_unix_secs: None,
         storage: current_storage(connected),
+        synced_count: synced_track_count(),
+        library_count,
     });
+}
+
+/// Tracks currently on the iPod per the manifest (X in "X of Y synced").
+/// Cheap and always fresh — just a JSON read + `Vec::len()`, no source
+/// walk. Falls back to 0 if the manifest path can't be resolved or the
+/// manifest doesn't exist yet (nothing synced yet is a legitimate 0, not
+/// an error worth surfacing on a status tick).
+fn synced_track_count() -> usize {
+    let Ok(manifest_path) = crate::config::default_manifest_path() else { return 0 };
+    crate::manifest::load_or_default(&manifest_path)
+        .map(|m| m.tracks.len())
+        .unwrap_or(0)
 }
 
 /// Query free + total bytes for the connected iPod's drive. `None` when
@@ -690,8 +758,10 @@ fn handle_client_command(
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
     prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
+    pause_tx_holder: &mut Option<oneshot::Sender<()>>,
     configured_serial: &mut Option<String>,
     scheduler: &mut SyncScheduler,
+    library_count_cache: &mut Option<usize>,
 ) -> bool {
     tracing::info!("daemon: client {client_id} command: {command:?}");
     match command {
@@ -709,6 +779,8 @@ fn handle_client_command(
                 last_sync: entries.last().cloned(),
                 next_scheduled_unix_secs: None,
                 storage: current_storage(connected),
+                synced_count: synced_track_count(),
+                library_count: *library_count_cache,
             });
         }
         DaemonCommand::GetConfig => {
@@ -736,6 +808,10 @@ fn handle_client_command(
                 tracing::error!("daemon: failed to save config: {e}");
                 return false;
             }
+            // Invalidate the cached library count — the source path may
+            // have changed, which would make the cached Y stale. It's
+            // repopulated for free the next time a sync computes it.
+            *library_count_cache = None;
             // Mirror the persisted ipod identity into the in-memory
             // `configured_serial` so subsequent plug-in / TriggerSync
             // checks see the post-wizard state without needing a daemon
@@ -822,6 +898,8 @@ fn handle_client_command(
                 internal_tx,
                 cancel_tx_holder,
                 prompt_tx_holder,
+                pause_tx_holder,
+                *library_count_cache,
             );
         }
         DaemonCommand::CancelSync => {
@@ -834,6 +912,18 @@ fn handle_client_command(
                 tracing::info!("daemon: client {client_id} cancelled the running sync");
             } else {
                 tracing::debug!("daemon: client {client_id} sent cancel_sync but no sync is in progress");
+            }
+        }
+        DaemonCommand::Pause => {
+            // Wake the orchestrator's pause arm. Unlike CancelSync, this
+            // is graceful — no force-kill; the SyncCompleted internal
+            // event arrives once the subprocess has drained, checkpointed,
+            // emitted "paused", and exited on its own.
+            if let Some(tx) = pause_tx_holder.take() {
+                let _ = tx.send(());
+                tracing::info!("daemon: client {client_id} requested pause of the running sync");
+            } else {
+                tracing::debug!("daemon: client {client_id} sent pause but no sync is in progress");
             }
         }
         DaemonCommand::DecidePrompt { id, choice } => {

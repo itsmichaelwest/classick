@@ -151,7 +151,9 @@ pub fn merge_source(
         .or_else(|| persisted.as_ref().and_then(|p| p.source.clone()))
 }
 
-fn default_manifest_path() -> Result<PathBuf> {
+/// Public so the daemon (`daemon/runtime.rs`) can locate the manifest
+/// without spawning a subprocess just to read a track count.
+pub fn default_manifest_path() -> Result<PathBuf> {
     let appdata = dirs::config_dir()
         .ok_or_else(|| anyhow!("could not resolve %APPDATA% via dirs::config_dir"))?;
     Ok(appdata.join(crate::PROJECT_DIR).join("manifest.json"))
