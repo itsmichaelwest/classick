@@ -1158,7 +1158,15 @@ pub fn backfill_rockbox(
         Instant::now(),
     );
     let (mut updated, mut skipped) = (0usize, 0usize);
-    for entry in manifest.tracks.iter().filter(|e| e.source_known && !e.ipod_relpath.is_empty()) {
+    // Skip passthrough entries: their on-device file keeps the source
+    // container/extension (e.g. .wav/.mp3) and already carries its own tags/art
+    // (Rockbox-ready as-is). Only transcoded ALAC (.m4a) output was ever bare,
+    // and embed_track_metadata only supports MP4 tags anyway.
+    for entry in manifest
+        .tracks
+        .iter()
+        .filter(|e| e.source_known && !e.ipod_relpath.is_empty() && e.encoder != "passthrough")
+    {
         let device_file = Path::new(&mount)
             .join(entry.ipod_relpath.replace('\\', std::path::MAIN_SEPARATOR_STR));
         if !device_file.exists() || !entry.source_path.exists() {

@@ -48,7 +48,16 @@ pub fn embed_track_metadata(m4a: &Path, tags: &crate::ipod::db::Tags, art: Optio
     if file.primary_tag().is_none() {
         file.insert_tag(Tag::new(TagType::Mp4Ilst));
     }
-    let tag = file.primary_tag_mut().expect("primary tag present after insert");
+    // `insert_tag` is a no-op for file types that don't support the tag type
+    // (e.g. a WAV/AIFF passthrough file can't hold an MP4 ilst), so the tag may
+    // still be absent here. Return Err (never panic) so the caller warn-skips —
+    // this fn is called from non-fatal paths (transcode worker + backfill).
+    let Some(tag) = file.primary_tag_mut() else {
+        anyhow::bail!(
+            "{} does not support MP4 tags (not an .m4a?); skipping embed",
+            m4a.display()
+        );
+    };
 
     if let Some(v) = &tags.title {
         tag.set_title(v.clone());
@@ -184,6 +193,36 @@ mod tests {
         embed_track_metadata(&tmp, &tags_fixture(), None).unwrap();
         let f = lofty::read_from_path(&tmp).unwrap();
         assert_eq!(f.primary_tag().unwrap().title().as_deref(), Some("Wake Me Up Tomorrow"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Regression: a file lofty can read but that doesn't support MP4 tags
+    /// (e.g. a WAV/AIFF passthrough) must return Err, NOT panic — the backfill
+    /// loop calls this per-track and must warn-skip rather than abort.
+    #[test]
+    fn embed_into_non_mp4_returns_err_not_panic() {
+        // Minimal valid PCM WAV (mono/16-bit/44.1k, 2 samples) lofty can parse.
+        let mut wav: Vec<u8> = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&40u32.to_le_bytes()); // 36 + data(4)
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&44100u32.to_le_bytes());
+        wav.extend_from_slice(&88200u32.to_le_bytes()); // byte rate
+        wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+        wav.extend_from_slice(&16u16.to_le_bytes()); // bits
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4u32.to_le_bytes());
+        wav.extend_from_slice(&[0, 0, 0, 0]);
+
+        let tmp = std::env::temp_dir().join(format!("classick-embed-wav-{}.wav", std::process::id()));
+        std::fs::write(&tmp, &wav).unwrap();
+        // Must not panic; must be Err (unsupported tag type).
+        let r = embed_track_metadata(&tmp, &tags_fixture(), None);
+        assert!(r.is_err(), "embedding into a non-MP4 file must return Err, not panic");
         let _ = std::fs::remove_file(&tmp);
     }
 }
