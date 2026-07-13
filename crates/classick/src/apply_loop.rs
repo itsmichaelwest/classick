@@ -857,30 +857,15 @@ pub(crate) fn transcode_one(
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
-                // Refalac --artwork wants a path; extract embedded art to a
-                // temp jpg first if any, then pass it. Cleaned up after.
-                let art_path_opt = if has_embedded_art(&probe) {
-                    let art_path = transcode::temp_art_path();
-                    transcode::extract_cover_art(&src.path, &art_path, &config.ffmpeg).with_context(|| {
-                        format!("extract art for refalac --artwork: {}", src.path.display())
-                    })?;
-                    Some(art_path)
-                } else {
-                    None
-                };
                 let ffmpeg_path = config.ffmpeg.as_path();
-                let result = transcode::transcode_via_refalac(
+                transcode::transcode_via_refalac(
                     &src.path,
                     &dst,
                     &config.refalac_path,
                     ffmpeg_path,
-                    art_path_opt.as_deref(),
+                    None, // audio-only: art embedded later by artwork::embed
                 )
-                .with_context(|| format!("refalac transcode {}", src.path.display()));
-                if let Some(p) = &art_path_opt {
-                    let _ = std::fs::remove_file(p);
-                }
-                result?;
+                .with_context(|| format!("refalac transcode {}", src.path.display()))?;
                 let ver = refalac_version
                     .clone()
                     .unwrap_or_else(|| "refalac (version unknown)".to_string());

@@ -156,10 +156,8 @@ pub fn ffmpeg_args(src: &Path, dst: &Path) -> Vec<String> {
         "-y".into(),  // overwrite output without prompting
         "-i".into(), src.to_string_lossy().into_owned(),
         "-map".into(), "0:a".into(),
-        "-map".into(), "0:v?".into(),  // optional video (attached pic) — `?` = don't error if absent
         "-c:a".into(), "alac".into(),
-        "-c:v".into(), "copy".into(),
-        "-disposition:v".into(), "attached_pic".into(),
+        "-vn".into(),  // audio-only: embedded art is written later by artwork::embed
         "-f".into(), "ipod".into(),
         dst.to_string_lossy().into_owned(),
     ]
@@ -642,10 +640,9 @@ mod tests {
         assert!(joined.contains("-y"));
         assert!(joined.contains(r"-i C:\src\song.flac"));
         assert!(joined.contains("-map 0:a"));
-        assert!(joined.contains("-map 0:v?"));
+        assert!(!joined.contains("0:v"), "unified pipeline: transcode is audio-only");
+        assert!(!joined.contains("attached_pic"));
         assert!(joined.contains("-c:a alac"));
-        assert!(joined.contains("-c:v copy"));
-        assert!(joined.contains("-disposition:v attached_pic"));
         assert!(joined.contains("-f ipod"));
         // The output path is the LAST arg.
         assert_eq!(args.last().unwrap(), r"C:\tmp\out.m4a");
