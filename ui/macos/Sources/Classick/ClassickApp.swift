@@ -21,6 +21,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let model = AppModel()
     let daemonClient = DaemonClient()
     private let daemonProcess = DaemonProcess()
+    private let setupWindowController = SetupWindowController()
+
+    /// First-run setup is auto-presented exactly once per launch, the moment
+    /// the daemon confirms the user is unconfigured. This latches that so a
+    /// later `config_update` (or reconnect churn) can't re-open it.
+    private var didAutoPresentSetup = false
     #if canImport(Sparkle)
     private let updater = Updater()
     #endif
@@ -54,9 +60,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 self.model.apply(event)
                 self.observeForNotification(event)
                 self.presentPromptIfNeeded()
+                self.autoPresentSetupIfNeeded()
             }
             self.daemonFatalError = await self.daemonClient.lastFatalError
         }
+    }
+
+    /// Shows first-run setup. Wired to the "Set Up Classick…" menu row and
+    /// reused by `autoPresentSetupIfNeeded`.
+    func presentSetup() {
+        setupWindowController.show(model: model, onDone: finishSetup)
+    }
+
+    /// Auto-presents setup the first time the daemon confirms (post-handshake)
+    /// that the user has no configured music library. Gated on
+    /// `needsFirstRunSetup`, which stays false until the `get_config` reply
+    /// lands, so this can't fire during the startup race — and latched by
+    /// `didAutoPresentSetup` so it happens at most once per launch.
+    private func autoPresentSetupIfNeeded() {
+        guard !didAutoPresentSetup, model.needsFirstRunSetup else { return }
+        didAutoPresentSetup = true
+        presentSetup()
     }
 
     /// Sends the setup window's `save_config` (folder + auto-sync + the
@@ -167,10 +191,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 struct ClassickApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
-    // `openWindow`/`openSettings` are ordinary `EnvironmentValues` and are
-    // readable from the `App` conformer itself (not just from `View` bodies)
-    // — the standard way to trigger scenes from `MenuBarExtra` actions.
-    @Environment(\.openWindow) private var openWindow
+    // `openSettings` is an ordinary `EnvironmentValue` readable from the `App`
+    // conformer itself — the standard way to trigger the Settings scene from a
+    // `MenuBarExtra` action. (Setup is NOT a SwiftUI scene; it's an
+    // AppKit-hosted window owned by the delegate — see `SetupWindowController`.)
     @Environment(\.openSettings) private var openSettings
 
     var body: some Scene {
@@ -178,7 +202,7 @@ struct ClassickApp: App {
             MenuContent(
                 model: appDelegate.model,
                 daemonFatalError: appDelegate.daemonFatalError,
-                onSetUp: openSetupWindow,
+                onSetUp: appDelegate.presentSetup,
                 onOpenSettings: openSettingsWindow,
                 onSyncNow: appDelegate.syncNow,
                 onCancelSync: appDelegate.cancelSync,
@@ -187,13 +211,6 @@ struct ClassickApp: App {
             )
         }
         .menuBarExtraStyle(.menu)
-
-        // A regular, single-instance window (not a MenuBarExtra submenu) so
-        // `.fileImporter` and normal window chrome work as expected.
-        Window("Set Up Classick", id: "setup") {
-            SetupWindow(model: appDelegate.model, onDone: appDelegate.finishSetup)
-        }
-        .windowResizability(.contentSize)
 
         Settings {
             SettingsView(
@@ -204,14 +221,9 @@ struct ClassickApp: App {
         }
     }
 
-    /// Opening any window from this `LSUIElement` (accessory, no Dock icon)
-    /// app requires activating it first — otherwise the window can open
+    /// Opening the Settings window from this `LSUIElement` (accessory, no Dock
+    /// icon) app requires activating it first — otherwise the window can open
     /// behind whatever app currently has focus.
-    private func openSetupWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "setup")
-    }
-
     private func openSettingsWindow() {
         NSApp.activate(ignoringOtherApps: true)
         openSettings()

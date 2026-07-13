@@ -1,3 +1,4 @@
+import AppKit
 import ServiceManagement
 import SwiftUI
 
@@ -168,8 +169,12 @@ private struct AboutTab: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Image(systemName: "ipod")
-                .font(.system(size: 48))
+            // The real app icon (from the bundle's AppIcon asset) rather than
+            // a generic SF Symbol. `applicationIconImage` is always populated
+            // for a bundled, signed app.
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .frame(width: 96, height: 96)
             Text("Classick")
                 .font(.title2.bold())
             Text(build.isEmpty ? "Version \(version)" : "Version \(version) (\(build))")

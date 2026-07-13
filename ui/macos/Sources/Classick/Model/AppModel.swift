@@ -67,10 +67,30 @@ final class AppModel {
     private var statusConfigured = false
 
     private var isConfiguredForCurrentDevice: Bool {
-        if let device {
-            return device.serial == configuredSerial
-        }
-        return hasSeenConfig ? configuredSerial != nil : statusConfigured
+        // Until the config reply lands (`hasSeenConfig`), we don't yet know
+        // *which* iPod is paired, so we can't device-match. Trust the daemon's
+        // device-agnostic `status_update.configured` flag in that window — this
+        // avoids flashing "Set Up Classick…" during the startup handshake AND
+        // on every reconnect of an already-configured device (where
+        // `status_update` arrives before `config_update`).
+        guard hasSeenConfig else { return statusConfigured }
+        // Config known but the `device_connected` event hasn't arrived yet:
+        // fall back to "is anything paired at all".
+        guard let device else { return configuredSerial != nil }
+        // Both known: the paired serial must match the connected device, so a
+        // swapped-in unpaired iPod correctly shows "Set Up Classick…".
+        return device.serial == configuredSerial
+    }
+
+    /// The user has never completed first-run setup: the daemon has reported
+    /// its persisted config (post-handshake, so `hasSeenConfig`) and it carries
+    /// no music-library source. Stays `false` until the config reply lands, so
+    /// first-run auto-presentation waits for the handshake instead of firing
+    /// during the startup race. The daemon always answers `get_config` — with
+    /// an empty `config_update` when nothing is persisted — so this reliably
+    /// flips `true` on a fresh machine.
+    var needsFirstRunSetup: Bool {
+        hasSeenConfig && (config?.source?.isEmpty ?? true)
     }
 
     private let decoder = JSONDecoder()

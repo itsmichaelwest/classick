@@ -47,6 +47,31 @@ final class AppModelReducerTests: XCTestCase {
         XCTAssertEqual(m.phase, .idle)
     }
 
+    func testNeedsFirstRunSetupOnlyAfterEmptyConfigSeen() {
+        // The first-run auto-present trigger must stay false until the daemon's
+        // get_config reply lands (avoids firing during the startup race), then
+        // become true only when no music-library source is configured.
+        let m = AppModel()
+        XCTAssertFalse(m.needsFirstRunSetup, "unknown before the config reply")
+
+        m.apply(.configUpdate(source: nil, daemon: nil, ipod: nil))
+        XCTAssertTrue(m.needsFirstRunSetup, "empty config == never set up")
+
+        m.apply(.configUpdate(source: "/music", daemon: nil, ipod: nil))
+        XCTAssertFalse(m.needsFirstRunSetup, "source set == setup completed")
+    }
+
+    func testReconnectOfConfiguredDeviceDoesNotFlashSetUp() {
+        // Regression: on reconnect the daemon's status_update (configured=true)
+        // arrives before config_update, so before we know the paired serial the
+        // menu must trust that flag and stay .idle — not flash "Set Up Classick…".
+        let m = AppModel()
+        m.apply(.statusUpdate(.init(state: .idle, configured: true, ipodConnected: true, lastSync: nil, storage: nil)))
+        XCTAssertEqual(m.phase, .idle)
+        m.apply(.deviceConnected(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
+        XCTAssertEqual(m.phase, .idle, "must not flash .notConfigured before config_update")
+    }
+
     func testDeviceSwapToUnpairedShowsNotConfigured() {
         // Regression: "configured" must be checked against the *currently
         // connected* device's serial, not just "some iPod was ever paired" —

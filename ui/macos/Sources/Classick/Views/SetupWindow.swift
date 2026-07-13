@@ -2,14 +2,16 @@ import SwiftUI
 
 /// First-run setup: pick the music library folder, confirm the detected
 /// iPod, opt into auto-sync, and persist it all in one `save_config`.
-/// Reached from the `.notConfigured` menu row ("Set Up Classick…") — see
-/// `ClassickApp`'s `Window(id: "setup")` scene for how this is opened and
-/// brought to the front from the `LSUIElement` app.
+/// Reached from the `.notConfigured` menu row ("Set Up Classick…") and
+/// auto-presented on first run — see `SetupWindowController`, which hosts
+/// this view in an AppKit `NSWindow` (rather than a lazy SwiftUI `Window`
+/// scene) so it can be shown deterministically from the app delegate.
+/// `onClose` is injected by that controller because a hosted view has no
+/// `@Environment(\.dismiss)` window to dismiss.
 struct SetupWindow: View {
     var model: AppModel
     var onDone: (_ source: String, _ autoSync: Bool) -> Void
-
-    @Environment(\.dismiss) private var dismiss
+    var onClose: () -> Void
 
     @State private var pickedPath: String?
     @State private var autoSync = true
@@ -54,7 +56,7 @@ struct SetupWindow: View {
                 Button("Done") {
                     guard let pickedPath else { return }
                     onDone(pickedPath, autoSync)
-                    dismiss()
+                    onClose()
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(pickedPath == nil)
