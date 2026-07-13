@@ -87,20 +87,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// currently-detected iPod, if any) and clears any error banner from a
     /// prior failed handshake/save.
     func finishSetup(source: String, autoSync: Bool) {
-        // SaveConfig replaces the whole daemon blob, so any field this wizard
-        // doesn't carry gets reset to its default. Preserve rockboxCompat (and
-        // any future user-set flag) from the current config rather than
-        // silently flipping it back off when setup re-runs.
-        let daemon = DaemonSettings(
+        let daemon = Self.setupDaemonSettings(
+            autoSync: autoSync,
+            preservingRockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
+        let ipod = model.device.map { IpodIdentity(serial: $0.serial, modelLabel: $0.model, name: $0.name) }
+        Task { await daemonClient.send(.saveConfig(source: source, daemon: daemon, ipod: ipod)) }
+    }
+
+    /// The `DaemonSettings` the first-run wizard persists. SaveConfig replaces
+    /// the whole daemon blob, so any field not carried here gets reset to its
+    /// default when setup re-runs — hence `rockboxCompat` is threaded through
+    /// from the current config rather than silently flipped back off. Static +
+    /// pure so the preservation is unit-testable.
+    static func setupDaemonSettings(autoSync: Bool, preservingRockboxCompat rockboxCompat: Bool) -> DaemonSettings {
+        DaemonSettings(
             enabled: autoSync,
             autostartWithWindows: false,
             firstSyncMode: "auto_apply",
             subsequentSyncMode: "auto_apply",
             scheduleMinutes: 0,
             notifyOn: "all",
-            rockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
-        let ipod = model.device.map { IpodIdentity(serial: $0.serial, modelLabel: $0.model, name: $0.name) }
-        Task { await daemonClient.send(.saveConfig(source: source, daemon: daemon, ipod: ipod)) }
+            rockboxCompat: rockboxCompat)
     }
 
     /// Settings window's debounced edits. `ipod` is omitted (nil) so an
