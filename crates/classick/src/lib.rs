@@ -41,6 +41,14 @@ pub const RETRY_BACKOFF: [Duration; 3] = [
     Duration::from_secs(3),
 ];
 
+/// Concurrent afconvert transcode workers (afconvert is CPU-bound; oversubscribing
+/// hurts). Resolved at runtime via available_parallelism, capped.
+pub fn transcode_workers() -> usize {
+    std::thread::available_parallelism().map(|n| n.get().saturating_sub(1)).unwrap_or(1).clamp(1, 4)
+}
+/// Max jobs transcoded ahead of the committer (bounds temp-file disk use).
+pub const PIPELINE_WINDOW: usize = 8;
+
 pub mod apply_loop;
 pub mod checkpoint;
 pub mod cli;
@@ -54,6 +62,7 @@ pub mod ipod;
 pub mod logging;
 pub mod manifest;
 pub mod orchestrator;
+pub mod pipeline;
 pub mod preflight;
 pub mod progress;
 #[cfg(windows)]
