@@ -3,6 +3,16 @@ import XCTest
 
 @MainActor
 final class AppModelReducerTests: XCTestCase {
+    /// Regression: the first-run setup wizard must NOT reset an enabled Rockbox
+    /// compatibility toggle back to off (SaveConfig replaces the whole daemon
+    /// blob, so the wizard has to carry the existing value through).
+    func testSetupWizardPreservesRockboxCompat() {
+        let preserved = AppDelegate.setupDaemonSettings(autoSync: true, preservingRockboxCompat: true)
+        XCTAssertTrue(preserved.rockboxCompat, "wizard must preserve an enabled Rockbox toggle")
+        let off = AppDelegate.setupDaemonSettings(autoSync: true, preservingRockboxCompat: false)
+        XCTAssertFalse(off.rockboxCompat)
+    }
+
     func testDeviceConnectThenDisconnect() {
         let m = AppModel()
         m.apply(.deviceConnected(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "Michael’s iPod"))
