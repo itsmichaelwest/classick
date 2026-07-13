@@ -102,11 +102,14 @@ private struct GeneralTab: View {
                     get: { rockboxCompat },
                     set: { rockboxCompat = $0; scheduleSave() }
                 ))
-            Text("Lets an iPod running Rockbox read your library. Applies to newly synced tracks; use the button below to convert what's already on the iPod. Keep any files you copy to the iPod yourself outside iPod_Control.")
+            Text("Embeds tags + cover art into the files so an iPod running Rockbox can read your library (applies to newly synced tracks). Keep any files you copy to the iPod yourself outside iPod_Control.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
-            Button("Update existing library for Rockbox") { onBackfill() }
+            Button("Update artwork & metadata") { onBackfill() }
+            Text("Refresh artwork + metadata for everything already on the iPod — both the Apple firmware and Rockbox — without re-copying audio. Use after retagging your library (e.g. in Lidarr).")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
 
             if let ipodLabel {
                 LabeledContent("iPod") {
