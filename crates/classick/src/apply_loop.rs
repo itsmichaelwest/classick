@@ -7,13 +7,16 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
+use crate::checkpoint::CheckpointClock;
 use crate::cli::EncoderChoice;
 use crate::config::Config;
 use crate::config_file;
 use crate::ipod::db::{OwnedDb, TrackHandle};
 use crate::ipod::device;
 use crate::manifest::{self, Action, Manifest, ManifestEntry};
+use crate::pipeline::OrderedTranscoder;
 use crate::preflight;
 use crate::progress::{ActionPlanSummary, Decision, Progress, ReviewDecision};
 use crate::source::{self, SourceEntry};
@@ -249,11 +252,12 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 progress.log("Aborted; nothing was written.");
                 return Ok(());
             }
-            Ok(Decision::Prompt { .. }) | Ok(Decision::Form { .. }) => {
+            Ok(Decision::Prompt { .. }) | Ok(Decision::Form { .. }) | Ok(Decision::Pause) => {
                 // Unexpected at this stage (no try_with_prompt / wizard caller
-                // wired yet — Tasks 5+6 will do that). Return loudly rather
-                // than silently swallowing a stray decision.
-                return Err(anyhow!("unexpected prompt/form decision before any prompt was sent"));
+                // wired yet, and Pause only makes sense once the apply loop
+                // is running). Return loudly rather than silently swallowing
+                // a stray decision.
+                return Err(anyhow!("unexpected prompt/form/pause decision before any prompt was sent"));
             }
             Err(_) => {
                 return Err(anyhow!("review channel disconnected unexpectedly"));
@@ -328,11 +332,41 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
             ));
         }
 
+        // Dispatch parallel transcode jobs for every Add/Modify action ahead
+        // of the single committer loop below. Modify actions that will be
+        // skipped under --no-delete (see the Modify arm) are excluded here —
+        // dispatching one would mean nobody ever calls `take()` for it,
+        // permanently leaking a window permit and an on-disk temp file for
+        // the rest of the process. Add jobs are always dispatched (Add never
+        // short-circuits before reaching the committer).
+        let transcode_jobs: Vec<(usize, SourceEntry)> = actions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, a)| match a {
+                Action::Add(src) => Some((idx, src.clone())),
+                Action::Modify(src, _old) if !effective_no_delete => Some((idx, src.clone())),
+                _ => None,
+            })
+            .collect();
+        let config_for_workers = config.clone();
+        let refalac_for_workers = refalac_version.clone();
+        let transcoder = OrderedTranscoder::start(
+            transcode_jobs,
+            crate::transcode_workers(),
+            crate::PIPELINE_WINDOW,
+            move |src: &SourceEntry| transcode_one(src, &config_for_workers, &refalac_for_workers),
+        );
+
         let mut i = 0usize;
         let mut cancelled = false;
-        let mut tracks_since_checkpoint = 0usize;
-        for action in actions {
-            // Non-blocking cancel poll. The IPC stdin reader maps a
+        let mut paused = false;
+        let mut ckpt = CheckpointClock::new(
+            crate::CHECKPOINT_MAX_TRACKS,
+            Duration::from_secs(crate::CHECKPOINT_MAX_SECONDS),
+            Instant::now(),
+        );
+        for (idx, action) in actions.into_iter().enumerate() {
+            // Non-blocking cancel/pause poll. The IPC stdin reader maps a
             // `{"type":"cancel"}` from the daemon to
             // Decision::Review(ReviewDecision::Quit) and pushes it onto
             // decision_rx. Without this check we'd only observe Quit at
@@ -343,10 +377,19 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
             // we fall through to the post-loop db.write() + manifest
             // save below, so all completed tracks are properly
             // registered in iTunesDB and no orphans are left behind.
+            //
+            // Decision::Pause is the same drain-then-stop shape as Cancel;
+            // the only difference (surfaced in a later task) is the terminal
+            // outcome reported to the caller.
             match decision_rx.try_recv() {
                 Ok(Decision::Review(ReviewDecision::Quit)) => {
                     progress.log("Cancel requested — finalising completed tracks before stopping...");
                     cancelled = true;
+                    break;
+                }
+                Ok(Decision::Pause) => {
+                    progress.log("Pause requested — finalising in-flight tracks…");
+                    paused = true;
                     break;
                 }
                 // Other decisions at this point are stray (no prompt is
@@ -469,48 +512,20 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                         manifest.tracks.retain(|e| e.ipod_dbid != old.ipod_dbid);
                     }
 
-                    // Second half: re-add. Only runs if delete succeeded.
-                    // (The --no-delete short-circuit above already returned.)
-                    if deleted {
-                        let transcoded: Option<Transcoded> = loop {
-                            match transcode_one(&src, config, &refalac_version) {
-                                Ok(t) => break Some(t),
-                                Err(e) => match prompt_retry_skip_abort(progress, decision_rx, &src, &e)? {
-                                    PromptOutcome::Retry => continue,
-                                    PromptOutcome::Skip => {
-                                        // iPod state is "in-between": old
-                                        // track gone, new not added. Next
-                                        // run's diff will see the missing
-                                        // iPod entry and re-add naturally.
-                                        progress.log(format!(
-                                            "Skipped Modify after partial delete for {}",
-                                            src.path.display()
-                                        ));
-                                        break None;
-                                    }
-                                    _ => return Err(e),
-                                },
-                            }
-                        };
-                        if let Some(t) = transcoded {
-                            loop {
-                                match commit_transcoded(&db, &mut manifest, &src, &t) {
-                                    Ok(()) => break,
-                                    Err(e) => match prompt_retry_skip_abort(progress, decision_rx, &src, &e)? {
-                                        PromptOutcome::Retry => continue,
-                                        PromptOutcome::Skip => {
-                                            progress.log(format!(
-                                                "Skipped Modify after partial delete for {}",
-                                                src.path.display()
-                                            ));
-                                            break;
-                                        }
-                                        _ => return Err(e),
-                                    },
-                                }
-                            }
-                        }
-                    }
+                    // Second half: commit the already-pipelined transcode.
+                    // `take(idx)` MUST run whenever a job was dispatched for
+                    // this index — and one was, since the dispatch filter
+                    // above only excludes no-delete-skipped Modifies (this
+                    // arm already returned in that case) — regardless of
+                    // whether the delete succeeded. Otherwise the pipeline's
+                    // window permit and the worker's temp file for this job
+                    // leak for the rest of the process. `deleted` selects
+                    // whether the drained result is actually committed
+                    // (`true`) or discarded (`false`, delete failed + user
+                    // skipped — iPod state is "in-between": old track gone,
+                    // new not added; the next run's diff sees the missing
+                    // iPod entry and re-adds naturally).
+                    commit_pipelined(&transcoder, idx, &db, &mut manifest, &src, deleted, progress, decision_rx)?;
                     progress.track_done();
                 }
                 Action::Add(src) => {
@@ -520,35 +535,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                         total_planned,
                         format!("ADD {}", display_path(&src.path)),
                     );
-                    // Skip is clean here: no iPod state changes, no manifest update.
-                    let transcoded: Option<Transcoded> = loop {
-                        match transcode_one(&src, config, &refalac_version) {
-                            Ok(t) => break Some(t),
-                            Err(e) => match prompt_retry_skip_abort(progress, decision_rx, &src, &e)? {
-                                PromptOutcome::Retry => continue,
-                                PromptOutcome::Skip => {
-                                    progress.log(format!("Skipped Add for {}", src.path.display()));
-                                    break None;
-                                }
-                                _ => return Err(e),
-                            },
-                        }
-                    };
-                    if let Some(t) = transcoded {
-                        loop {
-                            match commit_transcoded(&db, &mut manifest, &src, &t) {
-                                Ok(()) => break,
-                                Err(e) => match prompt_retry_skip_abort(progress, decision_rx, &src, &e)? {
-                                    PromptOutcome::Retry => continue,
-                                    PromptOutcome::Skip => {
-                                        progress.log(format!("Skipped Add for {}", src.path.display()));
-                                        break;
-                                    }
-                                    _ => return Err(e),
-                                },
-                            }
-                        }
-                    }
+                    // Add always dispatches a job (see the filter above), so
+                    // `take(idx)` always runs here.
+                    commit_pipelined(&transcoder, idx, &db, &mut manifest, &src, true, progress, decision_rx)?;
                     progress.track_done();
                 }
                 Action::MetadataOnly { source, entry } => {
@@ -613,33 +602,41 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 }
             }
 
-            // Periodic checkpoint: every SYNC_CHECKPOINT_EVERY processed
-            // actions, persist the iTunesDB + manifest. Without this, a
-            // daemon crash / USB unplug / power loss mid-sync orphans every
-            // file copied via itdb_cp_track_to_ipod since the only db.write()
-            // was scheduled for the very end. With this, the orphan window
-            // is bounded to N tracks (~25 here).
+            // Periodic checkpoint: time-or-count (whichever fires first)
+            // persists the iTunesDB + manifest. Without this, a daemon crash
+            // / USB unplug / power loss mid-sync orphans every file copied
+            // via itdb_cp_track_to_ipod since the only db.write() was
+            // scheduled for the very end. With this, the orphan window is
+            // bounded to CHECKPOINT_MAX_TRACKS tracks or CHECKPOINT_MAX_SECONDS
+            // of wall-clock, whichever comes first.
             //
-            // Unchanged / no-delete-Remove actions hit `continue` before
-            // reaching here and so don't move the counter — they don't
+            // Unchanged / no-delete-Remove/Modify actions hit `continue`
+            // before reaching here and so don't record a tick — they don't
             // mutate state worth persisting.
-            tracks_since_checkpoint += 1;
-            if tracks_since_checkpoint >= crate::SYNC_CHECKPOINT_EVERY {
+            if ckpt.record(Instant::now()) {
                 progress.log(format!("Checkpoint: persisting state after {i} tracks…"));
-                db.write().context("checkpoint: db.write")?;
+                crate::try_with_prompt::retry_transient(&crate::RETRY_BACKOFF, || {
+                    db.write().context("checkpoint: db.write")
+                })?;
                 manifest.last_source_root = Some(config.source.clone());
                 manifest::save_atomic(&config.manifest_path, &manifest)
                     .context("checkpoint: manifest save")?;
-                tracks_since_checkpoint = 0;
             }
         }
 
+        // Stop the pipeline: no more `take()` calls are coming. Workers/feeder
+        // are NOT joined here — on a normal finish they've already drained
+        // (every dispatched job's index was taken above); on cancel/pause any
+        // leftover in-flight transcodes block harmlessly on the bounded
+        // channel and die with the process. Their temp files are cleaned up
+        // by OS temp-dir housekeeping or the next reconcile pass.
+        transcoder.stop();
+
         // 6. Final commit. NEITHER is persisted unless we got this far.
-        // Also runs after a `cancelled` break above so completed tracks
-        // get a coherent final flush (no orphan pile-up under
-        // iPod_Control\Music). Idempotent for the post-checkpoint
-        // residual: if the last checkpoint just fired, this re-writes
-        // the same state.
+        // Also runs after a `cancelled`/`paused` break above so completed
+        // tracks get a coherent final flush (no orphan pile-up under
+        // iPod_Control\Music). Idempotent for the post-checkpoint residual:
+        // if the last checkpoint just fired, this re-writes the same state.
         progress.log("Writing iPod DB...");
         db.write()?;
         progress.log("Writing manifest...");
@@ -648,7 +645,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         manifest.last_source_root = Some(config.source.clone());
         manifest::save_atomic(&config.manifest_path, &manifest)?;
 
-        if cancelled {
+        if paused {
+            progress.log("Sync paused. Completed tracks were saved. Eject the iPod before unplugging.");
+        } else if cancelled {
             progress.log("Sync cancelled. Completed tracks were saved. Eject the iPod before unplugging.");
         } else {
             progress.log("Done. Eject the iPod before unplugging.");
@@ -926,6 +925,62 @@ fn commit_transcoded(
         &t.source_format,
     ));
     Ok(())
+}
+
+/// Bridges a pipelined (already-dispatched) transcode job to the committer.
+/// `idx` is the action index the job was dispatched under; `transcoder.take`
+/// blocks until that job's result is ready, then frees a pipeline window
+/// permit — so this MUST be called exactly once for every index that was
+/// handed to `OrderedTranscoder::start`, even when the caller ends up
+/// discarding the result (`commit = false`).
+///
+/// - `take` returning `Err` is a deterministic transcode failure (bad file,
+///   ffmpeg/afconvert failure, etc.) — NOT retried; logged and skipped.
+/// - `take` returning `Ok(t)` with `commit = false` means the caller already
+///   decided this job's output must not land on the iPod (currently: a
+///   Modify whose delete-old half failed and was skipped). The temp file is
+///   still cleaned up here.
+/// - `take` returning `Ok(t)` with `commit = true` runs the normal
+///   Retry/Skip/Abort loop around `commit_transcoded`, reusing the same `t`
+///   on Retry (the transcode already succeeded — only the libgpod add needs
+///   retrying).
+fn commit_pipelined(
+    transcoder: &OrderedTranscoder<Transcoded>,
+    idx: usize,
+    db: &OwnedDb,
+    manifest: &mut Manifest,
+    src: &SourceEntry,
+    commit: bool,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<()> {
+    let t = match transcoder.take(idx) {
+        Ok(t) => t,
+        Err(e) => {
+            if commit {
+                progress.error(format!("Transcode failed for {}: {e:#}", src.path.display()));
+                progress.log(format!("Skipped {} (transcode failed)", src.path.display()));
+            }
+            return Ok(());
+        }
+    };
+    if !commit {
+        let _ = std::fs::remove_file(&t.temp);
+        return Ok(());
+    }
+    loop {
+        match commit_transcoded(db, manifest, src, &t) {
+            Ok(()) => return Ok(()),
+            Err(e) => match prompt_retry_skip_abort(progress, decision_rx, src, &e)? {
+                PromptOutcome::Retry => continue,
+                PromptOutcome::Skip => {
+                    progress.log(format!("Skipped {} (commit failed)", src.path.display()));
+                    return Ok(());
+                }
+                _ => return Err(e),
+            },
+        }
+    }
 }
 
 /// Shared Retry/Skip/Abort prompt for `transcode_one`/`commit_transcoded`

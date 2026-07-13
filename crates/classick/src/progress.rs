@@ -64,6 +64,10 @@ pub enum Decision {
     Prompt { id: u64, choice: usize },
     /// `value: None` means the user aborted (Esc / Ctrl+C).
     Form { id: u64, value: Option<String> },
+    /// Graceful pause: drain in-flight tracks, checkpoint, then stop.
+    /// Bare variant for now — IPC command/event + terminal outcome land in
+    /// a later task; the apply loop's decision poll already matches it.
+    Pause,
 }
 
 /// Events sent from the main thread to the progress thread.
