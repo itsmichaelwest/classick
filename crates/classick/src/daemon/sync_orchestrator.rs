@@ -14,6 +14,15 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::Instant;
+
+// The production grace period lives in `crate::daemon::PAUSE_DRAIN_GRACE`
+// (15s). Tests use a much shorter value so the "subprocess never drains"
+// path doesn't add real wall-clock seconds to `cargo test`.
+#[cfg(not(test))]
+use crate::daemon::PAUSE_DRAIN_GRACE;
+#[cfg(test)]
+const PAUSE_DRAIN_GRACE: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestratorOutcome {
@@ -77,10 +86,15 @@ impl FailureTracker {
 ///
 /// `pause_rx` fires when the user clicks Pause in the UI; the orchestrator
 /// writes a Pause command to the subprocess stdin and, unlike cancel, does
-/// NOT force-kill — pause is graceful, so the subprocess finishes draining
-/// its in-flight window, checkpoints, emits `{"type":"paused"}`, and exits
-/// on its own. The existing `bounded_kill` 5s grace remains only as the
-/// cancel/bail backstop; a paused sync is trusted to exit cleanly.
+/// NOT immediately force-kill — pause is graceful, so the subprocess is
+/// given a chance to finish draining its in-flight window, checkpoint, emit
+/// `{"type":"paused"}`, and exit on its own. That trust is bounded, though:
+/// a `PAUSE_DRAIN_GRACE` deadline is armed the moment pause is requested, and
+/// if the subprocess hasn't exited by then, it's treated as wedged and
+/// force-killed via the same `bounded_kill` path cancel uses. Either way the
+/// outcome is still `Paused` — the subprocess checkpoints incrementally, so
+/// whatever committed before the wedge is preserved and a later `TriggerSync`
+/// resumes normally.
 ///
 /// `prompt_decisions_rx` carries `(id, choice)` pairs from
 /// `DaemonCommand::DecidePrompt`; each is serialised as
@@ -112,6 +126,12 @@ pub async fn run(
     // oneshot::Receiver panics if polled again past Ready. Once the pause
     // is forwarded we just keep relaying lines until the subprocess exits.
     let mut pause_requested = false;
+    // Armed the instant pause is requested; an ABSOLUTE deadline (not a
+    // fresh relative sleep) so re-evaluating it on every loop iteration
+    // still targets the same instant instead of restarting the clock.
+    // `None` means no pause is in flight; the backstop branch below is
+    // effectively disabled in that state.
+    let mut pause_deadline: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -176,8 +196,29 @@ pub async fn run(
                 pause_requested = true;
                 let _ = stdin.write_all(b"{\"type\":\"pause\"}\n").await;
                 let _ = stdin.flush().await;
-                // No force-kill: keep looping, relaying lines, until the
-                // subprocess drains + checkpoints + emits "paused" + exits.
+                // No immediate force-kill: keep looping, relaying lines,
+                // trusting the subprocess to drain + checkpoint + emit
+                // "paused" + exit on its own. `pause_deadline` below is the
+                // bounded backstop in case that trust is misplaced.
+                pause_deadline = Some(Instant::now() + PAUSE_DRAIN_GRACE);
+            }
+            // Backstop for a paused subprocess that never drains (e.g. a
+            // libgpod/FS write wedged on a slow spinning-HDD + fskit FAT32
+            // volume during the final checkpoint). Deliberately does NOT
+            // use an `if pause_deadline.is_some()` guard combined with
+            // `.unwrap()` on the async expression itself — tokio::select!
+            // still evaluates a disabled branch's async expression (it just
+            // skips polling it), so that would panic on every iteration
+            // before pause is ever requested. Routing through
+            // `pending()` when there's no deadline sidesteps that
+            // entirely: the branch simply never becomes ready.
+            _ = pause_drain_deadline(pause_deadline) => {
+                tracing::warn!(
+                    "orchestrator: paused sync did not drain within {:?}; force-killing as a backstop",
+                    PAUSE_DRAIN_GRACE
+                );
+                bounded_kill(&mut child, crate::daemon::SYNC_KILL_GRACE).await;
+                return Ok(OrchestratorOutcome::Paused { summary: last_summary });
             }
             Some((id, choice)) = prompt_decisions_rx.recv() => {
                 // User replied to a daemon-relayed prompt. Forward the
@@ -226,6 +267,17 @@ fn summary_from_value(v: &Value) -> SyncSummary {
     }
 }
 
+/// Resolves at `deadline` if one is armed; otherwise never resolves. Lets
+/// the pause backstop live as an ordinary (unguarded) `select!` branch —
+/// see the comment at its call site in `run` for why a guarded `.unwrap()`
+/// would be unsound here.
+async fn pause_drain_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn bounded_kill(child: &mut Child, timeout: Duration) {
     match tokio::time::timeout(timeout, child.wait()).await {
         Ok(_) => {}
@@ -236,6 +288,40 @@ async fn bounded_kill(child: &mut Child, timeout: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Exercises `pause_drain_deadline` directly rather than driving `run`
+    // end-to-end. A real integration test would need a dummy subprocess
+    // that ignores stdin and never exits — the task's suggested `cat` does
+    // NOT work: `build_command` always appends
+    // `--ipc-mode --apply --ipod <drive>`, and `cat --ipc-mode ...` treats
+    // those as illegal options and exits immediately with an error,
+    // defeating the "never exits" premise the test needs. Making `run`
+    // accept an arbitrary pre-built `Command` (or an injected grace
+    // parameter) just to route around that would touch the production
+    // signature for a test-only concern, which the task said not to do.
+    // The Windows daemon-integration suite (`tests/daemon_runtime_integration.rs`,
+    // `#![cfg(windows)]`-gated) is the real end-to-end coverage for this
+    // path but doesn't run on macOS. So: cover the new deadline logic in
+    // isolation here, and rely on manual device smoke-testing for the
+    // full `run()` behavior.
+
+    #[tokio::test(start_paused = true)]
+    async fn pause_drain_deadline_resolves_once_armed_deadline_elapses() {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        pause_drain_deadline(Some(deadline)).await;
+        assert!(Instant::now() >= deadline, "must not resolve before the armed deadline");
+    }
+
+    #[tokio::test]
+    async fn pause_drain_deadline_never_resolves_when_unarmed() {
+        // No deadline armed (mirrors `pause_deadline == None` before pause is
+        // ever requested) — the backstop branch must stay pending forever so
+        // it can safely live in `select!` without a guard.
+        tokio::select! {
+            _ = pause_drain_deadline(None) => panic!("must never resolve without an armed deadline"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+    }
     use std::path::PathBuf;
 
     #[test]

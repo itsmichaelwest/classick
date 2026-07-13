@@ -54,6 +54,15 @@ pub const DEVICE_EVENT_CHANNEL_CAPACITY: usize = 32;
 /// cleanly before we hard-kill it.
 pub const SYNC_KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Backstop grace period after a Pause command, before the orchestrator
+/// force-kills a subprocess that never drained. Generous relative to
+/// `SYNC_KILL_GRACE` because a legitimate pause-exit has more work to do than
+/// a cancel: at most one in-flight libgpod track add, plus the final
+/// `db.write()` and manifest save. This should only ever fire if the
+/// subprocess genuinely wedges (e.g. a libgpod/FS write stuck on a slow
+/// spinning-HDD + fskit FAT32 volume during the final checkpoint).
+pub const PAUSE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// How long the daemon waits, after a graceful Shutdown command, for an
 /// in-flight sync to drain (cancel → write iTunesDB → exit cleanly) before
 /// returning from the main loop. Must be larger than `SYNC_KILL_GRACE` so
