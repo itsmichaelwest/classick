@@ -87,13 +87,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// currently-detected iPod, if any) and clears any error banner from a
     /// prior failed handshake/save.
     func finishSetup(source: String, autoSync: Bool) {
+        // SaveConfig replaces the whole daemon blob, so any field this wizard
+        // doesn't carry gets reset to its default. Preserve rockboxCompat (and
+        // any future user-set flag) from the current config rather than
+        // silently flipping it back off when setup re-runs.
         let daemon = DaemonSettings(
             enabled: autoSync,
             autostartWithWindows: false,
             firstSyncMode: "auto_apply",
             subsequentSyncMode: "auto_apply",
             scheduleMinutes: 0,
-            notifyOn: "all")
+            notifyOn: "all",
+            rockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
         let ipod = model.device.map { IpodIdentity(serial: $0.serial, modelLabel: $0.model, name: $0.name) }
         Task { await daemonClient.send(.saveConfig(source: source, daemon: daemon, ipod: ipod)) }
     }
