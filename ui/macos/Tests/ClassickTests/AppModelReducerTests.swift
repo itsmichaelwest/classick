@@ -91,6 +91,50 @@ final class AppModelReducerTests: XCTestCase {
         guard case .paused = m.phase else { return XCTFail("expected .paused") }
     }
 
+    func testPausedPhaseSurvivesTrailingIdleStatus() {
+        let m = AppModel()
+        m.apply(.deviceConnected(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
+        m.apply(.configUpdate(source: "/music", daemon: nil,
+                              ipod: IpodIdentity(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", name: nil)))
+        m.apply(.statusUpdate(.init(state: .syncing, configured: true, ipodConnected: true, lastSync: nil, storage: nil,
+                                    syncedCount: 84, libraryCount: 1381)))
+        m.apply(.syncEvent(line: #"{"type":"paused"}"#))
+        guard case .paused = m.phase else { return XCTFail("expected .paused after pause event") }
+        // Subprocess exits → daemon broadcasts idle. Paused MUST persist and
+        // refresh its counts, not revert to plain idle.
+        m.apply(.statusUpdate(.init(state: .idle, configured: true, ipodConnected: true, lastSync: nil, storage: nil,
+                                    syncedCount: 84, libraryCount: 1381)))
+        guard case let .paused(synced, total) = m.phase else {
+            return XCTFail("paused state lost after trailing idle status")
+        }
+        XCTAssertEqual(synced, 84)
+        XCTAssertEqual(total, 1381)
+    }
+
+    func testResumeFromPausedEntersSyncing() {
+        let m = AppModel()
+        m.apply(.deviceConnected(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
+        m.apply(.configUpdate(source: "/music", daemon: nil,
+                              ipod: IpodIdentity(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", name: nil)))
+        m.apply(.syncEvent(line: #"{"type":"paused"}"#))
+        guard case .paused = m.phase else { return XCTFail("expected .paused") }
+        // Resume sends TriggerSync → daemon reports syncing → leave paused.
+        m.apply(.statusUpdate(.init(state: .syncing, configured: true, ipodConnected: true, lastSync: nil, storage: nil,
+                                    syncedCount: 84, libraryCount: 1381)))
+        guard case .syncing = m.phase else { return XCTFail("expected .syncing after resume") }
+    }
+
+    func testPausedClearsOnDeviceDisconnect() {
+        let m = AppModel()
+        m.apply(.deviceConnected(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
+        m.apply(.configUpdate(source: "/music", daemon: nil,
+                              ipod: IpodIdentity(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", name: nil)))
+        m.apply(.syncEvent(line: #"{"type":"paused"}"#))
+        guard case .paused = m.phase else { return XCTFail("expected .paused") }
+        m.apply(.deviceDisconnected(serial: "0xA"))
+        guard case .noDevice = m.phase else { return XCTFail("expected .noDevice after unplug") }
+    }
+
     func testDeviceSwapToUnpairedShowsNotConfigured() {
         // Regression: "configured" must be checked against the *currently
         // connected* device's serial, not just "some iPod was ever paired" —
