@@ -24,6 +24,13 @@ crossterm = "0.29"
 dirs = "5"
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process"] }
 plist = "1"
+image = "0.25"
+# MP4 tag/cover-art writer for the artwork module (crates/classick/src/artwork.rs).
+# Was previously macOS-only (used there for tag/cover-art *reading*); the
+# artwork module's embed_track_metadata is used by both the macOS (afconvert)
+# and Windows/Linux (ffmpeg) transcode backends, so it must be an unconditional
+# dependency, not gated to cfg(target_os = "macos").
+lofty = "0.22"
 
 # Windows-only: SCSI INQUIRY pass-through to read SysInfoExtended XML directly
 # from the iPod firmware (the same mechanism iTunes uses). Lets us identify
@@ -53,8 +60,6 @@ core-foundation = "0.10"
 core-foundation-sys = "0.8"
 io-kit-sys = "0.4"
 libc = "0.2"
-# Native tag/probe reading (replaces ffprobe on macOS) + cover-art extraction.
-lofty = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["test-util"] }
