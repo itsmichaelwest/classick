@@ -830,6 +830,7 @@ pub(crate) fn transcode_one(
     };
     let action = transcode::classify(&probe, &classify_cfg)
         .with_context(|| format!("classify {}", src.path.display()))?;
+    let is_transcode = matches!(action, SourceAction::Transcode);
 
     // Resolve the on-disk file we'll feed into libgpod, plus the
     // encoder identity to record in the manifest.
@@ -857,30 +858,15 @@ pub(crate) fn transcode_one(
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
-                // Refalac --artwork wants a path; extract embedded art to a
-                // temp jpg first if any, then pass it. Cleaned up after.
-                let art_path_opt = if has_embedded_art(&probe) {
-                    let art_path = transcode::temp_art_path();
-                    transcode::extract_cover_art(&src.path, &art_path, &config.ffmpeg).with_context(|| {
-                        format!("extract art for refalac --artwork: {}", src.path.display())
-                    })?;
-                    Some(art_path)
-                } else {
-                    None
-                };
                 let ffmpeg_path = config.ffmpeg.as_path();
-                let result = transcode::transcode_via_refalac(
+                transcode::transcode_via_refalac(
                     &src.path,
                     &dst,
                     &config.refalac_path,
                     ffmpeg_path,
-                    art_path_opt.as_deref(),
+                    None, // audio-only: art embedded later by artwork::embed
                 )
-                .with_context(|| format!("refalac transcode {}", src.path.display()));
-                if let Some(p) = &art_path_opt {
-                    let _ = std::fs::remove_file(p);
-                }
-                result?;
+                .with_context(|| format!("refalac transcode {}", src.path.display()))?;
                 let ver = refalac_version
                     .clone()
                     .unwrap_or_else(|| "refalac (version unknown)".to_string());
@@ -889,18 +875,38 @@ pub(crate) fn transcode_one(
         },
     };
 
-    // libgpod still writes its own thumbnail copy, so we extract once more
-    // here for the apply_tags path. Source-side bytes are unchanged; this
-    // is independent of refalac's own --artwork embed.
-    let art = if has_embedded_art(&probe) {
+    // Extract source art once; normalize to a small baseline JPEG that feeds
+    // BOTH libgpod's Apple thumbnails AND (when rockbox_compat) the embedded
+    // covr atom. Non-fatal: on any art failure, fall back to no art.
+    let art: Option<Vec<u8>> = if has_embedded_art(&probe) {
         let art_path = transcode::temp_art_path();
-        transcode::extract_cover_art(&src.path, &art_path, &config.ffmpeg)?;
-        let bytes = std::fs::read(&art_path)?;
+        let raw = transcode::extract_cover_art(&src.path, &art_path, &config.ffmpeg)
+            .and_then(|()| std::fs::read(&art_path).map_err(Into::into));
         let _ = std::fs::remove_file(&art_path);
-        Some(bytes)
+        match raw {
+            Ok(bytes) => match crate::artwork::normalize(&bytes) {
+                Ok(norm) => Some(norm),
+                Err(e) => {
+                    tracing::warn!("art normalize failed for {}: {e:#}; using raw bytes", src.path.display());
+                    Some(bytes)
+                }
+            },
+            Err(e) => {
+                tracing::warn!("art extract failed for {}: {e:#}", src.path.display());
+                None
+            }
+        }
     } else {
         None
     };
+
+    // Rockbox: make the transcoded .m4a self-describing (tags + art). Only for
+    // transcoded output — passthrough files keep their own metadata. Non-fatal.
+    if config.rockbox_compat && is_transcode {
+        if let Err(e) = crate::artwork::embed_track_metadata(&temp, &tags, art.as_deref()) {
+            tracing::warn!("rockbox embed failed for {}: {e:#}", src.path.display());
+        }
+    }
 
     let fingerprint = source::fingerprint(&src.path)
         .with_context(|| format!("fingerprint {}", src.path.display()))?;
@@ -1094,6 +1100,104 @@ pub(crate) fn entry_from(
     }
 }
 
+/// Embed tags + normalized art from `source` into the on-device `.m4a` at
+/// `device_file`, in place (no re-transcode). Returns the new file size.
+/// Non-fatal caller decides skip vs abort. Public(crate) for unit tests.
+pub(crate) fn backfill_one_file(device_file: &Path, source: &Path, ffmpeg: &Path) -> Result<u64> {
+    let probe = transcode::probe(source, ffmpeg)
+        .with_context(|| format!("probe {}", source.display()))?;
+    let tags = tags_from_probe(&probe);
+    let art: Option<Vec<u8>> = if has_embedded_art(&probe) {
+        let art_path = transcode::temp_art_path();
+        let raw = transcode::extract_cover_art(source, &art_path, ffmpeg)
+            .and_then(|()| std::fs::read(&art_path).map_err(Into::into));
+        let _ = std::fs::remove_file(&art_path);
+        raw.ok().and_then(|b| crate::artwork::normalize(&b).ok().or(Some(b)))
+    } else {
+        None
+    };
+    crate::artwork::embed_track_metadata(device_file, &tags, art.as_deref())
+        .with_context(|| format!("embed into {}", device_file.display()))?;
+    Ok(std::fs::metadata(device_file)?.len())
+}
+
+/// Backfill the existing on-device library: for each manifest entry with a
+/// source file + on-device .m4a, embed tags+art in place and update the
+/// iTunesDB size. No re-transcode. Per-track failures skip (warn), never abort.
+pub fn backfill_rockbox(
+    config: &mut Config,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<RunOutcome> {
+    // Same preflight + DB preamble as run() (copied verbatim from run(), see
+    // its ~L116 mount resolution and ~L312-334 identity/provision/open block).
+    let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
+    let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
+    progress.log(format!(
+        "iPod identity: FirewireGuid={}, ModelNumStr={}",
+        identity.firewire_guid, identity.model_num_str,
+    ));
+    if let Err(e) = crate::ipod::sysinfo_provision::provision(Path::new(&mount), &identity) {
+        progress.log(format!("SysInfoExtended provisioning failed: {e:#}"));
+    }
+    let db = OwnedDb::open(Path::new(&mount))?;
+    unsafe {
+        let device_ptr = (*db.as_ptr()).device;
+        device::set_firewire_guid(device_ptr, &identity.firewire_guid)?;
+        device::set_model_num(device_ptr, &identity.model_num_str)?;
+    }
+
+    // run() loads via `manifest::load_or_default` (not `manifest::load` — no
+    // such function exists); match that exactly so a first-ever backfill
+    // against a fresh manifest.json doesn't hard-error.
+    let manifest = manifest::load_or_default(&config.manifest_path)?;
+    // Same checkpoint cadence as run() (~L387).
+    let mut ckpt = CheckpointClock::new(
+        crate::CHECKPOINT_MAX_TRACKS,
+        Duration::from_secs(crate::CHECKPOINT_MAX_SECONDS),
+        Instant::now(),
+    );
+    let (mut updated, mut skipped) = (0usize, 0usize);
+    // Skip passthrough entries: their on-device file keeps the source
+    // container/extension (e.g. .wav/.mp3) and already carries its own tags/art
+    // (Rockbox-ready as-is). Only transcoded ALAC (.m4a) output was ever bare,
+    // and embed_track_metadata only supports MP4 tags anyway.
+    for entry in manifest
+        .tracks
+        .iter()
+        .filter(|e| e.source_known && !e.ipod_relpath.is_empty() && e.encoder != "passthrough")
+    {
+        let device_file = Path::new(&mount)
+            .join(entry.ipod_relpath.replace('\\', std::path::MAIN_SEPARATOR_STR));
+        if !device_file.exists() || !entry.source_path.exists() {
+            skipped += 1;
+            continue;
+        }
+        match backfill_one_file(&device_file, &entry.source_path, &config.ffmpeg) {
+            Ok(size) => {
+                db.set_track_size(entry.ipod_dbid, size.min(u32::MAX as u64) as u32).ok();
+                updated += 1;
+            }
+            Err(e) => {
+                tracing::warn!("backfill skip {}: {e:#}", entry.source_path.display());
+                skipped += 1;
+            }
+        }
+        progress.log(format!("backfill: {updated} updated, {skipped} skipped"));
+        // record() is a tick-and-check: it must be called exactly once per
+        // processed track (mirrors run()'s post-action-loop record() call),
+        // unlike the brief's guessed `should_checkpoint(updated)` which isn't
+        // a real CheckpointClock method.
+        if ckpt.record(Instant::now()) {
+            progress.log(format!("Checkpoint: persisting state after {updated} track(s)…"));
+            db.write().context("checkpoint: db.write")?;
+        }
+    }
+    db.write()?;
+    progress.log(format!("Rockbox backfill complete: {updated} updated, {skipped} skipped"));
+    Ok(RunOutcome::Completed)
+}
+
 pub(crate) fn build_rebuild_manifest(db: &OwnedDb) -> Manifest {
     let handles = db.list_tracks_for_rebuild();
     let tracks = handles.into_iter().map(|h| ManifestEntry {
@@ -1171,6 +1275,32 @@ mod tests {
         let json = r#"{"streams":[],"format":{}}"#;
         let probe: ProbeOutput = serde_json::from_str(json).unwrap();
         assert_eq!(source_format_from_probe(&probe), "unknown");
+    }
+}
+
+#[cfg(test)]
+mod backfill_tests {
+    use super::backfill_one_file;
+
+    #[test]
+    fn backfill_embeds_into_existing_device_file() {
+        // Copy the bare fixture as a stand-in on-device .m4a.
+        let dir = std::env::temp_dir().join(format!("classick-backfill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dev = dir.join("track.m4a");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/bare.m4a"), &dev).unwrap();
+
+        // The per-track backfill step: probe source tags → normalize art → embed.
+        let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tagged.flac")); // existing fixture: tags + embedded PNG art
+        let before = std::fs::metadata(&dev).unwrap().len();
+        backfill_one_file(&dev, src, &std::path::PathBuf::from("ffmpeg")).unwrap();
+        let after = std::fs::metadata(&dev).unwrap().len();
+        assert!(after >= before, "embedding should not shrink the file");
+
+        use lofty::file::TaggedFileExt;
+        let tag = lofty::read_from_path(&dev).unwrap();
+        assert!(tag.primary_tag().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

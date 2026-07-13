@@ -25,6 +25,7 @@ struct DaemonSettings: Codable, Equatable, Sendable {
     var subsequentSyncMode: String   // "review" | "auto_apply"
     var scheduleMinutes: UInt32
     var notifyOn: String             // "all" | "errors_only" | "none"
+    var rockboxCompat: Bool
 
     enum CodingKeys: String, CodingKey {
         case enabled
@@ -33,6 +34,36 @@ struct DaemonSettings: Codable, Equatable, Sendable {
         case subsequentSyncMode = "subsequent_sync_mode"
         case scheduleMinutes = "schedule_minutes"
         case notifyOn = "notify_on"
+        case rockboxCompat = "rockbox_compat"
+    }
+
+    init(
+        enabled: Bool,
+        autostartWithWindows: Bool,
+        firstSyncMode: String,
+        subsequentSyncMode: String,
+        scheduleMinutes: UInt32,
+        notifyOn: String,
+        rockboxCompat: Bool = false
+    ) {
+        self.enabled = enabled
+        self.autostartWithWindows = autostartWithWindows
+        self.firstSyncMode = firstSyncMode
+        self.subsequentSyncMode = subsequentSyncMode
+        self.scheduleMinutes = scheduleMinutes
+        self.notifyOn = notifyOn
+        self.rockboxCompat = rockboxCompat
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        autostartWithWindows = try container.decode(Bool.self, forKey: .autostartWithWindows)
+        firstSyncMode = try container.decode(String.self, forKey: .firstSyncMode)
+        subsequentSyncMode = try container.decode(String.self, forKey: .subsequentSyncMode)
+        scheduleMinutes = try container.decode(UInt32.self, forKey: .scheduleMinutes)
+        notifyOn = try container.decode(String.self, forKey: .notifyOn)
+        rockboxCompat = try container.decodeIfPresent(Bool.self, forKey: .rockboxCompat) ?? false
     }
 }
 
@@ -96,6 +127,7 @@ enum DaemonCommand: Encodable, Sendable {
     case cancelSync
     case pause
     case decidePrompt(id: UInt64, choice: Int32)
+    case backfillRockbox
 
     enum Trigger: String, Encodable, Sendable {
         case manual, scheduled
@@ -138,6 +170,8 @@ enum DaemonCommand: Encodable, Sendable {
             try container.encode("decide_prompt", forKey: .type)
             try container.encode(id, forKey: .id)
             try container.encode(choice, forKey: .choice)
+        case .backfillRockbox:
+            try container.encode("backfill_rockbox", forKey: .type)
         }
     }
 }

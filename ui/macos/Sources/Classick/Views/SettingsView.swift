@@ -12,10 +12,11 @@ struct SettingsView: View {
     var model: AppModel
     var onSave: (_ source: String?, _ daemon: DaemonSettings) -> Void
     var onForgetIpod: () -> Void
+    var onBackfill: () -> Void
 
     var body: some View {
         TabView {
-            GeneralTab(model: model, onSave: onSave, onForgetIpod: onForgetIpod)
+            GeneralTab(model: model, onSave: onSave, onForgetIpod: onForgetIpod, onBackfill: onBackfill)
                 .tabItem { Label("General", systemImage: "gearshape") }
             AboutTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
@@ -28,11 +29,13 @@ private struct GeneralTab: View {
     var model: AppModel
     var onSave: (_ source: String?, _ daemon: DaemonSettings) -> Void
     var onForgetIpod: () -> Void
+    var onBackfill: () -> Void
 
     @State private var sourcePath: String?
     @State private var enabled = true
     @State private var scheduleMinutes: UInt32 = 0
     @State private var launchAtLogin = false
+    @State private var rockboxCompat = false
     @State private var isPickingFolder = false
     @State private var saveTask: Task<Void, Never>?
 
@@ -93,6 +96,18 @@ private struct GeneralTab: View {
                     }
                 ))
 
+            Toggle(
+                "Rockbox compatibility (embed tags & art in files)",
+                isOn: Binding(
+                    get: { rockboxCompat },
+                    set: { rockboxCompat = $0; scheduleSave() }
+                ))
+            Text("Lets an iPod running Rockbox read your library. Applies to newly synced tracks; use the button below to convert what's already on the iPod. Keep any files you copy to the iPod yourself outside iPod_Control.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Button("Update existing library for Rockbox") { onBackfill() }
+
             if let ipodLabel {
                 LabeledContent("iPod") {
                     HStack {
@@ -122,6 +137,7 @@ private struct GeneralTab: View {
             enabled = daemon.enabled
             scheduleMinutes = daemon.scheduleMinutes
             launchAtLogin = daemon.autostartWithWindows
+            rockboxCompat = daemon.rockboxCompat
         }
     }
 
@@ -138,7 +154,8 @@ private struct GeneralTab: View {
                 firstSyncMode: model.config?.daemon?.firstSyncMode ?? "auto_apply",
                 subsequentSyncMode: model.config?.daemon?.subsequentSyncMode ?? "auto_apply",
                 scheduleMinutes: scheduleMinutes,
-                notifyOn: model.config?.daemon?.notifyOn ?? "all")
+                notifyOn: model.config?.daemon?.notifyOn ?? "all",
+                rockboxCompat: rockboxCompat)
             onSave(sourcePath, daemon)
         }
     }

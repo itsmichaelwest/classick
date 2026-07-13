@@ -36,6 +36,7 @@ pub fn transcode_workers() -> usize {
 pub const PIPELINE_WINDOW: usize = 8;
 
 pub mod apply_loop;
+pub mod artwork;
 pub mod checkpoint;
 pub mod cli;
 pub mod config;

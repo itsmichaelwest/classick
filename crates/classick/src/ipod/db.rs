@@ -270,6 +270,20 @@ impl OwnedDb {
         Ok(())
     }
 
+    /// Update a track's stored file `size` (bytes) by dbid. Used by the Rockbox
+    /// backfill after embedding tags/art grows an on-device file, so the
+    /// iTunesDB stays consistent. Idempotent; does NOT call `itdb_write`.
+    pub fn set_track_size(&self, dbid: u64, size: u32) -> Result<()> {
+        unsafe {
+            let found = self.find_track_by_dbid(dbid);
+            if found.is_null() {
+                return Ok(()); // idempotent: track not present
+            }
+            (*found).size = size as _;
+        }
+        Ok(())
+    }
+
     /// Walk the DB's track GList and return the first track whose dbid
     /// matches, or NULL if none. libgpod doesn't expose a hashmap lookup;
     /// ~1,400 tracks at ~30ns per pointer-chase is fine.
