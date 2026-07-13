@@ -453,3 +453,14 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   See `apply_loop::rebuild_apple_artwork`. Corollary: any op that opens + writes
   the DB without re-thumbnailing every track drops existing art — suspect the
   normal incremental-sync / `do_metadata_only` path has the same latent bug.
+- **macOS release (`scripts/release-macos.sh <version>`) appcast-URL gotcha.**
+  The script signs + notarizes + `gh release create`s the dmg, then runs
+  Sparkle's `generate_appcast`, which writes enclosure URLs pointing at
+  `gh-pages` (`itsmichaelwest.github.io/...`). But dmgs are hosted on GitHub
+  Releases, so before publishing, REWRITE the `dist/appcast.xml` enclosure URL
+  to the Releases download path
+  (`github.com/itsmichaelwest/classick/releases/download/vX/Classick-X.dmg`) and
+  publish a single-entry `appcast.xml` to the `gh-pages` branch (that push is
+  what rolls the Sparkle auto-update to everyone — GitHub's pre-release flag
+  does NOT gate Sparkle). Version lives in BOTH `ui/macos/project.yml`
+  (MARKETING_VERSION + CURRENT_PROJECT_VERSION) and `ui/macos/Info.plist`.

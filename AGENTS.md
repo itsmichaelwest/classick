@@ -5,23 +5,30 @@ the specific area you're touching.
 
 ## What this is
 
-Windows-native sync tool that copies a FLAC library to an iPod Classic,
-transcoding to ALAC on the fly. Two halves:
+Cross-platform (Windows + macOS) sync tool that copies a FLAC library to an
+iPod Classic, transcoding to ALAC on the fly. Three parts:
 
-1. **Rust core (`crates/classick/`)** — single self-contained `classick.exe`.
-   Wraps libgpod via FFI; spawns ffmpeg (or refalac) for transcode; writes the
+1. **Rust core (`crates/classick/`)** — one self-contained `classick` binary
+   (`classick.exe` on Windows). Wraps libgpod via FFI; spawns the transcoder
+   (ffmpeg/refalac on Windows, the system `afconvert` on macOS); writes the
    iTunesDB. Runs in three modes: `--ipc-mode` (subprocess driven by a GUI),
-   `--daemon` (long-lived tray companion), or interactive TUI (default when
-   stdout is a TTY). Daemon mode compiles cross-platform (Unix-socket
-   transport on non-Windows); the device-detection layer is still Windows-only.
+   `--daemon` (long-lived tray/menu-bar companion), or interactive TUI (default
+   when stdout is a TTY). Device detection is implemented for Windows and macOS;
+   `#[cfg(windows)]` still gates the SCSI/SysInfoExtended-inquiry path, but the
+   rest (mount detection, libgpod identity resolution) is cross-platform.
 2. **WinUI 3 tray app (`ui/windows/`)** — .NET 10 desktop app. Lives in the
    system tray, owns the daemon process, surfaces device state + sync progress
    + settings + first-run wizard.
+3. **SwiftUI menu-bar app (`ui/macos/`)** — macOS 15+ app, the Mac counterpart
+   to the tray app. Same daemon + IPC; owns the daemon, shows device state,
+   manual/auto sync, settings (incl. the Rockbox-compatibility toggle). Ships
+   notarized + self-updating (Sparkle); released via `scripts/release-macos.sh`.
 
-The two halves talk over a named pipe (`\\.\pipe\classick`) for daemon
-commands and over stdin/stdout newline-delimited JSON for per-sync events. The
-wire format is in `docs/ipc-protocol.md` — that document is the source of
-truth, both implementations must agree with it.
+Each UI owns the daemon and talks to it over the same newline-delimited JSON
+IPC: a named pipe (`\\.\pipe\classick`) on Windows, a Unix socket (under
+`$TMPDIR`) on macOS, plus stdin/stdout JSON for per-sync events. The wire
+format is in `docs/ipc-protocol.md` — that document is the source of truth; all
+implementations must agree with it.
 
 For the full design rationale and the rejected-alternatives table, see
 `docs/SPEC.md`. For battle-scars and hard-won gotchas, see `LEARNINGS.md` —
@@ -43,8 +50,8 @@ classick/                  Cargo workspace root
 │       ├── examples/       Standalone Rust spike binaries
 │       └── vendor/         Vendored libgpod build artefacts (DLLs, headers)
 ├── ui/
-│   └── windows/            WinUI 3 / .NET 10 tray app (see its own README).
-│                           Future: ui/macos, ui/linux when those land.
+│   ├── windows/            WinUI 3 / .NET 10 tray app (see its own README).
+│   └── macos/              SwiftUI menu-bar app, macOS 15+ (see its own README).
 ├── docs/
 │   ├── ipc-protocol.md     Wire format (Rust ↔ UI). Source of truth.
 │   ├── SPEC.md             Full original design spec
@@ -157,6 +164,25 @@ dotnet run --project Classick.UI/Classick.UI.csproj
 A `WarnIfCoreMissing` MSBuild target warns (does not fail) when the Rust
 binary hasn't been built yet.
 
+## macOS UI (`ui/macos/`)
+
+SwiftUI menu-bar app (SPM package), macOS 15+, Swift 6 strict concurrency. See
+`ui/macos/README.md` for full detail; the short version:
+
+```bash
+# From workspace root — the app embeds + spawns the daemon:
+cargo build --release
+ui/macos/bundle.sh                    # -> ui/macos/Classick.app (ad-hoc, for dev)
+cd ui/macos && swift test             # unit tests (WireCodec, AppModel reducer, …)
+```
+
+Transcoding on macOS is the system `afconvert` (never bundle ffmpeg on macOS).
+The app is **not** sandboxed — it spawns a daemon that needs raw device access
+and a shared `$TMPDIR` Unix-socket; enabling the App Sandbox breaks IPC. Signed
++ notarized release: `scripts/release-macos.sh <version>` (Developer ID identity
++ `classick-notary` profile in the Keychain); the Sparkle appcast is published
+to the `gh-pages` branch — see `LEARNINGS.md` for the appcast-URL gotcha.
+
 ## IPC contract
 
 `docs/ipc-protocol.md` is the source of truth. Implementations on each side:
@@ -165,6 +191,8 @@ binary hasn't been built yet.
   `crates/classick/src/progress.rs::run_ipc` (channel-to-wire backend)
 - C#: `ui/windows/Classick.UI.Core/Ipc/IpcEvent.cs` and `IpcCommand.cs`
   (subprocess wire), `DaemonEvent.cs` / `DaemonCommand.cs` (daemon-pipe wire)
+- Swift: `ui/macos/Sources/Classick/Ipc/WireModels.swift` (event/command
+  Codables) + `DaemonClient.swift` (Unix-socket transport)
 
 Versioning is semver with a `hello` handshake — see §1 of the protocol doc.
 A breaking change anywhere on the wire is a major bump and both sides must
