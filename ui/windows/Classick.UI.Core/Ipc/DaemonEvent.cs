@@ -20,6 +20,18 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(SyncEventEnvelope), "sync_event")]
 public abstract record DaemonEvent;
 
+// TODO(windows): pause/resume + X-of-Y not yet wired on Windows.
+// Daemon protocol bumped to 1.2.0: `status_update` gained a required
+// `synced_count` (usize) and an optional `library_count` (usize, omitted
+// when unknown) — see docs/ipc-protocol.md "Daemon v1.2.0". StatusUpdateEvent
+// below doesn't decode either field yet, so "X of Y synced" can't be
+// rendered on Windows. There's also no terminal `paused` SyncEvent case to
+// distinguish a graceful pause from a normal completion or abort. Mirror
+// the Rust daemon (crates/classick/src/ipc_daemon.rs::DaemonEvent::StatusUpdate)
+// and the macOS client (ui/macos/Sources/Classick/Ipc/WireModels.swift,
+// `StatusInfo.syncedCount`/`libraryCount`, `SyncEvent.paused`) plus a
+// Pause/Resume affordance in the tray UI. Can't build/verify Windows in
+// this environment — see docs/ipc-protocol.md.
 public sealed record StatusUpdateEvent(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("configured")] bool Configured,
