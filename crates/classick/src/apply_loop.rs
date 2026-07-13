@@ -1103,15 +1103,14 @@ pub(crate) fn entry_from(
 /// Embed tags + normalized art from `source` into the on-device `.m4a` at
 /// `device_file`, in place (no re-transcode). Returns the new file size.
 /// Non-fatal caller decides skip vs abort. Public(crate) for unit tests.
-/// Probe `source`, normalize its cover art, and embed tags + art into the
-/// on-device `.m4a` (the Rockbox side). Returns `(tags, normalized_art,
-/// new_size)` so the caller can ALSO refresh the Apple ithmb thumbnail from the
-/// same normalized art — see `backfill_rockbox`. Pure file I/O; no libgpod.
-pub(crate) fn backfill_one_file(
-    device_file: &Path,
+/// Probe a source file and return `(tags, normalized_cover_art)`. Shared by the
+/// Rockbox `.m4a` embed and the Apple ArtworkDB rebuild. Art is normalized to a
+/// small baseline JPEG (`artwork::normalize`); `None` when the source has no
+/// embedded art. On normalize failure, falls back to the raw art bytes.
+pub(crate) fn source_tags_and_art(
     source: &Path,
     ffmpeg: &Path,
-) -> Result<(crate::ipod::db::Tags, Option<Vec<u8>>, u64)> {
+) -> Result<(crate::ipod::db::Tags, Option<Vec<u8>>)> {
     let probe = transcode::probe(source, ffmpeg)
         .with_context(|| format!("probe {}", source.display()))?;
     let tags = tags_from_probe(&probe);
@@ -1124,28 +1123,44 @@ pub(crate) fn backfill_one_file(
     } else {
         None
     };
+    Ok((tags, art))
+}
+
+/// Embed a source's tags + normalized art into an on-device `.m4a` (Rockbox
+/// side). Returns `(tags, normalized_art, new_size)`. Pure file I/O; no libgpod.
+pub(crate) fn backfill_one_file(
+    device_file: &Path,
+    source: &Path,
+    ffmpeg: &Path,
+) -> Result<(crate::ipod::db::Tags, Option<Vec<u8>>, u64)> {
+    let (tags, art) = source_tags_and_art(source, ffmpeg)?;
     crate::artwork::embed_track_metadata(device_file, &tags, art.as_deref())
         .with_context(|| format!("embed into {}", device_file.display()))?;
     let size = std::fs::metadata(device_file)?.len();
     Ok((tags, art, size))
 }
 
-/// Backfill the existing on-device library for Rockbox: embed tags + normalized
-/// cover art into each managed `.m4a` in place. No re-transcode.
+/// Refresh artwork + metadata for the already-synced library on BOTH firmwares,
+/// WITHOUT re-copying audio. Used by the "Update existing library" command and
+/// after a bulk source retag (Lidarr etc.).
 ///
-/// CRITICAL: this deliberately does NOT open or write the iTunesDB/ArtworkDB.
-/// Verified on-device (0.2.1 → this fix): any `itdb_write` in the backfill
-/// context regenerates the ArtworkDB and DROPS the existing cover-art
-/// thumbnails (e.g. `F1069_1.ithmb` is deleted) — even with zero tracks changed,
-/// and even after re-setting the thumbnails via `itdb_track_set_thumbnails_from_data`.
-/// That was the 0.2.1 "backfill broke Apple artwork" bug. Leaving the DB
-/// completely untouched keeps Apple-firmware artwork intact; Rockbox reads its
-/// tags/art straight from the `.m4a`, so no DB write is needed for it anyway.
-/// (The iTunesDB `size` field goes slightly stale as files grow — harmless: the
-/// firmware plays the file directly and the DB signature is over records, not
-/// file bytes.)
+/// Two phases, no re-transcode:
+///  1. **Rockbox** — embed each track's tags + normalized cover art into its
+///     on-device `.m4a` (Rockbox reads tags/art straight from the file). Only
+///     for transcoded ALAC output; passthrough files (mp3/aac/…) already carry
+///     their own tags/art, so their file is left alone.
+///  2. **Apple** — rebuild the ArtworkDB fresh for ALL managed tracks:
+///     re-thumbnail each from source art, DELETE the stale ithmb/ArtworkDB,
+///     then `itdb_write`. The delete-then-build is essential — `itdb_write`'s
+///     REWRITE path drops cover-art thumbnails loaded from an existing DB
+///     (verified on-device: F1069 deleted), while its fresh-BUILD path (no stale
+///     ithmb present) writes them correctly. Also refreshes the iTunesDB tags.
 ///
-/// Per-track failures skip (warn), never abort.
+/// Safety: if the iPod holds tracks classick doesn't manage (absent from the
+/// manifest, or skipped this run), the fresh rebuild would drop THEIR Apple art
+/// (we can't regenerate it — no source), so Phase 2 is skipped and a warning is
+/// logged; the Rockbox file updates from Phase 1 still stand. Per-track failures
+/// skip (warn), never abort.
 pub fn backfill_rockbox(
     config: &mut Config,
     progress: &Progress,
@@ -1153,25 +1168,20 @@ pub fn backfill_rockbox(
 ) -> Result<RunOutcome> {
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
     let manifest = manifest::load_or_default(&config.manifest_path)?;
-    // Skip passthrough entries: their on-device file keeps the source
-    // container/extension (e.g. .wav/.mp3) and already carries its own tags/art
-    // (Rockbox-ready as-is). Only transcoded ALAC (.m4a) output was ever bare,
-    // and embed_track_metadata only supports MP4 tags anyway.
     let entries: Vec<&crate::manifest::ManifestEntry> = manifest
         .tracks
         .iter()
-        .filter(|e| e.source_known && !e.ipod_relpath.is_empty() && e.encoder != "passthrough")
+        .filter(|e| e.source_known && !e.ipod_relpath.is_empty())
         .collect();
     let total = entries.len();
-    // Drive the UI's "X of Y" + progress bar. Emit a summary (so the total is
-    // known) + per-track start/done (so it advances). Without these the UI sat
-    // frozen at "0 of 0" for the whole run and looked stuck.
     progress.summary(0, 0, total, 0, 0, total);
     progress.log(format!(
-        "Rockbox backfill: embedding tags+art into {total} file(s); iTunes/Apple library left untouched…"
+        "Refreshing artwork + metadata for {total} track(s) — no audio re-copy…"
     ));
 
+    // Phase 1: per-track Rockbox embed + collect (dbid, tags, art) for Phase 2.
     let (mut updated, mut skipped) = (0usize, 0usize);
+    let mut refreshed: Vec<(u64, crate::ipod::db::Tags, Option<Vec<u8>>)> = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
         let label = entry
             .source_path
@@ -1186,10 +1196,20 @@ pub fn backfill_rockbox(
             progress.track_done();
             continue;
         }
-        // Pure file I/O: embed tags + covr into the device .m4a. Never touches
-        // libgpod / the iTunesDB / the ArtworkDB (see the doc comment above).
-        match backfill_one_file(&device_file, &entry.source_path, &config.ffmpeg) {
-            Ok(_) => updated += 1,
+        match source_tags_and_art(&entry.source_path, &config.ffmpeg) {
+            Ok((tags, art)) => {
+                // Rockbox: embed into the .m4a — transcoded ALAC only.
+                // Passthrough files already carry their own tags/art.
+                if entry.encoder != "passthrough" {
+                    if let Err(e) =
+                        crate::artwork::embed_track_metadata(&device_file, &tags, art.as_deref())
+                    {
+                        tracing::warn!("embed {} failed: {e:#}", device_file.display());
+                    }
+                }
+                refreshed.push((entry.ipod_dbid, tags, art));
+                updated += 1;
+            }
             Err(e) => {
                 tracing::warn!("backfill skip {}: {e:#}", entry.source_path.display());
                 skipped += 1;
@@ -1197,8 +1217,79 @@ pub fn backfill_rockbox(
         }
         progress.track_done();
     }
-    progress.log(format!("Rockbox backfill complete: {updated} updated, {skipped} skipped"));
+
+    // Phase 2: rebuild the Apple ArtworkDB fresh so Apple firmware shows art too.
+    match rebuild_apple_artwork(Path::new(&mount), &refreshed) {
+        Ok(()) => progress.log("Apple firmware artwork rebuilt.".to_string()),
+        Err(e) => progress.log(format!(
+            "Apple artwork not rebuilt ({e:#}); Rockbox files still updated."
+        )),
+    }
+
+    progress.log(format!(
+        "Refresh complete: {updated} updated, {skipped} skipped."
+    ));
     Ok(RunOutcome::Completed)
+}
+
+/// Phase 2 of `backfill_rockbox`: rebuild the Apple ArtworkDB fresh from
+/// `refreshed` = `(dbid, tags, normalized_art)` for every managed track.
+///
+/// Returns `Err` (leaving the Apple side untouched) if the iPod holds tracks not
+/// present in `refreshed` — the fresh rebuild deletes ALL thumbnails, so an
+/// unmanaged track we don't re-thumbnail would lose its cover; refusing is safer
+/// than silently clobbering art we can't regenerate.
+fn rebuild_apple_artwork(
+    mount: &Path,
+    refreshed: &[(u64, crate::ipod::db::Tags, Option<Vec<u8>>)],
+) -> Result<()> {
+    let identity = device::resolve_libgpod_identity(mount)?;
+    // Provision so the artwork format list (incl. F1069) is correct for the write.
+    crate::ipod::sysinfo_provision::provision(mount, &identity).ok();
+    let db = OwnedDb::open(mount)?;
+    unsafe {
+        let device_ptr = (*db.as_ptr()).device;
+        device::set_firewire_guid(device_ptr, &identity.firewire_guid)?;
+        device::set_model_num(device_ptr, &identity.model_num_str)?;
+    }
+
+    // Foreign/unmanaged-track guard: every track on the iPod must be in
+    // `refreshed`, or the fresh rebuild would drop its (irretrievable) art.
+    let managed: std::collections::HashSet<u64> = refreshed.iter().map(|(d, _, _)| *d).collect();
+    let unmanaged = db
+        .list_tracks_for_rebuild()
+        .into_iter()
+        .filter(|t| !managed.contains(&t.dbid))
+        .count();
+    if unmanaged > 0 {
+        anyhow::bail!(
+            "{unmanaged} on-iPod track(s) not covered by this refresh; \
+             skipping Apple artwork rebuild to avoid dropping their covers"
+        );
+    }
+
+    // Re-thumbnail every track from source art (into libgpod's in-memory state).
+    for (dbid, tags, art) in refreshed {
+        db.update_track_metadata(*dbid, tags, art.as_deref())
+            .unwrap_or_else(|e| tracing::warn!("re-thumbnail dbid {dbid}: {e:#}"));
+    }
+
+    // Force libgpod's fresh-BUILD path: delete the stale ArtworkDB + ithmb so
+    // itdb_write rebuilds them from the in-memory thumbnails (preserving F1069)
+    // instead of taking the destructive rewrite path.
+    let art_dir = mount.join("iPod_Control").join("Artwork");
+    if let Ok(rd) = std::fs::read_dir(&art_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if let Some(n) = p.file_name().and_then(|s| s.to_str()) {
+                if n.ends_with(".ithmb") || n == "ArtworkDB" {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+    db.write()?;
+    Ok(())
 }
 
 pub(crate) fn build_rebuild_manifest(db: &OwnedDb) -> Manifest {
