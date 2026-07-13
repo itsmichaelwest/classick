@@ -26,6 +26,16 @@ pub const DISPLAY_NAME: &str = "Classick";
 /// crash. Tunable if real-world failure modes warrant it.
 pub const SYNC_CHECKPOINT_EVERY: usize = 25;
 
+use std::time::Duration;
+
+/// Backoff schedule for transient iPod-write retries (add/copy, delete,
+/// checkpoint write). 3 delays = up to 3 retries. See `retry_transient`.
+pub const RETRY_BACKOFF: [Duration; 3] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+];
+
 pub mod apply_loop;
 pub mod cli;
 pub mod config;
