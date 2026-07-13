@@ -1130,35 +1130,28 @@ pub(crate) fn backfill_one_file(
     Ok((tags, art, size))
 }
 
-/// Backfill the existing on-device library: for each manifest entry with a
-/// source file + on-device .m4a, embed tags+art in place and update the
-/// iTunesDB size. No re-transcode. Per-track failures skip (warn), never abort.
+/// Backfill the existing on-device library for Rockbox: embed tags + normalized
+/// cover art into each managed `.m4a` in place. No re-transcode.
+///
+/// CRITICAL: this deliberately does NOT open or write the iTunesDB/ArtworkDB.
+/// Verified on-device (0.2.1 → this fix): any `itdb_write` in the backfill
+/// context regenerates the ArtworkDB and DROPS the existing cover-art
+/// thumbnails (e.g. `F1069_1.ithmb` is deleted) — even with zero tracks changed,
+/// and even after re-setting the thumbnails via `itdb_track_set_thumbnails_from_data`.
+/// That was the 0.2.1 "backfill broke Apple artwork" bug. Leaving the DB
+/// completely untouched keeps Apple-firmware artwork intact; Rockbox reads its
+/// tags/art straight from the `.m4a`, so no DB write is needed for it anyway.
+/// (The iTunesDB `size` field goes slightly stale as files grow — harmless: the
+/// firmware plays the file directly and the DB signature is over records, not
+/// file bytes.)
+///
+/// Per-track failures skip (warn), never abort.
 pub fn backfill_rockbox(
     config: &mut Config,
     progress: &Progress,
     decision_rx: &Receiver<Decision>,
 ) -> Result<RunOutcome> {
-    // Same preflight + DB preamble as run() (copied verbatim from run(), see
-    // its ~L116 mount resolution and ~L312-334 identity/provision/open block).
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
-    let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
-    progress.log(format!(
-        "iPod identity: FirewireGuid={}, ModelNumStr={}",
-        identity.firewire_guid, identity.model_num_str,
-    ));
-    if let Err(e) = crate::ipod::sysinfo_provision::provision(Path::new(&mount), &identity) {
-        progress.log(format!("SysInfoExtended provisioning failed: {e:#}"));
-    }
-    let db = OwnedDb::open(Path::new(&mount))?;
-    unsafe {
-        let device_ptr = (*db.as_ptr()).device;
-        device::set_firewire_guid(device_ptr, &identity.firewire_guid)?;
-        device::set_model_num(device_ptr, &identity.model_num_str)?;
-    }
-
-    // run() loads via `manifest::load_or_default` (not `manifest::load` — no
-    // such function exists); match that exactly so a first-ever backfill
-    // against a fresh manifest.json doesn't hard-error.
     let manifest = manifest::load_or_default(&config.manifest_path)?;
     // Skip passthrough entries: their on-device file keeps the source
     // container/extension (e.g. .wav/.mp3) and already carries its own tags/art
@@ -1170,19 +1163,14 @@ pub fn backfill_rockbox(
         .filter(|e| e.source_known && !e.ipod_relpath.is_empty() && e.encoder != "passthrough")
         .collect();
     let total = entries.len();
-    // Drive the UI's "X of Y" + progress bar. A backfill is N in-place metadata
-    // updates; emit a summary (so the total is known) + per-track start/done
-    // (so it advances). Without these the UI sat frozen at "0 of 0" for the
-    // whole run and looked stuck. total_planned == metadata_only == N.
+    // Drive the UI's "X of Y" + progress bar. Emit a summary (so the total is
+    // known) + per-track start/done (so it advances). Without these the UI sat
+    // frozen at "0 of 0" for the whole run and looked stuck.
     progress.summary(0, 0, total, 0, 0, total);
-    progress.log(format!("Rockbox backfill: {total} track(s) to update…"));
+    progress.log(format!(
+        "Rockbox backfill: embedding tags+art into {total} file(s); iTunes/Apple library left untouched…"
+    ));
 
-    // Same checkpoint cadence as run() (~L387).
-    let mut ckpt = CheckpointClock::new(
-        crate::CHECKPOINT_MAX_TRACKS,
-        Duration::from_secs(crate::CHECKPOINT_MAX_SECONDS),
-        Instant::now(),
-    );
     let (mut updated, mut skipped) = (0usize, 0usize);
     for (i, entry) in entries.iter().enumerate() {
         let label = entry
@@ -1198,33 +1186,17 @@ pub fn backfill_rockbox(
             progress.track_done();
             continue;
         }
+        // Pure file I/O: embed tags + covr into the device .m4a. Never touches
+        // libgpod / the iTunesDB / the ArtworkDB (see the doc comment above).
         match backfill_one_file(&device_file, &entry.source_path, &config.ffmpeg) {
-            Ok((tags, art, size)) => {
-                // Rockbox side done (covr embedded in the .m4a above). Apple
-                // side: db.write() below rewrites the ArtworkDB, and if the
-                // track's thumbnail isn't re-set in memory libgpod writes a
-                // blanked entry (the 0.2.1 backfill art-break). Re-generate the
-                // ithmb thumbnail from the SAME normalized art so the rewrite is
-                // correct — this both preserves and repairs Apple artwork.
-                db.update_track_metadata(entry.ipod_dbid, &tags, art.as_deref())
-                    .unwrap_or_else(|e| tracing::warn!("re-thumbnail dbid {}: {e:#}", entry.ipod_dbid));
-                db.set_track_size(entry.ipod_dbid, size.min(u32::MAX as u64) as u32).ok();
-                updated += 1;
-            }
+            Ok(_) => updated += 1,
             Err(e) => {
                 tracing::warn!("backfill skip {}: {e:#}", entry.source_path.display());
                 skipped += 1;
             }
         }
         progress.track_done();
-        // record() is a tick-and-check: call it exactly once per processed
-        // track (mirrors run()'s post-action-loop record()).
-        if ckpt.record(Instant::now()) {
-            progress.log(format!("Checkpoint: persisting state after {updated} track(s)…"));
-            db.write().context("checkpoint: db.write")?;
-        }
     }
-    db.write()?;
     progress.log(format!("Rockbox backfill complete: {updated} updated, {skipped} skipped"));
     Ok(RunOutcome::Completed)
 }
