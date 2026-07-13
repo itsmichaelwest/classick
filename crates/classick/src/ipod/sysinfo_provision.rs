@@ -244,16 +244,19 @@ mod tests {
     use crate::ipod::device::LibgpodIdentity;
     use std::path::PathBuf;
 
-    fn temp_mount() -> PathBuf {
-        // Unique per-process temp mount with the Device dir libgpod expects.
-        let base = std::env::temp_dir().join(format!("classick-provision-{}", std::process::id()));
+    fn temp_mount(label: &str) -> PathBuf {
+        // Unique per-process-AND-test temp mount with the Device dir libgpod
+        // expects. The `label` keeps parallel tests from sharing a dir (one
+        // test's remove_dir_all must not yank another's file mid-run).
+        let base = std::env::temp_dir()
+            .join(format!("classick-provision-{}-{label}", std::process::id()));
         std::fs::create_dir_all(base.join("iPod_Control/Device")).unwrap();
         base
     }
 
     #[test]
     fn provision_writes_sysinfoextended_for_known_model() {
-        let mount = temp_mount();
+        let mount = temp_mount("known");
         let id = LibgpodIdentity { firewire_guid: "0x000A27002138B0A8".into(), model_num_str: "MC293".into() };
         provision(&mount, &id).unwrap();
         let written = std::fs::read_to_string(mount.join("iPod_Control/Device/SysInfoExtended")).unwrap();
@@ -266,7 +269,7 @@ mod tests {
 
     #[test]
     fn provision_skips_unknown_model_without_writing() {
-        let mount = temp_mount();
+        let mount = temp_mount("unknown");
         let id = LibgpodIdentity { firewire_guid: "0x000A27002138B0A8".into(), model_num_str: "XPID_9999".into() };
         provision(&mount, &id).unwrap(); // Ok, but no file
         assert!(!mount.join("iPod_Control/Device/SysInfoExtended").exists());
