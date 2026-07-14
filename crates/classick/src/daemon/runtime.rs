@@ -15,7 +15,7 @@ use crate::daemon::device_watcher::PollingDeviceWatcher;
 use crate::daemon::history::{HistoryEntry, HistoryService, SyncOutcome, SyncSummary, SyncTrigger};
 use crate::daemon::ipc_server::ClientCommand;
 use crate::daemon::scheduler::SyncScheduler;
-use crate::daemon::state::{DaemonState, StateMachine, TriggerOutcome};
+use crate::daemon::state::{DaemonState, SessionKind, StateMachine, TriggerOutcome};
 use crate::daemon::sync_orchestrator::{self, OrchestratorOutcome};
 use crate::ipc_daemon::{
     DaemonCommand, DaemonEvent, DaemonStateLabel, SyncRejectReason, TriggerSource,
@@ -80,6 +80,16 @@ pub async fn run_daemon() -> Result<()> {
         })
     });
 
+    let exe_for_scan = std::env::current_exe()?;
+    let event_tx_for_scan = event_tx.clone();
+    let spawn_scan: SpawnFn = Arc::new(move |_drive: String, cancel_rx, pause_rx, prompt_rx| {
+        let exe = exe_for_scan.clone();
+        let event_tx = event_tx_for_scan.clone();
+        Box::pin(async move {
+            sync_orchestrator::run_scan(exe, cancel_rx, pause_rx, prompt_rx, event_tx).await
+        })
+    });
+
     let deps = DaemonDeps {
         configured_serial,
         #[cfg(target_os = "macos")]
@@ -88,6 +98,7 @@ pub async fn run_daemon() -> Result<()> {
         watcher: Box::new(PollingDeviceWatcher::new_production()),
         spawn_sync,
         spawn_backfill,
+        spawn_scan,
         schedule_minutes,
         preset_event_tx: Some(event_tx),
         config_path: None,
@@ -127,6 +138,11 @@ pub struct DaemonDeps {
     /// cancel/pause/prompt channels, and event relay as a normal sync — so
     /// a backfill and a sync can never run concurrently.
     pub spawn_backfill: SpawnFn,
+    /// Same shape as `spawn_sync`, but drives a `--scan-library` subprocess
+    /// (`sync_orchestrator::run_scan` in production). The `drive` argument is
+    /// ignored — a scan touches no device. Used by `DaemonCommand::ScanLibrary`
+    /// via `start_scan_session`, which shares the sync guard.
+    pub spawn_scan: SpawnFn,
     pub schedule_minutes: u32,
     /// If Some, the runtime uses this pre-built sender instead of
     /// constructing its own. Production passes the same one it gave
@@ -180,6 +196,11 @@ enum InternalEvent {
     LibraryCountComputed {
         count: usize,
     },
+    /// A --scan-library subprocess finished. No history entry — a scan is
+    /// cache maintenance, not a sync.
+    ScanCompleted {
+        outcome: Result<OrchestratorOutcome>,
+    },
 }
 
 /// Test-friendly entry. Production wraps real impls and calls this.
@@ -220,6 +241,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
     let spawn_sync = deps.spawn_sync;
     let spawn_backfill = deps.spawn_backfill;
+    let spawn_scan = deps.spawn_scan;
     // Cancellation signal for the currently-running sync (if any). Set
     // by start_sync_session; taken + sent by handle_client_command's
     // CancelSync arm; cleared in handle_internal_event after completion.
@@ -268,6 +290,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &connected,
                     &spawn_sync,
                     &spawn_backfill,
+                    &spawn_scan,
                     &internal_tx,
                     &mut cancel_tx_holder,
                     &mut prompt_tx_holder,
@@ -304,9 +327,11 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
             }
 
             Some(internal) = internal_rx.recv() => {
-                // Only the SyncCompleted variant clears the sync-lifecycle
-                // holders. IpodNameResolved is unrelated to sync lifecycle.
-                let is_sync_completion = matches!(internal, InternalEvent::SyncCompleted { .. });
+                // Sync AND scan completions clear the sync-lifecycle holders
+                // (both occupy the shared guard). IpodNameResolved /
+                // LibraryCountComputed are unrelated to sync lifecycle.
+                let is_sync_completion = matches!(internal,
+                    InternalEvent::SyncCompleted { .. } | InternalEvent::ScanCompleted { .. });
                 if is_sync_completion {
                     cancel_tx_holder = None;
                     prompt_tx_holder = None;
@@ -513,6 +538,16 @@ fn handle_internal_event(
                 synced_count: synced_track_count(),
                 library_count: *library_count_cache,
             });
+        }
+        InternalEvent::ScanCompleted { outcome } => {
+            if let Err(e) = &outcome {
+                tracing::warn!("daemon: library scan failed: {e:#}");
+            }
+            state.finish_sync();
+            // Fresh index on disk: rebroadcast the library and a status
+            // update (selection-aware count may have changed).
+            let _ = event_tx.send(crate::daemon::library::build_library_update(config_path));
+            broadcast_status(event_tx, state, connected, config_path, history, *library_count_cache);
         }
     }
 }
@@ -722,6 +757,44 @@ fn start_sync_session(
     });
 }
 
+/// Start a library-scan subprocess. Mirrors `start_sync_session` minus the
+/// device/serial and history bookkeeping — a scan touches no iPod and writes
+/// no history. Shares the guard, cancel/pause/prompt channels, and event
+/// relay, so a scan and a sync can never run concurrently.
+#[allow(clippy::too_many_arguments)]
+fn start_scan_session(
+    state: &mut StateMachine,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    spawn_scan: &SpawnFn,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
+    prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
+    pause_tx_holder: &mut Option<oneshot::Sender<()>>,
+    connected: &Option<DetectedIpod>,
+    config_path: &std::path::Path,
+    history: &HistoryService,
+    library_count_cache: Option<usize>,
+) {
+    if state.try_start_scan() != TriggerOutcome::Accepted {
+        return;
+    }
+    broadcast_status(event_tx, state, connected, config_path, history, library_count_cache);
+
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    *cancel_tx_holder = Some(cancel_tx);
+    let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<(u64, i32)>();
+    *prompt_tx_holder = Some(prompt_tx);
+    let (pause_tx, pause_rx) = oneshot::channel::<()>();
+    *pause_tx_holder = Some(pause_tx);
+
+    let spawn_scan = spawn_scan.clone();
+    let internal_tx = internal_tx.clone();
+    tokio::spawn(async move {
+        let outcome = (spawn_scan)(String::new(), cancel_rx, pause_rx, prompt_rx).await;
+        let _ = internal_tx.send(InternalEvent::ScanCompleted { outcome });
+    });
+}
+
 fn make_history_entry(
     trigger: SyncTrigger,
     outcome: SyncOutcome,
@@ -744,6 +817,16 @@ fn make_history_entry(
     }
 }
 
+/// Map the state machine to the wire's `status_update.state`. A `Scan`
+/// session reports `Scanning`; a real sync reports `Syncing`.
+fn state_label(state: &StateMachine) -> DaemonStateLabel {
+    match state.state() {
+        DaemonState::Idle => DaemonStateLabel::Idle,
+        DaemonState::Syncing(s) if s.kind == SessionKind::Scan => DaemonStateLabel::Scanning,
+        DaemonState::Syncing(_) => DaemonStateLabel::Syncing,
+    }
+}
+
 fn broadcast_status(
     event_tx: &broadcast::Sender<DaemonEvent>,
     state: &StateMachine,
@@ -757,13 +840,13 @@ fn broadcast_status(
         .flatten()
         .and_then(|c| c.ipod_identity)
         .is_some();
-    let state_label = match state.state() {
-        DaemonState::Idle => DaemonStateLabel::Idle,
-        DaemonState::Syncing(_) => DaemonStateLabel::Syncing,
-    };
+    // Selection-aware Y: under a non-All selection this is the *selected*
+    // track count; under mode=All it returns None and we keep the walk cache.
+    let library_count = crate::daemon::library::selected_library_count(config_path)
+        .or(library_count);
     let entries = history.read();
     let _ = event_tx.send(DaemonEvent::StatusUpdate {
-        state: state_label,
+        state: state_label(state),
         configured,
         ipod_connected: connected.is_some(),
         last_sync: entries.last().cloned(),
@@ -858,6 +941,7 @@ fn handle_client_command(
     connected: &Option<DetectedIpod>,
     spawn_sync: &SpawnFn,
     spawn_backfill: &SpawnFn,
+    spawn_scan: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
     prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
@@ -870,20 +954,18 @@ fn handle_client_command(
     match command {
         DaemonCommand::GetStatus => {
             let configured = configured_serial.is_some();
-            let state_label = match state.state() {
-                DaemonState::Idle => DaemonStateLabel::Idle,
-                DaemonState::Syncing(_) => DaemonStateLabel::Syncing,
-            };
+            let library_count = crate::daemon::library::selected_library_count(config_path)
+                .or(*library_count_cache);
             let entries = history.read();
             let _ = reply.send(DaemonEvent::StatusUpdate {
-                state: state_label,
+                state: state_label(state),
                 configured,
                 ipod_connected: connected.is_some(),
                 last_sync: entries.last().cloned(),
                 next_scheduled_unix_secs: None,
                 storage: current_storage(connected),
                 synced_count: synced_track_count(),
-                library_count: *library_count_cache,
+                library_count,
             });
         }
         DaemonCommand::GetConfig => {
@@ -1112,15 +1194,69 @@ fn handle_client_command(
             // Symmetric no-op — subscription is implicit, so there's
             // nothing to tear down.
         }
-        // Library/selection commands (daemon protocol v1.4.0). Wired up in
-        // full in the runtime task; these interim arms keep the match
-        // exhaustive so the wire types can land first.
-        DaemonCommand::GetLibrary
-        | DaemonCommand::ScanLibrary
-        | DaemonCommand::GetSelection
-        | DaemonCommand::SaveSelection { .. }
-        | DaemonCommand::PreviewSelection { .. } => {
-            tracing::debug!("daemon: client {client_id} sent a v1.4.0 selection command; not yet wired");
+        DaemonCommand::GetLibrary => {
+            let _ = reply.send(crate::daemon::library::build_library_update(config_path));
+        }
+        DaemonCommand::ScanLibrary => {
+            if !state.is_idle() {
+                tracing::debug!("daemon: client {client_id} sent scan_library while busy; dropped");
+                return false;
+            }
+            let has_source = config_file::load(config_path).ok().flatten()
+                .and_then(|c| c.source).is_some();
+            if !has_source {
+                tracing::debug!("daemon: client {client_id} sent scan_library but no source configured; dropped");
+                return false;
+            }
+            tracing::info!("daemon: client {client_id} triggered a library scan");
+            start_scan_session(
+                state, event_tx, spawn_scan, internal_tx,
+                cancel_tx_holder, prompt_tx_holder, pause_tx_holder,
+                connected, config_path, history, *library_count_cache,
+            );
+        }
+        DaemonCommand::GetSelection => {
+            let sel = crate::selection::default_selection_path()
+                .map(|p| crate::selection::load_or_all(&p))
+                .unwrap_or_else(|_| crate::selection::Selection::all());
+            let _ = reply.send(DaemonEvent::SelectionUpdate { mode: sel.mode, rules: sel.rules });
+        }
+        DaemonCommand::SaveSelection { mode, rules } => {
+            let sel = crate::selection::Selection {
+                version: crate::selection::SELECTION_VERSION,
+                mode,
+                rules,
+            };
+            match crate::selection::default_selection_path() {
+                Ok(path) => {
+                    if let Err(e) = crate::selection::save_atomic(&path, &sel) {
+                        tracing::error!("daemon: failed to save selection: {e:#}");
+                        return false;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("daemon: cannot resolve selection path: {e:#}");
+                    return false;
+                }
+            }
+            let _ = reply.send(DaemonEvent::SelectionUpdate { mode: sel.mode, rules: sel.rules });
+            // Y in "X of Y" likely changed; push a fresh status to everyone.
+            broadcast_status(event_tx, state, connected, config_path, history, *library_count_cache);
+        }
+        DaemonCommand::PreviewSelection { mode, rules } => {
+            let source = config_file::load(config_path).ok().flatten().and_then(|c| c.source);
+            let index = match (source, crate::library_index::default_index_path()) {
+                (Some(root), Ok(p)) => crate::library_index::load_or_empty(&p, &root),
+                _ => crate::library_index::LibraryIndex::empty(std::path::PathBuf::new()),
+            };
+            let manifest = crate::config::default_manifest_path()
+                .and_then(|p| crate::manifest::load_or_default(&p))
+                .unwrap_or_else(|_| crate::manifest::Manifest::empty());
+            let (selected_tracks, selected_bytes, adds, removes) =
+                crate::daemon::library::preview(&index, &manifest, mode, &rules);
+            let _ = reply.send(DaemonEvent::SelectionPreview {
+                selected_tracks, selected_bytes, adds, removes,
+            });
         }
         DaemonCommand::Shutdown => {
             tracing::info!("daemon: shutdown requested by client {client_id}; exiting loop");
@@ -1162,6 +1298,17 @@ mod tests {
             daemon: Some(DaemonSettings { enabled, ..Default::default() }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn state_label_maps_scan_sessions_to_scanning() {
+        let mut sm = StateMachine::new();
+        assert!(matches!(state_label(&sm), DaemonStateLabel::Idle));
+        sm.try_start_scan();
+        assert!(matches!(state_label(&sm), DaemonStateLabel::Scanning));
+        sm.finish_sync();
+        sm.try_start_sync(SyncTrigger::Manual);
+        assert!(matches!(state_label(&sm), DaemonStateLabel::Syncing));
     }
 
     // Regression: auto-sync must follow the user's `enabled` toggle, NOT

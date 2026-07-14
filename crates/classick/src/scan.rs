@@ -70,7 +70,6 @@ fn scan_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn scan_writes_index_and_stamps_scanned_at() {
