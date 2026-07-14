@@ -6,6 +6,7 @@ pub mod device_watcher;
 pub mod device_storage;
 pub mod format;
 pub mod history;
+pub mod library;
 #[cfg(target_os = "macos")]
 pub mod iokit_watcher;
 pub mod ipc_server;
