@@ -180,6 +180,62 @@ pub fn filter(
     (kept, dirty)
 }
 
+/// Sync-path entry point: load selection + index from their default paths,
+/// filter, persist inline-probe additions. mode=All is a zero-cost
+/// passthrough (no index load, no writes).
+pub fn apply_to_sources(
+    sources: Vec<SourceEntry>,
+    source_root: &std::path::Path,
+    progress_log: impl Fn(String),
+) -> Vec<SourceEntry> {
+    let sel_path = match default_selection_path() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("selection: cannot resolve selection path ({e:#}); syncing everything");
+            return sources;
+        }
+    };
+    let idx_path = match crate::library_index::default_index_path() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("selection: cannot resolve index path ({e:#}); syncing everything");
+            return sources;
+        }
+    };
+    apply_with_paths(sources, source_root, &sel_path, &idx_path,
+        crate::library_index::read_track_tags, progress_log)
+}
+
+/// Path-injected core of `apply_to_sources` (testable without touching the
+/// user's real config dir).
+pub fn apply_with_paths(
+    sources: Vec<SourceEntry>,
+    source_root: &std::path::Path,
+    selection_path: &std::path::Path,
+    index_path: &std::path::Path,
+    probe: impl FnMut(&std::path::Path) -> anyhow::Result<TrackTags>,
+    progress_log: impl Fn(String),
+) -> Vec<SourceEntry> {
+    let selection = load_or_all(selection_path);
+    if selection.mode == SelectionMode::All {
+        return sources;
+    }
+    let total = sources.len();
+    let mut index = crate::library_index::load_or_empty(index_path, source_root);
+    let (kept, dirty) = filter(sources, &selection, &mut index, probe);
+    if dirty {
+        if let Err(e) = crate::library_index::save_atomic(index_path, &index) {
+            // Cache only — a failed save costs a re-probe next run, never a
+            // wrong sync.
+            tracing::warn!("selection: failed to save index after inline probes: {e:#}");
+        }
+    }
+    progress_log(format!(
+        "selection: {} of {} source track(s) selected (mode={:?})",
+        kept.len(), total, selection.mode));
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +475,33 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Remove(_)),
             "deselected + on-iPod must become an ordinary Remove");
+    }
+
+    #[test]
+    fn apply_with_paths_filters_and_persists_inline_probes() {
+        let base = std::env::temp_dir().join(format!("classick-selapply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let sel_path = base.join("selection.json");
+        let idx_path = base.join("library-index.json");
+        let root = PathBuf::from("/m");
+
+        // Selection: include only IDM. Index: empty (forces inline probe).
+        save_atomic(&sel_path, &Selection {
+            version: 1, mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Genre { name: "IDM".into() }],
+        }).unwrap();
+
+        let sources = vec![src("/m/a.flac")];
+        let kept = apply_with_paths(sources, &root, &sel_path, &idx_path, |_| Ok(TrackTags {
+            artist: "Autechre".into(), album_artist: String::new(),
+            album: "Amber".into(), genre: "IDM".into(), title: String::new(), duration_ms: 0,
+        }), |_msg| {});
+        assert_eq!(kept.len(), 1);
+
+        // The inline probe must have been persisted.
+        let idx = crate::library_index::load_or_empty(&idx_path, &root);
+        assert_eq!(idx.files.len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
