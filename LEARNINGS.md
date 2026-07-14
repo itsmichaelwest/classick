@@ -490,3 +490,11 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   `xcodegen generate`. Add a file → run `xcodegen generate` (from `ui/macos`) →
   commit the regenerated `project.pbxproj`, or the .app build fails with
   "cannot find <NewType> in scope" even though the SPM build is green.
+- **Commit AND push the version bump BEFORE `gh release create`.** `gh release
+  create vX` tags the *remote* default-branch HEAD, not your local HEAD. If you
+  push `main`, then commit the version bump locally, then create the release,
+  the `vX` tag lands on the pre-bump commit (Info.plist still shows the old
+  version) even though the locally-built dmg is correct. Fix after the fact with
+  `git push origin main && git tag -f vX <bump-commit> && git push origin vX
+  --force`. Better: bump + commit + push `main`, THEN
+  `scripts/release-macos.sh`/`gh release create`. (Discovered shipping 0.3.0.)
