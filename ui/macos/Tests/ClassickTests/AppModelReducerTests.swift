@@ -160,4 +160,36 @@ final class AppModelReducerTests: XCTestCase {
         m.apply(.deviceConnected(serial: "0xB", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
         XCTAssertEqual(m.phase, .notConfigured)
     }
+
+    func testLibraryAndSelectionEventsPopulateModel() {
+        let m = AppModel()
+        m.apply(.libraryUpdate(LibraryInfo(
+            sourceRoot: "/m", scannedAtUnixSecs: 1,
+            artists: [], genres: [], totalTracks: 0, totalBytes: 0)))
+        XCTAssertEqual(m.library?.sourceRoot, "/m")
+        m.apply(.selectionUpdate(mode: .include, rules: [.genre(name: "IDM")]))
+        XCTAssertEqual(m.selection?.mode, .include)
+        XCTAssertEqual(m.selection?.rules, [.genre(name: "IDM")])
+        m.apply(.selectionPreview(SelectionPreviewInfo(
+            selectedTracks: 10, selectedBytes: 100, adds: 2, removes: 3)))
+        XCTAssertEqual(m.selectionPreview?.removes, 3)
+    }
+
+    func testScanningStatusMakesScanningPhaseAndRoutesTrackStart() {
+        let m = AppModel()
+        // device + config so computePhase doesn't fall into noDevice/notConfigured
+        m.apply(.deviceConnected(serial: "S", modelLabel: "iPod", drive: "/Volumes/IPOD", name: nil))
+        m.apply(.configUpdate(source: "/m", daemon: nil,
+                              ipod: IpodIdentity(serial: "S", modelLabel: "iPod", name: nil)))
+        m.apply(.statusUpdate(.init(state: .scanning, configured: true, ipodConnected: true, lastSync: nil, storage: nil)))
+        guard case .scanning = m.phase else { return XCTFail("expected scanning, got \(m.phase)") }
+
+        // Forwarded scan progress must update .scanning, NOT flip to .syncing.
+        m.apply(.syncEvent(line: #"{"type":"track_start","current":5,"total":100,"label":"x.flac"}"#))
+        guard case let .scanning(current, total) = m.phase else {
+            return XCTFail("track_start during a scan must stay in scanning; got \(m.phase)")
+        }
+        XCTAssertEqual(current, 5)
+        XCTAssertEqual(total, 100)
+    }
 }

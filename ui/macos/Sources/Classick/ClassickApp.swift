@@ -269,6 +269,8 @@ private func menuBarSystemImage(for phase: Phase) -> String {
         return "ipod"
     case .syncing:
         return "arrow.triangle.2.circlepath"
+    case .scanning:
+        return "magnifyingglass"
     case .paused:
         return "pause.circle"
     case .error:

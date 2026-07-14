@@ -66,6 +66,9 @@ struct MenuContent: View {
             Button("Pause", action: onPause)
             Button("Cancel Sync", action: onCancelSync)
 
+        case let .scanning(current, total):
+            Text("Scanning library… \(current) of \(total)")
+
         case let .paused(synced, total):
             Text("Paused — \(pausedSummary(synced: synced, total: total)) synced")
             Button("Resume", action: onResume)
