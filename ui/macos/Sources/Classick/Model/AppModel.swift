@@ -103,6 +103,12 @@ final class AppModel {
         case .hello, .historyUpdate, .unknown:
             break
 
+        // Library/selection events (daemon v1.4.0). Fully handled in the
+        // reducer's selection state; interim no-op keeps the switch exhaustive
+        // until that lands.
+        case .libraryUpdate, .selectionUpdate, .selectionPreview:
+            break
+
         case let .configUpdate(source, daemon, ipod):
             config = AppConfig(source: source, daemon: daemon, ipod: ipod)
             // The daemon considers itself configured once it has a persisted
@@ -137,7 +143,7 @@ final class AppModel {
             let targetSyncing: Bool
             switch info.state {
             case .syncing: targetSyncing = true
-            case .idle: targetSyncing = false
+            case .idle, .scanning: targetSyncing = false
             }
             phase = computePhase(targetSyncing: targetSyncing)
 

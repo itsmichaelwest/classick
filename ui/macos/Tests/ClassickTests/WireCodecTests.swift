@@ -74,4 +74,71 @@ final class WireCodecTests: XCTestCase {
         let decoded = try JSONDecoder().decode(DaemonSettings.self, from: Data(json.utf8))
         XCTAssertFalse(decoded.rockboxCompat)
     }
+
+    func testDecodesLibraryUpdate() throws {
+        let line = #"{"type":"library_update","source_root":"/music","scanned_at_unix_secs":42,"artists":[{"name":"Aphex Twin","albums":[{"name":"Drukqs","genre":"IDM","tracks":30,"bytes":900}]}],"genres":[{"name":"IDM","tracks":30,"bytes":900}],"total_tracks":30,"total_bytes":900}"#
+        let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(line.utf8))
+        guard case let .libraryUpdate(info) = event else { return XCTFail("expected libraryUpdate, got \(event)") }
+        XCTAssertEqual(info.sourceRoot, "/music")
+        XCTAssertEqual(info.scannedAtUnixSecs, 42)
+        XCTAssertEqual(info.artists.first?.name, "Aphex Twin")
+        XCTAssertEqual(info.artists.first?.albums.first?.tracks, 30)
+        XCTAssertEqual(info.genres.first?.name, "IDM")
+    }
+
+    func testDecodesLibraryUpdateNeverScanned() throws {
+        let line = #"{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"genres":[],"total_tracks":0,"total_bytes":0}"#
+        let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(line.utf8))
+        guard case let .libraryUpdate(info) = event else { return XCTFail() }
+        XCTAssertNil(info.scannedAtUnixSecs, "null timestamp = never scanned")
+    }
+
+    func testDecodesSelectionUpdateAndPreview() throws {
+        let upd = #"{"type":"selection_update","mode":"include","rules":[{"kind":"artist","name":"BoC"},{"kind":"album","artist":"Aphex Twin","album":"Drukqs"},{"kind":"genre","name":"Ambient"}]}"#
+        let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(upd.utf8))
+        guard case let .selectionUpdate(mode, rules) = event else { return XCTFail() }
+        XCTAssertEqual(mode, .include)
+        XCTAssertEqual(rules, [
+            .artist(name: "BoC"),
+            .album(artist: "Aphex Twin", album: "Drukqs"),
+            .genre(name: "Ambient"),
+        ])
+
+        let prev = #"{"type":"selection_preview","selected_tracks":2340,"selected_bytes":14200000000,"adds":120,"removes":214}"#
+        let event2 = try JSONDecoder().decode(DaemonEvent.self, from: Data(prev.utf8))
+        guard case let .selectionPreview(info) = event2 else { return XCTFail() }
+        XCTAssertEqual(info.removes, 214)
+    }
+
+    func testEncodesSelectionCommands() throws {
+        func encode(_ cmd: DaemonCommand) throws -> String {
+            String(decoding: try JSONEncoder().encode(cmd), as: UTF8.self)
+        }
+        XCTAssertTrue(try encode(.getLibrary).contains(#""type":"get_library""#))
+        XCTAssertTrue(try encode(.scanLibrary).contains(#""type":"scan_library""#))
+        XCTAssertTrue(try encode(.getSelection).contains(#""type":"get_selection""#))
+        let save = try encode(.saveSelection(mode: .include, rules: [.artist(name: "BoC")]))
+        XCTAssertTrue(save.contains(#""type":"save_selection""#))
+        XCTAssertTrue(save.contains(#""mode":"include""#))
+        XCTAssertTrue(save.contains(#""kind":"artist""#))
+        let preview = try encode(.previewSelection(mode: .exclude, rules: []))
+        XCTAssertTrue(preview.contains(#""type":"preview_selection""#))
+    }
+
+    func testStatusUpdateScanningState() throws {
+        let line = #"{"type":"status_update","state":"scanning","configured":true,"ipod_connected":false,"synced_count":0}"#
+        let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(line.utf8))
+        guard case let .statusUpdate(info) = event else { return XCTFail() }
+        XCTAssertEqual(info.state, .scanning)
+    }
+
+    func testStatusUpdateUnknownStateDecodesAsIdle() throws {
+        // Protocol rule: unknown state values MUST be treated as idle —
+        // without this the whole status_update fails to decode and the
+        // menu freezes on stale state when a newer daemon speaks.
+        let line = #"{"type":"status_update","state":"defragging","configured":true,"ipod_connected":false,"synced_count":0}"#
+        let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(line.utf8))
+        guard case let .statusUpdate(info) = event else { return XCTFail("must not throw") }
+        XCTAssertEqual(info.state, .idle)
+    }
 }

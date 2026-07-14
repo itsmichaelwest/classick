@@ -85,7 +85,7 @@ struct HistoryEntry: Codable, Equatable, Sendable {
 }
 
 struct StatusInfo: Equatable, Sendable {
-    enum State: String, Codable, Sendable { case idle, syncing }
+    enum State: String, Codable, Sendable { case idle, syncing, scanning }
 
     struct Storage: Codable, Equatable, Sendable {
         var free: UInt64
@@ -115,6 +115,89 @@ extension StatusInfo: Codable {
     }
 }
 
+// MARK: - Library selection (daemon protocol v1.4.0)
+
+enum SelectionMode: String, Codable, Equatable, Sendable {
+    case all, include, exclude
+}
+
+enum SelectionRule: Codable, Equatable, Hashable, Sendable {
+    // Hashable is declared here (synthesized) rather than retroactively in
+    // the test target — Swift 6 rejects cross-module retroactive
+    // conformances without @retroactive, and the tests use Set([rules]).
+    case artist(name: String)
+    case album(artist: String, album: String)
+    case genre(name: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, name, artist, album
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "artist": self = .artist(name: try c.decode(String.self, forKey: .name))
+        case "album": self = .album(
+            artist: try c.decode(String.self, forKey: .artist),
+            album: try c.decode(String.self, forKey: .album))
+        case "genre": self = .genre(name: try c.decode(String.self, forKey: .name))
+        case let other:
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
+                debugDescription: "unknown rule kind \(other)")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .artist(name):
+            try c.encode("artist", forKey: .kind)
+            try c.encode(name, forKey: .name)
+        case let .album(artist, album):
+            try c.encode("album", forKey: .kind)
+            try c.encode(artist, forKey: .artist)
+            try c.encode(album, forKey: .album)
+        case let .genre(name):
+            try c.encode("genre", forKey: .kind)
+            try c.encode(name, forKey: .name)
+        }
+    }
+}
+
+struct LibraryAlbum: Codable, Equatable, Sendable {
+    var name: String
+    var genre: String?
+    var tracks: Int
+    var bytes: UInt64
+}
+
+struct LibraryArtist: Codable, Equatable, Sendable {
+    var name: String
+    var albums: [LibraryAlbum]
+}
+
+struct LibraryGenre: Codable, Equatable, Sendable {
+    var name: String
+    var tracks: Int
+    var bytes: UInt64
+}
+
+struct LibraryInfo: Equatable, Sendable {
+    var sourceRoot: String?
+    var scannedAtUnixSecs: UInt64?
+    var artists: [LibraryArtist]
+    var genres: [LibraryGenre]
+    var totalTracks: Int
+    var totalBytes: UInt64
+}
+
+struct SelectionPreviewInfo: Equatable, Sendable {
+    var selectedTracks: Int
+    var selectedBytes: UInt64
+    var adds: Int
+    var removes: Int
+}
+
 // MARK: - DaemonCommand (sent)
 
 enum DaemonCommand: Encodable, Sendable {
@@ -128,6 +211,11 @@ enum DaemonCommand: Encodable, Sendable {
     case pause
     case decidePrompt(id: UInt64, choice: Int32)
     case backfillRockbox
+    case getLibrary
+    case scanLibrary
+    case getSelection
+    case saveSelection(mode: SelectionMode, rules: [SelectionRule])
+    case previewSelection(mode: SelectionMode, rules: [SelectionRule])
 
     enum Trigger: String, Encodable, Sendable {
         case manual, scheduled
@@ -141,6 +229,8 @@ enum DaemonCommand: Encodable, Sendable {
         case ipod
         case id
         case choice
+        case mode
+        case rules
     }
 
     func encode(to encoder: Encoder) throws {
@@ -172,6 +262,20 @@ enum DaemonCommand: Encodable, Sendable {
             try container.encode(choice, forKey: .choice)
         case .backfillRockbox:
             try container.encode("backfill_rockbox", forKey: .type)
+        case .getLibrary:
+            try container.encode("get_library", forKey: .type)
+        case .scanLibrary:
+            try container.encode("scan_library", forKey: .type)
+        case .getSelection:
+            try container.encode("get_selection", forKey: .type)
+        case let .saveSelection(mode, rules):
+            try container.encode("save_selection", forKey: .type)
+            try container.encode(mode, forKey: .mode)
+            try container.encode(rules, forKey: .rules)
+        case let .previewSelection(mode, rules):
+            try container.encode("preview_selection", forKey: .type)
+            try container.encode(mode, forKey: .mode)
+            try container.encode(rules, forKey: .rules)
         }
     }
 }
@@ -187,6 +291,9 @@ enum DaemonEvent: Decodable, Sendable {
     case deviceDisconnected(serial: String)
     case syncRejected(reason: String)
     case syncEvent(line: String)
+    case libraryUpdate(LibraryInfo)
+    case selectionUpdate(mode: SelectionMode, rules: [SelectionRule])
+    case selectionPreview(SelectionPreviewInfo)
     case unknown            // forward-compat: log + ignore
 
     private enum CodingKeys: String, CodingKey {
@@ -211,6 +318,18 @@ enum DaemonEvent: Decodable, Sendable {
         case line
         case syncedCount = "synced_count"
         case libraryCount = "library_count"
+        case sourceRoot = "source_root"
+        case scannedAtUnixSecs = "scanned_at_unix_secs"
+        case artists
+        case genres
+        case totalTracks = "total_tracks"
+        case totalBytes = "total_bytes"
+        case mode
+        case rules
+        case selectedTracks = "selected_tracks"
+        case selectedBytes = "selected_bytes"
+        case adds
+        case removes
     }
 
     init(from decoder: Decoder) throws {
@@ -222,7 +341,11 @@ enum DaemonEvent: Decodable, Sendable {
             let coreVersion = try container.decode(String.self, forKey: .coreVersion)
             self = .hello(protocolVersion: protocolVersion, coreVersion: coreVersion)
         case "status_update":
-            let state = try container.decode(StatusInfo.State.self, forKey: .state)
+            // Unknown state values MUST decode as .idle (protocol §Daemon
+            // v1.4.0) — a hard decode failure here would drop the whole
+            // status_update and freeze the menu on stale state.
+            let stateRaw = try container.decode(String.self, forKey: .state)
+            let state = StatusInfo.State(rawValue: stateRaw) ?? .idle
             let configured = try container.decode(Bool.self, forKey: .configured)
             let ipodConnected = try container.decode(Bool.self, forKey: .ipodConnected)
             let lastSync = try container.decodeIfPresent(HistoryEntry.self, forKey: .lastSync)
@@ -262,6 +385,24 @@ enum DaemonEvent: Decodable, Sendable {
         case "sync_event":
             let line = try container.decode(String.self, forKey: .line)
             self = .syncEvent(line: line)
+        case "library_update":
+            self = .libraryUpdate(LibraryInfo(
+                sourceRoot: try container.decodeIfPresent(String.self, forKey: .sourceRoot),
+                scannedAtUnixSecs: try container.decodeIfPresent(UInt64.self, forKey: .scannedAtUnixSecs),
+                artists: try container.decodeIfPresent([LibraryArtist].self, forKey: .artists) ?? [],
+                genres: try container.decodeIfPresent([LibraryGenre].self, forKey: .genres) ?? [],
+                totalTracks: try container.decodeIfPresent(Int.self, forKey: .totalTracks) ?? 0,
+                totalBytes: try container.decodeIfPresent(UInt64.self, forKey: .totalBytes) ?? 0))
+        case "selection_update":
+            self = .selectionUpdate(
+                mode: try container.decodeIfPresent(SelectionMode.self, forKey: .mode) ?? .all,
+                rules: try container.decodeIfPresent([SelectionRule].self, forKey: .rules) ?? [])
+        case "selection_preview":
+            self = .selectionPreview(SelectionPreviewInfo(
+                selectedTracks: try container.decodeIfPresent(Int.self, forKey: .selectedTracks) ?? 0,
+                selectedBytes: try container.decodeIfPresent(UInt64.self, forKey: .selectedBytes) ?? 0,
+                adds: try container.decodeIfPresent(Int.self, forKey: .adds) ?? 0,
+                removes: try container.decodeIfPresent(Int.self, forKey: .removes) ?? 0))
         default:
             self = .unknown
         }
