@@ -48,6 +48,9 @@ Thumbs.db
 crates/classick/vendor/libgpod/macos-prefix/
 
 # macOS SwiftUI app build artifacts
+# Stray SPM cache if `swift` is ever run from the repo root (package lives
+# under ui/macos, but `--package-path` writes a marker dir at the CWD).
+/.build/
 ui/macos/.build/
 ui/macos/Classick.app/
 ui/macos/.build-xcode/
