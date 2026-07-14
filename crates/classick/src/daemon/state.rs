@@ -16,6 +16,17 @@ pub struct SyncSession {
     pub trigger: SyncTrigger,
     pub serial: Option<String>,
     pub drive: Option<String>,
+    pub kind: SessionKind,
+}
+
+/// Whether the occupied `Syncing` state is a real sync or a library scan.
+/// Both share the single guard so they never run concurrently (no SMB
+/// contention, no index-file races); the label distinguishes them for the
+/// UI's `status_update.state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionKind {
+    Sync,
+    Scan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +50,7 @@ impl StateMachine {
     /// (and transitions to Syncing); returns `DroppedAlreadySyncing` if
     /// state was Syncing (state unchanged).
     pub fn try_start_sync(&mut self, trigger: SyncTrigger) -> TriggerOutcome {
-        self.try_start_sync_inner(trigger, None, None)
+        self.try_start_sync_inner(trigger, None, None, SessionKind::Sync)
     }
 
     pub fn try_start_sync_for_device(
@@ -48,7 +59,13 @@ impl StateMachine {
         serial: String,
         drive: String,
     ) -> TriggerOutcome {
-        self.try_start_sync_inner(trigger, Some(serial), Some(drive))
+        self.try_start_sync_inner(trigger, Some(serial), Some(drive), SessionKind::Sync)
+    }
+
+    /// A library scan occupies the same guard as a sync — they never run
+    /// concurrently (no SMB contention, no index-file races).
+    pub fn try_start_scan(&mut self) -> TriggerOutcome {
+        self.try_start_sync_inner(SyncTrigger::Manual, None, None, SessionKind::Scan)
     }
 
     fn try_start_sync_inner(
@@ -56,6 +73,7 @@ impl StateMachine {
         trigger: SyncTrigger,
         serial: Option<String>,
         drive: Option<String>,
+        kind: SessionKind,
     ) -> TriggerOutcome {
         match &self.state {
             DaemonState::Idle => {
@@ -68,6 +86,7 @@ impl StateMachine {
                     trigger,
                     serial,
                     drive,
+                    kind,
                 });
                 TriggerOutcome::Accepted
             }
@@ -146,6 +165,28 @@ mod tests {
         } else {
             panic!("expected Syncing");
         }
+    }
+
+    #[test]
+    fn scan_session_carries_scan_kind_and_shares_the_guard() {
+        let mut sm = StateMachine::new();
+        assert_eq!(sm.try_start_scan(), TriggerOutcome::Accepted);
+        if let DaemonState::Syncing(s) = sm.state() {
+            assert_eq!(s.kind, SessionKind::Scan);
+        } else { panic!("expected Syncing (shared guard)"); }
+        // A sync while scanning is dropped — the guard is shared.
+        assert_eq!(sm.try_start_sync(SyncTrigger::Manual), TriggerOutcome::DroppedAlreadySyncing);
+        sm.finish_sync();
+        assert!(sm.is_idle());
+    }
+
+    #[test]
+    fn sync_sessions_default_to_sync_kind() {
+        let mut sm = StateMachine::new();
+        sm.try_start_sync(SyncTrigger::Manual);
+        if let DaemonState::Syncing(s) = sm.state() {
+            assert_eq!(s.kind, SessionKind::Sync);
+        } else { panic!(); }
     }
 
     #[test]
