@@ -133,6 +133,13 @@ pub struct Cli {
     /// Rockbox-readable. Requires --ipod (or auto-detect).
     #[arg(long)]
     pub backfill_rockbox: bool,
+
+    /// Scan the source library's tags into the library index
+    /// (library-index.json), then exit. Powers the Choose Music browser.
+    /// Incremental: files whose (mtime, size) match the cached record are
+    /// not re-read.
+    #[arg(long, conflicts_with = "backfill_rockbox")]
+    pub scan_library: bool,
 }
 
 #[cfg(test)]
@@ -269,6 +276,19 @@ mod tests {
     fn daemon_and_ipc_mode_conflict() {
         let result = Cli::try_parse_from(["classick", "--daemon", "--ipc-mode"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_scan_library_flag() {
+        let cli = Cli::try_parse_from(["classick", "--scan-library"]).unwrap();
+        assert!(cli.scan_library);
+        let cli = Cli::try_parse_from(["classick"]).unwrap();
+        assert!(!cli.scan_library);
+    }
+
+    #[test]
+    fn scan_library_conflicts_with_backfill_rockbox() {
+        assert!(Cli::try_parse_from(["classick", "--scan-library", "--backfill-rockbox"]).is_err());
     }
 
     #[test]

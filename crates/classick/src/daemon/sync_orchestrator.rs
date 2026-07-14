@@ -45,7 +45,7 @@ pub enum OrchestratorOutcome {
 /// orphaned sync subprocess transcoding for hours and holding ffmpeg
 /// children — observed in the wild on 2026-05-24.
 pub fn build_command(exe: &std::path::Path, drive: &str, rockbox_compat: bool) -> Command {
-    let mut cmd = base_command(exe, drive, "--apply");
+    let mut cmd = base_command(exe, "--apply", Some(drive));
     if rockbox_compat {
         cmd.arg("--rockbox-compat");
     }
@@ -57,20 +57,26 @@ pub fn build_command(exe: &std::path::Path, drive: &str, rockbox_compat: bool) -
 /// — it embeds tags + art into the existing on-iPod library in place
 /// rather than running a full add/modify/remove sync.
 pub fn build_backfill_command(exe: &std::path::Path, drive: &str) -> Command {
-    base_command(exe, drive, "--backfill-rockbox")
+    base_command(exe, "--backfill-rockbox", Some(drive))
 }
 
-/// Shared stdio/no-console setup for both the normal-sync and backfill
-/// subprocess commands. See `build_command`'s doc comment for why
-/// `kill_on_drop(true)` is load-bearing.
-fn base_command(exe: &std::path::Path, drive: &str, mode_flag: &str) -> Command {
+/// Build the library-scan subprocess command. No --ipod: a scan only reads
+/// the source tree and writes the index cache.
+pub fn build_scan_command(exe: &std::path::Path) -> Command {
+    base_command(exe, "--scan-library", None)
+}
+
+/// Shared stdio/no-console setup for the sync/backfill/scan subprocess
+/// commands. See `build_command`'s doc comment for why `kill_on_drop(true)`
+/// is load-bearing. `drive` is `None` for a scan (no device involved).
+fn base_command(exe: &std::path::Path, mode_flag: &str, drive: Option<&str>) -> Command {
     use crate::windows_proc::NoConsoleWindow;
     let mut cmd = Command::new(exe);
-    cmd.arg("--ipc-mode")
-        .arg(mode_flag)
-        .arg("--ipod")
-        .arg(drive)
-        .stdin(Stdio::piped())
+    cmd.arg("--ipc-mode").arg(mode_flag);
+    if let Some(d) = drive {
+        cmd.arg("--ipod").arg(d);
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -152,6 +158,20 @@ pub async fn run_backfill(
     event_tx: broadcast::Sender<DaemonEvent>,
 ) -> Result<OrchestratorOutcome> {
     let cmd = build_backfill_command(&exe, &drive);
+    drive_child(exe, cmd, cancel_rx, pause_rx, prompt_decisions_rx, event_tx).await
+}
+
+/// Run a --scan-library subprocess through the same drive-to-completion
+/// machinery as syncs/backfills (event forwarding, cancel/pause, bail
+/// threshold — mostly inert for a scan, but shared code is shared behavior).
+pub async fn run_scan(
+    exe: PathBuf,
+    cancel_rx: oneshot::Receiver<()>,
+    pause_rx: oneshot::Receiver<()>,
+    prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
+    event_tx: broadcast::Sender<DaemonEvent>,
+) -> Result<OrchestratorOutcome> {
+    let cmd = build_scan_command(&exe);
     drive_child(exe, cmd, cancel_rx, pause_rx, prompt_decisions_rx, event_tx).await
 }
 
@@ -400,6 +420,16 @@ mod tests {
         assert!(!dbg.contains("--apply"));
         assert!(dbg.contains("--ipod"));
         assert!(dbg.contains("G:\\"));
+    }
+
+    #[test]
+    fn build_scan_command_passes_scan_flag_without_ipod() {
+        let cmd = build_scan_command(&PathBuf::from("classick"));
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("--ipc-mode"));
+        assert!(dbg.contains("--scan-library"));
+        assert!(!dbg.contains("--ipod"), "a scan involves no device");
+        assert!(!dbg.contains("--apply"));
     }
 
     #[test]

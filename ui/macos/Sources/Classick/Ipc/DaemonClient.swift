@@ -165,6 +165,9 @@ actor DaemonClient {
             // a cached-name plug-in — leaving `configuredSerial` nil, the menu
             // stuck on "Set Up", and Settings showing defaults.
             await send(.getConfig)
+            // Warm the selection so the menu's "Selection active" line and the
+            // Choose Music window seed correctly on (re)connect.
+            await send(.getSelection)
             return
         }
 

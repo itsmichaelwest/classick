@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let daemonClient = DaemonClient()
     private let daemonProcess = DaemonProcess()
     private let setupWindowController = SetupWindowController()
+    private let chooseMusicController = ChooseMusicWindowController()
 
     /// First-run setup is auto-presented exactly once per launch, the moment
     /// the daemon confirms the user is unconfigured. This latches that so a
@@ -70,6 +71,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// reused by `autoPresentSetupIfNeeded`.
     func presentSetup() {
         setupWindowController.show(model: model, onDone: finishSetup)
+    }
+
+    /// Opens the Choose Music browser. Pulls a fresh library + selection on
+    /// appear, and wires scan/preview/save to daemon commands.
+    func presentChooseMusic() {
+        chooseMusicController.show(
+            model: model,
+            onAppear: { [weak self] in
+                Task {
+                    await self?.daemonClient.send(.getLibrary)
+                    await self?.daemonClient.send(.getSelection)
+                }
+            },
+            onScan: { [weak self] in
+                Task { await self?.daemonClient.send(.scanLibrary) }
+            },
+            onPreview: { [weak self] mode, rules in
+                Task { await self?.daemonClient.send(.previewSelection(mode: mode, rules: rules)) }
+            },
+            onSave: { [weak self] mode, rules in
+                self?.saveSelection(mode: mode, rules: rules)
+            })
+    }
+
+    private func saveSelection(mode: SelectionMode, rules: [SelectionRule]) {
+        let preview = model.selectionPreview
+        Task { await daemonClient.send(.saveSelection(mode: mode, rules: rules)) }
+        // Offer an immediate sync when the selection changes what's on the
+        // iPod and a device is present (spec §5 Save flow).
+        if let preview, preview.adds + preview.removes > 0, model.device != nil {
+            let alert = NSAlert()
+            alert.messageText = "Sync now?"
+            alert.informativeText =
+                "This selection will add \(preview.adds) and remove \(preview.removes) track(s) at the next sync."
+            alert.addButton(withTitle: "Sync Now")
+            alert.addButton(withTitle: "Later")
+            if alert.runModal() == .alertFirstButtonReturn {
+                syncNow()
+            }
+        }
     }
 
     /// Auto-presents setup the first time the daemon confirms (post-handshake)
@@ -235,6 +276,7 @@ struct ClassickApp: App {
                 onSetUp: appDelegate.presentSetup,
                 onOpenSettings: openSettingsWindow,
                 onSyncNow: appDelegate.syncNow,
+                onChooseMusic: appDelegate.presentChooseMusic,
                 onCancelSync: appDelegate.cancelSync,
                 onPause: appDelegate.pause,
                 onResume: appDelegate.resume,
@@ -269,6 +311,8 @@ private func menuBarSystemImage(for phase: Phase) -> String {
         return "ipod"
     case .syncing:
         return "arrow.triangle.2.circlepath"
+    case .scanning:
+        return "magnifyingglass"
     case .paused:
         return "pause.circle"
     case .error:

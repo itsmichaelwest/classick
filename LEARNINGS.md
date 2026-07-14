@@ -464,3 +464,29 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   what rolls the Sparkle auto-update to everyone — GitHub's pre-release flag
   does NOT gate Sparkle). Version lives in BOTH `ui/macos/project.yml`
   (MARKETING_VERSION + CURRENT_PROJECT_VERSION) and `ui/macos/Info.plist`.
+- **macOS side must never depend on ffmpeg — in runtime OR tests.** The library
+  tag scan (`library_index::read_track_tags`) uses lofty (pure Rust), not
+  ffmpeg. Test fixtures follow the same rule: use the committed
+  `crates/classick/tests/fixtures/tagged.flac` (via
+  `concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tagged.flac")`) instead
+  of ffmpeg-synthesizing a FLAC, so the suite runs on a bare macOS box.
+- **Unknown daemon `status_update.state` MUST decode to `.idle` on the UI
+  side.** The Swift `DaemonEvent` decoder reads `state` as a raw String and maps
+  unknown values to `.idle` (`StatusInfo.State(rawValue:) ?? .idle`), NOT via a
+  hard `decode(State.self)`. A hard decode would throw on a newer daemon's new
+  state, dropping the whole `status_update` and freezing the menu on stale
+  state. This is the standing forward-compat rule for all future state values.
+- **Adding `DaemonCommand`/`DaemonEvent` variants breaks exhaustive matches —
+  land the wire types with interim arms so each commit compiles.** New Rust
+  command variants break `daemon::runtime::handle_client_command`'s match; new
+  Swift event cases break `AppModel.apply` and the `status_update.state` switch.
+  Add a temporary catch-all/no-op arm in the wire-types commit, then replace it
+  with real handling in the wiring commit. Same for the new `.scanning`/
+  `Phase.scanning` cases (menuBarSystemImage, MenuContent.phaseContent).
+- **Adding a Swift file needs `xcodegen generate` — `bundle.sh` does NOT run
+  it.** `swift build`/`swift test` (SPM) auto-discover files under
+  `Sources/`, so tests pass, but `ui/macos/bundle.sh` builds the committed
+  `Classick.xcodeproj` via xcodebuild, which lists sources from the last
+  `xcodegen generate`. Add a file → run `xcodegen generate` (from `ui/macos`) →
+  commit the regenerated `project.pbxproj`, or the .app build fails with
+  "cannot find <NewType> in scope" even though the SPM build is green.

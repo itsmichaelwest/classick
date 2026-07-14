@@ -31,6 +31,7 @@ pub struct Config {
     pub force_reencode: bool,
     pub rockbox_compat: bool,
     pub backfill_rockbox: bool,
+    pub scan_library: bool,
 }
 
 impl Config {
@@ -146,6 +147,7 @@ pub fn resolve_with(
         force_reencode,
         rockbox_compat,
         backfill_rockbox: cli.backfill_rockbox,
+        scan_library: cli.scan_library,
     })
 }
 
@@ -246,6 +248,13 @@ mod tests {
         assert!(!config.force_reencode);
         assert!(!config.rockbox_compat);
         assert!(!config.backfill_rockbox);
+    }
+
+    #[test]
+    fn scan_library_threads_through_resolve() {
+        let cli = Cli::try_parse_from(["classick", "--source", r"D:\m", "--scan-library"]).unwrap();
+        let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
+        assert!(cfg.scan_library);
     }
 
     #[test]

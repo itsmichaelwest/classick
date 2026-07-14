@@ -12,6 +12,7 @@ struct MenuContent: View {
     var onSetUp: () -> Void = { print("TODO: open setup window") }
     var onOpenSettings: () -> Void = { print("TODO: open settings window") }
     var onSyncNow: () -> Void = { print("TODO: send(.triggerSync(source: .manual))") }
+    var onChooseMusic: () -> Void = { print("TODO: open Choose Music window") }
     var onCancelSync: () -> Void = { print("TODO: send(.cancelSync)") }
     var onPause: () -> Void = { print("TODO: send(.pause)") }
     var onResume: () -> Void = { print("TODO: send(.triggerSync(source: .manual))") }
@@ -55,8 +56,12 @@ struct MenuContent: View {
             if let lastSync = model.lastSync {
                 Text("Last sync: \(formatLastSync(lastSync.timestamp))")
             }
+            if model.selection.map({ $0.mode != .all }) ?? false {
+                Text("Selection active — \(model.libraryCount ?? 0) tracks")
+            }
             Divider()
             Button("Sync Now", action: onSyncNow)
+            Button("Choose Music…", action: onChooseMusic)
 
         case let .syncing(current, total, label):
             Text("Syncing… \(current) of \(total)")
@@ -65,6 +70,9 @@ struct MenuContent: View {
             }
             Button("Pause", action: onPause)
             Button("Cancel Sync", action: onCancelSync)
+
+        case let .scanning(current, total):
+            Text("Scanning library… \(current) of \(total)")
 
         case let .paused(synced, total):
             Text("Paused — \(pausedSummary(synced: synced, total: total)) synced")

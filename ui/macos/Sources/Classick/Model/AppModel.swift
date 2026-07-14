@@ -10,6 +10,7 @@ enum Phase: Equatable, Sendable {
     case notConfigured
     case idle
     case syncing(current: Int, total: Int, label: String)
+    case scanning(current: Int, total: Int)
     case paused(synced: Int, total: Int?)
     case error(String)
 }
@@ -48,6 +49,20 @@ final class AppModel {
     private(set) var config: AppConfig?
     private(set) var syncedCount: Int = 0
     private(set) var libraryCount: Int?
+
+    struct SelectionState: Equatable, Sendable {
+        var mode: SelectionMode
+        var rules: [SelectionRule]
+    }
+    private(set) var library: LibraryInfo?
+    private(set) var selection: SelectionState?
+    private(set) var selectionPreview: SelectionPreviewInfo?
+    private var isScanning = false
+    /// Raw device capacity for the Choose Music footer's capacity bar
+    /// (storageText is display-only). Set beside storageText in the
+    /// deviceConnected arm from the same `storageFor(drive:)` call;
+    /// cleared on deviceDisconnected.
+    private(set) var deviceStorage: (free: Int64, total: Int64)?
 
     // Tracked separately from `device` because `status_update` carries its
     // own `ipod_connected`/`configured` flags independent of the
@@ -103,6 +118,15 @@ final class AppModel {
         case .hello, .historyUpdate, .unknown:
             break
 
+        case let .libraryUpdate(info):
+            library = info
+
+        case let .selectionUpdate(mode, rules):
+            selection = SelectionState(mode: mode, rules: rules)
+
+        case let .selectionPreview(info):
+            selectionPreview = info
+
         case let .configUpdate(source, daemon, ipod):
             config = AppConfig(source: source, daemon: daemon, ipod: ipod)
             // The daemon considers itself configured once it has a persisted
@@ -119,13 +143,16 @@ final class AppModel {
         case let .deviceConnected(serial, modelLabel, drive, name):
             device = DeviceState(serial: serial, model: modelLabel, name: name, drive: drive)
             isIpodConnected = true
-            storageText = Self.formatStorage(storageFor(drive: drive))
+            let storage = storageFor(drive: drive)
+            deviceStorage = storage
+            storageText = Self.formatStorage(storage)
             phase = computePhase(targetSyncing: phaseIsSyncing)
 
         case .deviceDisconnected:
             device = nil
             isIpodConnected = false
             storageText = nil
+            deviceStorage = nil
             phase = computePhase(targetSyncing: false)
 
         case let .statusUpdate(info):
@@ -134,12 +161,18 @@ final class AppModel {
             lastSync = info.lastSync
             syncedCount = info.syncedCount
             libraryCount = info.libraryCount
+            isScanning = (info.state == .scanning)
             let targetSyncing: Bool
             switch info.state {
             case .syncing: targetSyncing = true
-            case .idle: targetSyncing = false
+            case .idle, .scanning: targetSyncing = false
             }
-            phase = computePhase(targetSyncing: targetSyncing)
+            if info.state == .scanning {
+                // Preserve in-flight scan progress across status rebroadcasts.
+                if case .scanning = phase {} else { phase = .scanning(current: 0, total: 0) }
+            } else {
+                phase = computePhase(targetSyncing: targetSyncing)
+            }
 
         case let .syncEvent(line):
             applySyncEvent(line)
@@ -188,9 +221,19 @@ final class AppModel {
               let event = try? decoder.decode(SyncEvent.self, from: data) else { return }
         switch event {
         case let .trackStart(current, total, label):
-            phase = .syncing(current: current, total: total, label: label)
+            if isScanning {
+                phase = .scanning(current: current, total: total)
+            } else {
+                phase = .syncing(current: current, total: total, label: label)
+            }
         case .finish:
-            phase = .idle
+            if isScanning {
+                // The daemon's post-scan Idle status will confirm; don't leave
+                // a stale `.scanning`. Fall back to the derived resting phase.
+                phase = computePhase(targetSyncing: false)
+            } else {
+                phase = .idle
+            }
         case let .prompt(id, message, options):
             pendingPrompt = PendingPrompt(id: id, message: message, options: options)
         case let .form(id, label, initial, hint):

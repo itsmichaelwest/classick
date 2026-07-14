@@ -115,6 +115,11 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     };
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
     let sources = preflight::walk_source(config, progress, decision_rx)?;
+    let sources = crate::selection::apply_to_sources(
+        sources,
+        &config.source,
+        |msg| progress.log(msg),
+    );
 
     // 3. Load (or rebuild) manifest.
     let mut manifest = if config.rebuild_manifest {
