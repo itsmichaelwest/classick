@@ -54,6 +54,7 @@ pub mod preflight;
 pub mod progress;
 #[cfg(windows)]
 pub mod scsi_inquiry;
+pub mod selection;
 pub mod source;
 pub mod sysinfo_extended;
 pub mod tags;
