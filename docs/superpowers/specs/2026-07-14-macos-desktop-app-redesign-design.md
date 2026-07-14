@@ -159,17 +159,22 @@ state, pinned bottom across all views. States:
 | No device | dimmed icon + "No iPod connected" | — | "N tracks selected" + disabled Sync Now |
 | Error | red icon + "Sync failed" | inline failure reason | **Details** + **Retry** |
 
-**ETA (Rust).** The daemon computes remaining time from rolling throughput
-over the last N completed tracks (N≈8) and emits it as a new **optional**
-`eta_secs: u64` field on the `track_start` event:
+**ETA (Rust).** The daemon-spawned sync subprocess computes remaining time and
+emits it as a new **optional** `eta_secs: u64` field on the `track_start`
+event. The daemon relays that `sync_event` line to UIs verbatim (it already
+forwards subprocess stdout), so no daemon-loop change is needed — only the
+subprocess's IPC emitter and the two UI decoders.
 
-- Source of truth: `crates/classick/src/progress.rs::run_ipc` (or wherever
-  `track_start` is emitted) tracks per-track completion timestamps in a small
-  ring buffer, computes `remaining_tracks * avg_secs_per_recent_track`, and
-  omits the field until it has ≥2 samples (so the UI shows "114 of 336" with
-  no ETA early on).
+- Source of truth: `crates/classick/src/progress.rs::run_ipc`. It reuses the
+  **same whole-run-average approach the TUI already uses** (`TuiState::eta` —
+  `elapsed_since_first_track / tracks_done * remaining_tracks`), lifted into a
+  small shared `EtaEstimator` struct so both the TUI and IPC paths compute it
+  identically. The field is omitted until ≥1 track has completed (so the UI
+  shows "114 of 336" with no ETA on the very first track). A rolling-window
+  estimator is a possible later refinement, explicitly out of scope for v1.
 - Wire: `docs/ipc-protocol.md` inner `sync_event` protocol bumps
-  **v1.0.0 → v1.1.0** (additive optional field, backward-compatible). The
+  **v1.1.0 → v1.2.0** (additive optional field, backward-compatible; the
+  protocol is already at 1.1.0, so this is the next minor). The
   Rust `ipc.rs` event and both UI decoders add the optional field; Swift uses
   `decodeIfPresent`, C# tolerates its absence.
 - `AppModel` threads `eta_secs` into the `.syncing` phase; `DeviceRow`
@@ -211,26 +216,33 @@ A new daemon component `daemon/library_watcher.rs`, a sibling to
   `notify` is the de-facto standard, actively maintained, widely adopted.
 - Watches the configured source root (from `config.toml`); re-arms when the
   source changes via `save_config`; disarmed when no source is configured.
-- **Debounces** bursts (~1 s quiet period) — large file operations emit many
-  events — then runs the **existing incremental refresh**
-  (`library_index::stale_entries` + `update_index`; only changed/new files are
-  re-probed) and broadcasts the resulting `library_update` to connected UIs.
-- Runs on startup too: a single incremental refresh so the library is current
-  the moment the app opens, without a user action.
-- Lifecycle: owned by the daemon runtime; started with the runtime, stopped on
-  shutdown (no orphaned watch threads). Errors are logged and degrade to
-  "manual Rescan still works", never crash the daemon.
-- Scanning still runs under the daemon's existing shared operation guard so a
-  watcher-triggered refresh can't race a sync/backfill (consistent with the
-  scan-subprocess decision from the library-selection design).
+- **Debounces** bursts (~1.5 s quiet period, a new select arm in the runtime
+  mirroring the existing device-event `Debouncer`) — large file operations
+  emit many events — then triggers the daemon's existing **scan subprocess**
+  via `start_scan_session`. That path is crash-isolated, runs under the shared
+  sync/scan guard (so it can't race a sync/backfill), is internally incremental
+  (`scan.rs::scan_with` → `stale_entries` + `update_index`, re-probing only
+  changed files), and **already broadcasts `library_update`** on completion.
+  No new broadcast code.
+- Runs on startup too: one `start_scan_session` at daemon start so the library
+  is current the moment the app opens, without a user action.
+- Re-arms when the source path changes (the `SaveConfig` arm calls
+  `watcher.rewatch(new_source)`); disarmed when no source is configured.
+- Lifecycle: the `notify` watcher is owned by the runtime; its watch thread is
+  dropped on shutdown (no orphans). Errors are logged and degrade to "manual
+  Rescan still works", never crash the daemon.
+- Deliberately reuses the scan subprocess rather than an in-daemon
+  `update_index` call — the library-selection design rejected an in-daemon
+  scanner thread because a tag-parse panic would kill the daemon.
 
 ## 10. Wire protocol delta
 
 Exactly one change: inner `sync_event` `track_start` gains optional
 `eta_secs`. Everything else (`library_update`, `save_selection`,
 `forget_ipod`, `backfill_rockbox`, history) is already on the wire and reused.
-`docs/ipc-protocol.md` is updated; the inner sync-event version bumps to
-v1.1.0 (minor, additive). The daemon-pipe protocol version is unchanged.
+`docs/ipc-protocol.md` is updated; the inner sync-event version bumps
+v1.1.0 → v1.2.0 (minor, additive). The daemon-pipe protocol version is
+unchanged.
 
 ## 11. Testing
 
@@ -242,12 +254,14 @@ v1.1.0 (minor, additive). The daemon-pipe protocol version is unchanged.
 - **Swift (lifecycle):** a small test/asserted behavior that
   `applicationShouldTerminateAfterLastWindowClosed` is `false` and reopen is
   wired.
-- **Rust (watcher):** unit/integration test in the daemon suite (following the
-  `daemon_runtime_integration.rs` sandbox pattern): touching a file in a
-  temp source root triggers, after debounce, exactly one incremental refresh
-  and a `library_update` broadcast; no source configured → no watch.
-- **Rust (ETA):** unit test of the throughput/ETA calc (ring buffer → omitted
-  before 2 samples → monotone-ish estimate after).
+- **Rust (watcher):** two levels. (a) A `library_watcher` unit/integration
+  test: watching a temp dir and touching a `.flac` file delivers a coalesced
+  change signal; no path watched → no signal. (b) A `daemon_runtime_integration`
+  test (sandbox pattern, injected fake `spawn_scan`): a change signal on a
+  configured source triggers, after debounce, exactly one scan-session spawn;
+  no source configured → none.
+- **Rust (ETA):** unit test of `EtaEstimator` (no completed tracks → `None`;
+  after N completed in T seconds with M remaining → `≈ T/N * M`).
 - **Wire:** `WireCodecTests` gains a case decoding a `track_start` with and
   without `eta_secs`.
 
