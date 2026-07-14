@@ -53,6 +53,7 @@ pub mod orchestrator;
 pub mod pipeline;
 pub mod preflight;
 pub mod progress;
+pub mod scan;
 #[cfg(windows)]
 pub mod scsi_inquiry;
 pub mod selection;

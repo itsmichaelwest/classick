@@ -57,6 +57,9 @@ pub fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decisio
 
     ensure_source_or_wizard(&cli, progress, decision_rx)?;
     let mut config = config::resolve(cli)?;
+    if config.scan_library {
+        return crate::scan::run(&config, progress);
+    }
     if config.backfill_rockbox {
         return apply_loop::backfill_rockbox(&mut config, progress, decision_rx);
     }
