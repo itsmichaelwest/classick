@@ -28,15 +28,17 @@ struct ChooseMusicWindow: View {
             footer
         }
         .onAppear {
+            // Seed from an already-known selection (the post-hello get_selection
+            // usually landed before this window opened, so .onChange below won't
+            // fire for it). The .onChange covers the arrives-after-open case.
+            seedDraftIfNeeded()
             onAppear()  // sends get_library + get_selection
         }
-        .onChange(of: model.selection) { _, sel in
+        .onChange(of: model.selection) { _, _ in
             // Seed the draft ONCE from the persisted selection; later
             // selection_update echoes (e.g. our own save) must not clobber
             // in-progress edits.
-            guard !seededFromModel, let sel else { return }
-            draft = SelectionDraft(mode: sel.mode, rules: sel.rules)
-            seededFromModel = true
+            seedDraftIfNeeded()
         }
         .onChange(of: draft) { _, d in
             schedulePreview(d)
@@ -45,6 +47,9 @@ struct ChooseMusicWindow: View {
 
     private var header: some View {
         VStack(spacing: 8) {
+            // The mode picker must stay enabled at all times — it's how the
+            // user leaves "Entire library". Only the browser controls below
+            // gray out in All mode (spec §5: gray the browser, keep state).
             Picker("Sync", selection: $draft.mode) {
                 Text("Entire library").tag(SelectionMode.all)
                 Text("Only selected").tag(SelectionMode.include)
@@ -66,9 +71,9 @@ struct ChooseMusicWindow: View {
                 TextField("Search", text: $search)
                     .textFieldStyle(.roundedBorder)
             }
+            .disabled(draft.mode == .all)  // grayed out, state kept (spec §5)
         }
         .padding(12)
-        .disabled(draft.mode == .all)  // grayed out, state kept (spec §5)
     }
 
     @ViewBuilder
@@ -229,6 +234,14 @@ struct ChooseMusicWindow: View {
     private func relativeDate(_ unixSecs: UInt64) -> String {
         let date = Date(timeIntervalSince1970: TimeInterval(unixSecs))
         return date.formatted(.relative(presentation: .named))
+    }
+
+    /// Seed the local draft from the persisted selection exactly once, so
+    /// in-progress edits are never clobbered by later selection_update echoes.
+    private func seedDraftIfNeeded() {
+        guard !seededFromModel, let sel = model.selection else { return }
+        draft = SelectionDraft(mode: sel.mode, rules: sel.rules)
+        seededFromModel = true
     }
 
     private func schedulePreview(_ d: SelectionDraft) {
