@@ -46,6 +46,7 @@ pub mod ffi;
 pub mod ipc;
 pub mod ipc_daemon;
 pub mod ipod;
+pub mod library_index;
 pub mod logging;
 pub mod manifest;
 pub mod orchestrator;
