@@ -1112,6 +1112,16 @@ fn handle_client_command(
             // Symmetric no-op — subscription is implicit, so there's
             // nothing to tear down.
         }
+        // Library/selection commands (daemon protocol v1.4.0). Wired up in
+        // full in the runtime task; these interim arms keep the match
+        // exhaustive so the wire types can land first.
+        DaemonCommand::GetLibrary
+        | DaemonCommand::ScanLibrary
+        | DaemonCommand::GetSelection
+        | DaemonCommand::SaveSelection { .. }
+        | DaemonCommand::PreviewSelection { .. } => {
+            tracing::debug!("daemon: client {client_id} sent a v1.4.0 selection command; not yet wired");
+        }
         DaemonCommand::Shutdown => {
             tracing::info!("daemon: shutdown requested by client {client_id}; exiting loop");
             return true;

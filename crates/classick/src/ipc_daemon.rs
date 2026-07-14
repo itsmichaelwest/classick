@@ -4,14 +4,15 @@
 //! JSON, snake_case "type" discriminator, additive.
 //!
 //! Spec §7. Protocol semver: daemon emits hello with
-//! `protocol_version = "1.3.0"` since this extends M1's "1.0.0".
+//! `protocol_version = "1.4.0"` since this extends M1's "1.0.0".
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
 use crate::daemon::device_storage::StorageInfo;
 use crate::daemon::history::HistoryEntry;
+use crate::selection::{SelectionMode, SelectionRule};
 use serde::{Deserialize, Serialize};
 
-pub const DAEMON_PROTOCOL_VERSION: &str = "1.3.0";
+pub const DAEMON_PROTOCOL_VERSION: &str = "1.4.0";
 
 /// Events from daemon → UI clients (in addition to forwarded sync-
 /// subprocess events from `src/ipc.rs`).
@@ -79,6 +80,53 @@ pub enum DaemonEvent {
     SyncEvent {
         line: String,
     },
+    /// Aggregated library index for the Choose Music browser. Never
+    /// per-track. `scanned_at_unix_secs: None` (serialized null) = never
+    /// scanned — the UI shows its scan-prompt empty state.
+    LibraryUpdate {
+        source_root: Option<String>,
+        scanned_at_unix_secs: Option<u64>,
+        artists: Vec<LibraryArtist>,
+        genres: Vec<LibraryGenre>,
+        total_tracks: usize,
+        total_bytes: u64,
+    },
+    SelectionUpdate {
+        mode: SelectionMode,
+        rules: Vec<SelectionRule>,
+    },
+    /// Reply to preview_selection: hypothetical impact vs the manifest.
+    /// bytes are SOURCE sizes (an estimate of on-iPod size — label it "~").
+    SelectionPreview {
+        selected_tracks: usize,
+        selected_bytes: u64,
+        adds: usize,
+        removes: usize,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LibraryAlbum {
+    pub name: String,
+    /// Display-only: most common genre among the album's tracks; None on
+    /// tie/absence. Genre RULES always match per-track (see spec).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre: Option<String>,
+    pub tracks: usize,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LibraryArtist {
+    pub name: String,
+    pub albums: Vec<LibraryAlbum>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LibraryGenre {
+    pub name: String,
+    pub tracks: usize,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -86,6 +134,7 @@ pub enum DaemonEvent {
 pub enum DaemonStateLabel {
     Idle,
     Syncing,
+    Scanning,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -149,6 +198,21 @@ pub enum DaemonCommand {
     /// Rockbox can read it. Spawns a `--backfill-rockbox` subprocess; reports
     /// sync-style progress. No-op if a sync is already running.
     BackfillRockbox,
+    /// Reply: library_update from the cached index (may be never-scanned).
+    GetLibrary,
+    /// Spawn a --scan-library subprocess under the shared sync guard.
+    /// No-op (log + drop) if busy or no source configured.
+    ScanLibrary,
+    GetSelection,
+    SaveSelection {
+        mode: crate::selection::SelectionMode,
+        rules: Vec<crate::selection::SelectionRule>,
+    },
+    /// Pure computation; nothing persists. Reply: selection_preview.
+    PreviewSelection {
+        mode: crate::selection::SelectionMode,
+        rules: Vec<crate::selection::SelectionRule>,
+    },
     Shutdown,
 }
 
@@ -174,7 +238,99 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"hello""#));
-        assert!(json.contains(r#""protocol_version":"1.3.0""#));
+        assert!(json.contains(r#""protocol_version":"1.4.0""#));
+    }
+
+    #[test]
+    fn protocol_version_is_1_4_0() {
+        assert_eq!(DAEMON_PROTOCOL_VERSION, "1.4.0");
+    }
+
+    #[test]
+    fn new_selection_commands_deserialize() {
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(r#"{"type":"get_library"}"#).unwrap(),
+            DaemonCommand::GetLibrary));
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(r#"{"type":"scan_library"}"#).unwrap(),
+            DaemonCommand::ScanLibrary));
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(r#"{"type":"get_selection"}"#).unwrap(),
+            DaemonCommand::GetSelection));
+
+        let save: DaemonCommand = serde_json::from_str(
+            r#"{"type":"save_selection","mode":"include","rules":[
+                {"kind":"artist","name":"Boards of Canada"},
+                {"kind":"album","artist":"Aphex Twin","album":"Drukqs"},
+                {"kind":"genre","name":"Ambient"}]}"#).unwrap();
+        match save {
+            DaemonCommand::SaveSelection { mode, rules } => {
+                assert_eq!(mode, crate::selection::SelectionMode::Include);
+                assert_eq!(rules.len(), 3);
+            }
+            _ => panic!("expected SaveSelection"),
+        }
+
+        let preview: DaemonCommand = serde_json::from_str(
+            r#"{"type":"preview_selection","mode":"exclude","rules":[]}"#).unwrap();
+        assert!(matches!(preview, DaemonCommand::PreviewSelection { .. }));
+    }
+
+    #[test]
+    fn library_update_serializes_aggregated_shape() {
+        let evt = DaemonEvent::LibraryUpdate {
+            source_root: Some("/music".into()),
+            scanned_at_unix_secs: Some(42),
+            artists: vec![LibraryArtist {
+                name: "Aphex Twin".into(),
+                albums: vec![LibraryAlbum {
+                    name: "Drukqs".into(), genre: Some("IDM".into()), tracks: 30, bytes: 900,
+                }],
+            }],
+            genres: vec![LibraryGenre { name: "IDM".into(), tracks: 30, bytes: 900 }],
+            total_tracks: 30,
+            total_bytes: 900,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(json.contains(r#""type":"library_update""#));
+        assert!(json.contains(r#""scanned_at_unix_secs":42"#));
+        assert!(json.contains(r#""albums""#));
+    }
+
+    #[test]
+    fn library_update_never_scanned_serializes_null_timestamp() {
+        let evt = DaemonEvent::LibraryUpdate {
+            source_root: None, scanned_at_unix_secs: None,
+            artists: vec![], genres: vec![], total_tracks: 0, total_bytes: 0,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(json.contains(r#""scanned_at_unix_secs":null"#),
+            "null (not omitted) — the UI branches on it for the never-scanned state");
+    }
+
+    #[test]
+    fn selection_update_and_preview_serialize() {
+        let upd = DaemonEvent::SelectionUpdate {
+            mode: crate::selection::SelectionMode::Exclude,
+            rules: vec![crate::selection::SelectionRule::Genre { name: "Podcast".into() }],
+        };
+        let json = serde_json::to_string(&upd).unwrap();
+        assert!(json.contains(r#""type":"selection_update""#));
+        assert!(json.contains(r#""mode":"exclude""#));
+
+        let prev = DaemonEvent::SelectionPreview {
+            selected_tracks: 2340, selected_bytes: 14_200_000_000,
+            adds: 120, removes: 214,
+        };
+        let json = serde_json::to_string(&prev).unwrap();
+        assert!(json.contains(r#""type":"selection_preview""#));
+        assert!(json.contains(r#""removes":214"#));
+    }
+
+    #[test]
+    fn scanning_state_label_serializes() {
+        let s = serde_json::to_string(&DaemonStateLabel::Scanning).unwrap();
+        assert_eq!(s, r#""scanning""#);
     }
 
     #[test]

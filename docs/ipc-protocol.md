@@ -709,7 +709,7 @@ Bumps will append rows here. Don't edit historical rows.
 > `major.minor.patch` scheme and both currently sit on major `1`, but their
 > minor versions move on separate schedules and a matching number (e.g. both
 > once being `1.1.0`) is coincidence, not a shared release train. As of this
-> writing the daemon protocol is at **`1.3.0`** — see "Daemon v1.3.0" below;
+> writing the daemon protocol is at **`1.4.0`** — see "Daemon v1.4.0" below;
 > this section is kept as the historical record of the `1.1.0` daemon bump.
 
 When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows) or a
@@ -902,3 +902,47 @@ first occupies the `Syncing` state until it completes. Unlike
 `trigger_sync`, it does not reply with `sync_rejected` on those no-op
 paths; the daemon just logs and drops the request, matching the existing
 `pause`/`cancel_sync` no-op style.
+
+## Daemon v1.4.0 — Library selection: browse, scan, choose what syncs (2026-07-14)
+
+The daemon now emits `hello` with `protocol_version = "1.4.0"`. Purely
+additive over v1.3.0: five new commands, three new events, one new
+`status_update.state` value, and a semantics clarification for
+`library_count`. See
+`docs/superpowers/specs/2026-07-14-library-selection-design.md`.
+
+### New commands (UI → daemon)
+
+| Type | Fields | Behavior |
+|---|---|---|
+| `get_library` | (none) | Replies `library_update` from the cached library index. Never-scanned → `scanned_at_unix_secs: null` + empty collections. |
+| `scan_library` | (none) | Spawns `classick --ipc-mode --scan-library` under the same state-machine guard as `trigger_sync`/`backfill_rockbox` (no-op, log + drop, if busy or no source configured). Progress arrives as forwarded subprocess events; on finish the daemon reloads the index and broadcasts a fresh `library_update`. |
+| `get_selection` | (none) | Replies `selection_update`. |
+| `save_selection` | `mode`, `rules` | Persists selection.json atomically; replies `selection_update`; broadcasts a refreshed `status_update`. |
+| `preview_selection` | `mode`, `rules` | Pure computation, no persistence. Replies `selection_preview`. |
+
+`mode` is `"all" | "include" | "exclude"`. Each rule is one of:
+`{"kind":"artist","name":…}`, `{"kind":"album","artist":…,"album":…}`,
+`{"kind":"genre","name":…}`. Matching is case-insensitive; "artist" means
+album_artist falling back to track artist; empty strings are the
+Unknown-Artist / No-Genre buckets.
+
+### New events (daemon → UI)
+
+| Type | Fields |
+|---|---|
+| `library_update` | `source_root` (str?), `scanned_at_unix_secs` (u64 \| null; null = never scanned), `artists[]` — `{name, albums[]: {name, genre?, tracks, bytes}}` — `genres[]: {name, tracks, bytes}`, `total_tracks`, `total_bytes`. Aggregated, never per-track. An album's `genre` is display-only (most common among its tracks; omitted on tie/absence); genre rules match per-track. |
+| `selection_update` | `mode`, `rules` — mirror of selection.json. |
+| `selection_preview` | `selected_tracks`, `selected_bytes` (source bytes — an estimate of on-iPod size), `adds`, `removes` (vs the manifest). |
+
+### `status_update.state` gains `"scanning"`
+
+Emitted while a library scan subprocess runs. **Clients MUST treat unknown
+`state` values as `idle`** — this is the standing rule for all future state
+additions, matching §2's unknown-message tolerance.
+
+### `library_count` semantics
+
+`status_update.library_count` is now the **selected** track count — the "Y"
+in "X of Y synced" is what the current selection wants on the iPod, not the
+raw folder count. Under `mode: "all"` the value is unchanged.
