@@ -130,9 +130,75 @@ pub fn save_atomic(path: &Path, sel: &Selection) -> Result<()> {
     Ok(())
 }
 
+use crate::library_index::{IndexedTrack, LibraryIndex, TrackTags};
+use crate::source::SourceEntry;
+
+/// Filter the walked source list down to what the selection wants. Files not
+/// yet in the index (added since the last scan, or stat-stale) are probed
+/// inline and folded in — the sync self-heals the gap between scans. Returns
+/// the kept entries and whether the index gained/changed entries (caller
+/// saves it back if so). Fail-open: if tags can't be read, the track is KEPT.
+pub fn filter(
+    sources: Vec<SourceEntry>,
+    selection: &Selection,
+    index: &mut LibraryIndex,
+    mut probe: impl FnMut(&std::path::Path) -> anyhow::Result<TrackTags>,
+) -> (Vec<SourceEntry>, bool) {
+    if selection.mode == SelectionMode::All {
+        return (sources, false);
+    }
+    let mut dirty = false;
+    let kept = sources
+        .into_iter()
+        .filter(|src| {
+            let fresh = index.files.get(&src.path)
+                .map(|rec| rec.mtime == src.mtime && rec.size == src.size)
+                .unwrap_or(false);
+            if !fresh {
+                match probe(&src.path) {
+                    Ok(tags) => {
+                        index.files.insert(src.path.clone(), IndexedTrack {
+                            mtime: src.mtime, size: src.size,
+                            artist: tags.artist, album_artist: tags.album_artist,
+                            album: tags.album, genre: tags.genre,
+                            title: tags.title, duration_ms: tags.duration_ms,
+                        });
+                        dirty = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "selection: cannot read tags for {} ({e:#}); keeping track (fail-open)",
+                            src.path.display());
+                        return true;
+                    }
+                }
+            }
+            let rec = &index.files[&src.path];
+            selection.wants(&rec.facts())
+        })
+        .collect();
+    (kept, dirty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library_index::{IndexedTrack, LibraryIndex, TrackTags};
+    use crate::source::SourceEntry;
+    use std::path::PathBuf;
+
+    fn src(path: &str) -> SourceEntry {
+        SourceEntry { path: PathBuf::from(path), mtime: 1, size: 10 }
+    }
+
+    fn indexed(artist: &str, album: &str, genre: &str) -> IndexedTrack {
+        IndexedTrack {
+            mtime: 1, size: 10,
+            artist: artist.to_string(), album_artist: String::new(),
+            album: album.to_string(), genre: genre.to_string(),
+            title: String::new(), duration_ms: 0,
+        }
+    }
 
     fn facts<'a>(artist: &'a str, album_artist: &'a str, album: &'a str, genre: &'a str) -> TrackFacts<'a> {
         TrackFacts { artist, album_artist, album, genre }
@@ -248,5 +314,110 @@ mod tests {
         save_atomic(&path, &sel).unwrap();
         assert_eq!(load_or_all(&path), sel);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn filter_mode_all_is_passthrough_and_never_probes() {
+        let mut index = LibraryIndex::empty(PathBuf::from("/m"));
+        let sources = vec![src("/m/a.flac"), src("/m/b.flac")];
+        let (kept, dirty) = filter(sources.clone(), &Selection::all(), &mut index,
+            |_| panic!("mode=all must not probe"));
+        assert_eq!(kept, sources);
+        assert!(!dirty);
+    }
+
+    #[test]
+    fn filter_include_keeps_only_matches() {
+        let mut index = LibraryIndex::empty(PathBuf::from("/m"));
+        index.files.insert(PathBuf::from("/m/keep.flac"), indexed("Boards of Canada", "Geogaddi", "IDM"));
+        index.files.insert(PathBuf::from("/m/drop.flac"), indexed("Burial", "Untrue", "Dubstep"));
+        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
+            SelectionRule::Artist { name: "Boards of Canada".into() },
+        ]};
+        let (kept, _) = filter(vec![src("/m/keep.flac"), src("/m/drop.flac")], &sel, &mut index,
+            |_| unreachable!("both files are indexed"));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].path, PathBuf::from("/m/keep.flac"));
+    }
+
+    #[test]
+    fn filter_probes_unindexed_files_inline_and_marks_dirty() {
+        // A file added since the last scan isn't in the index — the sync
+        // self-heals by probing it inline and folding it into the cache.
+        let mut index = LibraryIndex::empty(PathBuf::from("/m"));
+        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
+            SelectionRule::Genre { name: "IDM".into() },
+        ]};
+        let (kept, dirty) = filter(vec![src("/m/fresh.flac")], &sel, &mut index, |_| Ok(TrackTags {
+            artist: "Autechre".into(), album_artist: String::new(),
+            album: "Amber".into(), genre: "IDM".into(), title: String::new(), duration_ms: 0,
+        }));
+        assert_eq!(kept.len(), 1);
+        assert!(dirty, "inline probe must mark the index dirty so the caller saves it");
+        assert_eq!(index.files[&PathBuf::from("/m/fresh.flac")].artist, "Autechre");
+    }
+
+    #[test]
+    fn filter_reprobes_when_stat_differs_from_index() {
+        // Index has stale (mtime,size) for the path — tags may have changed,
+        // so trust must be re-established before evaluating rules.
+        let mut index = LibraryIndex::empty(PathBuf::from("/m"));
+        index.files.insert(PathBuf::from("/m/a.flac"), IndexedTrack {
+            mtime: 999, size: 999, // differs from src()'s (1, 10)
+            artist: "Old".into(), album_artist: String::new(),
+            album: "X".into(), genre: "Rock".into(), title: String::new(), duration_ms: 0,
+        });
+        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
+            SelectionRule::Artist { name: "New".into() },
+        ]};
+        let (kept, dirty) = filter(vec![src("/m/a.flac")], &sel, &mut index, |_| Ok(TrackTags {
+            artist: "New".into(), album_artist: String::new(),
+            album: "X".into(), genre: "Rock".into(), title: String::new(), duration_ms: 0,
+        }));
+        assert_eq!(kept.len(), 1, "re-probed tags now match the rule");
+        assert!(dirty);
+    }
+
+    #[test]
+    fn filter_probe_failure_keeps_the_track() {
+        // Fail-open: a track we can't read tags for stays in the sync rather
+        // than silently disappearing from the iPod.
+        let mut index = LibraryIndex::empty(PathBuf::from("/m"));
+        let sel = Selection { version: 1, mode: SelectionMode::Exclude, rules: vec![
+            SelectionRule::Genre { name: "Podcast".into() },
+        ]};
+        let (kept, _) = filter(vec![src("/m/mystery.flac")], &sel, &mut index,
+            |_| Err(anyhow::anyhow!("unreadable")));
+        assert_eq!(kept.len(), 1, "unreadable tags must not drop a track");
+    }
+
+    #[test]
+    fn deselected_tracks_become_remove_actions_via_diff() {
+        // End-to-end composition: filter -> manifest::diff yields Remove for
+        // on-iPod tracks the selection no longer wants. THE core promise.
+        use crate::manifest::{diff, Action, Manifest, ManifestEntry};
+        let mut index = LibraryIndex::empty(PathBuf::from("/m"));
+        index.files.insert(PathBuf::from("/m/synced.flac"), indexed("Burial", "Untrue", "Dubstep"));
+        let manifest = Manifest {
+            version: 1, ipod_serial: None, last_source_root: None,
+            tracks: vec![ManifestEntry {
+                source_path: PathBuf::from("/m/synced.flac"),
+                source_mtime: 1, source_size: 10,
+                source_fingerprint: "blake3:aa".into(),
+                ipod_dbid: 1, ipod_relpath: "F00/X.m4a".into(),
+                source_known: true, audio_fingerprint: String::new(),
+                encoder: "unknown".into(), encoder_version: String::new(),
+                source_format: "flac".into(),
+            }],
+        };
+        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
+            SelectionRule::Artist { name: "Someone Else".into() },
+        ]};
+        let (kept, _) = filter(vec![src("/m/synced.flac")], &sel, &mut index, |_| unreachable!());
+        assert!(kept.is_empty());
+        let actions = diff(&manifest, &kept, |_| unreachable!(), |_| unreachable!(), "ffmpeg", false).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Remove(_)),
+            "deselected + on-iPod must become an ordinary Remove");
     }
 }
