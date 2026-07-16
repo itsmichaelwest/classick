@@ -1187,19 +1187,20 @@ struct LibraryView: View {
 }
 ```
 
-**This is a MOVE, not a duplication.** Take the helper methods and subviews
-(`header`, `content`, `browser`, `artistRow`, `genreRow`, `emptyState`,
-`schedulePreview`, `seedDraftIfNeeded`, `relativeDate`, `filteredArtists`,
-`filteredGenres`, and the capacity/impact readout) out of
-`ChooseMusicWindow.swift` and into `LibraryView`, dropping only the `footer`'s
-Cancel/Save `HStack` and `onClose`. `ChooseMusicWindow.swift` and its
-controller are **deleted in Task 11**, so across the full plan the browser code
-lives in exactly one place — there is no permanent duplication. (The two files
-briefly coexist between Task 7 and Task 11 only because `presentChooseMusic`
-still references the old window until Task 11 retires it; a reviewer seeing that
-transient overlap should treat it as expected, not as duplicated logic to flag.)
-The capacity bar moves into the device row in Task 8; here, keep only the
-per-row counts + the scanned/empty state.
+**This is a move-in-two-steps, not permanent duplication.** Bring the helper
+methods and subviews (`header`, `content`, `browser`, `artistRow`, `genreRow`,
+`emptyState`, `schedulePreview`, `seedDraftIfNeeded`, `relativeDate`,
+`filteredArtists`, `filteredGenres`, and the capacity/impact readout) into
+`LibraryView`, dropping only the `footer`'s Cancel/Save `HStack` and `onClose`.
+
+**Leave `ChooseMusicWindow.swift` UNTOUCHED in this task** — it is still
+referenced by `AppDelegate.presentChooseMusic` and must keep compiling. It (and
+its controller) are **deleted in Task 11**, which also retires
+`presentChooseMusic`. So the browser code lives in two files only transiently
+(Task 7 → Task 11), then in exactly one — there is no permanent duplication. A
+reviewer seeing that transient overlap should treat it as expected, not as
+duplicated logic to flag. The capacity bar moves into the device row in Task 8;
+here, keep only the per-row counts + the scanned/empty state.
 
 - [ ] **Step 2: Remove the temporary `LibraryView` stub**
 
