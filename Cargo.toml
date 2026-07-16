@@ -10,4 +10,4 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-notify = "6"
+notify = "8"

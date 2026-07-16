@@ -18,9 +18,9 @@ pub struct LibraryWatcher {
 
 impl LibraryWatcher {
     /// Start watching `source` (if any). Returns the watcher handle plus the
-    /// receiver of coalesced change ticks. The `notify` callback runs on the
-    /// crate's own thread; it forwards a unit tick per event batch onto the
-    /// tokio channel (the runtime does the time-based debounce).
+    /// receiver of change ticks. The `notify` callback runs on the crate's own
+    /// thread; it forwards one tick per notify event onto the tokio channel
+    /// (the runtime does the time-based debounce / coalescing).
     pub fn spawn(source: Option<PathBuf>) -> (Self, UnboundedReceiver<()>) {
         let (tx, rx) = mpsc::unbounded_channel::<()>();
         let mut me = Self { watcher: None, current: None, tx };
@@ -31,13 +31,18 @@ impl LibraryWatcher {
     /// Re-point the watch at `source` (or stop watching when `None`). Idempotent
     /// when the path is unchanged.
     pub fn rewatch(&mut self, source: Option<PathBuf>) {
+        // self.current is the path currently ARMED (successfully watched); None
+        // means nothing is armed. So a no-op only when we're already watching the
+        // requested path (or both are None).
         if source == self.current {
             return;
         }
-        // Drop any existing watcher (stops the old watch), then build a new one.
+        // Tear down any existing watch, and treat ourselves as un-armed until a
+        // new watch actually succeeds below — so a failed attempt never latches
+        // self.current and a later retry with the same path re-attempts.
         self.watcher = None;
-        self.current = source.clone();
-        let Some(path) = source else { return };
+        self.current = None;
+        let Some(path) = source else { return }; // disarm request; stays None
         if !path.exists() {
             tracing::warn!("library_watcher: source {} does not exist; not watching", path.display());
             return;
@@ -63,6 +68,7 @@ impl LibraryWatcher {
         }
         tracing::info!("library_watcher: watching {}", path.display());
         self.watcher = Some(watcher);
+        self.current = Some(path);
     }
 }
 
@@ -91,5 +97,28 @@ mod tests {
         let (_watcher, mut rx) = LibraryWatcher::spawn(None);
         let got = tokio::time::timeout(Duration::from_millis(400), rx.recv()).await;
         assert!(got.is_err(), "no watched path → no ticks (timeout expected)");
+    }
+
+    #[tokio::test]
+    async fn rewatch_after_failed_attempt_still_arms() {
+        // Guards the state bug: a failed rewatch (nonexistent path) must not
+        // latch the watcher into a permanently-un-armed state. Task 3 calls
+        // rewatch on every config save, so a transient bad path can't wedge it.
+        let dir = std::env::temp_dir().join(format!("classick-rewatch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let nonexistent = dir.join("does-not-exist-subdir");
+
+        let (mut watcher, mut rx) = LibraryWatcher::spawn(None);
+        // First: a rewatch that fails (path doesn't exist).
+        watcher.rewatch(Some(nonexistent));
+        // Then: a rewatch onto the real dir must still arm the watch.
+        watcher.rewatch(Some(dir.clone()));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::fs::write(dir.join("new.flac"), b"x").unwrap();
+
+        let got = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        assert!(matches!(got, Ok(Some(()))), "expected a change tick after re-arm, got {got:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
