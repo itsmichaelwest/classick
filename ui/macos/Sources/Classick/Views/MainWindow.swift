@@ -90,13 +90,6 @@ struct SetupCallToActionView: View {
     }
 }
 
-// TEMPORARY stubs — replaced by Tasks 9–10. Kept minimal so the scene compiles
+// TEMPORARY stub — replaced by Task 10. Kept minimal so the scene compiles
 // and the window is runnable during Phase B.
-struct DeviceView: View {
-    var model: AppModel
-    var onSaveSettings: (_ source: String?, _ daemon: DaemonSettings) -> Void = { _, _ in }
-    var onForgetIpod: () -> Void = {}
-    var onBackfill: () -> Void = {}
-    var body: some View { Text("device view") }
-}
 struct HistoryView: View { var model: AppModel; var body: some View { Text("history") } }
