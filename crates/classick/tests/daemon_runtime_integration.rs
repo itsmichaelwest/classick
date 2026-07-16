@@ -342,3 +342,145 @@ async fn runtime_stays_responsive_during_long_sync() {
     // is responsive.
     tokio::time::sleep(Duration::from_millis(200)).await;
 }
+
+/// Extended sandbox for watcher tests: adds a configured `source` dir and a
+/// fake `spawn_scan` that counts invocations, so a test can assert exactly
+/// how many scans a source change triggers. Reuses `sandbox()`'s tempdir +
+/// pipe isolation, then overwrites the config with a `source` path via
+/// `config_file::save` (PersistedConfig is public, so no hand-rolled TOML
+/// needed) and swaps in a counting `spawn_scan` closure.
+struct WatcherSandbox {
+    source: PathBuf,
+    scan_spawns: Arc<std::sync::atomic::AtomicUsize>,
+    runtime_task: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl WatcherSandbox {
+    async fn shutdown(self) {
+        self.runtime_task.abort();
+    }
+}
+
+async fn sandbox_with_source() -> WatcherSandbox {
+    use classick::config_file::{DaemonSettings, PersistedConfig, SyncMode};
+    use classick::daemon::device_watcher::{DeviceEvent, DeviceWatcher};
+    use classick::daemon::runtime::{DaemonDeps, run_daemon_with_deps};
+    use tokio::sync::mpsc;
+
+    let (config_path, history_path, pipe_name) = sandbox();
+    let source = config_path.parent().unwrap().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+
+    let cfg = PersistedConfig {
+        source: Some(source.clone()),
+        daemon: Some(DaemonSettings {
+            subsequent_sync_mode: SyncMode::AutoApply,
+            schedule_minutes: 0,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    classick::config_file::save(&config_path, &cfg).unwrap();
+
+    // No device activity needed — this test only exercises the
+    // filesystem-watcher → scan path.
+    struct NoDeviceWatcher;
+    impl DeviceWatcher for NoDeviceWatcher {
+        fn start(self: Box<Self>) -> mpsc::Receiver<DeviceEvent> {
+            // Leak the sender so the channel never closes — an immediately
+            // closed channel makes `device_rx.recv()` perpetually Ready(None),
+            // which under `biased;` starves the lower-priority watcher/timer
+            // select arms this test depends on.
+            let (tx, rx) = mpsc::channel(1);
+            std::mem::forget(tx);
+            rx
+        }
+    }
+
+    let scan_spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let scan_spawns_for_closure = scan_spawns.clone();
+    let spawn_scan_fn = move |_drive: String,
+                              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
+                              _pause_rx: tokio::sync::oneshot::Receiver<()>,
+                              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+        scan_spawns_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
+                outcome: classick::daemon::history::SyncOutcome::Ok,
+                summary: None,
+            })
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
+    };
+    let noop_spawn_fn = |_drive: String,
+                         _cancel_rx: tokio::sync::oneshot::Receiver<()>,
+                         _pause_rx: tokio::sync::oneshot::Receiver<()>,
+                         _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+        Box::pin(async move {
+            Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
+                outcome: classick::daemon::history::SyncOutcome::Ok,
+                summary: None,
+            })
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
+    };
+
+    let deps = DaemonDeps {
+        configured_serial: None,
+        watcher: Box::new(NoDeviceWatcher),
+        spawn_sync: Arc::new(noop_spawn_fn),
+        spawn_backfill: Arc::new(noop_spawn_fn),
+        spawn_scan: Arc::new(spawn_scan_fn),
+        schedule_minutes: 0,
+        preset_event_tx: None,
+        config_path: Some(config_path),
+        history_path: Some(history_path),
+        pipe_name: Some(pipe_name),
+    };
+    let runtime_task = tokio::spawn(run_daemon_with_deps(deps));
+
+    // A `source` is configured, so run_daemon_with_deps fires a one-shot
+    // startup scan. Wait for it to be spawned, then let it complete (the
+    // stub resolves instantly) and reset the counter — the test below
+    // asserts scans triggered strictly by the FS-change/debounce path.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while scan_spawns.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        if std::time::Instant::now() > deadline {
+            panic!("startup scan never fired within 5s");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Give the (instantly-resolving) scan a moment to complete and flip
+    // state back to Idle so the debounce-triggered scan later isn't
+    // dropped by the `state.is_idle()` guard.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    scan_spawns.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    // Give the OS filesystem watch a beat to arm before the test writes
+    // under `source` (mirrors library_watcher's own tests).
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    WatcherSandbox { source, scan_spawns, runtime_task }
+}
+
+// Task 3: a filesystem change under the configured source coalesces into
+// exactly one scan after LIBRARY_DEBOUNCE_WINDOW, proving the watcher is
+// wired through the debounce timer into start_scan_session.
+#[tokio::test]
+async fn watcher_change_triggers_one_scan_after_debounce() {
+    let _guard = PIPE_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let sb = sandbox_with_source().await;
+
+    // Simulate a filesystem change under the configured source.
+    std::fs::write(sb.source.join("added.flac"), b"x").unwrap();
+
+    // Wait past the debounce window; exactly one scan should have spawned.
+    tokio::time::sleep(
+        classick::daemon::LIBRARY_DEBOUNCE_WINDOW + Duration::from_millis(500),
+    ).await;
+    assert_eq!(
+        sb.scan_spawns.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one coalesced scan after a source change"
+    );
+
+    sb.shutdown().await;
+}

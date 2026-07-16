@@ -238,6 +238,16 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
         }
     };
     let mut device_rx = deps.watcher.start();
+    // Filesystem watcher over the configured source library. Emits coalesced
+    // change ticks; the select loop debounces them and triggers a scan.
+    let initial_source = config_file::load(&config_path)
+        .ok()
+        .flatten()
+        .and_then(|c| c.source);
+    let (mut library_watcher, mut library_rx) =
+        crate::daemon::library_watcher::LibraryWatcher::spawn(initial_source);
+    // Deadline used to debounce a burst of FS events into a single scan.
+    let mut library_scan_deadline: Option<tokio::time::Instant> = None;
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
     let spawn_sync = deps.spawn_sync;
     let spawn_backfill = deps.spawn_backfill;
@@ -272,6 +282,16 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     // asynchronously via InternalEvent::LibraryCountComputed.
     spawn_library_count(&config_path, &internal_tx);
 
+    // Refresh the library index once at startup so the browser is current
+    // without a user action. Guarded/incremental like any scan.
+    if config_file::load(&config_path).ok().flatten().and_then(|c| c.source).is_some() {
+        start_scan_session(
+            &mut state, &event_tx, &spawn_scan, &internal_tx,
+            &mut cancel_tx_holder, &mut prompt_tx_holder, &mut pause_tx_holder,
+            &connected, &config_path, &history, library_count_cache,
+        );
+    }
+
     let exit_reason: ExitReason = loop {
         tokio::select! {
             biased;
@@ -299,6 +319,11 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &mut scheduler,
                     &mut library_count_cache,
                 );
+                // A SaveConfig may have changed the source path; re-point the
+                // watcher. rewatch() is a no-op when the path is unchanged.
+                let latest_source = config_file::load(&config_path)
+                    .ok().flatten().and_then(|c| c.source);
+                library_watcher.rewatch(latest_source);
                 if should_exit { break ExitReason::Shutdown; }
             }
 
@@ -368,6 +393,35 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                             library_count_cache,
                         );
                     }
+                }
+            }
+
+            Some(()) = library_rx.recv() => {
+                // Coalesce: (re)arm the debounce deadline. The timer arm below
+                // fires the scan once the source has been quiet for the window.
+                library_scan_deadline =
+                    Some(tokio::time::Instant::now() + crate::daemon::LIBRARY_DEBOUNCE_WINDOW);
+            }
+
+            _ = async {
+                match library_scan_deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                library_scan_deadline = None;
+                // Only scan when idle + a source is configured; otherwise drop
+                // (a sync in flight will refresh the count itself, and the next
+                // change re-arms the deadline).
+                let has_source = config_file::load(&config_path).ok().flatten()
+                    .and_then(|c| c.source).is_some();
+                if has_source && state.is_idle() {
+                    tracing::info!("daemon: library watcher fired a scan after debounce");
+                    start_scan_session(
+                        &mut state, &event_tx, &spawn_scan, &internal_tx,
+                        &mut cancel_tx_holder, &mut prompt_tx_holder, &mut pause_tx_holder,
+                        &connected, &config_path, &history, library_count_cache,
+                    );
                 }
             }
         }
