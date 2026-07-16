@@ -89,7 +89,3 @@ struct SetupCallToActionView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
-
-// TEMPORARY stub — replaced by Task 10. Kept minimal so the scene compiles
-// and the window is runnable during Phase B.
-struct HistoryView: View { var model: AppModel; var body: some View { Text("history") } }

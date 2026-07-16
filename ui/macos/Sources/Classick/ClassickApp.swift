@@ -95,13 +95,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             })
     }
 
-    /// Requests a fresh library + selection snapshot from the daemon. Used by
-    /// `MainWindow`'s `.task` on first appear — mirrors `presentChooseMusic`'s
-    /// `onAppear`, since the main window now shows the same library data.
+    /// Requests a fresh library + selection + sync-history snapshot from the
+    /// daemon. Used by `MainWindow`'s `.task` on first appear — mirrors
+    /// `presentChooseMusic`'s `onAppear` for library/selection, and additionally
+    /// pulls history (`AppModel.history` is otherwise only ever populated by an
+    /// unsolicited `history_update`) so the History tab has data on first view.
     func requestLibraryAndSelection() {
         Task {
             await daemonClient.send(.getLibrary)
             await daemonClient.send(.getSelection)
+            await daemonClient.send(.getHistory(limit: 50))
         }
     }
 

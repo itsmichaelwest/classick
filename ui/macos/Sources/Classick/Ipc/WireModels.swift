@@ -216,6 +216,7 @@ enum DaemonCommand: Encodable, Sendable {
     case getSelection
     case saveSelection(mode: SelectionMode, rules: [SelectionRule])
     case previewSelection(mode: SelectionMode, rules: [SelectionRule])
+    case getHistory(limit: Int)
 
     enum Trigger: String, Encodable, Sendable {
         case manual, scheduled
@@ -231,6 +232,7 @@ enum DaemonCommand: Encodable, Sendable {
         case choice
         case mode
         case rules
+        case limit
     }
 
     func encode(to encoder: Encoder) throws {
@@ -276,6 +278,9 @@ enum DaemonCommand: Encodable, Sendable {
             try container.encode("preview_selection", forKey: .type)
             try container.encode(mode, forKey: .mode)
             try container.encode(rules, forKey: .rules)
+        case let .getHistory(limit):
+            try container.encode("get_history", forKey: .type)
+            try container.encode(limit, forKey: .limit)
         }
     }
 }
