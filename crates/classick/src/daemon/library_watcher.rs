@@ -100,25 +100,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rewatch_after_failed_attempt_still_arms() {
-        // Guards the state bug: a failed rewatch (nonexistent path) must not
-        // latch the watcher into a permanently-un-armed state. Task 3 calls
-        // rewatch on every config save, so a transient bad path can't wedge it.
-        let dir = std::env::temp_dir().join(format!("classick-rewatch-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let nonexistent = dir.join("does-not-exist-subdir");
+    async fn rewatch_same_path_after_failed_attempt_still_arms() {
+        // Guards the state-latch bug: rewatch the SAME path that failed the
+        // first time (because it didn't exist yet), once it does exist. With
+        // the bug, the first (failed) attempt latched self.current = Some(p),
+        // so the second call short-circuits on `source == self.current` and
+        // never arms. This is exactly Task 3's scenario: rewatch is called
+        // repeatedly with the same configured source while waiting for the
+        // library path to appear (mount, first-run, etc.).
+        let base = std::env::temp_dir().join(format!("classick-watch-rearm-{}", std::process::id()));
+        let p = base.join("music");
+        let _ = std::fs::remove_dir_all(&base); // ensure p does NOT exist yet
 
         let (mut watcher, mut rx) = LibraryWatcher::spawn(None);
-        // First: a rewatch that fails (path doesn't exist).
-        watcher.rewatch(Some(nonexistent));
-        // Then: a rewatch onto the real dir must still arm the watch.
-        watcher.rewatch(Some(dir.clone()));
+        // First attempt fails: p doesn't exist.
+        watcher.rewatch(Some(p.clone()));
+        // Now create the path and retry with the SAME path.
+        std::fs::create_dir_all(&p).unwrap();
+        watcher.rewatch(Some(p.clone()));
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        std::fs::write(dir.join("new.flac"), b"x").unwrap();
+        std::fs::write(p.join("new.flac"), b"x").unwrap();
 
         let got = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
-        assert!(matches!(got, Ok(Some(()))), "expected a change tick after re-arm, got {got:?}");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(got, Ok(Some(()))), "expected a change tick after same-path re-arm, got {got:?}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
