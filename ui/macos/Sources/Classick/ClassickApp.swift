@@ -281,7 +281,7 @@ struct ClassickApp: App {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        Window("Classick", id: "main") {
             MainWindow(
                 model: appDelegate.model,
                 onSyncNow: appDelegate.syncNow,
@@ -336,7 +336,7 @@ struct ClassickApp: App {
         openSettings()
     }
 
-    /// "Open Classick" menu action — brings the main `WindowGroup` window to
+    /// "Open Classick" menu action — brings the main singleton `Window` to
     /// the front, (re)creating it via `openWindow` if it was closed.
     private func openMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
