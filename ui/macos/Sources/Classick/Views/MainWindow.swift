@@ -90,17 +90,8 @@ struct SetupCallToActionView: View {
     }
 }
 
-// TEMPORARY stubs — replaced by Tasks 6–10. Kept minimal so the scene compiles
+// TEMPORARY stubs — replaced by Tasks 9–10. Kept minimal so the scene compiles
 // and the window is runnable during Phase B.
-struct DeviceRow: View {
-    var model: AppModel
-    var onSyncNow: () -> Void = {}
-    var onPause: () -> Void = {}
-    var onCancelSync: () -> Void = {}
-    var onResume: () -> Void = {}
-    var onRetry: () -> Void = {}
-    var body: some View { Text("device row").padding(8) }
-}
 struct DeviceView: View {
     var model: AppModel
     var onSaveSettings: (_ source: String?, _ daemon: DaemonSettings) -> Void = { _, _ in }
