@@ -1168,11 +1168,11 @@ struct LibraryView: View {
         }
     }
 
-    // header / content / browser / rows / filtering: COPY verbatim from
+    // header / content / browser / rows / filtering: MOVE these from
     // ChooseMusicWindow.swift (the mode picker MUST stay enabled; browser
     // grays out in .all mode). Omit the `footer` and its Cancel/Save buttons.
     // Keep `schedulePreview`, `seedDraftIfNeeded`, `filteredArtists`,
-    // `filteredGenres`, `artistRow`, `genreRow` unchanged.
+    // `filteredGenres`, `artistRow`, `genreRow` as they are.
 
     /// Auto-save the selection ~500ms after the last edit. No modal. The
     /// daemon echoes selection_update; the seed latch prevents clobbering.
@@ -1187,13 +1187,19 @@ struct LibraryView: View {
 }
 ```
 
-Copy the omitted helper methods and subviews (`header`, `content`, `browser`,
-`artistRow`, `genreRow`, `emptyState`, `schedulePreview`, `seedDraftIfNeeded`,
-`relativeDate`, `filteredArtists`, `filteredGenres`, and the capacity/impact
-readout) from `ChooseMusicWindow.swift` unchanged, dropping only the
-`footer`'s Cancel/Save `HStack` and `onClose`. Move the capacity bar into the
-device row is handled in Task 8; here, keep only the per-row counts + the
-scanned/empty state.
+**This is a MOVE, not a duplication.** Take the helper methods and subviews
+(`header`, `content`, `browser`, `artistRow`, `genreRow`, `emptyState`,
+`schedulePreview`, `seedDraftIfNeeded`, `relativeDate`, `filteredArtists`,
+`filteredGenres`, and the capacity/impact readout) out of
+`ChooseMusicWindow.swift` and into `LibraryView`, dropping only the `footer`'s
+Cancel/Save `HStack` and `onClose`. `ChooseMusicWindow.swift` and its
+controller are **deleted in Task 11**, so across the full plan the browser code
+lives in exactly one place — there is no permanent duplication. (The two files
+briefly coexist between Task 7 and Task 11 only because `presentChooseMusic`
+still references the old window until Task 11 retires it; a reviewer seeing that
+transient overlap should treat it as expected, not as duplicated logic to flag.)
+The capacity bar moves into the device row in Task 8; here, keep only the
+per-row counts + the scanned/empty state.
 
 - [ ] **Step 2: Remove the temporary `LibraryView` stub**
 
