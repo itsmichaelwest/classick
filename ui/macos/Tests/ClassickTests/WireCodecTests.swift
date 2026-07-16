@@ -29,6 +29,18 @@ final class WireCodecTests: XCTestCase {
         XCTAssertEqual(add, 0); XCTAssertEqual(unchanged, 12)
     }
 
+    func testTrackStartDecodesOptionalEta() throws {
+        let withEta = #"{"type":"track_start","current":5,"total":10,"label":"X","eta_secs":42}"#
+        let noEta = #"{"type":"track_start","current":1,"total":10,"label":"Y"}"#
+        let d = JSONDecoder()
+        if case let .trackStart(_, _, _, eta) = try d.decode(SyncEvent.self, from: Data(withEta.utf8)) {
+            XCTAssertEqual(eta, 42)
+        } else { XCTFail("expected trackStart") }
+        if case let .trackStart(_, _, _, eta) = try d.decode(SyncEvent.self, from: Data(noEta.utf8)) {
+            XCTAssertNil(eta)
+        } else { XCTFail("expected trackStart") }
+    }
+
     func testEncodesSaveConfig() throws {
         let cmd = DaemonCommand.saveConfig(
             source: "/music", daemon: nil,

@@ -66,7 +66,7 @@ struct MenuContent: View {
             Button("Sync Now", action: onSyncNow)
             Button("Choose Music…", action: onChooseMusic)
 
-        case let .syncing(current, total, label):
+        case let .syncing(current, total, label, _):
             Text("Syncing… \(current) of \(total)")
             if !label.isEmpty {
                 Text(label)
