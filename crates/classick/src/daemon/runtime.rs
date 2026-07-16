@@ -301,6 +301,10 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     tracing::info!("daemon: command channel closed; exiting");
                     return Ok(());
                 };
+                // Only SaveConfig can change the source path; avoid a disk
+                // read + rewatch on every other command.
+                let is_save_config =
+                    matches!(&client_cmd.command, DaemonCommand::SaveConfig { .. });
                 let should_exit = handle_client_command(
                     client_cmd,
                     &history,
@@ -321,9 +325,16 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                 );
                 // A SaveConfig may have changed the source path; re-point the
                 // watcher. rewatch() is a no-op when the path is unchanged.
-                let latest_source = config_file::load(&config_path)
-                    .ok().flatten().and_then(|c| c.source);
-                library_watcher.rewatch(latest_source);
+                // A transient config-read failure must NOT disarm the
+                // watcher — only a legitimately-absent source should.
+                if is_save_config {
+                    match config_file::load(&config_path) {
+                        Ok(cfg) => library_watcher.rewatch(cfg.and_then(|c| c.source)),
+                        Err(e) => tracing::warn!(
+                            "daemon: skipping library rewatch, config load failed: {e:#}"
+                        ),
+                    }
+                }
                 if should_exit { break ExitReason::Shutdown; }
             }
 
@@ -409,19 +420,29 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                library_scan_deadline = None;
-                // Only scan when idle + a source is configured; otherwise drop
-                // (a sync in flight will refresh the count itself, and the next
-                // change re-arms the deadline).
+                // Only scan when idle + a source is configured. If busy (a
+                // sync/scan is in flight), re-arm the deadline instead of
+                // dropping it, so the pending rescan is retried once the
+                // current operation finishes rather than being lost forever.
                 let has_source = config_file::load(&config_path).ok().flatten()
                     .and_then(|c| c.source).is_some();
-                if has_source && state.is_idle() {
+                if !has_source {
+                    // Nothing to scan — clear the deadline.
+                    library_scan_deadline = None;
+                } else if state.is_idle() {
+                    // Consume the deadline and run the incremental scan.
+                    library_scan_deadline = None;
                     tracing::info!("daemon: library watcher fired a scan after debounce");
                     start_scan_session(
                         &mut state, &event_tx, &spawn_scan, &internal_tx,
                         &mut cancel_tx_holder, &mut prompt_tx_holder, &mut pause_tx_holder,
                         &connected, &config_path, &history, library_count_cache,
                     );
+                } else {
+                    // Busy (sync/scan in flight): retry after another debounce
+                    // window rather than dropping the pending rescan.
+                    library_scan_deadline =
+                        Some(tokio::time::Instant::now() + crate::daemon::LIBRARY_DEBOUNCE_WINDOW);
                 }
             }
         }
