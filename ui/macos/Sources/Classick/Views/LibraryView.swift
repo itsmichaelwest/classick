@@ -15,7 +15,6 @@ struct LibraryView: View {
     @State private var draft = SelectionDraft(mode: .all, rules: [])
     @State private var seededFromModel = false
     @State private var userEdited = false
-    @State private var isSeeding = false
     @State private var tab: Tab = .artists
     @State private var search = ""
     @State private var previewTask: Task<Void, Never>?
@@ -42,15 +41,11 @@ struct LibraryView: View {
             seedDraftIfNeeded()
         }
         .onChange(of: draft) { _, d in
-            // Programmatic seed-writes flow through this same onChange as
-            // real user edits; isSeeding distinguishes the two so a seed
-            // doesn't get mistaken for an edit (and doesn't trigger a
-            // spurious preview/save) and so a real edit permanently blocks
-            // any later (possibly-delayed) seed from clobbering it.
-            guard !isSeeding else {
-                isSeeding = false
-                return
-            }
+            // Any draft change marks the draft as user-edited, which
+            // permanently blocks re-seeding (see seedDraftIfNeeded). The
+            // one-time seed also trips this, but seededFromModel already
+            // blocks re-seeds by then, so the resulting harmless re-save +
+            // correct preview is a cosmetic round-trip, not a clobber.
             userEdited = true
             schedulePreview(d)
             scheduleSave(d)
@@ -182,14 +177,11 @@ struct LibraryView: View {
         }
     }
 
-    /// Seed the local draft from the persisted selection exactly once, so
-    /// in-progress edits are never clobbered by later selection_update
-    /// echoes. Also bails if the user has already edited the draft before
-    /// the persisted selection ever arrived (launch race) — that edit must
-    /// win over the late seed.
+    /// Seed the local draft from the persisted selection exactly once, and
+    /// never after the user has started editing — so a late get_selection
+    /// reply can't overwrite an in-progress edit made before it arrived.
     private func seedDraftIfNeeded() {
         guard !seededFromModel, !userEdited, let sel = model.selection else { return }
-        isSeeding = true
         draft = SelectionDraft(mode: sel.mode, rules: sel.rules)
         seededFromModel = true
     }
