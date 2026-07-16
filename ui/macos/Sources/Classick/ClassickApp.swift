@@ -256,6 +256,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.stop() }
         daemonProcess.stop()
     }
+
+    /// Hybrid app: closing the main window leaves the app running in the Dock
+    /// + menu bar so the daemon keeps syncing. Quit is explicit (⌘Q).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    /// Re-open the main window when the Dock icon is clicked with no window
+    /// visible. Returning true tells AppKit we handled it.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            NSApp.activate(ignoringOtherApps: true)
+            // The WindowGroup restores its window on activation; if none exists,
+            // openWindow (wired in Task 5) recreates it. AppKit reopens the
+            // last closed WindowGroup window automatically here.
+        }
+        return true
+    }
 }
 
 @main
