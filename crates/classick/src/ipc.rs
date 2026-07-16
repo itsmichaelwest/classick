@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Current wire-protocol semver. Bumped per the rules in
 /// `docs/ipc-protocol.md` §1.
-pub const PROTOCOL_VERSION: &str = "1.1.0";
+pub const PROTOCOL_VERSION: &str = "1.2.0";
 
 /// Events emitted from the core to the UI on stdout.
 ///
@@ -62,6 +62,10 @@ pub enum IpcEvent {
         current: usize,
         total: usize,
         label: String,
+        /// Estimated seconds remaining (whole-run average). Omitted before the
+        /// first track completes. Added in protocol 1.2.0.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eta_secs: Option<u64>,
     },
     /// Per-track done. No fields. See §4.8.
     TrackDone,
@@ -193,6 +197,7 @@ impl IpcEvent {
                 current: *current,
                 total: *total,
                 label: label.clone(),
+                eta_secs: None,
             },
             PE::TrackDone => IpcEvent::TrackDone,
             PE::Log(m) => IpcEvent::Log { message: m.clone() },
