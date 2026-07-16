@@ -10,6 +10,7 @@ struct MenuContent: View {
     var daemonFatalError: String?
 
     var onSetUp: () -> Void = { print("TODO: open setup window") }
+    var onOpenMain: () -> Void = { print("TODO: open main window") }
     var onOpenSettings: () -> Void = { print("TODO: open settings window") }
     var onSyncNow: () -> Void = { print("TODO: send(.triggerSync(source: .manual))") }
     var onChooseMusic: () -> Void = { print("TODO: open Choose Music window") }
@@ -27,6 +28,8 @@ struct MenuContent: View {
 
         phaseContent
 
+        Divider()
+        Button("Open Classick", action: onOpenMain)
         Divider()
         Button("Check for Updates…", action: onCheckForUpdates)
         Button("Settings…", action: onOpenSettings)

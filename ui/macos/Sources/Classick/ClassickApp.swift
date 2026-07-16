@@ -95,6 +95,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             })
     }
 
+    /// Requests a fresh library + selection snapshot from the daemon. Used by
+    /// `MainWindow`'s `.task` on first appear — mirrors `presentChooseMusic`'s
+    /// `onAppear`, since the main window now shows the same library data.
+    func requestLibraryAndSelection() {
+        Task {
+            await daemonClient.send(.getLibrary)
+            await daemonClient.send(.getSelection)
+        }
+    }
+
+    /// "Rescan Library" action for the main window's `LibraryView`.
+    func rescan() {
+        Task { await daemonClient.send(.scanLibrary) }
+    }
+
+    /// Live preview of a candidate selection (mode + rules) as the user edits
+    /// it in the main window, mirroring `presentChooseMusic`'s wiring.
+    func previewSelection(mode: SelectionMode, rules: [SelectionRule]) {
+        Task { await daemonClient.send(.previewSelection(mode: mode, rules: rules)) }
+    }
+
+    /// Persist a selection without the modal "Sync now?" alert (the persistent
+    /// LibraryView auto-saves; the sync-on-change offer is handled inline there).
+    func saveSelectionDirect(mode: SelectionMode, rules: [SelectionRule]) {
+        Task { await daemonClient.send(.saveSelection(mode: mode, rules: rules)) }
+    }
+
     private func saveSelection(mode: SelectionMode, rules: [SelectionRule]) {
         let preview = model.selectionPreview
         Task { await daemonClient.send(.saveSelection(mode: mode, rules: rules)) }
@@ -287,13 +314,35 @@ struct ClassickApp: App {
     // `MenuBarExtra` action. (Setup is NOT a SwiftUI scene; it's an
     // AppKit-hosted window owned by the delegate — see `SetupWindowController`.)
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
+        WindowGroup(id: "main") {
+            MainWindow(
+                model: appDelegate.model,
+                onSyncNow: appDelegate.syncNow,
+                onPause: appDelegate.pause,
+                onCancelSync: appDelegate.cancelSync,
+                onResume: appDelegate.resume,
+                onRetry: appDelegate.retry,
+                onPreview: { mode, rules in appDelegate.previewSelection(mode: mode, rules: rules) },
+                onSaveSelection: { mode, rules in appDelegate.saveSelectionDirect(mode: mode, rules: rules) },
+                onScan: appDelegate.rescan,
+                onSaveSettings: appDelegate.saveSettings,
+                onForgetIpod: appDelegate.forgetIpod,
+                onBackfill: appDelegate.backfillRockbox,
+                onSetUp: appDelegate.presentSetup,
+                onAppearRequests: appDelegate.requestLibraryAndSelection
+            )
+        }
+        .windowResizability(.contentMinSize)
+
         MenuBarExtra("Classick", systemImage: menuBarSystemImage(for: appDelegate.model.phase)) {
             MenuContent(
                 model: appDelegate.model,
                 daemonFatalError: appDelegate.daemonFatalError,
                 onSetUp: appDelegate.presentSetup,
+                onOpenMain: openMainWindow,
                 onOpenSettings: openSettingsWindow,
                 onSyncNow: appDelegate.syncNow,
                 onChooseMusic: appDelegate.presentChooseMusic,
@@ -321,6 +370,13 @@ struct ClassickApp: App {
     private func openSettingsWindow() {
         NSApp.activate(ignoringOtherApps: true)
         openSettings()
+    }
+
+    /// "Open Classick" menu action — brings the main `WindowGroup` window to
+    /// the front, (re)creating it via `openWindow` if it was closed.
+    private func openMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "main")
     }
 }
 
