@@ -967,7 +967,7 @@ mod tests {
 
     #[test]
     fn eta_estimator_none_until_a_track_completes() {
-        let mut e = EtaEstimator::new_at(std::time::Instant::now());
+        let e = EtaEstimator::new_at(std::time::Instant::now());
         // No completed tracks yet → no estimate.
         assert_eq!(e.eta_secs(1, 10), None);
     }

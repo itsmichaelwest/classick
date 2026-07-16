@@ -333,4 +333,35 @@ mod tests {
         // Internally tagged enum with no fields serializes as just {"type": "..."}.
         assert!(json.contains(r#""type":"track_done""#), "got: {json}");
     }
+
+    #[test]
+    fn track_start_event_omits_eta_secs_when_none() {
+        // Compatibility guarantee (protocol 1.2.0 is additive): a `None` ETA
+        // must serialize identically to pre-1.2.0 — the `eta_secs` field is
+        // omitted entirely, not emitted as `null`. `skip_serializing_if`
+        // enforces this.
+        let event = IpcEvent::TrackStart {
+            current: 1,
+            total: 15,
+            label: "Aphex Twin - #ATC1".to_string(),
+            eta_secs: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("eta_secs"), "got: {json}");
+        assert!(json.contains(r#""current":1"#), "got: {json}");
+        assert!(json.contains(r#""total":15"#), "got: {json}");
+        assert!(json.contains(r#""label":"Aphex Twin - #ATC1""#), "got: {json}");
+    }
+
+    #[test]
+    fn track_start_event_includes_eta_secs_when_some() {
+        let event = IpcEvent::TrackStart {
+            current: 6,
+            total: 15,
+            label: "Aphex Twin - #ATC2".to_string(),
+            eta_secs: Some(42),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""eta_secs":42"#), "got: {json}");
+    }
 }
