@@ -13,7 +13,7 @@ struct MenuContent: View {
     var onOpenMain: () -> Void = { print("TODO: open main window") }
     var onOpenSettings: () -> Void = { print("TODO: open settings window") }
     var onSyncNow: () -> Void = { print("TODO: send(.triggerSync(source: .manual))") }
-    var onChooseMusic: () -> Void = { print("TODO: open Choose Music window") }
+    var onRescan: () -> Void = { print("TODO: send(.scanLibrary)") }
     var onCancelSync: () -> Void = { print("TODO: send(.cancelSync)") }
     var onPause: () -> Void = { print("TODO: send(.pause)") }
     var onResume: () -> Void = { print("TODO: send(.triggerSync(source: .manual))") }
@@ -26,13 +26,13 @@ struct MenuContent: View {
             Divider()
         }
 
-        phaseContent
-
-        Divider()
         Button("Open Classick", action: onOpenMain)
         Divider()
-        Button("Check for Updates…", action: onCheckForUpdates)
+        phaseContent
+        Divider()
+        Button("Rescan Library", action: onRescan)
         Button("Settings…", action: onOpenSettings)
+        Button("Check for Updates…", action: onCheckForUpdates)
         Button("Quit Classick") { NSApplication.shared.terminate(nil) }
     }
 
@@ -64,7 +64,6 @@ struct MenuContent: View {
             }
             Divider()
             Button("Sync Now", action: onSyncNow)
-            Button("Choose Music…", action: onChooseMusic)
 
         case let .syncing(current, total, label, _):
             Text("Syncing… \(current) of \(total)")

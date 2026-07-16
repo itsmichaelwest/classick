@@ -22,7 +22,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let daemonClient = DaemonClient()
     private let daemonProcess = DaemonProcess()
     private let setupWindowController = SetupWindowController()
-    private let chooseMusicController = ChooseMusicWindowController()
 
     /// First-run setup is auto-presented exactly once per launch, the moment
     /// the daemon confirms the user is unconfigured. This latches that so a
@@ -73,33 +72,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         setupWindowController.show(model: model, onDone: finishSetup)
     }
 
-    /// Opens the Choose Music browser. Pulls a fresh library + selection on
-    /// appear, and wires scan/preview/save to daemon commands.
-    func presentChooseMusic() {
-        chooseMusicController.show(
-            model: model,
-            onAppear: { [weak self] in
-                Task {
-                    await self?.daemonClient.send(.getLibrary)
-                    await self?.daemonClient.send(.getSelection)
-                }
-            },
-            onScan: { [weak self] in
-                Task { await self?.daemonClient.send(.scanLibrary) }
-            },
-            onPreview: { [weak self] mode, rules in
-                Task { await self?.daemonClient.send(.previewSelection(mode: mode, rules: rules)) }
-            },
-            onSave: { [weak self] mode, rules in
-                self?.saveSelection(mode: mode, rules: rules)
-            })
-    }
-
     /// Requests a fresh library + selection + sync-history snapshot from the
-    /// daemon. Used by `MainWindow`'s `.task` on first appear — mirrors
-    /// `presentChooseMusic`'s `onAppear` for library/selection, and additionally
-    /// pulls history (`AppModel.history` is otherwise only ever populated by an
-    /// unsolicited `history_update`) so the History tab has data on first view.
+    /// daemon. Used by `MainWindow`'s `.task` on first appear so the persistent
+    /// `LibraryView` and History tab both have data on first view
+    /// (`AppModel.history` is otherwise only ever populated by an unsolicited
+    /// `history_update`).
     func requestLibraryAndSelection() {
         Task {
             await daemonClient.send(.getLibrary)
@@ -114,33 +91,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     /// Live preview of a candidate selection (mode + rules) as the user edits
-    /// it in the main window, mirroring `presentChooseMusic`'s wiring.
+    /// it in the main window's `LibraryView`.
     func previewSelection(mode: SelectionMode, rules: [SelectionRule]) {
         Task { await daemonClient.send(.previewSelection(mode: mode, rules: rules)) }
     }
 
-    /// Persist a selection without the modal "Sync now?" alert (the persistent
-    /// LibraryView auto-saves; the sync-on-change offer is handled inline there).
+    /// Persist a selection. The persistent `LibraryView` auto-saves on every
+    /// debounced edit; the always-visible Sync Now button in the device row
+    /// (rather than a modal "Sync now?" prompt on every save) is the
+    /// affordance for applying a selection change to the connected iPod.
     func saveSelectionDirect(mode: SelectionMode, rules: [SelectionRule]) {
         Task { await daemonClient.send(.saveSelection(mode: mode, rules: rules)) }
-    }
-
-    private func saveSelection(mode: SelectionMode, rules: [SelectionRule]) {
-        let preview = model.selectionPreview
-        Task { await daemonClient.send(.saveSelection(mode: mode, rules: rules)) }
-        // Offer an immediate sync when the selection changes what's on the
-        // iPod and a device is present (spec §5 Save flow).
-        if let preview, preview.adds + preview.removes > 0, model.device != nil {
-            let alert = NSAlert()
-            alert.messageText = "Sync now?"
-            alert.informativeText =
-                "This selection will add \(preview.adds) and remove \(preview.removes) track(s) at the next sync."
-            alert.addButton(withTitle: "Sync Now")
-            alert.addButton(withTitle: "Later")
-            if alert.runModal() == .alertFirstButtonReturn {
-                syncNow()
-            }
-        }
     }
 
     /// Auto-presents setup the first time the daemon confirms (post-handshake)
@@ -348,7 +309,7 @@ struct ClassickApp: App {
                 onOpenMain: openMainWindow,
                 onOpenSettings: openSettingsWindow,
                 onSyncNow: appDelegate.syncNow,
-                onChooseMusic: appDelegate.presentChooseMusic,
+                onRescan: appDelegate.rescan,
                 onCancelSync: appDelegate.cancelSync,
                 onPause: appDelegate.pause,
                 onResume: appDelegate.resume,

@@ -2,10 +2,10 @@ import SwiftUI
 
 /// The always-present Music Library browser: mode picker + Artists/Genres +
 /// checkbox outline. Edits a local `SelectionDraft` and auto-saves it
-/// (debounced) — there is no modal Save/Cancel here, unlike the transient
-/// `ChooseMusicWindow` this view's browser guts were adapted from. The
-/// capacity bar and selection-impact readout live on the device row
-/// (Task 8) instead of here.
+/// (debounced) — there is no modal Save/Cancel here, unlike the old
+/// transient Choose Music window this view's browser guts were adapted
+/// from (retired in favor of this persistent view). The capacity bar and
+/// selection-impact readout live on the device row (Task 8) instead of here.
 struct LibraryView: View {
     var model: AppModel
     var onScan: () -> Void
@@ -214,4 +214,8 @@ struct LibraryView: View {
         guard !search.isEmpty else { return library.genres }
         return library.genres.filter { $0.name.lowercased().contains(search.lowercased()) }
     }
+}
+
+func formatBytes(_ bytes: UInt64) -> String {
+    ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
 }
