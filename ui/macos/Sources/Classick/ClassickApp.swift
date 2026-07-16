@@ -264,7 +264,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     /// Re-open the main window when the Dock icon is clicked with no window
-    /// visible. Returning true tells AppKit we handled it.
+    /// visible. Returning `true` lets AppKit perform its default reopen
+    /// behavior (restoring the last-closed `WindowGroup` window once Task 5
+    /// adds one); `false` would suppress that and require reopening manually.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
             NSApp.activate(ignoringOtherApps: true)
@@ -314,9 +316,8 @@ struct ClassickApp: App {
         }
     }
 
-    /// Opening the Settings window from this `LSUIElement` (accessory, no Dock
-    /// icon) app requires activating it first — otherwise the window can open
-    /// behind whatever app currently has focus.
+    /// Activate before opening Settings so the window comes to the front
+    /// rather than opening behind the current app.
     private func openSettingsWindow() {
         NSApp.activate(ignoringOtherApps: true)
         openSettings()
