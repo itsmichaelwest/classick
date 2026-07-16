@@ -109,13 +109,3 @@ struct DeviceView: View {
     var body: some View { Text("device view") }
 }
 struct HistoryView: View { var model: AppModel; var body: some View { Text("history") } }
-
-// (`LibraryView` will be replaced by the real implementation in Task 7; for
-// Phase B this is a placeholder so the scene compiles and runs.)
-struct LibraryView: View {
-    var model: AppModel
-    var onScan: () -> Void = {}
-    var onPreview: (SelectionMode, [SelectionRule]) -> Void = { _, _ in }
-    var onSaveSelection: (SelectionMode, [SelectionRule]) -> Void = { _, _ in }
-    var body: some View { Text("library") }
-}
