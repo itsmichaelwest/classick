@@ -67,6 +67,8 @@ pub mod logging;
 pub mod manifest;
 pub mod orchestrator;
 pub mod pipeline;
+pub mod playlist;
+pub mod playlist_rules;
 pub mod preflight;
 pub mod progress;
 pub mod scan;
