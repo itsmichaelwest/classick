@@ -35,6 +35,25 @@ final class AppModelReducerTests: XCTestCase {
         XCTAssertTrue(m.lastRunDbRestored)
     }
 
+    /// Regression: a library-scan's `finish` event never carries
+    /// `skipped_for_space`/`artwork`/`db_restored` — those fields are
+    /// sync-only. A scan finishing right after a real sync must not clobber
+    /// that sync's rollup back to nil/nil/false.
+    func testScanFinishDoesNotClobberPriorSyncRollup() {
+        let m = AppModel()
+        m.apply(.syncEvent(line: #"{"type":"finish","success":true,"skipped_for_space":{"albums":14,"tracks":183,"bytes":9876543210},"artwork":{"embedded":40,"eligible":42,"failed_sources":2},"db_restored":true}"#))
+        XCTAssertEqual(m.lastRunSkippedForSpace, SkippedForSpace(albums: 14, tracks: 183, bytes: 9_876_543_210))
+        XCTAssertEqual(m.lastRunArtwork, ArtworkSummary(embedded: 40, eligible: 42, failedSources: 2))
+        XCTAssertTrue(m.lastRunDbRestored)
+
+        m.apply(.statusUpdate(.init(state: .scanning, configured: true, ipodConnected: true, lastSync: nil, storage: nil)))
+        m.apply(.syncEvent(line: #"{"type":"finish","success":true}"#))
+
+        XCTAssertEqual(m.lastRunSkippedForSpace, SkippedForSpace(albums: 14, tracks: 183, bytes: 9_876_543_210))
+        XCTAssertEqual(m.lastRunArtwork, ArtworkSummary(embedded: 40, eligible: 42, failedSources: 2))
+        XCTAssertTrue(m.lastRunDbRestored)
+    }
+
     func testDeviceConnectThenDisconnect() {
         let m = AppModel()
         m.apply(.deviceConnected(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "Michael’s iPod"))

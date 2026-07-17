@@ -241,14 +241,14 @@ final class AppModel {
                 phase = .syncing(current: current, total: total, label: label, etaSecs: etaSecs)
             }
         case let .finish(_, skippedForSpace, artwork, dbRestored):
-            lastRunSkippedForSpace = skippedForSpace
-            lastRunArtwork = artwork
-            lastRunDbRestored = dbRestored
             if isScanning {
-                // The daemon's post-scan Idle status will confirm; don't leave
-                // a stale `.scanning`. Fall back to the derived resting phase.
+                // A scan's finish never carries these fields (they're
+                // sync-only) — don't clobber the last real sync's rollup.
                 phase = computePhase(targetSyncing: false)
             } else {
+                lastRunSkippedForSpace = skippedForSpace
+                lastRunArtwork = artwork
+                lastRunDbRestored = dbRestored
                 phase = .idle
             }
         case let .prompt(id, message, options):
