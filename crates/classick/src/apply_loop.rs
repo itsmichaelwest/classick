@@ -798,14 +798,21 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // moments before the loop started, so a retry would just repeat the
         // same "doesn't fit" verdict.
         let final_deferred: Vec<DeferredAlbum> = if !cancelled && !paused && !deferred.is_empty() {
+            // Fresh free-space query: Removes already landed on disk during
+            // the main loop, so this reflects any space they reclaimed — no
+            // remove credit to fold in this time (unlike the up-front
+            // budget, which had to project it). See `retry_deferred`'s doc
+            // comment for why this I/O lives at the call site.
+            let retry_storage = free_space::query(Path::new(&mount));
+            let retry_budget = compute_budget(retry_storage, 0);
             retry_deferred(
-                &mount,
                 config,
                 &refalac_version,
                 &db,
                 &mut manifest,
                 &original_adds,
                 deferred,
+                retry_budget,
                 album_tag_of,
                 progress,
                 decision_rx,
@@ -1013,25 +1020,35 @@ pub(crate) fn deferred_add_actions(
 }
 
 /// End-of-run deferred retry (Task 8): after the main apply loop has run,
-/// if the fit pass deferred any albums, re-query free space once and give
-/// them a single second chance — the main loop's Removes may have freed
-/// enough room. Single pass, no loop: whatever `fit::plan_fit` still can't
-/// fit is returned as the final deferred list. Runs BEFORE the run's final
-/// `db.write()`/manifest save (see `run`'s doc comment) so any newly-added
-/// tracks land in the same commit as everything else.
+/// if the fit pass deferred any albums, give them a single second chance
+/// against a freshly-computed `budget` — the main loop's Removes may have
+/// freed enough room. Single pass, no loop: whatever `fit::plan_fit` still
+/// can't fit is returned as the final deferred list. Runs BEFORE the run's
+/// final `db.write()`/manifest save (see `run`'s doc comment) so any
+/// newly-added tracks land in the same commit as everything else.
+///
+/// `budget` is computed by the caller (fresh `free_space::query` + zero
+/// remove-credit, since Removes already landed on disk during the main loop
+/// — unlike the up-front budget, which had to project their reclaimed
+/// space) rather than queried in here. That keeps the only bit of I/O in
+/// this function's contract at the call site, so `retry_deferred` itself is
+/// a pure function of its inputs and can be exercised in tests with an
+/// arbitrary `Some(budget)`/`None` without needing a real mounted device.
+/// `pub` (not `pub(crate)`) so `tests/fit_retry_integration.rs` can drive it
+/// directly against a fake mount + hand-rolled DB.
 ///
 /// Reuses `commit_pipelined` — the exact same per-track commit/retry/skip
 /// machinery the main loop uses — via a second, small `OrderedTranscoder`
 /// (the main loop's was already `stop()`-ed by the time this runs).
 #[allow(clippy::too_many_arguments)]
-fn retry_deferred(
-    mount: &str,
+pub fn retry_deferred(
     config: &Config,
     refalac_version: &Option<String>,
     db: &OwnedDb,
     manifest: &mut Manifest,
     original_adds: &[SourceEntry],
     deferred: Vec<DeferredAlbum>,
+    budget: Option<u64>,
     album_tag_of: impl Fn(&Path) -> Option<String>,
     progress: &Progress,
     decision_rx: &Receiver<Decision>,
@@ -1042,11 +1059,6 @@ fn retry_deferred(
         return Ok(deferred);
     }
 
-    // Removes already landed on disk during the main loop, so this fresh
-    // query already reflects any space they reclaimed — no remove credit to
-    // fold in this time (unlike the up-front budget, which had to project it).
-    let storage = free_space::query(Path::new(mount));
-    let budget = compute_budget(storage, 0);
     let retry_outcome = crate::fit::plan_fit(candidates, budget, &album_tag_of);
     if retry_outcome.kept.is_empty() {
         return Ok(retry_outcome.deferred);
