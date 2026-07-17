@@ -1067,6 +1067,23 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
 /// operation's advertised "cannot be undone" semantics — the pre-wipe
 /// backup exists only as a narrow window to recover from an accidental
 /// confirm, not as a permanent undo path once the sync proceeds.
+/// Preflight for `--replace-library`: walks the source library and applies
+/// the same `guard_nonempty_walk` check `run()` uses, so an empty or
+/// unreachable source is caught BEFORE `replace_library` wipes anything.
+/// `pub(crate)` — this is the seam final-review fix #1 exercises directly,
+/// since driving all of `replace_library` needs a real device identity
+/// (`device::resolve_libgpod_identity` shells out to IOKit/USB recovery and
+/// has no fake-mount path) and so isn't practical to integration-test here.
+pub(crate) fn preflight_replace(
+    config: &mut Config,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<Vec<SourceEntry>> {
+    let sources = preflight::walk_source(config, progress, decision_rx)?;
+    guard_nonempty_walk(&sources, &config.source)?;
+    Ok(sources)
+}
+
 pub fn replace_library(
     config: &mut Config,
     progress: &Progress,
@@ -1076,6 +1093,17 @@ pub fn replace_library(
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
     let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
     let serial = device_state::sanitize_serial(&identity.firewire_guid);
+
+    // Validate the source BEFORE wiping anything: an empty/unreachable
+    // source must never destroy the device's existing library. Walk it now
+    // — before the confirmation prompt below, so the user is never asked to
+    // confirm a doomed operation, and before the backup/wipe I/O that
+    // follows. The result is intentionally discarded: `run()`, invoked at
+    // the end of this function, re-walks the source from scratch. That's a
+    // deliberate double-walk — cheap next to the risk of wiping a device on
+    // the strength of a walk result that's gone stale by the time `run()`
+    // gets to it (source unplugged/changed between here and there).
+    let _ = preflight_replace(config, progress, decision_rx)?;
 
     // Defensive backup of the pre-wipe iTunesDB — same helper/order as
     // `run`'s pre-sync backup (see the doc comment above for why `run`'s own
@@ -2138,6 +2166,94 @@ mod tests {
             })
         });
         assert!(kept.is_empty(), "selection filtering everything out must still be allowed");
+    }
+
+    // -- final-review #1: replace_library validates before wiping --------
+
+    /// RED/GREEN seam for final-review fix #1: `preflight_replace` must
+    /// reject an empty source directory with the same "contains no audio
+    /// files" error `run()`'s own `guard_nonempty_walk` produces, so
+    /// `replace_library` never reaches its confirmation prompt (let alone
+    /// the wipe) for a doomed sync. Uses a real, empty tempdir — not a
+    /// missing path — so `preflight::walk_source`'s walk succeeds (Ok(vec
+    /// of zero)) and the guard is what fails; a missing path would instead
+    /// enter `walk_source`'s retry/change/abort prompt loop and hang
+    /// waiting on `decision_rx`.
+    #[test]
+    fn preflight_replace_rejects_empty_source() {
+        let tmp = std::env::temp_dir().join(format!(
+            "classick-preflight-replace-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut config = test_config_for_preflight(tmp.clone());
+        let (progress, decision_rx) = crate::progress::Progress::start(false, false).unwrap();
+
+        let err = preflight_replace(&mut config, &progress, &decision_rx).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("contains no audio files"), "got: {msg}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Mirror-image GREEN case: a source with one real audio file passes
+    /// the guard and the walk result comes back non-empty.
+    #[test]
+    fn preflight_replace_allows_nonempty_source() {
+        let tmp = std::env::temp_dir().join(format!(
+            "classick-preflight-replace-nonempty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("track.flac"), b"not really flac, walk() only checks the extension")
+            .unwrap();
+
+        let mut config = test_config_for_preflight(tmp.clone());
+        let (progress, decision_rx) = crate::progress::Progress::start(false, false).unwrap();
+
+        let sources = preflight_replace(&mut config, &progress, &decision_rx).unwrap();
+        assert_eq!(sources.len(), 1, "got: {sources:?}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Minimal `Config` for driving `preflight_replace` in isolation — only
+    /// `source` matters to `preflight::walk_source`/`guard_nonempty_walk`;
+    /// every other field is a value that would blow up if actually used,
+    /// which is the point (this seam must not touch them).
+    fn test_config_for_preflight(source: std::path::PathBuf) -> Config {
+        Config {
+            source,
+            ipod: None,
+            ffmpeg: std::path::PathBuf::from("ffmpeg"),
+            dry_run: false,
+            apply: true,
+            no_delete: false,
+            verbose: false,
+            rebuild_manifest: false,
+            use_tui: false,
+            manifest_path: std::path::PathBuf::from("/nonexistent-manifest.json"),
+            save_config: false,
+            encoder: EncoderChoice::Ffmpeg,
+            refalac_path: std::path::PathBuf::from("refalac64"),
+            passthrough_wav: false,
+            force_reencode: false,
+            rockbox_compat: false,
+            backfill_rockbox: false,
+            scan_library: false,
+            restore_db_backup: false,
+            replace_library: false,
+            verify_artwork: false,
+        }
     }
 
     /// source_format_from_probe pulls codec_name from the first audio stream
