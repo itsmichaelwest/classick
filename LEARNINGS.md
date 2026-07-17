@@ -543,5 +543,27 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   least `Music/F00`** before adding any track, or every `itdb_cp_track_to_ipod`
   call in the test fails immediately. See the `fake_mount()`/`ipod_mount()`
   helpers in `tests/fit_retry_integration.rs`, `tests/wipe_all_tracks_integration.rs`,
-  and `tests/auto_restore_integration.rs` for the pattern
+  `tests/auto_restore_integration.rs`, `tests/device_playlists_integration.rs`,
+  and `tests/playlists_e2e.rs` for the pattern
   (`std::fs::create_dir_all(base.join("iPod_Control").join("Music").join("F00"))`).
+
+## Task 8 — end-to-end union/reconcile smoke (2026-07-18)
+
+- **libgpod playlist ids come from `itdb_playlist_add`, not `itdb_playlist_new`** —
+  `_new` only allocates the in-memory `Itdb_Playlist*`; the id itself is
+  assigned when it's actually linked into the `Itdb_iTunesDB` via `_add`, and
+  is stable across a `db.write()` + reparse from disk (proven by
+  `examples/playlist-id-spike.rs`). This is what makes by-id reconcile safe:
+  a managed playlist is identified ONLY by the id recorded in
+  `devices/<serial>/managed_playlists.json`, never by name — a foreign
+  playlist that happens to share a managed playlist's name must survive
+  `reconcile`/`reconcile_in` byte-for-byte untouched (see
+  `tests/device_playlists_integration.rs`'s `*_never_adopts_a_foreign_playlist*`
+  tests for the pinning case).
+- **`sync_set::compute` keys `EffectiveSet::playlist_tracks` by playlist
+  SLUG, not display name.** Feeding that straight into
+  `device_playlists::reconcile_in` (as `tests/playlists_e2e.rs` does) creates
+  an on-device playlist literally named after the slug (e.g. `"mix"`), not
+  the playlist's human-readable name (`"Mix"`). Any caller that wants the
+  display name to show up on-device has to translate slug -> name itself
+  before calling reconcile — `sync_set` doesn't do it.
