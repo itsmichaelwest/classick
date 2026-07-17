@@ -273,7 +273,6 @@ mod tests {
         assert!(cfg.restore_db_backup);
     }
 
-
     #[test]
     fn cli_encoder_wins_over_persisted_encoder() {
         let cli = Cli::try_parse_from([
