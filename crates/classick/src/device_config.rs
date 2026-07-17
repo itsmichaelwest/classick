@@ -124,7 +124,10 @@ impl DeviceSettings {
     /// from `global.daemon` (`enabled` -> `auto_sync`, `rockbox_compat` ->
     /// `rockbox_compat`; a missing `global.daemon` falls back to
     /// `DaemonSettings::default()`), persist it, and return the seeded
-    /// value.
+    /// value. If persisting the seeded file fails, the seeded values are
+    /// still returned and seeding is retried on the next call — under a
+    /// persistently unwritable device dir, later calls re-seed from the
+    /// then-current global (fail-open).
     fn load_or_migrate_at(path: &Path, global: &crate::config_file::PersistedConfig) -> Self {
         if path.exists() {
             return Self::load_or_default(path);
@@ -146,7 +149,8 @@ impl DeviceSettings {
 
     /// Seed-once migration from the global `DaemonSettings` into this
     /// device's per-device settings file. See [`Self::load_or_migrate_at`]
-    /// for the exact seed-once contract.
+    /// for the exact seed-once contract; on write failure, seeded values are
+    /// still returned and seeding is retried on the next call (fail-open).
     pub fn load_or_migrate(serial: &str, global: &crate::config_file::PersistedConfig) -> Self {
         let path = match crate::device_state::device_settings_path(serial) {
             Ok(p) => p,
