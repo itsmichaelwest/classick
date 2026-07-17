@@ -73,6 +73,28 @@ pub fn device_selection_path_in(root: &Path, serial: &str) -> Result<PathBuf> {
     Ok(device_dir_in(root, serial)?.join("selection.json"))
 }
 
+/// Path to a device's subscriptions.json (which playlists sync to this
+/// device), creating the device dir on demand.
+pub fn device_subscriptions_path(serial: &str) -> Result<PathBuf> {
+    Ok(device_dir(serial)?.join("subscriptions.json"))
+}
+
+/// Test/override variant of [`device_subscriptions_path`].
+pub fn device_subscriptions_path_in(root: &Path, serial: &str) -> Result<PathBuf> {
+    Ok(device_dir_in(root, serial)?.join("subscriptions.json"))
+}
+
+/// Path to a device's settings.json (auto-sync, Rockbox compatibility, ...),
+/// creating the device dir on demand.
+pub fn device_settings_path(serial: &str) -> Result<PathBuf> {
+    Ok(device_dir(serial)?.join("settings.json"))
+}
+
+/// Test/override variant of [`device_settings_path`].
+pub fn device_settings_path_in(root: &Path, serial: &str) -> Result<PathBuf> {
+    Ok(device_dir_in(root, serial)?.join("settings.json"))
+}
+
 /// Path to a device's artwork-dirty marker file, creating the device dir on
 /// demand. Used by the artwork-refresh flow (Task 13) to flag that cover art
 /// needs re-provisioning.
@@ -175,6 +197,19 @@ mod tests {
         let p = device_manifest_path_in(&root, "0xABC").unwrap();
         assert_eq!(p, root.join("devices").join("ABC").join("manifest.json"));
         assert!(p.parent().unwrap().is_dir(), "device_dir is created on demand");
+    }
+
+    #[test]
+    fn device_subscriptions_and_settings_paths_nest_under_devices_dir() {
+        let root = tempdir_under_target();
+
+        let subs = device_subscriptions_path_in(&root, "0xABC").unwrap();
+        assert_eq!(subs, root.join("devices").join("ABC").join("subscriptions.json"));
+        assert!(subs.parent().unwrap().is_dir(), "device_dir is created on demand");
+
+        let settings = device_settings_path_in(&root, "0xABC").unwrap();
+        assert_eq!(settings, root.join("devices").join("ABC").join("settings.json"));
+        assert!(settings.parent().unwrap().is_dir(), "device_dir is created on demand");
     }
 
     #[test]

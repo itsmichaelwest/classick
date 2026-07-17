@@ -94,11 +94,37 @@ pub fn default_selection_path() -> Result<PathBuf> {
 /// when `custom_selection` is on, otherwise the shared one. `identity` is
 /// `None` when no iPod is configured yet (or the caller doesn't know it) —
 /// that degrades to shared, same as `custom_selection: false`.
+///
+/// **Deprecated**: superseded by [`effective_device_selection_path`], which
+/// always resolves to the per-device file regardless of `custom_selection`.
+/// Kept in place while callers migrate; not marked `#[deprecated]` to avoid
+/// warning churn during the transition.
 pub fn effective_selection_path(identity: Option<&crate::config_file::IpodIdentity>) -> Result<PathBuf> {
     match identity {
         Some(id) if id.custom_selection => crate::device_state::device_selection_path(&id.serial),
         _ => default_selection_path(),
     }
+}
+
+/// Path-injected core of [`effective_device_selection_path`]: always returns
+/// `custom`, seeding it from `shared` first if it doesn't exist yet (see
+/// [`seed_custom_selection`] for the seed-once contract). Testable without
+/// touching the real config dir.
+fn effective_device_selection_path_at(shared: &Path, custom: &Path) -> Result<PathBuf> {
+    seed_custom_selection(shared, custom)?;
+    Ok(custom.to_path_buf())
+}
+
+/// Which selection.json a given iPod actually uses under the v2 per-device
+/// config model: ALWAYS its own `devices/<serial>/selection.json`, seeded
+/// once from the shared root `selection.json` the first time it's resolved
+/// (an existing per-device file is never overwritten). Supersedes
+/// [`effective_selection_path`]'s `custom_selection`-gated behavior — the
+/// `custom_selection` field is no longer consulted here.
+pub fn effective_device_selection_path(serial: &str) -> Result<PathBuf> {
+    let shared = default_selection_path()?;
+    let custom = crate::device_state::device_selection_path(serial)?;
+    effective_device_selection_path_at(&shared, &custom)
 }
 
 /// One-time seed when a device switches shared -> custom: copy the shared
@@ -528,6 +554,48 @@ mod tests {
 
         assert_eq!(load_or_all(&custom), user_edit, "second seed call must be a no-op");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn effective_device_selection_path_at_seeds_from_shared_exactly_once() {
+        let base = std::env::temp_dir()
+            .join(format!("classick-effdev-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let shared = base.join("selection.json");
+        let custom = base.join("devices").join("SER1").join("selection.json");
+        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
+            SelectionRule::Artist { name: "Boards of Canada".into() },
+        ]};
+        save_atomic(&shared, &sel).unwrap();
+
+        let p = effective_device_selection_path_at(&shared, &custom).unwrap();
+        assert_eq!(p, custom);
+        assert_eq!(load_or_all(&custom), sel, "first resolution seeds from shared");
+
+        // Shared file changes after the first resolution...
+        let changed = Selection { version: 1, mode: SelectionMode::Exclude, rules: vec![
+            SelectionRule::Genre { name: "Podcast".into() },
+        ]};
+        save_atomic(&shared, &changed).unwrap();
+
+        // ...but the second resolution must not re-seed.
+        effective_device_selection_path_at(&shared, &custom).unwrap();
+        assert_eq!(load_or_all(&custom), sel, "second resolution must ignore the shared change (seed-once)");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn effective_device_selection_path_resolves_to_per_device_path() {
+        let serial = "EFFDEVPATH-RESOLVE-TEST";
+        let p = effective_device_selection_path(serial).unwrap();
+        assert_eq!(
+            p,
+            crate::device_state::device_selection_path(serial).unwrap(),
+            "must always resolve to the per-device path, ignoring custom_selection entirely"
+        );
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
