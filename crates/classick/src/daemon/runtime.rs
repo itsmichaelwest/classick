@@ -1275,14 +1275,22 @@ fn handle_client_command(
             // to Syncing and the other is dropped/no-op. The UI does its own
             // typed confirmation before ever sending this command, so there's
             // no confirmation prompt to relay here (`--apply` already skips
-            // the core's interactive one).
+            // the core's interactive one). Unlike BackfillRockbox/ScanLibrary,
+            // this command is destructive (wipes the on-device library), so
+            // a busy/no-device guard replies with `SyncRejected` (mirroring
+            // TriggerSync's reply mechanism) instead of silently dropping —
+            // the UI needs a definitive answer before it can retry or warn.
             if !state.is_idle() {
+                let _ = reply.send(DaemonEvent::SyncRejected {
+                    reason: SyncRejectReason::AlreadySyncing,
+                });
                 tracing::debug!(
                     "daemon: client {client_id} sent replace_library but a sync is already in progress"
                 );
                 return false;
             }
             let Some(device) = connected.as_ref() else {
+                let _ = reply.send(DaemonEvent::SyncRejected { reason: SyncRejectReason::NoIpod });
                 tracing::debug!(
                     "daemon: client {client_id} sent replace_library but no iPod is connected"
                 );

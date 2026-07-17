@@ -386,6 +386,22 @@ mod tests {
         ));
     }
 
+    /// `replace_library`'s busy/no-device guards (runtime.rs) reply with
+    /// these two `SyncRejected` variants — unlike `TriggerSync`'s NotConfigured
+    /// path, `replace_library` never sends that third reason. Locks the wire
+    /// shape those replies depend on.
+    #[test]
+    fn sync_rejected_serializes_already_syncing_and_no_ipod() {
+        let already_syncing = DaemonEvent::SyncRejected { reason: SyncRejectReason::AlreadySyncing };
+        let json = serde_json::to_string(&already_syncing).unwrap();
+        assert!(json.contains(r#""type":"sync_rejected""#));
+        assert!(json.contains(r#""reason":"already_syncing""#), "got: {json}");
+
+        let no_ipod = DaemonEvent::SyncRejected { reason: SyncRejectReason::NoIpod };
+        let json = serde_json::to_string(&no_ipod).unwrap();
+        assert!(json.contains(r#""reason":"no_ipod""#), "got: {json}");
+    }
+
     #[test]
     fn trigger_sync_round_trips() {
         let json = r#"{"type":"trigger_sync","source":"manual"}"#;

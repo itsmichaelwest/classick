@@ -1003,14 +1003,14 @@ raw folder count. Under `mode: "all"` the value is unchanged.
 ## Daemon v1.5.0 — Skipped-for-space + artwork summary on history (2026-07-17)
 
 The daemon now emits `hello` with `protocol_version = "1.5.0"`. Purely
-additive over v1.4.0: no new commands or events — three new fields on the
-persisted `SyncSummary` shape and one new field on `HistoryEntry`, both of
-which already ride the existing `status_update.last_sync` and
-`history_update.entries` payloads (see the `v1.1.0` daemon-extensions
-section above for those event shapes). No separate status plumbing was
-needed: `last_sync: Option<HistoryEntry>` on `status_update` carries whatever
-fields `HistoryEntry` has, so UIs pick these up automatically once the
-daemon starts persisting them.
+additive over v1.4.0: one new command (`replace_library`, below); no changed
+or removed fields — three new fields on the persisted `SyncSummary` shape
+and one new field on `HistoryEntry`, both of which already ride the
+existing `status_update.last_sync` and `history_update.entries` payloads
+(see the `v1.1.0` daemon-extensions section above for those event shapes).
+No separate status plumbing was needed: `last_sync: Option<HistoryEntry>`
+on `status_update` carries whatever fields `HistoryEntry` has, so UIs pick
+these up automatically once the daemon starts persisting them.
 
 The daemon builds these fields from the sync subprocess's `finish` event
 (§4.11 above), which since subprocess protocol `1.3.0` already carries
@@ -1064,12 +1064,15 @@ confirmation, not a simple yes/no) before ever sending this command.
 
 `replace_library` reuses the exact same state-machine guard, cancel/pause
 signaling, and prompt-decision relay as `trigger_sync`/`backfill_rockbox`:
-it is **no-op if a sync (or a backfill, or another replace) is already in
-progress**, and no-op if no iPod is currently connected. Because it shares
+it is rejected if a sync (or a backfill, or another replace) is already in
+progress, and rejected if no iPod is currently connected. Because it shares
 the guard, a sync/backfill/replace can never run concurrently — whichever
-request lands first occupies the `Syncing` state until it completes. Like
-`backfill_rockbox` (and unlike `trigger_sync`), it does not reply with
-`sync_rejected` on those no-op paths; the daemon just logs and drops the
-request. The resulting history entry records `trigger: "manual"` — there
-is no dedicated `SyncTrigger` variant for a replace, matching how
-`backfill_rockbox` is recorded.
+request lands first occupies the `Syncing` state until it completes.
+Unlike `backfill_rockbox`/`scan_library` (which stay silent and just log +
+drop on their no-op paths), `replace_library` is destructive — it wipes
+every track on the iPod — so both guards reply with `sync_rejected`
+(`reason: "already_syncing"` or `"no_ipod"`), matching `trigger_sync`'s
+reply mechanism, so the UI always gets a definitive answer rather than a
+request that silently goes nowhere. The resulting history entry records
+`trigger: "manual"` — there is no dedicated `SyncTrigger` variant for a
+replace, matching how `backfill_rockbox` is recorded.
