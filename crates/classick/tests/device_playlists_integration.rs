@@ -257,8 +257,8 @@ fn reconcile_creates_updates_and_removes_without_touching_foreign_or_mpl() {
     let state_root = scratch_dir("state");
     let serial = "0xTESTSERIAL01";
 
-    // --- Step 1: reconcile with desired = [("Gym", [dbid0, dbid1])]. ---
-    let desired = vec![("Gym".to_string(), vec![dbids[0], dbids[1]])];
+    // --- Step 1: reconcile with desired = [("gym", "Gym", [dbid0, dbid1])]. ---
+    let desired = vec![("gym".to_string(), "Gym".to_string(), vec![dbids[0], dbids[1]])];
     let stats = device_playlists::reconcile_in(&db, &desired, &state_root, serial)
         .expect("reconcile should succeed");
     assert_eq!(stats, ReconcileStats { created: 1, updated: 0, removed: 0 });
@@ -283,8 +283,8 @@ fn reconcile_creates_updates_and_removes_without_touching_foreign_or_mpl() {
     // name heuristics": even a name reconcile itself just created is
     // untouchable once the record says otherwise. ---
     let desired_with_foreign = vec![
-        ("Gym".to_string(), vec![dbids[0], dbids[1]]),
-        ("Foreign".to_string(), vec![dbids[2]]),
+        ("gym".to_string(), "Gym".to_string(), vec![dbids[0], dbids[1]]),
+        ("foreign".to_string(), "Foreign".to_string(), vec![dbids[2]]),
     ];
     let stats2 = device_playlists::reconcile_in(&reopened, &desired_with_foreign, &state_root, serial)
         .expect("second reconcile should succeed");
@@ -317,6 +317,82 @@ fn reconcile_creates_updates_and_removes_without_touching_foreign_or_mpl() {
         "Gym gone, Foreign + MPL untouched"
     );
     assert_eq!(final_db.track_count(), 3, "reconcile must never touch track count");
+}
+
+/// Fix 2 regression: `PlaylistStore::unique_slug` lets two distinct
+/// playlists share a display name (`gym` and `gym-2`, both titled "Gym").
+/// Before Fix 2, `reconcile` keyed the managed record by NAME alone, which
+/// `dedup_by(name)` collapsed into a single managed entry — permanently
+/// orphaning one on-device playlist and clobbering membership on every
+/// subsequent reconcile (last write wins). Keying by slug must create and
+/// track both independently, and re-running with the same desired set must
+/// be a genuine steady-state no-op — an update for each, never a fresh
+/// create, and neither playlist lost or orphaned.
+#[test]
+fn reconcile_keeps_distinct_slugs_sharing_a_display_name_independent() {
+    let mount = fake_mount();
+    write_valid_itunesdb(&mount);
+    let db = OwnedDb::open(&mount).unwrap();
+
+    let source_root = scratch_dir("src-dupname");
+    let manifest = seed_tracks_with_manifest(&db, &source_root, 2);
+    let dbid0 = manifest.tracks[0].ipod_dbid;
+    let dbid1 = manifest.tracks[1].ipod_dbid;
+
+    let state_root = scratch_dir("state-dupname");
+    let serial = "0xDUPNAME";
+
+    let desired = vec![
+        ("gym".to_string(), "Gym".to_string(), vec![dbid0]),
+        ("gym-2".to_string(), "Gym".to_string(), vec![dbid1]),
+    ];
+
+    let first = device_playlists::reconcile_in(&db, &desired, &state_root, serial).unwrap();
+    assert_eq!(
+        first,
+        ReconcileStats { created: 2, updated: 0, removed: 0 },
+        "both distinctly-slugged playlists must be created"
+    );
+    db.write().expect("db.write after first reconcile");
+
+    let gyms = playlists_named(&db, "Gym");
+    assert_eq!(gyms.len(), 2, "two distinct on-device playlists, both named \"Gym\"");
+    let mut members: Vec<Vec<u64>> = gyms.iter().map(|(_, _, m)| m.clone()).collect();
+    members.sort();
+    let mut expected = vec![vec![dbid0], vec![dbid1]];
+    expected.sort();
+    assert_eq!(members, expected, "each keeps its own distinct membership, never merged");
+
+    let managed_path = device_state::managed_playlists_path_in(&state_root, serial).unwrap();
+    let recorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&managed_path).unwrap()).unwrap();
+    let slugs: std::collections::BTreeSet<String> = recorded["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["slug"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        slugs,
+        std::collections::BTreeSet::from(["gym".to_string(), "gym-2".to_string()]),
+        "both slugs recorded as distinct managed entries, not deduped away"
+    );
+
+    // Steady-state: same desired set again must update both in place —
+    // no clobber (each keeps its own membership), no orphan (neither is
+    // dropped or recreated).
+    let second = device_playlists::reconcile_in(&db, &desired, &state_root, serial).unwrap();
+    assert_eq!(
+        second,
+        ReconcileStats { created: 0, updated: 2, removed: 0 },
+        "steady-state re-run: both update in place, none created or removed"
+    );
+
+    let gyms_after = playlists_named(&db, "Gym");
+    assert_eq!(gyms_after.len(), 2, "no orphan created, no playlist lost on the steady-state run");
+    let mut members_after: Vec<Vec<u64>> = gyms_after.iter().map(|(_, _, m)| m.clone()).collect();
+    members_after.sort();
+    assert_eq!(members_after, expected, "membership unchanged by the steady-state run");
 }
 
 #[test]
@@ -358,7 +434,7 @@ fn reconcile_managed_record_is_stable_across_a_no_op_run() {
 
     let state_root = scratch_dir("state-noop");
     let serial = "0xNOOP";
-    let desired = vec![("Solo".to_string(), vec![dbid])];
+    let desired = vec![("solo".to_string(), "Solo".to_string(), vec![dbid])];
 
     let first = device_playlists::reconcile_in(&db, &desired, &state_root, serial).unwrap();
     assert_eq!(first, ReconcileStats { created: 1, updated: 0, removed: 0 });
@@ -395,7 +471,7 @@ fn reconcile_never_adopts_a_foreign_playlist_with_a_colliding_name() {
 
     let state_root = scratch_dir("state-foreign");
     let serial = "0xFOREIGN";
-    let desired = vec![("Gym".to_string(), vec![dbid])];
+    let desired = vec![("gym".to_string(), "Gym".to_string(), vec![dbid])];
     let stats = device_playlists::reconcile_in(&db, &desired, &state_root, serial)
         .expect("reconcile should succeed");
     assert_eq!(stats, ReconcileStats { created: 1, updated: 0, removed: 0 });
@@ -430,8 +506,10 @@ fn reconcile_never_adopts_a_foreign_playlist_with_a_colliding_name() {
 }
 
 /// Once a managed playlist's id is known, changing its desired display name
-/// must rename the SAME on-device playlist in place rather than creating a
-/// new one and orphaning the old — same id, new name.
+/// (SAME slug — Fix 2's identity key) must rename the SAME on-device
+/// playlist in place rather than creating a new one and orphaning the old
+/// — same id, new name. No manual record surgery needed: `reconcile_at`
+/// finds the previous id by matching `slug`, independent of `name`.
 #[test]
 fn reconcile_renames_in_place_when_recorded_id_still_resolves() {
     let mount = fake_mount();
@@ -445,7 +523,7 @@ fn reconcile_renames_in_place_when_recorded_id_still_resolves() {
     let state_root = scratch_dir("state-rename");
     let serial = "0xRENAME";
 
-    let desired = vec![("Gym".to_string(), vec![dbid])];
+    let desired = vec![("gym".to_string(), "Gym".to_string(), vec![dbid])];
     let first = device_playlists::reconcile_in(&db, &desired, &state_root, serial).unwrap();
     assert_eq!(first, ReconcileStats { created: 1, updated: 0, removed: 0 });
     db.write().expect("db.write after first reconcile");
@@ -455,24 +533,17 @@ fn reconcile_renames_in_place_when_recorded_id_still_resolves() {
     let recorded: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&managed_path).unwrap()).unwrap();
     let original_id = recorded["names"][0]["id"].as_u64().expect("recorded id present");
+    assert_eq!(recorded["names"][0]["slug"].as_str(), Some("gym"));
 
-    // Simulate a caller (e.g. a future slug-keyed subscription store) that
-    // already knows this managed slot's identity — its id — but now wants a
-    // different display name: rewrite the record's name field, same id.
-    std::fs::write(
-        &managed_path,
-        format!(r#"{{"names":[{{"name":"GymRenamed","id":{original_id}}}]}}"#),
-    )
-    .unwrap();
-
+    // Same slug, new display name — the rename signal.
     let reopened = OwnedDb::open(&mount).unwrap();
-    let desired_renamed = vec![("GymRenamed".to_string(), vec![dbid])];
+    let desired_renamed = vec![("gym".to_string(), "GymRenamed".to_string(), vec![dbid])];
     let second =
         device_playlists::reconcile_in(&reopened, &desired_renamed, &state_root, serial).unwrap();
     assert_eq!(
         second,
         ReconcileStats { created: 0, updated: 1, removed: 0 },
-        "a rename via a still-resolving recorded id must be an update, not a create"
+        "a rename via the same slug must be an update, not a create"
     );
 
     reopened.write().expect("db.write after second reconcile");

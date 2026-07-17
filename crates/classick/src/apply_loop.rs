@@ -198,16 +198,20 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         .map(|p| crate::device_config::Subscriptions::load_or_default(p))
         .unwrap_or_default();
     let mut effective_set: Option<crate::sync_set::EffectiveSet> = None;
-    // Task 6: desired on-device playlists as `(NAME, resolved source paths)`
-    // — `EffectiveSet::playlist_tracks` carries slugs (Task 5's join key
-    // against `Subscriptions`), but the spec wants the on-device playlist
-    // TITLE, so each slug is resolved back to its `Playlist::name()` here,
-    // while `store` is still in scope. `None` (rather than `Some(vec![])`)
-    // when the playlist store itself couldn't be opened this run — that's
-    // "unknown", not "user wants zero playlists", so the reconcile call
-    // near the final commit skips entirely rather than deleting every
-    // previously-managed playlist over a transient store-open failure.
-    let mut desired_playlists_by_name: Option<Vec<(String, Vec<PathBuf>)>> = None;
+    // Task 6 / Fix 2: desired on-device playlists as `(slug, display name,
+    // resolved source paths)`. `slug` is the managed-identity join key
+    // `reconcile_playlists_step`/`device_playlists::reconcile` now key on
+    // (never `name` alone — `PlaylistStore::unique_slug` allows distinct
+    // slugs like `gym`/`gym-2` to share a display name, and keying by name
+    // would collapse them into one managed entry). `name` comes straight
+    // from `EffectiveSet::playlist_tracks`, which already loaded each
+    // playlist to resolve its members — no second `store.load` round-trip
+    // needed here. `None` (rather than `Some(vec![])`) when the playlist
+    // store itself couldn't be opened this run — that's "unknown", not
+    // "user wants zero playlists", so the reconcile call near the final
+    // commit skips entirely rather than deleting every previously-managed
+    // playlist over a transient store-open failure.
+    let mut desired_playlists: Option<Vec<(String, String, Vec<PathBuf>)>> = None;
     let sources = match crate::playlist::PlaylistStore::default_root().and_then(crate::playlist::PlaylistStore::open) {
         Ok(store) => {
             let effective = crate::sync_set::compute(
@@ -227,24 +231,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 effective.sources.len(),
                 subscriptions.playlists.len(),
             ));
-            let mut names = Vec::with_capacity(effective.playlist_tracks.len());
-            for (slug, paths) in &effective.playlist_tracks {
-                match store.load(slug) {
-                    Ok(Some(pl)) => names.push((pl.name().to_string(), paths.clone())),
-                    // Both cases below are unexpected here: `slug` only
-                    // reached `playlist_tracks` because `sync_set::compute`
-                    // just loaded it successfully. Treat as a race (deleted
-                    // between then and now) — skip the playlist for THIS
-                    // run's device reconcile rather than failing the sync;
-                    // the next run will naturally drop it (no longer
-                    // desired) or pick it back up if it reappears.
-                    Ok(None) => tracing::warn!(
-                        "device-playlists: '{slug}' vanished from the store between sync_set::compute and now; skipping"
-                    ),
-                    Err(e) => tracing::warn!("device-playlists: failed to re-load '{slug}' for its name: {e:#}"),
-                }
-            }
-            desired_playlists_by_name = Some(names);
+            desired_playlists = Some(effective.playlist_tracks.clone());
             let sources = effective.sources.clone();
             effective_set = Some(effective);
             sources
@@ -1017,7 +1004,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // membership is re-derived fresh every time rather than diffed
         // incrementally.
         //
-        // `desired_playlists_by_name` is `None` when the playlist store
+        // `desired_playlists` is `None` when the playlist store
         // couldn't be opened earlier this run (see where it's built,
         // above) — skip the reconcile entirely rather than pass `desired =
         // []`, which would read as "the user wants zero playlists" and
@@ -1031,8 +1018,8 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // otherwise-successful sync. The final `db.write()` below always
         // runs regardless.
         if should_reconcile_playlists(cancelled, paused) {
-            if let Some(desired_by_name) = &desired_playlists_by_name {
-                if let Err(e) = reconcile_playlists_step(&db, desired_by_name, &manifest, &serial, progress) {
+            if let Some(desired) = &desired_playlists {
+                if let Err(e) = reconcile_playlists_step(&db, desired, &manifest, &serial, progress) {
                     tracing::warn!("playlist reconcile failed: {e:#}");
                     progress.log(format!("playlist update failed: {e:#} — will retry next sync"));
                 }
@@ -2129,21 +2116,47 @@ pub(crate) fn should_reconcile_playlists(cancelled: bool, paused: bool) -> bool 
     !cancelled && !paused
 }
 
-/// Core of Task 6's end-of-run playlist reconcile: joins `desired_by_name`'s
-/// source paths to this run's dbids via `manifest`, then calls
-/// `device_playlists::reconcile`. Extracted from `run` so every fallible
-/// step in here — the dbid join is infallible, but the `reconcile` call
-/// (which covers `ensure_managed_playlist`/removal calls and the final
-/// `ManagedPlaylists::save`) is not — surfaces through a single `Result`
-/// that the caller handles warn-only (see spec §6: playlist problems are
-/// fail-visible but must NEVER fail the sync, same rationale as
+/// Core of Task 6's end-of-run playlist reconcile: joins `desired`'s source
+/// paths to this run's dbids via `manifest`, then calls
+/// `device_playlists::reconcile`. `desired` is `(slug, display name,
+/// resolved source paths)` — `slug` is threaded through as the
+/// managed-identity join key (Fix 2: `reconcile` used to key on display
+/// name alone, which collapses two distinct playlists that happen to share
+/// a name via `PlaylistStore::unique_slug`'s `-2` disambiguation). Extracted
+/// from `run` so every fallible step in here — the dbid join is infallible,
+/// but the `reconcile` call (which covers `ensure_managed_playlist`/removal
+/// calls and the final `ManagedPlaylists::save`) is not — surfaces through a
+/// single `Result` that the caller handles warn-only (see spec §6: playlist
+/// problems are fail-visible but must NEVER fail the sync, same rationale as
 /// `mirror_to_ipod`'s doc comment). This function itself still returns
 /// `Err` on failure; it's the CALLER's job to catch it rather than bubble
 /// it into the final `db.write()`.
-fn reconcile_playlists_step(
+///
+/// `pub` (not `pub(crate)`) so integration tests can drive the full
+/// slug→display-name / manifest→dbid seam without duplicating it — see
+/// `tests/playlists_e2e.rs`'s `reconcile_through_reconcile_playlists_step_*`
+/// tests (Fix 3).
+pub fn reconcile_playlists_step(
     db: &OwnedDb,
-    desired_by_name: &[(String, Vec<PathBuf>)],
+    desired: &[(String, String, Vec<PathBuf>)],
     manifest: &Manifest,
+    serial: &str,
+    progress: &Progress,
+) -> Result<()> {
+    let root = dirs::config_dir()
+        .ok_or_else(|| anyhow!("could not resolve config dir"))?
+        .join(crate::PROJECT_DIR);
+    reconcile_playlists_step_in(db, desired, manifest, &root, serial, progress)
+}
+
+/// Test/override variant of [`reconcile_playlists_step`]: reconciles against
+/// `root/devices/<serial>/managed_playlists.json` (via
+/// `device_playlists::reconcile_in`) instead of the real config dir.
+pub fn reconcile_playlists_step_in(
+    db: &OwnedDb,
+    desired: &[(String, String, Vec<PathBuf>)],
+    manifest: &Manifest,
+    root: &Path,
     serial: &str,
     progress: &Progress,
 ) -> Result<()> {
@@ -2152,17 +2165,17 @@ fn reconcile_playlists_step(
         .iter()
         .map(|e| (e.source_path.as_path(), e.ipod_dbid))
         .collect();
-    let desired: Vec<(String, Vec<u64>)> = desired_by_name
+    let desired: Vec<(String, String, Vec<u64>)> = desired
         .iter()
-        .map(|(name, paths)| {
+        .map(|(slug, name, paths)| {
             let dbids: Vec<u64> = paths
                 .iter()
                 .filter_map(|p| dbid_by_source_path.get(p.as_path()).copied())
                 .collect();
-            (name.clone(), dbids)
+            (slug.clone(), name.clone(), dbids)
         })
         .collect();
-    let stats = crate::ipod::device_playlists::reconcile(db, &desired, serial)
+    let stats = crate::ipod::device_playlists::reconcile_in(db, &desired, root, serial)
         .context("reconcile Classick-managed iTunesDB playlists")?;
     if stats.created + stats.updated + stats.removed > 0 {
         progress.log(format!(

@@ -31,20 +31,36 @@ pub struct ReconcileStats {
     pub removed: usize,
 }
 
-/// One entry in `managed_playlists.json`: a display name plus the itdb
-/// playlist id that was assigned to it as of the last successful
-/// reconcile, if known. `id` is the actual source of managed identity (see
-/// the module doc comment); `name` is carried alongside for display and as
-/// the join key `reconcile_at` uses to find a desired entry's previous id.
+/// One entry in `managed_playlists.json`: the playlist-store SLUG (managed
+/// identity — see the module doc comment and Fix 2 below) plus the display
+/// name and the itdb playlist id that was assigned to it as of the last
+/// successful reconcile, if known.
 ///
-/// Deserializes from either the current `{"name": ..., "id": ...}` shape
-/// or a bare JSON string (the pre-migration format, when this file only
-/// ever recorded names) — a legacy string entry becomes `{name, id: None}`,
-/// which `ensure_managed_playlist` treats as "no recorded id" (see its doc
-/// comment for the consequence: legacy entries never get their on-device
-/// playlist adopted by name, only ever superseded by a fresh one).
+/// `slug` is the join key `reconcile_at` uses to find a desired entry's
+/// previous id — NOT `name`. `PlaylistStore::unique_slug` lets two distinct
+/// playlists share a display name (`gym`/`gym-2` both named "Gym"); keying
+/// on name alone would collapse them into one managed entry and clobber
+/// membership on every reconcile after the first. `name` is carried
+/// alongside purely for display/logging and as the on-device playlist
+/// title `ensure_managed_playlist` renames in place.
+///
+/// Deserializes from any of three shapes, oldest first:
+/// - a bare JSON string (the original pre-migration format, when this file
+///   only ever recorded names) — becomes `{slug: "", name, id: None}`;
+/// - the pre-Fix-2 `{"name": ..., "id": ...}` shape (no `slug` field) —
+///   becomes `{slug: "", name, id}`;
+/// - the current `{"slug": ..., "name": ..., "id": ...}` shape.
+///
+/// An empty `slug` marks a legacy entry: `reconcile_at` migrates it by a
+/// one-time name match against the current `desired` list (see its doc
+/// comment) rather than trusting `name` as an ongoing identity key. Until
+/// migrated, `ensure_managed_playlist` sees no recorded id for it, so its
+/// on-device playlist is never adopted by name, only ever superseded by a
+/// fresh one.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ManagedPlaylistEntry {
+    #[serde(default)]
+    pub slug: String,
     pub name: String,
     pub id: Option<u64>,
 }
@@ -58,11 +74,16 @@ impl<'de> Deserialize<'de> for ManagedPlaylistEntry {
         #[serde(untagged)]
         enum Repr {
             Legacy(String),
-            Full { name: String, id: Option<u64> },
+            Full {
+                #[serde(default)]
+                slug: String,
+                name: String,
+                id: Option<u64>,
+            },
         }
         Ok(match Repr::deserialize(deserializer)? {
-            Repr::Legacy(name) => ManagedPlaylistEntry { name, id: None },
-            Repr::Full { name, id } => ManagedPlaylistEntry { name, id },
+            Repr::Legacy(name) => ManagedPlaylistEntry { slug: String::new(), name, id: None },
+            Repr::Full { slug, name, id } => ManagedPlaylistEntry { slug, name, id },
         })
     }
 }
@@ -134,7 +155,7 @@ impl ManagedPlaylists {
 /// the real per-device state directory (`devices/<serial>/managed_playlists.json`).
 /// See [`reconcile_in`] for the test/override variant and the full
 /// algorithm description.
-pub fn reconcile(db: &OwnedDb, desired: &[(String, Vec<u64>)], serial: &str) -> Result<ReconcileStats> {
+pub fn reconcile(db: &OwnedDb, desired: &[(String, String, Vec<u64>)], serial: &str) -> Result<ReconcileStats> {
     let record_path = crate::device_state::managed_playlists_path(serial)?;
     reconcile_at(db, desired, &record_path)
 }
@@ -142,7 +163,7 @@ pub fn reconcile(db: &OwnedDb, desired: &[(String, Vec<u64>)], serial: &str) -> 
 /// Test/override variant of [`reconcile`]: uses `root/devices/<serial>/managed_playlists.json`.
 pub fn reconcile_in(
     db: &OwnedDb,
-    desired: &[(String, Vec<u64>)],
+    desired: &[(String, String, Vec<u64>)],
     root: &Path,
     serial: &str,
 ) -> Result<ReconcileStats> {
@@ -150,27 +171,40 @@ pub fn reconcile_in(
     reconcile_at(db, desired, &record_path)
 }
 
-/// Core reconcile: `desired` is `(playlist name, member dbids)`, in the
-/// order the caller wants playlists ensured (apply_loop passes subscription
-/// order). Playlists recorded in the PREVIOUS managed record but absent
-/// from `desired` (by name) are removed by their recorded id; everything in
-/// `desired` is ensured by recorded id (see `ipod::db::ensure_managed_playlist`
-/// for what "ensured by id" means and why — reuse-by-id only, never
-/// adopt-by-name). If `desired` contains the same name twice, the later
-/// entry wins (last `ensure_managed_playlist` call overwrites the earlier
-/// one's membership) — apply_loop's join never produces duplicate names in
-/// practice (one playlist store entry per subscribed slug), but this
-/// function doesn't defend against a caller that does.
+/// Core reconcile: `desired` is `(slug, display name, member dbids)`, in
+/// the order the caller wants playlists ensured (apply_loop passes
+/// subscription order). `slug` is the managed-identity join key (Fix 2 —
+/// see the module doc comment and `ManagedPlaylistEntry`'s doc comment for
+/// why `name` alone can't be: `PlaylistStore::unique_slug` lets two
+/// distinct playlists share a display name). Playlists recorded in the
+/// PREVIOUS managed record but absent from `desired` (by slug) are removed
+/// by their recorded id; everything in `desired` is ensured by recorded id
+/// (see `ipod::db::ensure_managed_playlist` for what "ensured by id" means
+/// and why — reuse-by-id only, never adopt-by-name). If `desired` contains
+/// the same slug twice, the later entry wins (last
+/// `ensure_managed_playlist` call overwrites the earlier one's membership)
+/// — apply_loop's join never produces duplicate slugs in practice (one
+/// playlist store entry per subscribed slug), but this function doesn't
+/// defend against a caller that does.
 ///
-/// The previous record's id for a desired name is looked up by matching
-/// `name` against the previous record's entries — this is also how a
-/// rename is expressed: if the CALLER already knows a desired slot's
-/// previous display name changed, it's expected to have updated the
-/// on-disk record's `name` field for that id before calling (or, in
-/// practice, a future slug-keyed caller passes the recorded id directly
-/// rather than through this record). Within one `reconcile_at` call,
-/// `ensure_managed_playlist` itself performs the actual rename against the
-/// live DB once it resolves the recorded id.
+/// The previous record's id for a desired slug is looked up by matching
+/// `slug` against the previous record's entries — this is also how a
+/// rename is expressed: since the join key is the slug, a display-name
+/// change for the SAME slug still finds the previous id, and
+/// `ensure_managed_playlist` performs the actual rename against the live
+/// DB once it resolves that id.
+///
+/// Legacy entries (pre-Fix-2 records, `slug` empty — see
+/// `ManagedPlaylistEntry`'s doc comment) are migrated once, in-memory, at
+/// the top of this call: each is matched against `desired` by NAME, in
+/// `previous.names` order, and claims the first not-yet-claimed desired
+/// slug with that name. This is deliberately best-effort — a legacy record
+/// predates slug-keying, so it can carry at most one id per name even if
+/// `desired` now has several distinct slugs sharing that name (the
+/// then-current bug this fix addresses); only one of them adopts the old
+/// id, the rest are created fresh, same as any other new playlist. Once
+/// migrated, the entry is persisted with its slug filled in and never
+/// needs this fallback again.
 ///
 /// # Failure paths
 /// - An individual `ensure_managed_playlist` call fails (e.g. malformed
@@ -189,18 +223,40 @@ pub fn reconcile_in(
 ///   failure mode isn't swallowed).
 fn reconcile_at(
     db: &OwnedDb,
-    desired: &[(String, Vec<u64>)],
+    desired: &[(String, String, Vec<u64>)],
     record_path: &Path,
 ) -> Result<ReconcileStats> {
     let previous = ManagedPlaylists::load(record_path);
-    let previous_id_by_name: HashMap<&str, Option<u64>> =
-        previous.names.iter().map(|e| (e.name.as_str(), e.id)).collect();
+
+    // Slug is the identity key. Seed it from entries that already carry
+    // one, then migrate legacy (empty-slug) entries by a one-time name
+    // match against `desired` — see the doc comment above for the
+    // ambiguous-name caveat.
+    let mut previous_id_by_slug: HashMap<String, Option<u64>> = HashMap::new();
+    for entry in &previous.names {
+        if !entry.slug.is_empty() {
+            previous_id_by_slug.insert(entry.slug.clone(), entry.id);
+        }
+    }
+    let mut claimed_legacy_names: HashSet<&str> = HashSet::new();
+    for entry in &previous.names {
+        if !entry.slug.is_empty() || claimed_legacy_names.contains(entry.name.as_str()) {
+            continue;
+        }
+        if let Some((slug, ..)) = desired
+            .iter()
+            .find(|(slug, name, _)| name == &entry.name && !previous_id_by_slug.contains_key(slug))
+        {
+            previous_id_by_slug.insert(slug.clone(), entry.id);
+            claimed_legacy_names.insert(entry.name.as_str());
+        }
+    }
 
     let mut stats = ReconcileStats::default();
     let mut managed: Vec<ManagedPlaylistEntry> = Vec::with_capacity(desired.len());
 
-    for (name, dbids) in desired {
-        let recorded_id = previous_id_by_name.get(name.as_str()).copied().flatten();
+    for (slug, name, dbids) in desired {
+        let recorded_id = previous_id_by_slug.get(slug).copied().flatten();
         match ensure_managed_playlist(db, name, dbids, recorded_id) {
             Ok(new_id) => {
                 // A recorded id that still resolves means we reused (and
@@ -213,18 +269,26 @@ fn reconcile_at(
                 } else {
                     stats.created += 1;
                 }
-                managed.push(ManagedPlaylistEntry { name: name.clone(), id: Some(new_id) });
+                managed.push(ManagedPlaylistEntry { slug: slug.clone(), name: name.clone(), id: Some(new_id) });
             }
             Err(e) => {
-                tracing::warn!("device-playlists: failed to ensure \"{name}\": {e:#}");
+                tracing::warn!("device-playlists: failed to ensure \"{name}\" ({slug}): {e:#}");
             }
         }
     }
 
-    let desired_names: HashSet<&str> = desired.iter().map(|(n, _)| n.as_str()).collect();
+    let desired_slugs: HashSet<&str> = desired.iter().map(|(slug, ..)| slug.as_str()).collect();
     for entry in &previous.names {
-        if desired_names.contains(entry.name.as_str()) {
-            continue; // still desired; already ensured above
+        let still_desired = if entry.slug.is_empty() {
+            // Migrated legacy entries were already re-ensured above under
+            // their claimed slug (and pushed into `managed` there); the
+            // rest are genuinely gone.
+            claimed_legacy_names.contains(entry.name.as_str())
+        } else {
+            desired_slugs.contains(entry.slug.as_str())
+        };
+        if still_desired {
+            continue;
         }
         let removal = match entry.id {
             Some(id) => remove_playlist_by_id(db, id),
@@ -248,8 +312,8 @@ fn reconcile_at(
         }
     }
 
-    managed.sort_by(|a, b| a.name.cmp(&b.name));
-    managed.dedup_by(|a, b| a.name == b.name);
+    managed.sort_by(|a, b| (a.slug.as_str(), a.name.as_str()).cmp(&(b.slug.as_str(), b.name.as_str())));
+    managed.dedup_by(|a, b| a.slug == b.slug && a.name == b.name);
     ManagedPlaylists { names: managed }.save(record_path)?;
 
     Ok(stats)
@@ -457,8 +521,8 @@ mod tests {
         let path = dir.join("nested").join("managed_playlists.json");
         let record = ManagedPlaylists {
             names: vec![
-                ManagedPlaylistEntry { name: "Gym".to_string(), id: Some(111) },
-                ManagedPlaylistEntry { name: "Road Trip".to_string(), id: Some(222) },
+                ManagedPlaylistEntry { slug: "gym".to_string(), name: "Gym".to_string(), id: Some(111) },
+                ManagedPlaylistEntry { slug: "road-trip".to_string(), name: "Road Trip".to_string(), id: Some(222) },
             ],
         };
         record.save(&path).expect("save should create parent dirs and succeed");
@@ -476,9 +540,26 @@ mod tests {
             loaded,
             ManagedPlaylists {
                 names: vec![
-                    ManagedPlaylistEntry { name: "Gym".to_string(), id: None },
-                    ManagedPlaylistEntry { name: "Road Trip".to_string(), id: None },
+                    ManagedPlaylistEntry { slug: String::new(), name: "Gym".to_string(), id: None },
+                    ManagedPlaylistEntry { slug: String::new(), name: "Road Trip".to_string(), id: None },
                 ],
+            }
+        );
+    }
+
+    /// Pre-Fix-2 shape: `{"name": ..., "id": ...}`, no `slug` field. Must
+    /// still load, with `slug` defaulting to empty (the "needs migration"
+    /// marker `reconcile_at` checks for).
+    #[test]
+    fn managed_playlists_pre_fix2_entries_deserialize_with_empty_slug() {
+        let dir = tempdir_under_target("pre-fix2");
+        let path = dir.join("managed_playlists.json");
+        std::fs::write(&path, br#"{"names":[{"name":"Gym","id":111}]}"#).unwrap();
+        let loaded = ManagedPlaylists::load(&path);
+        assert_eq!(
+            loaded,
+            ManagedPlaylists {
+                names: vec![ManagedPlaylistEntry { slug: String::new(), name: "Gym".to_string(), id: Some(111) }],
             }
         );
     }
@@ -487,9 +568,11 @@ mod tests {
     fn managed_playlists_save_is_atomic_no_tmp_left_behind() {
         let dir = tempdir_under_target("atomic");
         let path = dir.join("managed_playlists.json");
-        ManagedPlaylists { names: vec![ManagedPlaylistEntry { name: "A".to_string(), id: Some(1) }] }
-            .save(&path)
-            .unwrap();
+        ManagedPlaylists {
+            names: vec![ManagedPlaylistEntry { slug: "a".to_string(), name: "A".to_string(), id: Some(1) }],
+        }
+        .save(&path)
+        .unwrap();
         assert!(path.exists());
         assert!(!path.with_extension("json.tmp").exists());
     }

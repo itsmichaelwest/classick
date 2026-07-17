@@ -26,11 +26,17 @@ pub struct EffectiveSet {
     /// appended (subscription order, then playlist-internal order),
     /// deduped by absolute path.
     pub sources: Vec<SourceEntry>,
-    /// Per-playlist RESOLVED absolute paths, in subscription order. Each
-    /// playlist lists ALL of its resolved members, including ones already in
-    /// scope — Task 6's device-playlist reconcile needs the full membership,
-    /// not just the out-of-scope delta.
-    pub playlist_tracks: Vec<(String, Vec<PathBuf>)>,
+    /// Per-playlist `(slug, display name, RESOLVED absolute paths)`, in
+    /// subscription order. `slug` is the managed-identity join key (Fix 2 —
+    /// two playlists can share a display `name` via `PlaylistStore::
+    /// unique_slug`'s `-2`/`-3` disambiguation, so `name` alone is NOT
+    /// unique and must never be used to key anything). Each playlist lists
+    /// ALL of its resolved members, including ones already in scope — Task
+    /// 6's device-playlist reconcile needs the full membership, not just
+    /// the out-of-scope delta. `name` is carried here (read from the same
+    /// `store.load` this function already does) so callers don't need a
+    /// second store round-trip just to learn the on-device playlist title.
+    pub playlist_tracks: Vec<(String, String, Vec<PathBuf>)>,
     /// Count of playlist track references that resolved (manual: existed +
     /// safe; smart: matched a rule) but aren't in the walk, so were dropped
     /// rather than fabricated.
@@ -72,12 +78,12 @@ pub fn compute(
     let mut errors = Vec::new();
 
     for slug in &subs.playlists {
-        let resolved = match store.load(slug) {
+        let (name, resolved) = match store.load(slug) {
             Ok(Some(Playlist::Manual(manual))) => {
                 let (found, miss) =
                     crate::playlist::resolve_manual(&manual, source_root, &|p| walk_map.contains_key(p));
                 missing += miss;
-                found
+                (manual.name.clone(), found)
             }
             Ok(Some(Playlist::Smart(smart))) => {
                 let mut found = Vec::new();
@@ -92,7 +98,7 @@ pub fn compute(
                         missing += 1;
                     }
                 }
-                found
+                (smart.name.clone(), found)
             }
             Ok(None) => {
                 errors.push((slug.clone(), format!("playlist '{slug}' not found")));
@@ -111,7 +117,7 @@ pub fn compute(
                 }
             }
         }
-        playlist_tracks.push((slug.clone(), resolved));
+        playlist_tracks.push((slug.clone(), name, resolved));
     }
 
     EffectiveSet { sources, playlist_tracks, missing_playlist_tracks: missing, playlist_errors: errors }

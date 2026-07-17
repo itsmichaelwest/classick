@@ -20,7 +20,7 @@
 //! `device_playlists_integration.rs`'s `adopt_from_ipod_*` tests — not
 //! duplicated here.
 
-use classick::apply_loop::{retry_deferred, ArtworkCounts};
+use classick::apply_loop::{reconcile_playlists_step_in, retry_deferred, ArtworkCounts};
 use classick::cli::EncoderChoice;
 use classick::config::Config;
 use classick::device_config::Subscriptions;
@@ -237,16 +237,19 @@ fn sorted_playlist_names(db: &OwnedDb) -> Vec<String> {
 }
 
 /// Translate a `sync_set::EffectiveSet::playlist_tracks` entry into the
-/// `(name, dbids)` shape `reconcile_in` wants, resolving each resolved
-/// absolute path through the manifest.
+/// `(slug, name, dbids)` shape `reconcile_in` wants (Fix 2 — slug is the
+/// managed-identity join key, name is carried through for the on-device
+/// playlist title), resolving each resolved absolute path through the
+/// manifest.
 fn desired_playlists(
     manifest: &Manifest,
-    playlist_tracks: &[(String, Vec<PathBuf>)],
-) -> Vec<(String, Vec<u64>)> {
+    playlist_tracks: &[(String, String, Vec<PathBuf>)],
+) -> Vec<(String, String, Vec<u64>)> {
     playlist_tracks
         .iter()
-        .map(|(name, paths)| {
+        .map(|(slug, name, paths)| {
             (
+                slug.clone(),
                 name.clone(),
                 paths.iter().map(|p| dbid_for(manifest, p)).collect(),
             )
@@ -378,7 +381,8 @@ fn playlist_track_outside_scope_syncs_and_reconciles_as_playlist_member() {
     );
     assert_eq!(
         effective.playlist_tracks,
-        vec![("mix".to_string(), vec![f.skip.path.clone()])]
+        vec![("mix".to_string(), "Mix".to_string(), vec![f.skip.path.clone()])],
+        "playlist_tracks carries both the slug (identity) and the display name (Fix 2)"
     );
 
     // The tracks are already committed (setup's `commit_tracks`) — the union
@@ -401,19 +405,20 @@ fn playlist_track_outside_scope_syncs_and_reconciles_as_playlist_member() {
     drop(f.db);
 
     // Reparse from disk — confirm the reconcile landed for real, not just
-    // in the in-memory Itdb_iTunesDB. `sync_set::compute` keys
-    // `playlist_tracks` by SLUG (not the playlist's display name), and
-    // that's what flows straight into `reconcile_in` here, so the on-device
-    // playlist is named "mix", not "Mix".
+    // in the in-memory Itdb_iTunesDB. `sync_set::compute` (Fix 2) carries
+    // both the slug ("mix", the managed-identity join key) and the display
+    // name ("Mix") through `playlist_tracks`, and `desired_playlists`
+    // forwards both into `reconcile_in`, so the on-device playlist carries
+    // the display name "Mix", never the slug.
     let reopened = OwnedDb::open(&f.mount).unwrap();
     assert_eq!(
         sorted_playlist_names(&reopened),
-        vec!["iPod".to_string(), "mix".to_string()],
-        "managed playlist created alongside the untouched MPL"
+        vec!["Mix".to_string(), "iPod".to_string()],
+        "managed playlist created alongside the untouched MPL, under its display name"
     );
     let skip_dbid = dbid_for(&f.manifest, &f.skip.path);
     assert_eq!(
-        playlist_member_dbids(&reopened, "mix"),
+        playlist_member_dbids(&reopened, "Mix"),
         vec![skip_dbid],
         "the out-of-scope track is the sole member of the reconciled playlist"
     );
@@ -425,6 +430,66 @@ fn playlist_track_outside_scope_syncs_and_reconciles_as_playlist_member() {
         reopened.track_count(),
         2,
         "reconcile must never touch track count"
+    );
+}
+
+/// Fix 3 (e2e seam gap): scenario 1 above (and `device_playlists_
+/// integration.rs`) drive `device_playlists::reconcile_in` directly, hand-
+/// joining dbids via this test file's own `desired_playlists` helper —
+/// bypassing the actual seam `apply_loop::run` uses. This test instead goes
+/// through `apply_loop::reconcile_playlists_step_in` (the root-injected
+/// variant of the exact function `run` calls before its final `db.write()`),
+/// handing it `sync_set::compute`'s raw `playlist_tracks` unmodified so
+/// BOTH real seams are exercised together: the slug→display-name pairing
+/// `sync_set::compute` does (Fix 2) and `reconcile_playlists_step`'s own
+/// manifest-source-path→dbid join (previously only exercised via this
+/// file's test-only `dbid_for`-based helper, never the production code
+/// path). Asserts the on-device playlist carries the DISPLAY name "Mix"
+/// (never the slug "mix") and that membership matches the manifest's dbid.
+#[test]
+fn reconcile_through_reconcile_playlists_step_uses_display_name_and_manifest_dbids() {
+    let f = setup();
+
+    let walk = vec![f.keep.clone(), f.skip.clone()];
+    let subs = Subscriptions {
+        version: 1,
+        playlists: vec!["mix".to_string()],
+    };
+    let effective = sync_set::compute(
+        walk,
+        &f.selection,
+        &subs,
+        &f.store,
+        &f.index,
+        &f.source_root,
+    );
+    assert!(effective.playlist_errors.is_empty());
+
+    let (progress, _decision_rx) = Progress::start(false, false).unwrap();
+    reconcile_playlists_step_in(
+        &f.db,
+        &effective.playlist_tracks,
+        &f.manifest,
+        &f.state_root,
+        &f.serial,
+        &progress,
+    )
+    .expect("reconcile_playlists_step_in should succeed");
+
+    f.db.write().expect("db.write after reconcile");
+    drop(f.db);
+
+    let reopened = OwnedDb::open(&f.mount).unwrap();
+    assert_eq!(
+        sorted_playlist_names(&reopened),
+        vec!["Mix".to_string(), "iPod".to_string()],
+        "the on-device playlist must carry the display name, not the slug"
+    );
+    let skip_dbid = dbid_for(&f.manifest, &f.skip.path);
+    assert_eq!(
+        playlist_member_dbids(&reopened, "Mix"),
+        vec![skip_dbid],
+        "reconcile_playlists_step's own manifest source-path->dbid join must match the manifest"
     );
 }
 
