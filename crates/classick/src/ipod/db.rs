@@ -506,19 +506,60 @@ pub fn list_playlists(db: &OwnedDb) -> Vec<(String, bool)> {
     out
 }
 
-/// Find-or-create the playlist named `name` and make its membership exactly
-/// `dbids`, in order. Used by `device_playlists::reconcile` — this function
-/// itself does no bookkeeping of WHICH playlists Classick manages (that's
-/// the caller's job via the `managed_playlists.json` record); it just makes
-/// one named playlist's membership match `dbids`.
+/// Find-or-create a Classick-managed playlist by **recorded itdb id**,
+/// never by name, and make its membership exactly `dbids`, in order.
+/// Returns the resulting playlist's itdb id so the caller
+/// (`device_playlists::reconcile`) can persist it into
+/// `managed_playlists.json` for the next run.
+///
+/// # Why id, not name
+/// A name-based lookup (the pre-fix behavior) would find and rewrite a
+/// FOREIGN playlist — one Classick never created — if its name happened to
+/// collide with a desired managed-playlist name. Resolving by id closes
+/// that hole: itdb ids are libgpod-assigned random 64-bit values, never
+/// derived from (or colliding with) anything a foreign playlist could
+/// plausibly share. See the `device_playlists` module doc for the full
+/// invariant this protects (spec §3/§6: foreign playlists are never
+/// modified).
+///
+/// # Id-assignment timing
+/// Determined empirically via `examples/playlist-id-spike.rs` — libgpod
+/// ships in this repo as vendored headers + prebuilt binaries, no C source
+/// to read. Finding: `itdb_playlist_new` alone leaves `id == 0`; libgpod
+/// assigns the real random 64-bit id inside `itdb_playlist_add`, and that
+/// id is stable across `itdb_write` + a fresh reparse from disk. So this
+/// function reads `(*pl).id` immediately after `itdb_playlist_add` for a
+/// freshly created playlist — no post-write re-walk pass is needed to
+/// learn the id.
+///
+/// # Resolution
+/// - `recorded_id` is `Some(id)`, `itdb_playlist_by_id` resolves it to a
+///   playlist in `db`, and that playlist is not the MPL: it's reused.
+///   Membership is cleared and rewritten to `dbids`; the name is updated
+///   in place to `name` if it changed since the last reconcile (rename
+///   case — same id, new name).
+/// - Otherwise (no recorded id, the id no longer resolves — e.g. the user
+///   deleted the playlist — or it resolves to the MPL, which should be
+///   structurally impossible but is guarded anyway): a NEW playlist is
+///   created unconditionally via `itdb_playlist_new` + `itdb_playlist_add`.
+///   `itdb_playlist_by_name` is deliberately never consulted here — a
+///   same-named foreign playlist is left completely untouched, and the
+///   desired playlist is created alongside it under the same name. Two
+///   same-named playlists is a state iTunesDB tolerates fine, and is
+///   strictly safer than guessing at ownership by name.
+///
+/// Note: this means a legacy `managed_playlists.json` record (name-only,
+/// no id — pre-migration) never gets reused here even if its name still
+/// matches a desired playlist: the caller passes `recorded_id: None` for
+/// those, so a fresh playlist is always created and the old on-device one
+/// (no longer traceable by id) is left alone — effectively becoming
+/// "foreign" from Classick's perspective going forward. That's an
+/// intentional one-time consequence of the migration, not a bug: it's the
+/// same "never adopt by name" guarantee applied uniformly.
 ///
 /// # Failure paths
 /// - `name` contains an interior NUL byte: `Err`, nothing touched (can't
-///   even form the `CString` to look it up).
-/// - `itdb_playlist_by_name` resolves `name` to the iPod's master playlist:
-///   `Err`, nothing touched. Guards against a Classick-managed playlist
-///   name colliding with however the device's MPL happens to be titled —
-///   overwriting the MPL's membership would corrupt the Songs view.
+///   even form the `CString`).
 /// - `itdb_playlist_new` returns NULL (OOM or a libgpod-internal failure):
 ///   `Err`, nothing touched.
 /// - A `dbid` in `dbids` has no matching track currently in the DB (stale
@@ -526,23 +567,41 @@ pub fn list_playlists(db: &OwnedDb) -> Vec<(String, bool)> {
 ///   produced `dbids` ran): that one reference is skipped with
 ///   `tracing::warn!` and the rest of the call proceeds normally. One bad
 ///   reference should not sink an otherwise-good playlist.
-pub fn ensure_playlist(db: &OwnedDb, name: &str, dbids: &[u64]) -> Result<()> {
+pub fn ensure_managed_playlist(
+    db: &OwnedDb,
+    name: &str,
+    dbids: &[u64],
+    recorded_id: Option<u64>,
+) -> Result<u64> {
     let name_c = CString::new(name)
         .map_err(|_| anyhow!("playlist name contains interior NUL byte: {name:?}"))?;
     unsafe {
-        let mut pl = ffi::itdb_playlist_by_name(db.as_ptr(), name_c.as_ptr() as *mut _);
+        let mut pl: *mut ffi::Itdb_Playlist = ptr::null_mut();
+        if let Some(id) = recorded_id {
+            let candidate = ffi::itdb_playlist_by_id(db.as_ptr(), id);
+            if !candidate.is_null() && ffi::itdb_playlist_is_mpl(candidate) == 0 {
+                pl = candidate;
+            }
+        }
+
         if pl.is_null() {
-            pl = ffi::itdb_playlist_new(name_c.as_ptr(), 0);
-            if pl.is_null() {
+            let created = ffi::itdb_playlist_new(name_c.as_ptr(), 0);
+            if created.is_null() {
                 return Err(anyhow!("itdb_playlist_new returned NULL for {name:?}"));
             }
-            ffi::itdb_playlist_add(db.as_ptr(), pl, -1);
-        }
-        if ffi::itdb_playlist_is_mpl(pl) != 0 {
-            return Err(anyhow!(
-                "refusing to manage playlist {name:?}: itdb_playlist_by_name resolved it to \
-                 the master playlist"
-            ));
+            ffi::itdb_playlist_add(db.as_ptr(), created, -1);
+            pl = created;
+        } else {
+            // Reusing a recorded playlist: rename in place if the desired
+            // display name changed since the last reconcile.
+            let current_name = if (*pl).name.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr((*pl).name).to_string_lossy().into_owned()
+            };
+            if current_name != name {
+                set_str(&mut (*pl).name, Some(name));
+            }
         }
 
         // Build the dbid -> track pointer map once per call (a single pass
@@ -583,16 +642,20 @@ pub fn ensure_playlist(db: &OwnedDb, name: &str, dbids: &[u64]) -> Result<()> {
                 }
                 None => {
                     tracing::warn!(
-                        "ensure_playlist({name:?}): dbid {dbid} not found in DB; skipping"
+                        "ensure_managed_playlist({name:?}): dbid {dbid} not found in DB; skipping"
                     );
                 }
             }
         }
+
+        Ok((*pl).id as u64)
     }
-    Ok(())
 }
 
-/// Remove the playlist named `name`, if present.
+/// Remove the playlist named `name`, if present. Name-based fallback used
+/// only for legacy (pre-migration) `managed_playlists.json` entries that
+/// have no recorded id — see `remove_playlist_by_id` for the id-based path
+/// every entry uses once it has one.
 ///
 /// # Failure paths
 /// - No playlist named `name` exists: `Ok(false)` — idempotent, matching
@@ -616,6 +679,33 @@ pub fn remove_playlist_by_name(db: &OwnedDb, name: &str) -> Result<bool> {
             ));
         }
         // Frees the Itdb_Playlist and unlinks it from db.playlists.
+        ffi::itdb_playlist_remove(pl);
+    }
+    Ok(true)
+}
+
+/// Remove the playlist with itdb id `id`, if present. Id-based counterpart
+/// to `remove_playlist_by_name` — the primary removal path once a managed
+/// record entry has a recorded id, since id resolution has no
+/// false-positive-by-name hazard at all.
+///
+/// # Failure paths
+/// - No playlist with itdb id `id` exists: `Ok(false)` — same idempotent
+///   "already gone" semantics as `remove_playlist_by_name`.
+/// - `id` resolves to the iPod's master playlist: `Err`, nothing touched
+///   (structurally shouldn't happen, guarded anyway).
+pub fn remove_playlist_by_id(db: &OwnedDb, id: u64) -> Result<bool> {
+    unsafe {
+        let pl = ffi::itdb_playlist_by_id(db.as_ptr(), id);
+        if pl.is_null() {
+            return Ok(false);
+        }
+        if ffi::itdb_playlist_is_mpl(pl) != 0 {
+            return Err(anyhow!(
+                "refusing to remove playlist id {id}: itdb_playlist_by_id resolved it to \
+                 the master playlist"
+            ));
+        }
         ffi::itdb_playlist_remove(pl);
     }
     Ok(true)

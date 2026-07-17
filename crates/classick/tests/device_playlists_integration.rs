@@ -16,12 +16,12 @@ use classick::config::Config;
 use classick::device_state;
 use classick::ffi;
 use classick::fit::DeferredAlbum;
-use classick::ipod::db::{ensure_playlist, list_playlists, OwnedDb};
+use classick::ipod::db::{ensure_managed_playlist, list_playlists, OwnedDb};
 use classick::ipod::device_playlists::{self, ReconcileStats};
 use classick::manifest::Manifest;
 use classick::progress::Progress;
 use classick::source::SourceEntry;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -197,6 +197,51 @@ fn sorted_playlist_names(db: &OwnedDb) -> Vec<String> {
     names
 }
 
+/// `(id, is_mpl, sorted member dbids)` for every playlist named exactly
+/// `name` — unlike `playlist_member_dbids`, this doesn't assume the name is
+/// unique, so it's the right helper once a test has two same-named
+/// playlists on purpose (a foreign one Classick must never touch, plus the
+/// Classick-managed one it creates alongside it).
+fn playlists_named(db: &OwnedDb, name: &str) -> Vec<(u64, bool, Vec<u64>)> {
+    unsafe {
+        let mut out = Vec::new();
+        let mut node = (*db.as_ptr()).playlists;
+        while !node.is_null() {
+            let pl = (*node).data as *mut ffi::Itdb_Playlist;
+            if !pl.is_null() && !(*pl).name.is_null() {
+                let pname = CStr::from_ptr((*pl).name).to_string_lossy();
+                if pname == name {
+                    let mut members = Vec::new();
+                    let mut mnode = (*pl).members;
+                    while !mnode.is_null() {
+                        let t = (*mnode).data as *mut ffi::Itdb_Track;
+                        members.push((*t).dbid as u64);
+                        mnode = (*mnode).next;
+                    }
+                    members.sort();
+                    out.push(((*pl).id as u64, ffi::itdb_playlist_is_mpl(pl) != 0, members));
+                }
+            }
+            node = (*node).next;
+        }
+        out
+    }
+}
+
+/// Create a playlist directly via low-level FFI — no `ensure_managed_playlist`,
+/// no managed-record bookkeeping. Simulates a foreign (non-Classick)
+/// playlist that happens to share a name with one Classick is about to
+/// manage. Returns its itdb id.
+fn create_foreign_playlist(db: &OwnedDb, name: &str) -> u64 {
+    unsafe {
+        let name_c = CString::new(name).unwrap();
+        let pl = ffi::itdb_playlist_new(name_c.as_ptr(), 0);
+        assert!(!pl.is_null(), "itdb_playlist_new returned null");
+        ffi::itdb_playlist_add(db.as_ptr(), pl, -1);
+        (*pl).id as u64
+    }
+}
+
 #[test]
 fn reconcile_creates_updates_and_removes_without_touching_foreign_or_mpl() {
     let mount = fake_mount();
@@ -275,16 +320,30 @@ fn reconcile_creates_updates_and_removes_without_touching_foreign_or_mpl() {
 }
 
 #[test]
-fn ensure_playlist_never_overwrites_the_master_playlist() {
+fn ensure_managed_playlist_never_adopts_the_master_playlist_by_name() {
     let mount = fake_mount();
     write_valid_itunesdb(&mount);
     let db = OwnedDb::open(&mount).unwrap();
 
-    // "iPod" is the MPL's title (see `write_valid_itunesdb`). Asking
-    // `ensure_playlist` to manage a playlist under that exact name must
-    // refuse rather than silently repurpose the Songs view.
-    let result = ensure_playlist(&db, "iPod", &[]);
-    assert!(result.is_err(), "ensure_playlist must refuse to touch the master playlist");
+    // "iPod" is the MPL's title (see `write_valid_itunesdb`). With no
+    // recorded id, `ensure_managed_playlist` must never resolve to the MPL
+    // by name — instead of erroring OR repurposing the Songs view, it
+    // creates a second, distinct playlist under the same name.
+    let new_id = ensure_managed_playlist(&db, "iPod", &[], None)
+        .expect("a name collision with the MPL must not be an error");
+
+    let mpl_is_still_mpl =
+        list_playlists(&db).into_iter().any(|(name, is_mpl)| name == "iPod" && is_mpl);
+    assert!(mpl_is_still_mpl, "master playlist should remain flagged is_mpl");
+
+    let ipod_named = playlists_named(&db, "iPod");
+    assert_eq!(ipod_named.len(), 2, "expected the MPL plus the newly created playlist");
+    let mpl_entry = ipod_named.iter().find(|(_, is_mpl, _)| *is_mpl).expect("MPL entry present");
+    assert_ne!(mpl_entry.0, new_id, "the new playlist must be a distinct id from the MPL");
+    assert!(
+        ipod_named.iter().any(|(id, is_mpl, _)| *id == new_id && !is_mpl),
+        "the new non-MPL playlist should be present with the returned id"
+    );
 }
 
 #[test]
@@ -310,4 +369,167 @@ fn reconcile_managed_record_is_stable_across_a_no_op_run() {
     assert_eq!(second, ReconcileStats { created: 0, updated: 1, removed: 0 });
 
     assert_eq!(playlist_member_dbids(&db, "Solo"), vec![dbid]);
+}
+
+/// The core regression test for the by-id fix: a FOREIGN playlist (created
+/// directly via FFI, never recorded by Classick) shares its name with a
+/// playlist Classick is about to manage. Before this fix, `ensure_playlist`
+/// resolved by `itdb_playlist_by_name` and would have adopted — and
+/// cleared/rewritten the membership of — the foreign playlist. After the
+/// fix, `reconcile` never even looks the name up: with no recorded id for
+/// "Gym", `ensure_managed_playlist` unconditionally creates a NEW playlist,
+/// leaving the foreign one byte-for-byte as it was.
+#[test]
+fn reconcile_never_adopts_a_foreign_playlist_with_a_colliding_name() {
+    let mount = fake_mount();
+    write_valid_itunesdb(&mount);
+    let db = OwnedDb::open(&mount).unwrap();
+
+    let source_root = scratch_dir("src-foreign");
+    let manifest = seed_tracks_with_manifest(&db, &source_root, 1);
+    let dbid = manifest.tracks[0].ipod_dbid;
+
+    // Foreign "Gym", zero members, never recorded — exactly the
+    // "user's own playlist happens to share a name" scenario.
+    let foreign_id = create_foreign_playlist(&db, "Gym");
+
+    let state_root = scratch_dir("state-foreign");
+    let serial = "0xFOREIGN";
+    let desired = vec![("Gym".to_string(), vec![dbid])];
+    let stats = device_playlists::reconcile_in(&db, &desired, &state_root, serial)
+        .expect("reconcile should succeed");
+    assert_eq!(stats, ReconcileStats { created: 1, updated: 0, removed: 0 });
+
+    db.write().expect("db.write after reconcile");
+    drop(db);
+
+    let reopened = OwnedDb::open(&mount).unwrap();
+    let gyms = playlists_named(&reopened, "Gym");
+    assert_eq!(gyms.len(), 2, "the foreign Gym and Classick's new Gym should both exist");
+
+    let foreign = gyms
+        .iter()
+        .find(|(id, _, _)| *id == foreign_id)
+        .expect("the original foreign playlist must still exist, under its original id");
+    assert!(
+        foreign.2.is_empty(),
+        "foreign playlist's original (empty) membership must be completely untouched"
+    );
+
+    let managed_path = device_state::managed_playlists_path_in(&state_root, serial).unwrap();
+    let recorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&managed_path).unwrap()).unwrap();
+    let recorded_id = recorded["names"][0]["id"].as_u64().expect("recorded id present");
+    assert_ne!(recorded_id, foreign_id, "the recorded id must be the NEW playlist, not the foreign one");
+
+    let managed = gyms
+        .iter()
+        .find(|(id, _, _)| *id == recorded_id)
+        .expect("the recorded id should resolve to a \"Gym\" playlist on-device");
+    assert_eq!(managed.2, vec![dbid], "the new managed Gym should carry the desired membership");
+}
+
+/// Once a managed playlist's id is known, changing its desired display name
+/// must rename the SAME on-device playlist in place rather than creating a
+/// new one and orphaning the old — same id, new name.
+#[test]
+fn reconcile_renames_in_place_when_recorded_id_still_resolves() {
+    let mount = fake_mount();
+    write_valid_itunesdb(&mount);
+    let db = OwnedDb::open(&mount).unwrap();
+
+    let source_root = scratch_dir("src-rename");
+    let manifest = seed_tracks_with_manifest(&db, &source_root, 1);
+    let dbid = manifest.tracks[0].ipod_dbid;
+
+    let state_root = scratch_dir("state-rename");
+    let serial = "0xRENAME";
+
+    let desired = vec![("Gym".to_string(), vec![dbid])];
+    let first = device_playlists::reconcile_in(&db, &desired, &state_root, serial).unwrap();
+    assert_eq!(first, ReconcileStats { created: 1, updated: 0, removed: 0 });
+    db.write().expect("db.write after first reconcile");
+    drop(db);
+
+    let managed_path = device_state::managed_playlists_path_in(&state_root, serial).unwrap();
+    let recorded: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&managed_path).unwrap()).unwrap();
+    let original_id = recorded["names"][0]["id"].as_u64().expect("recorded id present");
+
+    // Simulate a caller (e.g. a future slug-keyed subscription store) that
+    // already knows this managed slot's identity — its id — but now wants a
+    // different display name: rewrite the record's name field, same id.
+    std::fs::write(
+        &managed_path,
+        format!(r#"{{"names":[{{"name":"GymRenamed","id":{original_id}}}]}}"#),
+    )
+    .unwrap();
+
+    let reopened = OwnedDb::open(&mount).unwrap();
+    let desired_renamed = vec![("GymRenamed".to_string(), vec![dbid])];
+    let second =
+        device_playlists::reconcile_in(&reopened, &desired_renamed, &state_root, serial).unwrap();
+    assert_eq!(
+        second,
+        ReconcileStats { created: 0, updated: 1, removed: 0 },
+        "a rename via a still-resolving recorded id must be an update, not a create"
+    );
+
+    reopened.write().expect("db.write after second reconcile");
+    drop(reopened);
+
+    let final_db = OwnedDb::open(&mount).unwrap();
+    assert_eq!(
+        sorted_playlist_names(&final_db),
+        vec!["GymRenamed".to_string(), "iPod".to_string()],
+        "old name gone, new name present, no duplicate"
+    );
+    let renamed = playlists_named(&final_db, "GymRenamed");
+    assert_eq!(renamed.len(), 1);
+    assert_eq!(renamed[0].0, original_id, "same itdb id across the rename");
+    assert_eq!(renamed[0].2, vec![dbid]);
+}
+
+/// A pre-migration `managed_playlists.json` entry (bare name string, no
+/// `id`) must still deserialize and still drive removal correctly via the
+/// name-based fallback (`remove_playlist_by_name`), even though it's never
+/// eligible for the by-id reuse path on the create/update side.
+#[test]
+fn reconcile_removes_a_legacy_name_only_recorded_playlist() {
+    let mount = fake_mount();
+    write_valid_itunesdb(&mount);
+    let db = OwnedDb::open(&mount).unwrap();
+
+    let source_root = scratch_dir("src-legacy");
+    let manifest = seed_tracks_with_manifest(&db, &source_root, 1);
+    let dbid = manifest.tracks[0].ipod_dbid;
+
+    // Create "Gym" for real (so it's genuinely on-device), independent of
+    // any managed-record bookkeeping.
+    ensure_managed_playlist(&db, "Gym", &[dbid], None).expect("create Gym");
+    db.write().expect("db.write");
+    drop(db);
+
+    let state_root = scratch_dir("state-legacy");
+    let serial = "0xLEGACY";
+    // Hand-write a pre-migration name-only managed record for it, as if
+    // this device's managed_playlists.json predates the id field.
+    let managed_path = device_state::managed_playlists_path_in(&state_root, serial).unwrap();
+    std::fs::write(&managed_path, br#"{"names":["Gym"]}"#).unwrap();
+
+    let reopened = OwnedDb::open(&mount).unwrap();
+    // desired = [] drops "Gym"; the legacy record has no id, so removal
+    // must fall back to `remove_playlist_by_name`.
+    let stats = device_playlists::reconcile_in(&reopened, &[], &state_root, serial).unwrap();
+    assert_eq!(stats, ReconcileStats { created: 0, updated: 0, removed: 1 });
+
+    reopened.write().expect("db.write after reconcile");
+    drop(reopened);
+
+    let final_db = OwnedDb::open(&mount).unwrap();
+    assert_eq!(
+        sorted_playlist_names(&final_db),
+        vec!["iPod".to_string()],
+        "Gym removed via the legacy name-based fallback"
+    );
 }

@@ -4,23 +4,22 @@
 //!
 //! ## Managed-identity model
 //!
-//! Classick "owns" exactly the set of on-device playlist names recorded in
+//! Classick "owns" exactly the set of on-device playlists recorded in
 //! `devices/<serial>/managed_playlists.json` after the last successful
-//! `reconcile` — NEVER inferred from playlist name alone. This is what
-//! keeps a user's own iTunes-authored (or Rockbox, or hand-made) playlist
-//! safe even if it happens to share a name with one Classick would
-//! otherwise create: since it was never recorded in the managed set,
-//! `reconcile`'s removal pass never touches it. (The create/update side
-//! still resolves a desired name via `itdb_playlist_by_name` inside
-//! `ipod::db::ensure_playlist` — a genuine name collision with a NEWLY
-//! desired playlist name is adopted in place, same as libgpod itself would
-//! do; only the removal side carries the "never touch what we didn't
-//! record" guarantee.)
+//! `reconcile` — identified by **itdb playlist id**, NEVER by name alone.
+//! This is what keeps a user's own iTunes-authored (or Rockbox, or
+//! hand-made) playlist safe even if it happens to share a name with one
+//! Classick would otherwise create: since its id was never recorded, both
+//! the create/update side (`ipod::db::ensure_managed_playlist`) and the
+//! removal side treat it as untouchable. A name collision with a NEWLY
+//! desired playlist name results in two same-named playlists on the
+//! device — Classick's new one, and the foreign one, left exactly as it
+//! was — rather than either side adopting the foreign playlist in place.
 
-use crate::ipod::db::{ensure_playlist, list_playlists, remove_playlist_by_name, OwnedDb};
+use crate::ipod::db::{ensure_managed_playlist, remove_playlist_by_id, remove_playlist_by_name, OwnedDb};
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Outcome of one `reconcile` call. All-zero on a run where the desired set
@@ -32,16 +31,52 @@ pub struct ReconcileStats {
     pub removed: usize,
 }
 
-/// Persisted record of the playlist names Classick manages on one device —
-/// see the module doc comment for why this, and not playlist-name
-/// heuristics, is the source of truth for what `reconcile` is allowed to
-/// remove. Written by every `reconcile` call (even a no-op run), so the
-/// next run's removal decision is always based on fresh truth rather than a
-/// stale file. Names are stored sorted for a deterministic, diff-friendly
-/// file on disk.
+/// One entry in `managed_playlists.json`: a display name plus the itdb
+/// playlist id that was assigned to it as of the last successful
+/// reconcile, if known. `id` is the actual source of managed identity (see
+/// the module doc comment); `name` is carried alongside for display and as
+/// the join key `reconcile_at` uses to find a desired entry's previous id.
+///
+/// Deserializes from either the current `{"name": ..., "id": ...}` shape
+/// or a bare JSON string (the pre-migration format, when this file only
+/// ever recorded names) — a legacy string entry becomes `{name, id: None}`,
+/// which `ensure_managed_playlist` treats as "no recorded id" (see its doc
+/// comment for the consequence: legacy entries never get their on-device
+/// playlist adopted by name, only ever superseded by a fresh one).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ManagedPlaylistEntry {
+    pub name: String,
+    pub id: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for ManagedPlaylistEntry {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Legacy(String),
+            Full { name: String, id: Option<u64> },
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Legacy(name) => ManagedPlaylistEntry { name, id: None },
+            Repr::Full { name, id } => ManagedPlaylistEntry { name, id },
+        })
+    }
+}
+
+/// Persisted record of the playlists Classick manages on one device — see
+/// the module doc comment for why the entries' `id` field, and not
+/// playlist-name heuristics, is the source of truth for what `reconcile`
+/// is allowed to touch or remove. Written by every `reconcile` call (even
+/// a no-op run), so the next run's decisions are always based on fresh
+/// truth rather than a stale file. Entries are stored sorted by name for a
+/// deterministic, diff-friendly file on disk.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManagedPlaylists {
-    pub names: Vec<String>,
+    pub names: Vec<ManagedPlaylistEntry>,
 }
 
 impl ManagedPlaylists {
@@ -108,26 +143,38 @@ pub fn reconcile_in(
 
 /// Core reconcile: `desired` is `(playlist name, member dbids)`, in the
 /// order the caller wants playlists ensured (apply_loop passes subscription
-/// order). Playlists named in the PREVIOUS managed record but absent from
-/// `desired` are removed; everything in `desired` is ensured (create if
-/// absent, else overwrite membership). If `desired` contains the same name
-/// twice, the later entry wins (last `ensure_playlist` call overwrites the
-/// earlier one's membership) — apply_loop's join never produces duplicate
-/// names in practice (one playlist store entry per subscribed slug), but
-/// this function doesn't defend against a caller that does.
+/// order). Playlists recorded in the PREVIOUS managed record but absent
+/// from `desired` (by name) are removed by their recorded id; everything in
+/// `desired` is ensured by recorded id (see `ipod::db::ensure_managed_playlist`
+/// for what "ensured by id" means and why — reuse-by-id only, never
+/// adopt-by-name). If `desired` contains the same name twice, the later
+/// entry wins (last `ensure_managed_playlist` call overwrites the earlier
+/// one's membership) — apply_loop's join never produces duplicate names in
+/// practice (one playlist store entry per subscribed slug), but this
+/// function doesn't defend against a caller that does.
+///
+/// The previous record's id for a desired name is looked up by matching
+/// `name` against the previous record's entries — this is also how a
+/// rename is expressed: if the CALLER already knows a desired slot's
+/// previous display name changed, it's expected to have updated the
+/// on-disk record's `name` field for that id before calling (or, in
+/// practice, a future slug-keyed caller passes the recorded id directly
+/// rather than through this record). Within one `reconcile_at` call,
+/// `ensure_managed_playlist` itself performs the actual rename against the
+/// live DB once it resolves the recorded id.
 ///
 /// # Failure paths
-/// - An individual `ensure_playlist` call fails (e.g. resolves to the MPL,
-///   or a malformed name): logged via `tracing::warn!` and skipped — that
-///   one playlist is left out of the new managed record (so it's retried
-///   as "created" next run rather than silently forgotten), but the rest of
-///   `desired` and the removal pass still proceed. One bad playlist must
-///   not block every other playlist's reconcile.
-/// - An individual `remove_playlist_by_name` call fails (MPL guard, or the
-///   name is malformed): logged via `tracing::warn!`; that name is kept in
-///   the new managed record so the NEXT run retries the removal, rather
-///   than silently dropping bookkeeping for a playlist that's still
-///   actually present on the device.
+/// - An individual `ensure_managed_playlist` call fails (e.g. malformed
+///   name): logged via `tracing::warn!` and skipped — that one playlist is
+///   left out of the new managed record (so it's retried as "created" next
+///   run rather than silently forgotten), but the rest of `desired` and
+///   the removal pass still proceed. One bad playlist must not block every
+///   other playlist's reconcile.
+/// - An individual removal call fails (MPL guard, or a malformed legacy
+///   name): logged via `tracing::warn!`; that entry is kept in the new
+///   managed record so the NEXT run retries the removal, rather than
+///   silently dropping bookkeeping for a playlist that's still actually
+///   present on the device.
 /// - Writing the new `managed_playlists.json` record fails: `Err` is
 ///   returned (see `ManagedPlaylists::save`'s doc comment for why this one
 ///   failure mode isn't swallowed).
@@ -137,24 +184,27 @@ fn reconcile_at(
     record_path: &Path,
 ) -> Result<ReconcileStats> {
     let previous = ManagedPlaylists::load(record_path);
-    let existing_on_device: HashSet<String> = list_playlists(db)
-        .into_iter()
-        .filter(|(_, is_mpl)| !is_mpl)
-        .map(|(name, _)| name)
-        .collect();
+    let previous_id_by_name: HashMap<&str, Option<u64>> =
+        previous.names.iter().map(|e| (e.name.as_str(), e.id)).collect();
 
     let mut stats = ReconcileStats::default();
-    let mut managed_names: Vec<String> = Vec::with_capacity(desired.len());
+    let mut managed: Vec<ManagedPlaylistEntry> = Vec::with_capacity(desired.len());
 
     for (name, dbids) in desired {
-        match ensure_playlist(db, name, dbids) {
-            Ok(()) => {
-                if existing_on_device.contains(name) {
+        let recorded_id = previous_id_by_name.get(name.as_str()).copied().flatten();
+        match ensure_managed_playlist(db, name, dbids, recorded_id) {
+            Ok(new_id) => {
+                // A recorded id that still resolves means we reused (and
+                // possibly renamed/rewrote) the existing playlist; anything
+                // else means `ensure_managed_playlist` created a fresh one
+                // (no recorded id, a stale id, or an id that turned out to
+                // be the MPL).
+                if recorded_id == Some(new_id) {
                     stats.updated += 1;
                 } else {
                     stats.created += 1;
                 }
-                managed_names.push(name.clone());
+                managed.push(ManagedPlaylistEntry { name: name.clone(), id: Some(new_id) });
             }
             Err(e) => {
                 tracing::warn!("device-playlists: failed to ensure \"{name}\": {e:#}");
@@ -163,11 +213,15 @@ fn reconcile_at(
     }
 
     let desired_names: HashSet<&str> = desired.iter().map(|(n, _)| n.as_str()).collect();
-    for name in &previous.names {
-        if desired_names.contains(name.as_str()) {
+    for entry in &previous.names {
+        if desired_names.contains(entry.name.as_str()) {
             continue; // still desired; already ensured above
         }
-        match remove_playlist_by_name(db, name) {
+        let removal = match entry.id {
+            Some(id) => remove_playlist_by_id(db, id),
+            None => remove_playlist_by_name(db, &entry.name),
+        };
+        match removal {
             Ok(true) => {
                 stats.removed += 1;
             }
@@ -177,17 +231,17 @@ fn reconcile_at(
                 // nothing left to retry.
             }
             Err(e) => {
-                tracing::warn!("device-playlists: failed to remove \"{name}\": {e:#}");
+                tracing::warn!("device-playlists: failed to remove \"{}\": {e:#}", entry.name);
                 // Keep it in the managed record so the next run gets
                 // another chance at removing it — see doc comment above.
-                managed_names.push(name.clone());
+                managed.push(entry.clone());
             }
         }
     }
 
-    managed_names.sort();
-    managed_names.dedup();
-    ManagedPlaylists { names: managed_names }.save(record_path)?;
+    managed.sort_by(|a, b| a.name.cmp(&b.name));
+    managed.dedup_by(|a, b| a.name == b.name);
+    ManagedPlaylists { names: managed }.save(record_path)?;
 
     Ok(stats)
 }
@@ -375,17 +429,41 @@ mod tests {
     fn managed_playlists_round_trips_through_save_and_load() {
         let dir = tempdir_under_target("roundtrip");
         let path = dir.join("nested").join("managed_playlists.json");
-        let record = ManagedPlaylists { names: vec!["Gym".to_string(), "Road Trip".to_string()] };
+        let record = ManagedPlaylists {
+            names: vec![
+                ManagedPlaylistEntry { name: "Gym".to_string(), id: Some(111) },
+                ManagedPlaylistEntry { name: "Road Trip".to_string(), id: Some(222) },
+            ],
+        };
         record.save(&path).expect("save should create parent dirs and succeed");
         let loaded = ManagedPlaylists::load(&path);
         assert_eq!(loaded, record);
     }
 
     #[test]
+    fn managed_playlists_legacy_name_only_entries_deserialize_with_unknown_id() {
+        let dir = tempdir_under_target("legacy");
+        let path = dir.join("managed_playlists.json");
+        std::fs::write(&path, br#"{"names":["Gym","Road Trip"]}"#).unwrap();
+        let loaded = ManagedPlaylists::load(&path);
+        assert_eq!(
+            loaded,
+            ManagedPlaylists {
+                names: vec![
+                    ManagedPlaylistEntry { name: "Gym".to_string(), id: None },
+                    ManagedPlaylistEntry { name: "Road Trip".to_string(), id: None },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn managed_playlists_save_is_atomic_no_tmp_left_behind() {
         let dir = tempdir_under_target("atomic");
         let path = dir.join("managed_playlists.json");
-        ManagedPlaylists { names: vec!["A".to_string()] }.save(&path).unwrap();
+        ManagedPlaylists { names: vec![ManagedPlaylistEntry { name: "A".to_string(), id: Some(1) }] }
+            .save(&path)
+            .unwrap();
         assert!(path.exists());
         assert!(!path.with_extension("json.tmp").exists());
     }
