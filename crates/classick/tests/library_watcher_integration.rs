@@ -143,6 +143,7 @@ async fn sandbox_with_source() -> WatcherSandbox {
         watcher: Box::new(NoDeviceWatcher(device_rx)),
         spawn_sync: Arc::new(noop_spawn),
         spawn_backfill: Arc::new(noop_spawn),
+        spawn_replace_library: Arc::new(noop_spawn),
         spawn_scan: Arc::new(spawn_scan),
         schedule_minutes: 0,
         preset_event_tx: None,

@@ -69,6 +69,19 @@ pub fn build_backfill_command(exe: &std::path::Path, drive: &str) -> Command {
     base_command(exe, "--backfill-rockbox", Some(drive))
 }
 
+/// Build the replace-library subprocess command: same stdio/no-console
+/// setup as `build_command`, but `--replace-library --apply` instead of
+/// plain `--apply` — it wipes every track on the iPod before falling
+/// through to a normal sync of the current selection. `--apply` is what
+/// makes `apply_loop::replace_library` skip its interactive confirmation
+/// prompt (see `should_skip_replace_confirmation`); the UI does its own
+/// typed confirmation before ever sending the `replace_library` command.
+pub fn build_replace_library_command(exe: &std::path::Path, drive: &str) -> Command {
+    let mut cmd = base_command(exe, "--replace-library", Some(drive));
+    cmd.arg("--apply");
+    cmd
+}
+
 /// Build the library-scan subprocess command. No --ipod: a scan only reads
 /// the source tree and writes the index cache.
 pub fn build_scan_command(exe: &std::path::Path) -> Command {
@@ -167,6 +180,26 @@ pub async fn run_backfill(
     event_tx: broadcast::Sender<DaemonEvent>,
 ) -> Result<OrchestratorOutcome> {
     let cmd = build_backfill_command(&exe, &drive);
+    drive_child(exe, cmd, cancel_rx, pause_rx, prompt_decisions_rx, event_tx).await
+}
+
+/// Run the one-shot replace-library subprocess (`--replace-library
+/// --apply`) through the same drive-to-completion machinery as `run`/
+/// `run_backfill` — identical event forwarding, failure-bail threshold,
+/// cancel/pause handling — so the UI sees ordinary sync-style progress for
+/// a replace with no special-casing on its side. `event_tx` is the SAME
+/// broadcast channel `run`/`run_backfill` use, so a `DecidePrompt`/
+/// `CancelSync`/`Pause` sent while a replace is in flight behaves exactly
+/// as it would during a normal sync.
+pub async fn run_replace_library(
+    exe: PathBuf,
+    drive: String,
+    cancel_rx: oneshot::Receiver<()>,
+    pause_rx: oneshot::Receiver<()>,
+    prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
+    event_tx: broadcast::Sender<DaemonEvent>,
+) -> Result<OrchestratorOutcome> {
+    let cmd = build_replace_library_command(&exe, &drive);
     drive_child(exe, cmd, cancel_rx, pause_rx, prompt_decisions_rx, event_tx).await
 }
 
@@ -475,6 +508,17 @@ mod tests {
         assert!(dbg.contains("--ipc-mode"));
         assert!(dbg.contains("--backfill-rockbox"));
         assert!(!dbg.contains("--apply"));
+        assert!(dbg.contains("--ipod"));
+        assert!(dbg.contains("G:\\"));
+    }
+
+    #[test]
+    fn build_replace_library_command_passes_replace_and_apply_flags() {
+        let cmd = build_replace_library_command(&PathBuf::from("classick.exe"), "G:\\");
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("--ipc-mode"));
+        assert!(dbg.contains("--replace-library"));
+        assert!(dbg.contains("--apply"));
         assert!(dbg.contains("--ipod"));
         assert!(dbg.contains("G:\\"));
     }

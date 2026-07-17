@@ -80,6 +80,20 @@ pub async fn run_daemon() -> Result<()> {
         })
     });
 
+    let exe_for_replace = std::env::current_exe()?;
+    let event_tx_for_replace = event_tx.clone();
+    let spawn_replace_library: SpawnFn =
+        Arc::new(move |drive: String, cancel_rx, pause_rx, prompt_rx| {
+            let exe = exe_for_replace.clone();
+            let event_tx = event_tx_for_replace.clone();
+            Box::pin(async move {
+                sync_orchestrator::run_replace_library(
+                    exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx,
+                )
+                .await
+            })
+        });
+
     let exe_for_scan = std::env::current_exe()?;
     let event_tx_for_scan = event_tx.clone();
     let spawn_scan: SpawnFn = Arc::new(move |_drive: String, cancel_rx, pause_rx, prompt_rx| {
@@ -98,6 +112,7 @@ pub async fn run_daemon() -> Result<()> {
         watcher: Box::new(PollingDeviceWatcher::new_production()),
         spawn_sync,
         spawn_backfill,
+        spawn_replace_library,
         spawn_scan,
         schedule_minutes,
         preset_event_tx: Some(event_tx),
@@ -138,6 +153,14 @@ pub struct DaemonDeps {
     /// cancel/pause/prompt channels, and event relay as a normal sync — so
     /// a backfill and a sync can never run concurrently.
     pub spawn_backfill: SpawnFn,
+    /// Same shape as `spawn_sync`, but drives a `--replace-library --apply`
+    /// subprocess (`sync_orchestrator::run_replace_library` in production)
+    /// instead of plain `--apply`. Used by the `DaemonCommand::ReplaceLibrary`
+    /// arm, which reuses `start_sync_session` — the same state-machine
+    /// guard, cancel/pause/prompt channels, and event relay as a normal
+    /// sync — so a replace and a sync (or backfill) can never run
+    /// concurrently.
+    pub spawn_replace_library: SpawnFn,
     /// Same shape as `spawn_sync`, but drives a `--scan-library` subprocess
     /// (`sync_orchestrator::run_scan` in production). The `drive` argument is
     /// ignored — a scan touches no device. Used by `DaemonCommand::ScanLibrary`
@@ -251,6 +274,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
     let spawn_sync = deps.spawn_sync;
     let spawn_backfill = deps.spawn_backfill;
+    let spawn_replace_library = deps.spawn_replace_library;
     let spawn_scan = deps.spawn_scan;
     // Cancellation signal for the currently-running sync (if any). Set
     // by start_sync_session; taken + sent by handle_client_command's
@@ -314,6 +338,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &connected,
                     &spawn_sync,
                     &spawn_backfill,
+                    &spawn_replace_library,
                     &spawn_scan,
                     &internal_tx,
                     &mut cancel_tx_holder,
@@ -1019,6 +1044,7 @@ fn handle_client_command(
     connected: &Option<DetectedIpod>,
     spawn_sync: &SpawnFn,
     spawn_backfill: &SpawnFn,
+    spawn_replace_library: &SpawnFn,
     spawn_scan: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
@@ -1233,6 +1259,46 @@ fn handle_client_command(
                 state,
                 event_tx,
                 spawn_backfill,
+                internal_tx,
+                cancel_tx_holder,
+                prompt_tx_holder,
+                pause_tx_holder,
+                *library_count_cache,
+            );
+        }
+        DaemonCommand::ReplaceLibrary => {
+            // Mirrors BackfillRockbox's arm exactly, just pointed at
+            // `spawn_replace_library` (a `--replace-library --apply`
+            // subprocess) instead of `spawn_backfill`. `start_sync_session`'s
+            // state-machine check is what makes a replace mutually exclusive
+            // with a sync/backfill — whichever gets there first flips state
+            // to Syncing and the other is dropped/no-op. The UI does its own
+            // typed confirmation before ever sending this command, so there's
+            // no confirmation prompt to relay here (`--apply` already skips
+            // the core's interactive one).
+            if !state.is_idle() {
+                tracing::debug!(
+                    "daemon: client {client_id} sent replace_library but a sync is already in progress"
+                );
+                return false;
+            }
+            let Some(device) = connected.as_ref() else {
+                tracing::debug!(
+                    "daemon: client {client_id} sent replace_library but no iPod is connected"
+                );
+                return false;
+            };
+            tracing::info!(
+                "daemon: client {client_id} triggered a library replace for {}",
+                device.serial
+            );
+            start_sync_session(
+                SyncTrigger::Manual,
+                device.serial.clone(),
+                device.drive.clone(),
+                state,
+                event_tx,
+                spawn_replace_library,
                 internal_tx,
                 cancel_tx_holder,
                 prompt_tx_holder,

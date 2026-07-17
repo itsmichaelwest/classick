@@ -1043,3 +1043,33 @@ terminal `finish` line) ever populates a non-default `db_restored` — a
 sync that's cancelled, bailed past the 50%-failure threshold, or force-
 killed after a stalled pause never gets to read `finish`, so those history
 entries keep `db_restored: false`.
+
+### New command: `replace_library`
+
+```json
+{"type":"replace_library"}
+```
+
+One-shot, user-triggered "erase and start over": wipes **every** track
+currently on the iPod, then falls straight through to an ordinary sync of
+the current selection (`apply_loop::replace_library`, Task 11). The daemon
+spawns `classick.exe --ipc-mode --replace-library --apply --ipod <drive>`
+and reports progress through the **same forwarded-event vocabulary** as a
+normal sync (`summary`, `track_start`, `track_done`, `log`, `error`,
+`finish` — see "Forwarded sync-subprocess events" above) — UI clients
+don't need to special-case a replace's progress display. `--apply` is what
+makes the core skip its own interactive erase-confirmation prompt; the UI
+is expected to obtain the user's confirmation itself (a typed/explicit
+confirmation, not a simple yes/no) before ever sending this command.
+
+`replace_library` reuses the exact same state-machine guard, cancel/pause
+signaling, and prompt-decision relay as `trigger_sync`/`backfill_rockbox`:
+it is **no-op if a sync (or a backfill, or another replace) is already in
+progress**, and no-op if no iPod is currently connected. Because it shares
+the guard, a sync/backfill/replace can never run concurrently — whichever
+request lands first occupies the `Syncing` state until it completes. Like
+`backfill_rockbox` (and unlike `trigger_sync`), it does not reply with
+`sync_rejected` on those no-op paths; the daemon just logs and drops the
+request. The resulting history entry records `trigger: "manual"` — there
+is no dedicated `SyncTrigger` variant for a replace, matching how
+`backfill_rockbox` is recorded.

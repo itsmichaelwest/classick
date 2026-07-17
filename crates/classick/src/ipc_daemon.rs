@@ -198,6 +198,12 @@ pub enum DaemonCommand {
     /// Rockbox can read it. Spawns a `--backfill-rockbox` subprocess; reports
     /// sync-style progress. No-op if a sync is already running.
     BackfillRockbox,
+    /// Erase every track on the iPod, then sync the current selection from
+    /// scratch. Spawns a `--replace-library --apply` subprocess; reports
+    /// sync-style progress. `--apply` skips the core's interactive
+    /// confirmation prompt — the UI does its own typed confirmation before
+    /// ever sending this command. No-op if a sync is already running.
+    ReplaceLibrary,
     /// Reply: library_update from the cached index (may be never-scanned).
     GetLibrary,
     /// Spawn a --scan-library subprocess under the shared sync guard.
@@ -368,6 +374,15 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<DaemonCommand>(json).unwrap(),
             DaemonCommand::BackfillRockbox
+        ));
+    }
+
+    #[test]
+    fn replace_library_deserializes() {
+        let json = r#"{"type":"replace_library"}"#;
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(json).unwrap(),
+            DaemonCommand::ReplaceLibrary
         ));
     }
 
