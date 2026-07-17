@@ -33,6 +33,9 @@ pub struct Config {
     pub backfill_rockbox: bool,
     pub scan_library: bool,
     pub restore_db_backup: bool,
+    /// One-shot: erase every track on the device, then sync the current
+    /// selection from scratch. Never persisted — see `to_persisted`.
+    pub replace_library: bool,
 }
 
 impl Config {
@@ -150,6 +153,7 @@ pub fn resolve_with(
         backfill_rockbox: cli.backfill_rockbox,
         scan_library: cli.scan_library,
         restore_db_backup: cli.restore_db_backup,
+        replace_library: cli.replace_library,
     })
 }
 
@@ -251,6 +255,7 @@ mod tests {
         assert!(!config.rockbox_compat);
         assert!(!config.backfill_rockbox);
         assert!(!config.restore_db_backup);
+        assert!(!config.replace_library);
     }
 
     #[test]
@@ -271,6 +276,46 @@ mod tests {
         .unwrap();
         let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
         assert!(cfg.restore_db_backup);
+    }
+
+    #[test]
+    fn replace_library_threads_through_resolve() {
+        let cli = Cli::try_parse_from([
+            "classick",
+            "--source",
+            r"D:\m",
+            "--replace-library",
+        ])
+        .unwrap();
+        let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
+        assert!(cfg.replace_library);
+    }
+
+    #[test]
+    fn replace_library_defaults_false() {
+        let cli = Cli::try_parse_from(["classick", "--source", r"D:\m"]).unwrap();
+        let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
+        assert!(!cfg.replace_library);
+    }
+
+    #[test]
+    fn replace_library_is_never_persisted() {
+        let cli = Cli::try_parse_from([
+            "classick",
+            "--source",
+            r"D:\m",
+            "--replace-library",
+            "--apply",
+        ])
+        .unwrap();
+        let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
+        assert!(cfg.replace_library);
+        // to_persisted() must not carry replace_library — it's a one-shot
+        // mode flag, not a durable setting (mirrors scan_library / backfill_rockbox /
+        // restore_db_backup, none of which round-trip through PersistedConfig either).
+        let persisted = cfg.to_persisted();
+        let toml = toml::to_string(&persisted).unwrap();
+        assert!(!toml.contains("replace_library"), "got: {toml}");
     }
 
     #[test]

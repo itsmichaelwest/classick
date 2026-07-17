@@ -69,6 +69,13 @@ pub fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decisio
         progress.log("iTunesDB restored from session backup.".to_string());
         return Ok(RunOutcome::Completed);
     }
+    if config.replace_library {
+        // Unlike the branches above, this isn't a run-and-exit one-shot: it
+        // wipes the device, then falls through to a full `apply_loop::run`
+        // sync of the current selection. See `apply_loop::replace_library`'s
+        // doc comment for the full sequence.
+        return apply_loop::replace_library(&mut config, progress, decision_rx);
+    }
     apply_loop::run(&mut config, progress, decision_rx)
 }
 

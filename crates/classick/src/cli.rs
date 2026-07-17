@@ -147,6 +147,18 @@ pub struct Cli {
     /// and wasn't auto-healed. Requires --ipod (or auto-detect).
     #[arg(long, conflicts_with_all = ["backfill_rockbox", "scan_library"])]
     pub restore_db_backup: bool,
+
+    /// Erase EVERY track on the iPod, then sync the current selection from
+    /// scratch. Unlike a normal sync (which only removes tracks the source
+    /// no longer has), this wipes the device's existing library
+    /// unconditionally before applying. Confirmed interactively unless
+    /// --apply is also passed. Cannot be combined with the other one-shot
+    /// modes below (dry-run has no meaning for a destructive operation, and
+    /// a rebuilt/foreign manifest is moot once the device is wiped).
+    #[arg(long, conflicts_with_all = [
+        "backfill_rockbox", "scan_library", "restore_db_backup", "dry_run", "rebuild_manifest",
+    ])]
+    pub replace_library: bool,
 }
 
 #[cfg(test)]
@@ -334,5 +346,55 @@ mod tests {
         assert!(
             Cli::try_parse_from(["classick", "--restore-db-backup", "--scan-library"]).is_err()
         );
+    }
+
+    #[test]
+    fn parses_replace_library_flag() {
+        let cli = Cli::try_parse_from(["classick", "--replace-library"]).unwrap();
+        assert!(cli.replace_library);
+        let cli = Cli::try_parse_from(["classick"]).unwrap();
+        assert!(!cli.replace_library);
+    }
+
+    #[test]
+    fn replace_library_conflicts_with_backfill_rockbox() {
+        assert!(
+            Cli::try_parse_from(["classick", "--replace-library", "--backfill-rockbox"]).is_err()
+        );
+    }
+
+    #[test]
+    fn replace_library_conflicts_with_scan_library() {
+        assert!(
+            Cli::try_parse_from(["classick", "--replace-library", "--scan-library"]).is_err()
+        );
+    }
+
+    #[test]
+    fn replace_library_conflicts_with_restore_db_backup() {
+        assert!(
+            Cli::try_parse_from(["classick", "--replace-library", "--restore-db-backup"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn replace_library_conflicts_with_dry_run() {
+        assert!(Cli::try_parse_from(["classick", "--replace-library", "--dry-run"]).is_err());
+    }
+
+    #[test]
+    fn replace_library_conflicts_with_rebuild_manifest() {
+        assert!(
+            Cli::try_parse_from(["classick", "--replace-library", "--rebuild-manifest"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn replace_library_combines_with_apply() {
+        let cli = Cli::try_parse_from(["classick", "--replace-library", "--apply"]).unwrap();
+        assert!(cli.replace_library);
+        assert!(cli.apply);
     }
 }

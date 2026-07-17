@@ -437,6 +437,48 @@ impl Drop for OwnedDb {
     }
 }
 
+/// Remove every track from `db`: delete each track's on-disk file (best
+/// effort — a missing file is not an error, mirroring `delete_track`),
+/// unlink it from every playlist, then remove + free the `Itdb_Track`.
+/// Does NOT call `itdb_write`; the caller batches that once after this
+/// returns. Returns the number of tracks removed.
+///
+/// Used by `--replace-library` (Task 11) to erase the device before
+/// re-syncing the current selection from scratch. Proven sequence —
+/// see `examples/wipe-tracks.rs` and the 2026-05-17 LEARNINGS entry:
+/// `itdb_playlist_remove_track(NULL, track)` removes a track from every
+/// playlist in one call, and `itdb_track_remove` alone (no separate
+/// `itdb_track_unlink`) handles both the DB tracks-list removal and the
+/// struct free.
+///
+/// Track pointers are collected into a `Vec` before iterating rather than
+/// walking `(*node).next` while removing — `itdb_track_remove` frees the
+/// GList node out from under an in-progress walk otherwise.
+pub fn wipe_all_tracks(db: &OwnedDb) -> Result<usize> {
+    let mut tracks: Vec<*mut ffi::Itdb_Track> = Vec::new();
+    unsafe {
+        let mut node = (*db.as_ptr()).tracks;
+        while !node.is_null() {
+            tracks.push((*node).data as *mut ffi::Itdb_Track);
+            node = (*node).next;
+        }
+    }
+    let count = tracks.len();
+    unsafe {
+        for track in tracks {
+            let fname_c = ffi::itdb_filename_on_ipod(track);
+            if !fname_c.is_null() {
+                let path_str = CStr::from_ptr(fname_c).to_string_lossy().into_owned();
+                let _ = std::fs::remove_file(Path::new(&path_str));
+                ffi::g_free(fname_c as *mut std::os::raw::c_void);
+            }
+            ffi::itdb_playlist_remove_track(ptr::null_mut(), track);
+            ffi::itdb_track_remove(track);
+        }
+    }
+    Ok(count)
+}
+
 /// File name (under `iPod_Control\iTunes\`) we copy `iTunesDB` to
 /// before each sync session, providing a known-good restore point if
 /// the sync crashes mid-write and corrupts the live DB.

@@ -949,6 +949,110 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     })
 }
 
+/// `--replace-library`: erase EVERY track on the iPod, then fall through to
+/// a normal `run()` sync of the current selection. Unlike `run`'s diff-driven
+/// Remove (which only touches tracks the source no longer has), this wipes
+/// the device unconditionally before applying — for the "I want the device
+/// to exactly mirror the selection, full stop" case.
+///
+/// Sequence: resolve mount + identity (mirrors `run`'s early steps) →
+/// session backup of the pre-wipe iTunesDB (same helper + ordering as `run`)
+/// → open the DB (auto-restore) to learn the live track count → confirm
+/// (skipped under `--apply`) → `wipe_all_tracks` → `db.write()` → reset the
+/// per-device manifest to `Manifest::empty()` with the serial stamped →
+/// fall through to `run(config, progress, decision_rx)` for the sync itself.
+///
+/// Note on ordering vs. the task brief: the brief's high-level sequence
+/// lists confirmation before "open DB", but the confirmation message must
+/// name the live track count, which only the opened DB can supply — so this
+/// opens the DB first (also needed to wire the FirewireGuid/ModelNumStr for
+/// write-signing before the wipe's `db.write()`) and confirms right after.
+/// Backup-before-wipe and wipe/write-before-manifest-reset — the orderings
+/// that actually matter for data safety — are unchanged.
+///
+/// `run()` re-resolves the mount/identity/manifest from scratch (its own
+/// preflight + `backup_itunesdb` + `open_with_auto_restore` run again) —
+/// deliberately simplest per the brief rather than threading state through.
+/// The only user-visible side effect of that double resolution: `run`'s own
+/// session backup overwrites the pre-wipe backup this function just made
+/// with a backup of the now-empty DB. That's consistent with the
+/// operation's advertised "cannot be undone" semantics — the pre-wipe
+/// backup exists only as a narrow window to recover from an accidental
+/// confirm, not as a permanent undo path once the sync proceeds.
+pub fn replace_library(
+    config: &mut Config,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<RunOutcome> {
+    preflight::verify_itunes_not_running(progress, decision_rx)?;
+    let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
+    let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
+    let serial = device_state::sanitize_serial(&identity.firewire_guid);
+
+    // Defensive backup of the pre-wipe iTunesDB — same helper/order as
+    // `run`'s pre-sync backup (see the doc comment above for why `run`'s own
+    // backup, moments later, ends up overwriting this one).
+    if let Err(e) = crate::ipod::db::backup_itunesdb(Path::new(&mount)) {
+        progress.log(format!(
+            "Pre-wipe DB backup failed: {e}; continuing without a fresh backup."
+        ));
+    }
+
+    let db = open_with_auto_restore(Path::new(&mount), || {
+        progress.log("Restored iPod database from backup after detecting corruption");
+        progress.note_db_restored();
+    })?;
+    unsafe {
+        let device_ptr = (*db.as_ptr()).device;
+        device::set_firewire_guid(device_ptr, &identity.firewire_guid)?;
+        device::set_model_num(device_ptr, &identity.model_num_str)?;
+    }
+
+    let track_count = db.track_count();
+    if !should_skip_replace_confirmation(config.apply) {
+        let outcome = await_prompt(
+            progress,
+            decision_rx,
+            replace_library_confirm_message(track_count),
+            &["Erase and sync", "Abort"],
+            &[PromptOutcome::Custom(0), PromptOutcome::Abort],
+        )?;
+        if !matches!(outcome, PromptOutcome::Custom(0)) {
+            return Err(anyhow!("--replace-library aborted by user"));
+        }
+    }
+
+    progress.log(format!("Erasing {track_count} track(s) from the iPod…"));
+    let wiped = crate::ipod::db::wipe_all_tracks(&db)?;
+    progress.log(format!("Erased {wiped} track(s)."));
+    db.write().context("write iPod DB after wipe")?;
+    drop(db);
+
+    let manifest_path = device_state::migrate_legacy_manifest(&config.manifest_path, &serial)?;
+    let mut manifest = Manifest::empty();
+    manifest.ipod_serial = Some(serial);
+    manifest::save_atomic(&manifest_path, &manifest).context("save reset manifest after wipe")?;
+
+    progress.log("Library erased; syncing the current selection…".to_string());
+    run(config, progress, decision_rx)
+}
+
+/// Whether `replace_library`'s confirmation prompt should be skipped —
+/// true iff `--apply` was passed. Pure so it's unit-testable without a
+/// Progress/decision-channel harness.
+pub(crate) fn should_skip_replace_confirmation(apply: bool) -> bool {
+    apply
+}
+
+/// Message shown by `replace_library`'s confirmation prompt. Pure so its
+/// exact wording is unit-testable.
+pub(crate) fn replace_library_confirm_message(track_count: usize) -> String {
+    format!(
+        "This erases all {track_count} tracks on the iPod, then syncs your selection. \
+         This cannot be undone."
+    )
+}
+
 /// Recovery instructions shown when the apply loop fails mid-sync. Kept as a
 /// const so both the in-TUI `progress.error` log and the bubbled error message
 /// stay in lock-step.
@@ -1990,6 +2094,28 @@ mod tests {
         assert_eq!(rollup.albums, 2);
         assert_eq!(rollup.tracks, 8);
         assert_eq!(rollup.bytes, 300);
+    }
+
+    // -- Task 11: --replace-library pure helpers ---------------------------
+
+    #[test]
+    fn replace_confirmation_is_skipped_under_apply() {
+        assert!(should_skip_replace_confirmation(true));
+        assert!(!should_skip_replace_confirmation(false));
+    }
+
+    #[test]
+    fn replace_confirm_message_names_the_track_count_and_is_irreversible() {
+        let msg = replace_library_confirm_message(42);
+        assert!(msg.contains("42"), "got: {msg}");
+        assert!(msg.contains("erases all"), "got: {msg}");
+        assert!(msg.contains("cannot be undone"), "got: {msg}");
+    }
+
+    #[test]
+    fn replace_confirm_message_handles_zero_tracks() {
+        let msg = replace_library_confirm_message(0);
+        assert!(msg.contains("all 0 tracks"), "got: {msg}");
     }
 }
 

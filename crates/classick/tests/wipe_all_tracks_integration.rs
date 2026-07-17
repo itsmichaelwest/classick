@@ -1,21 +1,21 @@
-//! Integration tests for Task 8's end-of-run deferred-album retry
-//! (`apply_loop::retry_deferred`). Exercises the real commit path — libgpod
-//! FFI + a real transcode (system `afconvert` on macOS, precedented in
-//! `transcode.rs`'s own tests — never ffmpeg on macOS) of the committed
-//! `tests/fixtures/tagged.flac` fixture — against a fake mount + hand-rolled
-//! iTunesDB, following the pattern in `auto_restore_integration.rs`.
+//! Integration test for Task 11's `wipe_all_tracks`
+//! (`crates/classick/src/ipod/db.rs`), the destructive core of
+//! `--replace-library`.
 //!
-//! `retry_deferred` takes its size budget as a plain `Option<u64>` parameter
-//! rather than querying `free_space` internally (see its doc comment), so it
-//! can be driven here with an arbitrary budget without needing a real
-//! mounted device whose free space we could control.
+//! Builds a real iTunesDB with 2 committed tracks via the existing
+//! `retry_deferred` harness (same fake-mount + real-transcode pattern as
+//! `fit_retry_integration.rs` / `auto_restore_integration.rs` — a real
+//! transcode via the system `afconvert` on macOS, never ffmpeg on macOS),
+//! then wipes it and verifies: the reported removed count, the in-memory
+//! post-wipe track count, that the on-disk audio files are gone, and that a
+//! fresh reparse from disk also shows zero tracks.
 
 use classick::apply_loop::retry_deferred;
 use classick::cli::EncoderChoice;
 use classick::config::Config;
 use classick::ffi;
 use classick::fit::DeferredAlbum;
-use classick::ipod::db::OwnedDb;
+use classick::ipod::db::{wipe_all_tracks, OwnedDb};
 use classick::manifest::Manifest;
 use classick::progress::Progress;
 use classick::source::SourceEntry;
@@ -34,17 +34,15 @@ fn scratch_dir(label: &str) -> PathBuf {
     let base = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("test-tmp")
-        .join(format!("fit-retry-{label}-{pid}-{n}"));
+        .join(format!("wipe-all-{label}-{pid}-{n}"));
     let _ = std::fs::remove_dir_all(&base);
     base
 }
 
-/// Fake iPod mount with the directory structure libgpod expects. A real
-/// device arrives from Apple's factory Restore with `iPod_Control/Music`
-/// pre-populated with `F00`..`F49` hashed subdirectories that
-/// `itdb_cp_track_to_ipod` round-robins new files into (it errors — "No
-/// 'F..' directories found" — rather than creating one itself), so the fake
-/// mount needs at least one.
+/// Fake iPod mount with the directory structure libgpod expects —
+/// `itdb_cp_track_to_ipod` round-robins new files into `F00..F49` and
+/// errors ("No 'F..' directories found") rather than creating one itself,
+/// so the fake mount needs at least one.
 fn fake_mount() -> PathBuf {
     let base = scratch_dir("mount");
     std::fs::create_dir_all(base.join("iPod_Control").join("iTunes")).unwrap();
@@ -54,7 +52,7 @@ fn fake_mount() -> PathBuf {
 }
 
 /// Write a real, valid (empty) iTunesDB at `<mount>/iPod_Control/iTunes/iTunesDB`
-/// by driving libgpod directly — same approach as `auto_restore_integration.rs`.
+/// by driving libgpod directly — same approach as the other integration tests.
 fn write_valid_itunesdb(mount: &Path) {
     unsafe {
         let db = ffi::itdb_new();
@@ -77,9 +75,7 @@ fn write_valid_itunesdb(mount: &Path) {
 }
 
 /// One small "album": `track_count` copies of the committed FLAC fixture
-/// under a shared parent directory, so `fit::album_key`'s directory-based
-/// fallback (these tests pass an `album_tag_of` that always returns `None`,
-/// same as a run with no library index) groups them together.
+/// under a shared parent directory.
 fn make_album(source_root: &Path, track_count: usize) -> Vec<SourceEntry> {
     let album_dir = source_root.join("Artist").join("Album");
     std::fs::create_dir_all(&album_dir).unwrap();
@@ -131,18 +127,14 @@ fn test_config() -> Config {
     }
 }
 
-#[test]
-fn retry_deferred_commits_album_when_budget_is_sufficient() {
-    let mount = fake_mount();
-    write_valid_itunesdb(&mount);
-    let db = OwnedDb::open(&mount).unwrap();
-    assert_eq!(db.track_count(), 0);
-
-    let source_root = scratch_dir("src-fit");
-    let tracks = make_album(&source_root, 2);
+/// Seed a real DB with `track_count` committed tracks using the existing
+/// `retry_deferred` commit path (real libgpod add + real transcode), the
+/// same harness `fit_retry_integration.rs` uses to get tracks genuinely
+/// on-disk rather than hand-faked.
+fn seed_tracks(db: &OwnedDb, source_root: &Path, track_count: usize) {
+    let tracks = make_album(source_root, track_count);
     let total_bytes: u64 = tracks.iter().map(|t| t.size).sum();
     let key = album_key_for(&tracks);
-
     let deferred = vec![DeferredAlbum { key, tracks: tracks.len(), bytes: total_bytes }];
 
     let config = test_config();
@@ -154,69 +146,55 @@ fn retry_deferred_commits_album_when_budget_is_sufficient() {
     let result = retry_deferred(
         &config,
         &refalac_version,
-        &db,
+        db,
         &mut manifest,
         &tracks,
         deferred,
-        Some(total_bytes * 10), // generous budget: well over what's needed
+        Some(total_bytes * 10), // generous budget
         |_: &Path| None,
         &progress,
         &decision_rx,
         &mut bytes_written,
     )
-    .expect("retry_deferred should succeed");
-
-    assert!(result.is_empty(), "album should no longer be deferred: {result:?}");
-    assert_eq!(manifest.tracks.len(), 2, "both tracks should land in the manifest");
-    assert_eq!(db.track_count(), 2, "both tracks should land in the in-memory DB");
-    assert!(bytes_written > 0, "bytes_written tally should reflect the committed audio");
-
-    // Reparse from disk to confirm the commit is real, not just in-memory.
-    db.write().unwrap();
-    drop(db);
-    let reopened = OwnedDb::open(&mount).unwrap();
-    assert_eq!(reopened.track_count(), 2, "tracks should persist across a reparse");
+    .expect("seed commit should succeed");
+    assert!(result.is_empty(), "seed album should not be deferred: {result:?}");
+    assert_eq!(db.track_count(), track_count, "sanity: all seed tracks committed");
 }
 
 #[test]
-fn retry_deferred_leaves_album_deferred_when_budget_is_insufficient() {
+fn wipe_all_tracks_removes_every_track_and_its_file() {
     let mount = fake_mount();
     write_valid_itunesdb(&mount);
     let db = OwnedDb::open(&mount).unwrap();
 
-    let source_root = scratch_dir("src-nofit");
-    let tracks = make_album(&source_root, 2);
-    let total_bytes: u64 = tracks.iter().map(|t| t.size).sum();
-    let key = album_key_for(&tracks);
+    let source_root = scratch_dir("src");
+    seed_tracks(&db, &source_root, 2);
 
-    let deferred = vec![DeferredAlbum { key: key.clone(), tracks: tracks.len(), bytes: total_bytes }];
+    let music_f00 = mount.join("iPod_Control").join("Music").join("F00");
+    let files_before = std::fs::read_dir(&music_f00).unwrap().count();
+    assert_eq!(files_before, 2, "sanity: both audio files landed on disk before wipe");
 
-    let config = test_config();
-    let refalac_version: Option<String> = None;
-    let mut manifest = Manifest::empty();
-    let (progress, decision_rx) = Progress::start(false, false).unwrap();
-    let mut bytes_written: u64 = 0;
+    let removed = wipe_all_tracks(&db).expect("wipe_all_tracks should succeed");
+    assert_eq!(removed, 2, "wipe_all_tracks should report the pre-wipe track count");
+    assert_eq!(db.track_count(), 0, "in-memory DB should have zero tracks after wipe");
 
-    let result = retry_deferred(
-        &config,
-        &refalac_version,
-        &db,
-        &mut manifest,
-        &tracks,
-        deferred,
-        Some(0), // no budget at all
-        |_: &Path| None,
-        &progress,
-        &decision_rx,
-        &mut bytes_written,
-    )
-    .expect("retry_deferred should succeed (a deferral is not an error)");
+    let files_after = std::fs::read_dir(&music_f00).unwrap().count();
+    assert_eq!(files_after, 0, "audio files should be deleted from disk");
 
-    assert_eq!(result.len(), 1, "album should still be reported as deferred");
-    assert_eq!(result[0].key, key);
-    assert_eq!(result[0].tracks, 2);
-    assert_eq!(result[0].bytes, total_bytes);
-    assert!(manifest.tracks.is_empty(), "nothing should have been committed to the manifest");
-    assert_eq!(db.track_count(), 0, "nothing should have been added to the DB");
-    assert_eq!(bytes_written, 0, "bytes_written should be untouched");
+    db.write().unwrap();
+    drop(db);
+    let reopened = OwnedDb::open(&mount).unwrap();
+    assert_eq!(reopened.track_count(), 0, "reparsed DB should show zero tracks after wipe + write");
+}
+
+#[test]
+fn wipe_all_tracks_on_empty_db_is_a_noop() {
+    let mount = fake_mount();
+    write_valid_itunesdb(&mount);
+    let db = OwnedDb::open(&mount).unwrap();
+    assert_eq!(db.track_count(), 0);
+
+    let removed = wipe_all_tracks(&db).expect("wipe_all_tracks on an empty DB should succeed");
+    assert_eq!(removed, 0);
+    assert_eq!(db.track_count(), 0);
 }
