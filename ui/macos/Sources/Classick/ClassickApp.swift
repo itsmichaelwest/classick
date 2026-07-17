@@ -172,6 +172,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.send(.forgetIpod) }
     }
 
+    /// Device view's Selection picker (Task 17). SaveConfig replaces the
+    /// whole `ipod` blob, so this must be built from the *current* persisted
+    /// identity with only `customSelection` flipped — never a bare
+    /// `IpodIdentity(serial:modelLabel:...)` construction, which would drop
+    /// `name`/`model_label` and re-trigger the 0.2.1 wizard-clobber lesson
+    /// `IpodIdentity.customSelection`'s doc comment warns about. No-ops if
+    /// there's no persisted identity yet (nothing to flip).
+    func saveIpodSelection(customSelection: Bool) {
+        guard let ipod = Self.withCustomSelection(customSelection, from: model.config?.ipod) else { return }
+        Task { await daemonClient.send(.saveConfig(source: nil, daemon: nil, ipod: ipod)) }
+    }
+
+    /// Pure identity-preserving update used by `saveIpodSelection`. Static so
+    /// the preservation is unit-testable, mirroring `setupIpodIdentity` /
+    /// `setupDaemonSettings` above.
+    static func withCustomSelection(_ customSelection: Bool, from existing: IpodIdentity?) -> IpodIdentity? {
+        guard let existing else { return nil }
+        return IpodIdentity(serial: existing.serial, modelLabel: existing.modelLabel, name: existing.name, customSelection: customSelection)
+    }
+
+    /// "Replace Library…" confirmation sheet's confirm action (Task 17). The
+    /// UI (`DeviceView`) is responsible for obtaining the user's typed
+    /// confirmation before calling this — mirrors `replace_library`'s own
+    /// contract on the wire (see `DaemonCommand.replaceLibrary`'s doc
+    /// comment): the daemon does not prompt.
+    func replaceLibrary() {
+        Task { await daemonClient.send(.replaceLibrary) }
+    }
+
     /// "Update existing library for Rockbox" button in Settings — asks the
     /// daemon to re-embed tags/art into already-synced tracks so an iPod
     /// running Rockbox (which doesn't read the iTunesDB) can display them.
@@ -315,6 +344,8 @@ struct ClassickApp: App {
                 onForgetIpod: appDelegate.forgetIpod,
                 onBackfill: appDelegate.backfillRockbox,
                 onSetUp: appDelegate.presentSetup,
+                onSaveIpodSelection: { custom in appDelegate.saveIpodSelection(customSelection: custom) },
+                onReplaceLibrary: appDelegate.replaceLibrary,
                 onAppearRequests: appDelegate.requestLibraryAndSelection
             )
         }

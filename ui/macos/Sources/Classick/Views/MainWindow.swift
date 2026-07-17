@@ -18,6 +18,8 @@ struct MainWindow: View {
     var onForgetIpod: () -> Void
     var onBackfill: () -> Void
     var onSetUp: () -> Void
+    var onSaveIpodSelection: (Bool) -> Void = { _ in }
+    var onReplaceLibrary: () -> Void = {}
     var onAppearRequests: () -> Void = {}
 
     enum SidebarItem: Hashable { case library, device, history }
@@ -65,7 +67,8 @@ struct MainWindow: View {
                             onPreview: onPreview, onSaveSelection: onSaveSelection)
             case .device:
                 DeviceView(model: model, onSaveSettings: onSaveSettings,
-                           onForgetIpod: onForgetIpod, onBackfill: onBackfill)
+                           onForgetIpod: onForgetIpod, onBackfill: onBackfill,
+                           onSaveIpodSelection: onSaveIpodSelection, onReplaceLibrary: onReplaceLibrary)
             case .history:
                 HistoryView(model: model)
             }

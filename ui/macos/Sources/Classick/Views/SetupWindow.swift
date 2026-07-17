@@ -49,6 +49,11 @@ struct SetupWindow: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            Text("Classick backs up your iPod's database before every sync.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             Spacer(minLength: 0)
 
             HStack {
@@ -63,7 +68,7 @@ struct SetupWindow: View {
             }
         }
         .padding(20)
-        .frame(width: 420, height: 340)
+        .frame(width: 420, height: 370)
         .fileImporter(isPresented: $isPickingFolder, allowedContentTypes: [.folder]) { result in
             if case let .success(url) = result {
                 pickedPath = url.path
