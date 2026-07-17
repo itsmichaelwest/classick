@@ -42,6 +42,7 @@ pub mod cli;
 pub mod config;
 pub mod config_file;
 pub mod daemon;
+pub mod device_state;
 pub mod ffi;
 pub mod ipc;
 pub mod ipc_daemon;
