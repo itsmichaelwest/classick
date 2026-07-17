@@ -1018,38 +1018,30 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // changes — no separate write, no window where tracks exist on the
         // device but playlists don't yet reflect them (or vice versa).
         //
+        // Gated on `should_reconcile_playlists` (Task 8's `final_deferred`
+        // gate, same rationale): a paused/cancelled run skips reconcile
+        // entirely and picks it back up on the next full run, since desired
+        // membership is re-derived fresh every time rather than diffed
+        // incrementally.
+        //
         // `desired_playlists_by_name` is `None` when the playlist store
         // couldn't be opened earlier this run (see where it's built,
         // above) — skip the reconcile entirely rather than pass `desired =
         // []`, which would read as "the user wants zero playlists" and
         // remove every previously-managed one over what's really just a
         // transient store-open failure.
-        if let Some(desired_by_name) = &desired_playlists_by_name {
-            let dbid_by_source_path: std::collections::HashMap<&Path, u64> = manifest
-                .tracks
-                .iter()
-                .map(|e| (e.source_path.as_path(), e.ipod_dbid))
-                .collect();
-            let desired: Vec<(String, Vec<u64>)> = desired_by_name
-                .iter()
-                .map(|(name, paths)| {
-                    let dbids: Vec<u64> = paths
-                        .iter()
-                        .filter_map(|p| dbid_by_source_path.get(p.as_path()).copied())
-                        .collect();
-                    (name.clone(), dbids)
-                })
-                .collect();
-            match crate::ipod::device_playlists::reconcile(&db, &desired, &serial) {
-                Ok(stats) if stats.created + stats.updated + stats.removed > 0 => {
-                    progress.log(format!(
-                        "playlists: {} created, {} updated, {} removed",
-                        stats.created, stats.updated, stats.removed
-                    ));
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    return Err(e.context("reconcile Classick-managed iTunesDB playlists"));
+        //
+        // Warn-only end-to-end (spec §6): any failure inside
+        // `reconcile_playlists_step` — including the final
+        // `ManagedPlaylists::save` — is logged and swallowed here rather
+        // than bubbled, so a playlist-only problem never sinks an
+        // otherwise-successful sync. The final `db.write()` below always
+        // runs regardless.
+        if should_reconcile_playlists(cancelled, paused) {
+            if let Some(desired_by_name) = &desired_playlists_by_name {
+                if let Err(e) = reconcile_playlists_step(&db, desired_by_name, &manifest, &serial, progress) {
+                    tracing::warn!("playlist reconcile failed: {e:#}");
+                    progress.log(format!("playlist update failed: {e:#} — will retry next sync"));
                 }
             }
         }
@@ -2129,6 +2121,65 @@ pub(crate) fn build_rebuild_manifest_from_handles(handles: Vec<TrackHandle>, ser
     Manifest { version: 1, ipod_serial: Some(serial.to_string()), last_source_root: None, tracks }
 }
 
+// -- Task 6: playlist reconcile helpers --------------------------------
+
+/// Whether the end-of-run playlist reconcile (`reconcile_playlists_step`)
+/// should run at all this pass — mirrors the adjacent `final_deferred` gate
+/// (Task 8) for the same reason: the user asked to stop, so this run's
+/// device state is intentionally incomplete, and reconcile compares against
+/// dbids for tracks that may not have finished landing. Skipping here is
+/// safe because reconcile is idempotent and re-derives `desired` fresh from
+/// the manifest/subscriptions every run — a paused or cancelled run simply
+/// leaves the on-device playlists as they were until the next full run.
+/// `pub(crate)` so it's unit-testable without a real `OwnedDb`.
+pub(crate) fn should_reconcile_playlists(cancelled: bool, paused: bool) -> bool {
+    !cancelled && !paused
+}
+
+/// Core of Task 6's end-of-run playlist reconcile: joins `desired_by_name`'s
+/// source paths to this run's dbids via `manifest`, then calls
+/// `device_playlists::reconcile`. Extracted from `run` so every fallible
+/// step in here — the dbid join is infallible, but the `reconcile` call
+/// (which covers `ensure_managed_playlist`/removal calls and the final
+/// `ManagedPlaylists::save`) is not — surfaces through a single `Result`
+/// that the caller handles warn-only (see spec §6: playlist problems are
+/// fail-visible but must NEVER fail the sync, same rationale as
+/// `mirror_to_ipod`'s doc comment). This function itself still returns
+/// `Err` on failure; it's the CALLER's job to catch it rather than bubble
+/// it into the final `db.write()`.
+fn reconcile_playlists_step(
+    db: &OwnedDb,
+    desired_by_name: &[(String, Vec<PathBuf>)],
+    manifest: &Manifest,
+    serial: &str,
+    progress: &Progress,
+) -> Result<()> {
+    let dbid_by_source_path: std::collections::HashMap<&Path, u64> = manifest
+        .tracks
+        .iter()
+        .map(|e| (e.source_path.as_path(), e.ipod_dbid))
+        .collect();
+    let desired: Vec<(String, Vec<u64>)> = desired_by_name
+        .iter()
+        .map(|(name, paths)| {
+            let dbids: Vec<u64> = paths
+                .iter()
+                .filter_map(|p| dbid_by_source_path.get(p.as_path()).copied())
+                .collect();
+            (name.clone(), dbids)
+        })
+        .collect();
+    let stats = crate::ipod::device_playlists::reconcile(db, &desired, serial)
+        .context("reconcile Classick-managed iTunesDB playlists")?;
+    if stats.created + stats.updated + stats.removed > 0 {
+        progress.log(format!(
+            "playlists: {} created, {} updated, {} removed",
+            stats.created, stats.updated, stats.removed
+        ));
+    }
+    Ok(())
+}
+
 /// Guard against a raw source walk that found zero audio files. An empty
 /// walk almost always means something's wrong (unmounted NAS share, typo'd
 /// path, wrong drive letter) — silently proceeding would let the diff read
@@ -2658,6 +2709,30 @@ mod tests {
     fn replace_confirm_message_handles_zero_tracks() {
         let msg = replace_library_confirm_message(0);
         assert!(msg.contains("all 0 tracks"), "got: {msg}");
+    }
+
+    // -- Task 6: should_reconcile_playlists truth table --------------------
+
+    #[test]
+    fn should_reconcile_playlists_true_on_clean_completion() {
+        assert!(should_reconcile_playlists(false, false));
+    }
+
+    #[test]
+    fn should_reconcile_playlists_false_when_cancelled() {
+        assert!(!should_reconcile_playlists(true, false));
+    }
+
+    #[test]
+    fn should_reconcile_playlists_false_when_paused() {
+        assert!(!should_reconcile_playlists(false, true));
+    }
+
+    #[test]
+    fn should_reconcile_playlists_false_when_both_cancelled_and_paused() {
+        // Not a state the real loop can produce, but the gate must still
+        // fail closed rather than panicking or picking one over the other.
+        assert!(!should_reconcile_playlists(true, true));
     }
 
     // -- Task 13: should_rebuild_artwork truth table ----------------------

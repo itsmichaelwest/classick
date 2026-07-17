@@ -101,11 +101,20 @@ impl ManagedPlaylists {
 
     /// Write the record atomically (tmp file + rename), same pattern as
     /// `manifest::save_atomic`. Failure here is surfaced to the caller
-    /// (unlike the mirror/adopt paths below): if we can't durably record
-    /// what we manage, the next run's removal decision would be made on
-    /// stale information, which is a correctness problem worth failing the
-    /// sync over rather than silently risking either "stuck" leftover
-    /// playlists or (worse) a future false-positive removal.
+    /// (unlike the mirror/adopt paths below) rather than swallowed inline:
+    /// if we can't durably record what we manage, the next run's removal
+    /// decision would be made on stale information, which is worth failing
+    /// THIS reconcile pass over rather than silently risking either "stuck"
+    /// leftover playlists or (worse) a future false-positive removal.
+    ///
+    /// This `Err` still isn't fatal to the overall SYNC, though — the
+    /// `apply_loop::run` call site (via `reconcile_playlists_step`) treats
+    /// every error out of the reconcile step as warn-only: it logs, tells
+    /// the user playlists will be retried next sync, and proceeds to the
+    /// final `db.write()` regardless (spec §6). Bubbling `Err` here just
+    /// ensures that "retry next sync" promise is honest — a swallowed save
+    /// failure would leave the on-disk record silently out of sync with
+    /// what's actually on the device.
     fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -318,21 +327,30 @@ pub fn mirror_to_ipod(mount: &Path, playlists_root: &Path, subscriptions_path: &
 /// the host side has nothing to lose, the device's mirror is trusted as-is.
 ///
 /// Returns the number of playlist files adopted (0 in every "nothing to do"
-/// case: host store already has content, mirror dir is missing/empty, or
-/// every copy failed). Never overwrites a NON-empty host store, even if the
-/// device mirror has playlists the host doesn't — that isn't "empty host",
-/// so this never guesses at a merge; only a truly-empty store adopts.
+/// case: host store already has content, this device's `subscriptions.json`
+/// already exists, mirror dir is missing/empty, or every copy failed).
+/// "Empty host" requires BOTH `playlists_root` to have no files AND
+/// `subscriptions_path` to be absent — if EITHER local artifact already
+/// exists, nothing is adopted, full stop. This is deliberately the simplest
+/// correct rule rather than a per-artifact merge: a subscriptions.json with
+/// no playlist files yet (or vice versa) is still real host state the user
+/// created, and adopting playlists while leaving a stale local
+/// subscriptions.json in place (or the reverse) would produce a
+/// silently-inconsistent pairing. Never overwrites either existing local
+/// artifact, even if the device mirror has content the host doesn't — that
+/// isn't "empty host", so this never guesses at a merge; only a truly-empty
+/// local state (both artifacts absent) adopts.
 ///
 /// Entirely best-effort: any I/O failure (unreadable mirror dir, permission
 /// error, disk full on the host) is logged via `tracing::warn!` and
 /// swallowed per-file — one bad copy doesn't block the rest, and adoption
 /// failing outright never blocks the sync that's about to run.
 pub fn adopt_from_ipod(mount: &Path, playlists_root: &Path, subscriptions_path: &Path) -> usize {
-    let host_has_content = match std::fs::read_dir(playlists_root) {
+    let playlists_root_has_content = match std::fs::read_dir(playlists_root) {
         Ok(rd) => rd.filter_map(|e| e.ok()).any(|e| e.path().is_file()),
         Err(_) => false, // store dir doesn't exist yet == empty
     };
-    if host_has_content {
+    if playlists_root_has_content || subscriptions_path.exists() {
         return 0;
     }
 
@@ -355,6 +373,14 @@ pub fn adopt_from_ipod(mount: &Path, playlists_root: &Path, subscriptions_path: 
     for src in &mirror_files {
         let Some(file_name) = src.file_name() else { continue };
         if file_name == "subscriptions.json" {
+            // Defense in depth: the outer gate above already returns early
+            // whenever `subscriptions_path` exists, so this should be
+            // unreachable in practice — but "never overwrite an existing
+            // subscriptions.json" is worth enforcing at the write site too,
+            // not just via the caller's pre-check.
+            if subscriptions_path.exists() {
+                continue;
+            }
             if let Some(parent) = subscriptions_path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     tracing::warn!("playlist adopt: failed to create {}: {e}", parent.display());

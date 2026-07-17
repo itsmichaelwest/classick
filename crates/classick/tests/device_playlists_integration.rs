@@ -533,3 +533,68 @@ fn reconcile_removes_a_legacy_name_only_recorded_playlist() {
         "Gym removed via the legacy name-based fallback"
     );
 }
+
+/// Populate `<mount>/iPod_Control/classick/playlists/` (the on-device
+/// mirror `adopt_from_ipod` reads from) with one `.m3u8` file plus a
+/// `subscriptions.json`, simulating a prior machine/install having synced
+/// and mirrored playlists to this iPod.
+fn seed_device_mirror(mount: &Path) {
+    let mirror_dir = mount.join("iPod_Control").join("classick").join("playlists");
+    std::fs::create_dir_all(&mirror_dir).unwrap();
+    std::fs::write(mirror_dir.join("gym.m3u8"), b"#EXTM3U\n").unwrap();
+    std::fs::write(mirror_dir.join("subscriptions.json"), br#"{"playlists":["gym"]}"#).unwrap();
+}
+
+#[test]
+fn adopt_from_ipod_adopts_when_both_local_artifacts_are_absent() {
+    let mount = fake_mount();
+    seed_device_mirror(&mount);
+
+    let host_root = scratch_dir("adopt-empty-host");
+    let playlists_root = host_root.join("playlists");
+    let subscriptions_path = host_root.join("subscriptions.json");
+    assert!(!playlists_root.exists());
+    assert!(!subscriptions_path.exists());
+
+    let adopted = device_playlists::adopt_from_ipod(&mount, &playlists_root, &subscriptions_path);
+    assert_eq!(adopted, 1, "the one mirrored .m3u8 should be adopted");
+    assert!(playlists_root.join("gym.m3u8").exists());
+    assert!(subscriptions_path.exists(), "subscriptions.json should also be adopted");
+    assert_eq!(
+        std::fs::read(&subscriptions_path).unwrap(),
+        std::fs::read(mount.join("iPod_Control").join("classick").join("playlists").join("subscriptions.json"))
+            .unwrap()
+    );
+}
+
+/// The gate fix under test: a pre-existing LOCAL `subscriptions.json` must
+/// block adoption entirely, even though `playlists_root` itself is empty —
+/// "host emptiness" requires BOTH artifacts absent, and adoption must never
+/// overwrite an existing subscriptions.json. Per the documented choice in
+/// `adopt_from_ipod`'s doc comment (simplest correct: if EITHER local
+/// artifact exists, adopt nothing), the mirrored playlist file must also be
+/// left un-adopted, not just the subscriptions file left untouched.
+#[test]
+fn adopt_from_ipod_skips_when_local_subscriptions_json_already_exists() {
+    let mount = fake_mount();
+    seed_device_mirror(&mount);
+
+    let host_root = scratch_dir("adopt-existing-subs");
+    let playlists_root = host_root.join("playlists"); // left empty/absent on purpose
+    let subscriptions_path = host_root.join("subscriptions.json");
+    std::fs::create_dir_all(&host_root).unwrap();
+    let original_subs = br#"{"playlists":["road-trip"]}"#;
+    std::fs::write(&subscriptions_path, original_subs).unwrap();
+
+    let adopted = device_playlists::adopt_from_ipod(&mount, &playlists_root, &subscriptions_path);
+    assert_eq!(adopted, 0, "existing local subscriptions.json must block adoption entirely");
+    assert!(
+        !playlists_root.join("gym.m3u8").exists(),
+        "playlists must not be adopted either, per the EITHER-artifact-exists gate"
+    );
+    assert_eq!(
+        std::fs::read(&subscriptions_path).unwrap(),
+        original_subs,
+        "the existing local subscriptions.json must be byte-for-byte untouched"
+    );
+}
