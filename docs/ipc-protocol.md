@@ -737,9 +737,9 @@ Deliberately **not** in v1 — listed so they don't accidentally creep in:
 | Protocol | Core version | UI version | Status     | Notes                                  |
 |----------|--------------|------------|------------|----------------------------------------|
 | 1.0.0    | 0.1.x        | 0.1.x      | Initial M1 | Windows-only UI; cross-platform TUI fallback remains. |
-| 1.1.0    | 0.1.x        | 0.1.x      | Current    | Additive: `pause` command (§5.6) + terminal `paused` event (§4.12). Handshake still requires major version `1` on both sides. |
-| 1.2.0    | 0.1.x        | 0.1.x      | Current    | Additive: optional `eta_secs` field on `track_start` (§4.7), daemon-computed whole-run-average sync ETA. |
-| 1.3.0    | 0.1.x        | 0.1.x      | Current    | Additive: fit engine wired into the apply loop — `finish` gains optional `skipped_for_space`, `artwork` (reserved), and `db_restored` fields (§4.11). |
+| 1.1.0    | 0.1.x        | 0.1.x      | Superseded | Additive: `pause` command (§5.6) + terminal `paused` event (§4.12). Handshake still requires major version `1` on both sides. |
+| 1.2.0    | 0.1.x        | 0.1.x      | Superseded | Additive: optional `eta_secs` field on `track_start` (§4.7), daemon-computed whole-run-average sync ETA. |
+| 1.3.0    | 0.1.x        | 0.1.x      | Current    | Additive: fit engine wired into the apply loop — `finish` gains optional `skipped_for_space`, `artwork` (previously reserved and always absent; populated as of this bump), and `db_restored` fields (§4.11). |
 
 Bumps will append rows here. Don't edit historical rows.
 
