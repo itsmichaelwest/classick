@@ -30,6 +30,13 @@ pub struct Config {
     pub passthrough_wav: bool,
     pub force_reencode: bool,
     pub rockbox_compat: bool,
+    /// Raw `--rockbox-compat` CLI flag, preserved separately from the merged
+    /// `rockbox_compat` above. `apply_loop::run` re-resolves `rockbox_compat`
+    /// per-device once the connected iPod's serial is known (trust-package
+    /// settings), via `apply_loop::effective_rockbox(rockbox_compat_cli_flag,
+    /// &device_settings)` — the CLI flag still force-enables for that one run
+    /// even when the device's own setting is off.
+    pub rockbox_compat_cli_flag: bool,
     pub backfill_rockbox: bool,
     pub scan_library: bool,
     pub restore_db_backup: bool,
@@ -153,6 +160,7 @@ pub fn resolve_with(
         passthrough_wav,
         force_reencode,
         rockbox_compat,
+        rockbox_compat_cli_flag: cli.rockbox_compat,
         backfill_rockbox: cli.backfill_rockbox,
         scan_library: cli.scan_library,
         restore_db_backup: cli.restore_db_backup,
@@ -490,6 +498,40 @@ mod tests {
         let cli = Cli::try_parse_from(["classick", "--source", r"D:\m"]).unwrap();
         let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
         assert!(!cfg.rockbox_compat);
+        assert!(!cfg.rockbox_compat_cli_flag);
+    }
+
+    // rockbox_compat_cli_flag must carry the RAW cli flag, not the merged
+    // value — apply_loop re-resolves rockbox_compat per-device using this
+    // flag once the connected iPod's serial is known (see
+    // `apply_loop::effective_rockbox`), so it must never be conflated with
+    // whatever the global persisted daemon setting happened to be.
+    #[test]
+    fn rockbox_compat_cli_flag_mirrors_raw_cli_flag_not_the_merged_value() {
+        let cli = Cli::try_parse_from(["classick", "--source", r"D:\m", "--rockbox-compat"]).unwrap();
+        let persisted = PersistedConfig {
+            source: Some(PathBuf::from(r"X:\x")),
+            daemon: Some(crate::config_file::DaemonSettings {
+                rockbox_compat: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
+        assert!(cfg.rockbox_compat_cli_flag, "must reflect the raw --rockbox-compat flag");
+
+        let cli2 = Cli::try_parse_from(["classick", "--source", r"D:\m"]).unwrap();
+        let persisted2 = PersistedConfig {
+            source: Some(PathBuf::from(r"X:\x")),
+            daemon: Some(crate::config_file::DaemonSettings {
+                rockbox_compat: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let cfg2 = resolve_with(cli2, None, Some(persisted2), PathBuf::from("dummy.json")).unwrap();
+        assert!(!cfg2.rockbox_compat_cli_flag, "must NOT pick up the persisted/global value");
+        assert!(cfg2.rockbox_compat, "merged value still reflects the persisted global setting");
     }
 
     #[test]

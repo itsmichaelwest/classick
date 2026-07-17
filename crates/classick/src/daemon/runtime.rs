@@ -50,21 +50,20 @@ pub async fn run_daemon() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<DaemonEvent>(crate::daemon::BROADCAST_CHANNEL_CAPACITY);
     let exe = std::env::current_exe()?;
     let event_tx_for_spawn = event_tx.clone();
-    // The spawn closure re-reads the persisted config at spawn time (same
+    // The spawn closure re-reads the persisted (global) config AND the
+    // syncing device's own settings at spawn time (same re-read-at-spawn
     // pattern as the GetConfig/SaveConfig command arms) rather than
     // capturing a snapshot at daemon startup — so a Settings change to
-    // `rockbox_compat` takes effect on the very next sync without a
-    // daemon restart.
+    // `rockbox_compat` takes effect on the very next sync without a daemon
+    // restart. The device settings win over the global value once seeded;
+    // see `device_config::DeviceSettings::load_or_migrate`.
     let config_path_for_spawn = config_path.clone();
-    let spawn_sync: SpawnFn = Arc::new(move |drive: String, cancel_rx, pause_rx, prompt_rx| {
+    let spawn_sync: SpawnFn = Arc::new(move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
         let exe = exe.clone();
         let event_tx = event_tx_for_spawn.clone();
-        let rockbox_compat = config_file::load(&config_path_for_spawn)
-            .ok()
-            .flatten()
-            .and_then(|c| c.daemon)
-            .map(|d| d.rockbox_compat)
-            .unwrap_or(false);
+        let global = config_file::load(&config_path_for_spawn).ok().flatten().unwrap_or_default();
+        let rockbox_compat =
+            crate::device_config::DeviceSettings::load_or_migrate(&serial, &global).rockbox_compat;
         Box::pin(async move {
             sync_orchestrator::run(exe, drive, rockbox_compat, cancel_rx, pause_rx, prompt_rx, event_tx).await
         })
@@ -72,18 +71,19 @@ pub async fn run_daemon() -> Result<()> {
 
     let exe_for_backfill = std::env::current_exe()?;
     let event_tx_for_backfill = event_tx.clone();
-    let spawn_backfill: SpawnFn = Arc::new(move |drive: String, cancel_rx, pause_rx, prompt_rx| {
-        let exe = exe_for_backfill.clone();
-        let event_tx = event_tx_for_backfill.clone();
-        Box::pin(async move {
-            sync_orchestrator::run_backfill(exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx).await
-        })
-    });
+    let spawn_backfill: SpawnFn =
+        Arc::new(move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
+            let exe = exe_for_backfill.clone();
+            let event_tx = event_tx_for_backfill.clone();
+            Box::pin(async move {
+                sync_orchestrator::run_backfill(exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx).await
+            })
+        });
 
     let exe_for_replace = std::env::current_exe()?;
     let event_tx_for_replace = event_tx.clone();
     let spawn_replace_library: SpawnFn =
-        Arc::new(move |drive: String, cancel_rx, pause_rx, prompt_rx| {
+        Arc::new(move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
             let exe = exe_for_replace.clone();
             let event_tx = event_tx_for_replace.clone();
             Box::pin(async move {
@@ -96,13 +96,14 @@ pub async fn run_daemon() -> Result<()> {
 
     let exe_for_scan = std::env::current_exe()?;
     let event_tx_for_scan = event_tx.clone();
-    let spawn_scan: SpawnFn = Arc::new(move |_drive: String, cancel_rx, pause_rx, prompt_rx| {
-        let exe = exe_for_scan.clone();
-        let event_tx = event_tx_for_scan.clone();
-        Box::pin(async move {
-            sync_orchestrator::run_scan(exe, cancel_rx, pause_rx, prompt_rx, event_tx).await
-        })
-    });
+    let spawn_scan: SpawnFn =
+        Arc::new(move |_serial: String, _drive: String, cancel_rx, pause_rx, prompt_rx| {
+            let exe = exe_for_scan.clone();
+            let event_tx = event_tx_for_scan.clone();
+            Box::pin(async move {
+                sync_orchestrator::run_scan(exe, cancel_rx, pause_rx, prompt_rx, event_tx).await
+            })
+        });
 
     let deps = DaemonDeps {
         configured_serial,
@@ -127,12 +128,16 @@ pub async fn run_daemon() -> Result<()> {
 /// runtime can clone it into a tokio::spawn'd task without consuming the
 /// daemon's only copy.
 ///
-/// Args: `(drive, cancel_rx, pause_rx, prompt_decisions_rx)`. The prompt
-/// channel lets `DaemonCommand::DecidePrompt` ferry user replies through to
-/// the running subprocess's stdin without blocking the runtime loop. The
-/// pause channel lets `DaemonCommand::Pause` request a graceful stop.
+/// Args: `(serial, drive, cancel_rx, pause_rx, prompt_decisions_rx)`. `serial`
+/// lets `spawn_sync` resolve per-device settings (Rockbox compat) at spawn
+/// time; closures that don't need it (backfill/replace/scan) ignore it. The
+/// prompt channel lets `DaemonCommand::DecidePrompt` ferry user replies
+/// through to the running subprocess's stdin without blocking the runtime
+/// loop. The pause channel lets `DaemonCommand::Pause` request a graceful
+/// stop.
 pub type SpawnFn = Arc<
     dyn Fn(
+            String,
             String,
             oneshot::Receiver<()>,
             oneshot::Receiver<()>,
@@ -413,7 +418,14 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
             _ = scheduler.tick() => {
                 // Scheduled syncs also honour the user's auto/manual choice;
                 // schedule_minutes is moot when the user opted into manual.
-                if connected.is_some() && state.is_idle() && auto_sync_enabled(&config_path) {
+                // The gate reads the CONFIGURED device's settings (not
+                // necessarily `connected`, though in practice a scheduled
+                // tick only does anything when they match — see the
+                // plug-in gate below for the equivalent check on attach).
+                let scheduled_gate = configured_serial
+                    .as_deref()
+                    .is_some_and(|serial| auto_sync_enabled(&config_path, serial));
+                if connected.is_some() && state.is_idle() && scheduled_gate {
                     if let Some(drive) = connected.as_ref().map(|d| d.drive.clone()) {
                         start_sync_session(
                             SyncTrigger::Scheduled,
@@ -652,11 +664,13 @@ fn handle_internal_event(
     }
 }
 
-/// Whether the daemon should auto-trigger syncs (plug-in + scheduled) for the
-/// configured device. Gated purely on the user's `enabled` toggle ("Sync
-/// automatically on plug-in"). When it's off — or the config can't be read —
-/// plug-in and scheduled triggers no-op and the only way to start a sync is
-/// the tray's Sync Now action. `subsequent_sync_mode` is NOT the gate: it
+/// Whether the daemon should auto-trigger syncs (plug-in + scheduled) for
+/// `serial`. Gated on that device's own `auto_sync` toggle ("Sync
+/// automatically on plug-in") — per-device since the trust-package settings
+/// migration, no longer the global daemon setting. When it's off — or
+/// neither the global config nor the device settings can be read — plug-in
+/// and scheduled triggers no-op and the only way to start a sync is the
+/// tray's Sync Now action. `subsequent_sync_mode` is NOT the gate: it
 /// selects apply-vs-review *once a sync runs* (review is v1.1; today every
 /// sync applies).
 ///
@@ -664,16 +678,19 @@ fn handle_internal_event(
 /// `subsequent_sync_mode` (`WizardViewModel`: `IsAutomatic ? "auto_apply" :
 /// "review"`) and always sends `enabled: true`. Until it maps the on/off
 /// intent to `enabled` instead, a Windows user who picks Manual mode will
-/// still be auto-synced. macOS already writes `enabled` correctly.
-fn auto_sync_enabled(config_path: &std::path::Path) -> bool {
-    config_auto_sync(config_file::load(config_path).ok().flatten().as_ref())
+/// still be auto-synced. macOS already writes `enabled` correctly. This
+/// still holds under per-device settings: `enabled` is only the seed value
+/// the first time a device is seen (see `DeviceSettings::load_or_migrate`).
+fn auto_sync_enabled(config_path: &std::path::Path, serial: &str) -> bool {
+    let global = config_file::load(config_path).ok().flatten().unwrap_or_default();
+    let device = crate::device_config::DeviceSettings::load_or_migrate(serial, &global);
+    should_auto_sync(&device)
 }
 
-/// Pure decision core of [`auto_sync_enabled`], split out so it can be tested
-/// without touching the filesystem. Fail-safe: no config or no daemon section
-/// means auto-sync is OFF.
-fn config_auto_sync(cfg: Option<&config_file::PersistedConfig>) -> bool {
-    cfg.and_then(|c| c.daemon.as_ref()).map(|d| d.enabled).unwrap_or(false)
+/// Pure decision core of [`auto_sync_enabled`], split out so it can be
+/// tested without touching the filesystem.
+pub(crate) fn should_auto_sync(settings: &crate::device_config::DeviceSettings) -> bool {
+    settings.auto_sync
 }
 
 fn handle_device_event(
@@ -743,7 +760,7 @@ fn handle_device_event(
             // want to drive sync explicitly via the tray's Sync Now action.
             if configured_serial == Some(ipod.serial.as_str())
                 && state.is_idle()
-                && auto_sync_enabled(config_path)
+                && auto_sync_enabled(config_path, &ipod.serial)
             {
                 start_sync_session(
                     SyncTrigger::PlugIn,
@@ -847,8 +864,9 @@ fn start_sync_session(
     let drive_for_task = drive.clone();
     let trigger_for_task = trigger.clone();
     let serial_for_task = serial.clone();
+    let serial_for_spawn = serial;
     tokio::spawn(async move {
-        let outcome = (spawn_sync)(drive_for_task, cancel_rx, pause_rx, prompt_rx).await;
+        let outcome = (spawn_sync)(serial_for_spawn, drive_for_task, cancel_rx, pause_rx, prompt_rx).await;
         let _ = internal_tx.send(InternalEvent::SyncCompleted {
             trigger: trigger_for_task,
             serial: serial_for_task,
@@ -891,7 +909,7 @@ fn start_scan_session(
     let spawn_scan = spawn_scan.clone();
     let internal_tx = internal_tx.clone();
     tokio::spawn(async move {
-        let outcome = (spawn_scan)(String::new(), cancel_rx, pause_rx, prompt_rx).await;
+        let outcome = (spawn_scan)(String::new(), String::new(), cancel_rx, pause_rx, prompt_rx).await;
         let _ = internal_tx.send(InternalEvent::ScanCompleted { outcome });
     });
 }
@@ -1480,14 +1498,7 @@ fn _silence_mpsc_warning(_: mpsc::Sender<DaemonEvent>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_file::{DaemonSettings, PersistedConfig};
-
-    fn cfg_with(enabled: bool) -> PersistedConfig {
-        PersistedConfig {
-            daemon: Some(DaemonSettings { enabled, ..Default::default() }),
-            ..Default::default()
-        }
-    }
+    use crate::config_file::PersistedConfig;
 
     #[test]
     fn state_label_maps_scan_sessions_to_scanning() {
@@ -1500,20 +1511,17 @@ mod tests {
         assert!(matches!(state_label(&sm), DaemonStateLabel::Syncing));
     }
 
-    // Regression: auto-sync must follow the user's `enabled` toggle, NOT
-    // `subsequent_sync_mode`. The old gate ignored `enabled`, so macOS (which
-    // writes the toggle to `enabled`) auto-synced even when it was turned off.
+    // should_auto_sync is the trivial pure seam over per-device settings —
+    // migration/seeding from the global `enabled` flag is covered by
+    // device_config.rs's `load_or_migrate` tests, not re-tested here.
     #[test]
-    fn auto_sync_follows_enabled_flag() {
-        assert!(config_auto_sync(Some(&cfg_with(true))));
-        assert!(!config_auto_sync(Some(&cfg_with(false))), "auto-sync must be off when disabled");
-    }
-
-    // Fail-safe: never auto-sync when we can't confirm it's enabled.
-    #[test]
-    fn auto_sync_off_without_config_or_daemon_section() {
-        assert!(!config_auto_sync(None));
-        assert!(!config_auto_sync(Some(&PersistedConfig::default())));
+    fn should_auto_sync_follows_device_setting() {
+        use crate::device_config::DeviceSettings;
+        assert!(should_auto_sync(&DeviceSettings { auto_sync: true, ..DeviceSettings::default() }));
+        assert!(
+            !should_auto_sync(&DeviceSettings { auto_sync: false, ..DeviceSettings::default() }),
+            "auto-sync must be off when the device setting is off"
+        );
     }
 
     // Cold-start "X of Y": count_source_library resolves the config's source

@@ -406,6 +406,7 @@ mod tests {
             passthrough_wav: false,
             force_reencode: false,
             rockbox_compat: false,
+            rockbox_compat_cli_flag: false,
             backfill_rockbox: false,
             scan_library: false,
             restore_db_backup: false,

@@ -81,7 +81,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
     // oneshot the test awaits.
     let (spawn_seen_tx, spawn_seen_rx) = oneshot::channel::<String>();
     let spawn_seen_tx = std::sync::Mutex::new(Some(spawn_seen_tx));
-    let spawn_fn = move |drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+    let spawn_fn = move |_serial: String, drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
         if let Some(s) = spawn_seen_tx.lock().unwrap().take() { let _ = s.send(drive.clone()); }
         Box::pin(async move {
             Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
@@ -98,7 +98,8 @@ async fn auto_sync_fires_when_configured_device_connects() {
         watcher: Box::new(watcher),
         spawn_sync: Arc::new(spawn_fn),
         spawn_backfill: Arc::new(
-            |_drive: String,
+            |_serial: String,
+             _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
@@ -113,7 +114,8 @@ async fn auto_sync_fires_when_configured_device_connects() {
             },
         ),
         spawn_replace_library: Arc::new(
-            |_drive: String,
+            |_serial: String,
+             _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
@@ -128,7 +130,8 @@ async fn auto_sync_fires_when_configured_device_connects() {
             },
         ),
         spawn_scan: Arc::new(
-            |_drive: String,
+            |_serial: String,
+             _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
@@ -184,7 +187,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
 
     let spawn_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let spawn_called_clone = spawn_called.clone();
-    let spawn_fn = move |_drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+    let spawn_fn = move |_serial: String, _drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
         spawn_called_clone.store(true, std::sync::atomic::Ordering::Relaxed);
         Box::pin(async move {
             Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
@@ -201,7 +204,8 @@ async fn unknown_device_does_not_trigger_auto_sync() {
         watcher: Box::new(watcher),
         spawn_sync: Arc::new(spawn_fn),
         spawn_backfill: Arc::new(
-            |_drive: String,
+            |_serial: String,
+             _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
@@ -216,7 +220,8 @@ async fn unknown_device_does_not_trigger_auto_sync() {
             },
         ),
         spawn_replace_library: Arc::new(
-            |_drive: String,
+            |_serial: String,
+             _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
@@ -231,7 +236,8 @@ async fn unknown_device_does_not_trigger_auto_sync() {
             },
         ),
         spawn_scan: Arc::new(
-            |_drive: String,
+            |_serial: String,
+             _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
@@ -292,7 +298,7 @@ async fn runtime_stays_responsive_during_long_sync() {
     // future never resolves — simulates a long sync).
     let (spawn_entered_tx, spawn_entered_rx) = oneshot::channel::<()>();
     let spawn_entered_tx = std::sync::Mutex::new(Some(spawn_entered_tx));
-    let spawn_fn = move |_drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+    let spawn_fn = move |_serial: String, _drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
         if let Some(s) = spawn_entered_tx.lock().unwrap().take() { let _ = s.send(()); }
         Box::pin(async move {
             std::future::pending::<()>().await;  // never resolves
@@ -311,7 +317,8 @@ async fn runtime_stays_responsive_during_long_sync() {
         watcher: Box::new(watcher),
         spawn_sync: Arc::new(spawn_fn),
         spawn_backfill: Arc::new(
-            |_drive: String,
+            |_serial: String,
+             _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
@@ -326,7 +333,8 @@ async fn runtime_stays_responsive_during_long_sync() {
             },
         ),
         spawn_replace_library: Arc::new(
-            |_drive: String,
+            |_serial: String,
+             _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
@@ -341,7 +349,8 @@ async fn runtime_stays_responsive_during_long_sync() {
             },
         ),
         spawn_scan: Arc::new(
-            |_drive: String,
+            |_serial: String,
+             _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {

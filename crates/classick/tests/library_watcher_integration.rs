@@ -81,6 +81,7 @@ impl WatcherSandbox {
 }
 
 fn noop_spawn(
+    _serial: String,
     _drive: String,
     _cancel_rx: tokio::sync::oneshot::Receiver<()>,
     _pause_rx: tokio::sync::oneshot::Receiver<()>,
@@ -124,7 +125,8 @@ async fn sandbox_with_source() -> WatcherSandbox {
 
     let scan_spawns = Arc::new(AtomicUsize::new(0));
     let scan_spawns_for_closure = scan_spawns.clone();
-    let spawn_scan = move |_drive: String,
+    let spawn_scan = move |_serial: String,
+                           _drive: String,
                            _cancel_rx: tokio::sync::oneshot::Receiver<()>,
                            _pause_rx: tokio::sync::oneshot::Receiver<()>,
                            _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {

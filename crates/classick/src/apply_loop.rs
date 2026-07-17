@@ -80,6 +80,16 @@ pub(crate) fn ffmpeg_version(ffmpeg_path: &std::path::Path) -> Result<String> {
         .to_string())
 }
 
+/// Effective Rockbox-compat for one run: the raw `--rockbox-compat` CLI flag
+/// force-enables regardless of the device's persisted setting (matches the
+/// pre-trust-package "CLI flag OR global setting" semantics — see
+/// `config::resolve_with`'s `rockbox_compat` merge); otherwise the syncing
+/// device's own setting wins. Pure so it's testable without touching the
+/// device-settings file.
+pub(crate) fn effective_rockbox(cli_flag: bool, device: &crate::device_config::DeviceSettings) -> bool {
+    cli_flag || device.rockbox_compat
+}
+
 /// Outcome of `run`'s apply phase, distinct from the `anyhow::Result` outer
 /// layer (which carries hard failures). `Completed` covers both a normal
 /// finish and the early-return no-op paths (dry-run, nothing-to-do, review
@@ -129,14 +139,30 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
     let serial = device_state::sanitize_serial(&identity.firewire_guid);
 
+    // Rockbox-compat is per-device (trust package): `config.rockbox_compat`
+    // as merged by `config::resolve` only reflects the CLI flag OR the
+    // *global* daemon setting, resolved before the device's serial was even
+    // known. Now that it is known, re-resolve against that device's own
+    // settings.json (seeded once from the global value — see
+    // `device_config::DeviceSettings::load_or_migrate`); the raw CLI flag
+    // still force-enables for this one run regardless of what's persisted.
+    let global_for_device_settings = config_file::load(&config_file::default_path()?)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let device_settings =
+        crate::device_config::DeviceSettings::load_or_migrate(&serial, &global_for_device_settings);
+    config.rockbox_compat = effective_rockbox(config.rockbox_compat_cli_flag, &device_settings);
+
     let sources = preflight::walk_source(config, progress, decision_rx)?;
     guard_nonempty_walk(&sources, &config.source)?;
     // The sync subprocess never receives the daemon's in-memory IpodIdentity
     // (no new IPC command for it — see selection design) so, same as
-    // `rockbox_compat`, re-read the persisted config here to learn whether
-    // this device uses a per-device selection. Only trust it when the
-    // serial matches the connected device: a stale persisted identity for a
-    // different iPod must not leak its custom_selection flag onto this one.
+    // `rockbox_compat` above, re-read the persisted config here to learn
+    // whether this device uses a per-device selection. Only trust it when
+    // the serial matches the connected device: a stale persisted identity
+    // for a different iPod must not leak its custom_selection flag onto
+    // this one.
     let persisted_ipod_identity = config_file::load(&config_file::default_path()?)
         .ok()
         .flatten()
@@ -2116,6 +2142,25 @@ mod tests {
         assert_eq!(encoder_str(EncoderChoice::Refalac), "refalac");
     }
 
+    fn device_settings_with_rockbox(rockbox_compat: bool) -> crate::device_config::DeviceSettings {
+        crate::device_config::DeviceSettings { rockbox_compat, ..crate::device_config::DeviceSettings::default() }
+    }
+
+    /// The CLI `--rockbox-compat` flag force-enables for one run regardless
+    /// of what the device's own settings.json says.
+    #[test]
+    fn effective_rockbox_cli_flag_forces_on() {
+        assert!(effective_rockbox(true, &device_settings_with_rockbox(false)));
+        assert!(effective_rockbox(true, &device_settings_with_rockbox(true)));
+    }
+
+    /// Without the CLI flag, the device's own setting decides.
+    #[test]
+    fn effective_rockbox_without_cli_flag_follows_device_setting() {
+        assert!(!effective_rockbox(false, &device_settings_with_rockbox(false)));
+        assert!(effective_rockbox(false, &device_settings_with_rockbox(true)));
+    }
+
     fn guard_test_entry(path: &str) -> SourceEntry {
         SourceEntry { path: std::path::PathBuf::from(path), mtime: 1, size: 10 }
     }
@@ -2249,6 +2294,7 @@ mod tests {
             passthrough_wav: false,
             force_reencode: false,
             rockbox_compat: false,
+            rockbox_compat_cli_flag: false,
             backfill_rockbox: false,
             scan_library: false,
             restore_db_backup: false,
