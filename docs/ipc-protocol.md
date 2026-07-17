@@ -742,7 +742,7 @@ Bumps will append rows here. Don't edit historical rows.
 > `major.minor.patch` scheme and both currently sit on major `1`, but their
 > minor versions move on separate schedules and a matching number (e.g. both
 > once being `1.1.0`) is coincidence, not a shared release train. As of this
-> writing the daemon protocol is at **`1.4.0`** — see "Daemon v1.4.0" below;
+> writing the daemon protocol is at **`1.5.0`** — see "Daemon v1.5.0" below;
 > this section is kept as the historical record of the `1.1.0` daemon bump.
 
 When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows) or a
@@ -997,3 +997,49 @@ additions, matching §2's unknown-message tolerance.
 `status_update.library_count` is now the **selected** track count — the "Y"
 in "X of Y synced" is what the current selection wants on the iPod, not the
 raw folder count. Under `mode: "all"` the value is unchanged.
+
+---
+
+## Daemon v1.5.0 — Skipped-for-space + artwork summary on history (2026-07-17)
+
+The daemon now emits `hello` with `protocol_version = "1.5.0"`. Purely
+additive over v1.4.0: no new commands or events — three new fields on the
+persisted `SyncSummary` shape and one new field on `HistoryEntry`, both of
+which already ride the existing `status_update.last_sync` and
+`history_update.entries` payloads (see the `v1.1.0` daemon-extensions
+section above for those event shapes). No separate status plumbing was
+needed: `last_sync: Option<HistoryEntry>` on `status_update` carries whatever
+fields `HistoryEntry` has, so UIs pick these up automatically once the
+daemon starts persisting them.
+
+The daemon builds these fields from the sync subprocess's `finish` event
+(§4.11 above), which since subprocess protocol `1.3.0` already carries
+`skipped_for_space` (whole-album fit-pass deferral) and `artwork` (embed
+rollup) — Task 8 added those wire fields; this bump is the daemon actually
+reading and persisting them into `history.json`, plus `db_restored`.
+
+### `SyncSummary` gains three fields
+
+| Field | Type | Notes |
+|---|---|---|
+| `skipped_for_space_tracks` | `usize` | From the subprocess `finish` event's `skipped_for_space.tracks`. `0` when nothing was deferred, or the field was absent (older core, or an all-fit run). |
+| `skipped_for_space_bytes` | `u64` | From `skipped_for_space.bytes`. |
+| `artwork_failed_sources` | `usize` | From the subprocess `finish` event's `artwork.failed_sources`. |
+
+Note `skipped_for_space.albums` (also present on the subprocess wire event)
+is deliberately **not** persisted onto `SyncSummary` — only `tracks`/`bytes`
+carry through. All three fields are `#[serde(default)]`: pre-existing
+`history.json` entries (written before this field existed) deserialize with
+them at `0`.
+
+### `HistoryEntry` gains `db_restored`
+
+| Field | Type | Notes |
+|---|---|---|
+| `db_restored` | `bool` | Mirrors the subprocess `finish` event's `db_restored` (§4.11) — `true` when Task 4's auto-restore-from-backup path fired during that sync. `#[serde(default, skip_serializing_if = "std::ops::Not::not")]`: omitted from the wire/`history.json` when `false` (old-client-compat, matching the subprocess field's own convention), and pre-existing entries without it deserialize to `false`. |
+
+Only `OrchestratorOutcome::Completed` (a subprocess run that reached its
+terminal `finish` line) ever populates a non-default `db_restored` — a
+sync that's cancelled, bailed past the 50%-failure threshold, or force-
+killed after a stalled pause never gets to read `finish`, so those history
+entries keep `db_restored: false`.

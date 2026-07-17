@@ -4,7 +4,7 @@
 //! JSON, snake_case "type" discriminator, additive.
 //!
 //! Spec §7. Protocol semver: daemon emits hello with
-//! `protocol_version = "1.4.0"` since this extends M1's "1.0.0".
+//! `protocol_version = "1.5.0"` since this extends M1's "1.0.0".
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
 use crate::daemon::device_storage::StorageInfo;
@@ -12,7 +12,7 @@ use crate::daemon::history::HistoryEntry;
 use crate::selection::{SelectionMode, SelectionRule};
 use serde::{Deserialize, Serialize};
 
-pub const DAEMON_PROTOCOL_VERSION: &str = "1.4.0";
+pub const DAEMON_PROTOCOL_VERSION: &str = "1.5.0";
 
 /// Events from daemon → UI clients (in addition to forwarded sync-
 /// subprocess events from `src/ipc.rs`).
@@ -238,12 +238,12 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"hello""#));
-        assert!(json.contains(r#""protocol_version":"1.4.0""#));
+        assert!(json.contains(r#""protocol_version":"1.5.0""#));
     }
 
     #[test]
-    fn protocol_version_is_1_4_0() {
-        assert_eq!(DAEMON_PROTOCOL_VERSION, "1.4.0");
+    fn protocol_version_is_1_5_0() {
+        assert_eq!(DAEMON_PROTOCOL_VERSION, "1.5.0");
     }
 
     #[test]

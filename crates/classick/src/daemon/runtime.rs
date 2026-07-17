@@ -559,15 +559,15 @@ fn handle_internal_event(
                 return;
             }
 
-            let (history_outcome, error_message, summary) = match outcome {
-                Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary }) => {
-                    (SyncOutcome::Ok, None, summary)
+            let (history_outcome, error_message, summary, db_restored) = match outcome {
+                Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary, db_restored }) => {
+                    (SyncOutcome::Ok, None, summary, db_restored)
                 }
-                Ok(OrchestratorOutcome::Completed { outcome, summary }) => {
-                    (outcome, Some("sync subprocess reported failure".to_string()), summary)
+                Ok(OrchestratorOutcome::Completed { outcome, summary, db_restored }) => {
+                    (outcome, Some("sync subprocess reported failure".to_string()), summary, db_restored)
                 }
                 Ok(OrchestratorOutcome::Aborted { reason, summary }) => {
-                    (SyncOutcome::Aborted, Some(reason), summary)
+                    (SyncOutcome::Aborted, Some(reason), summary, false)
                 }
                 // A graceful pause isn't a failure or a user-driven abort of
                 // the *library* — it's recorded as Aborted (reason "paused")
@@ -575,10 +575,10 @@ fn handle_internal_event(
                 // the live "paused" signal itself rode the raw SyncEvent
                 // stream the UI's Phase.paused reducer watches directly.
                 Ok(OrchestratorOutcome::Paused { summary }) => {
-                    (SyncOutcome::Aborted, Some("paused".to_string()), summary)
+                    (SyncOutcome::Aborted, Some("paused".to_string()), summary, false)
                 }
                 Err(e) => {
-                    (SyncOutcome::Error, Some(format!("orchestrator: {e:#}")), None)
+                    (SyncOutcome::Error, Some(format!("orchestrator: {e:#}")), None, false)
                 }
             };
 
@@ -596,7 +596,7 @@ fn handle_internal_event(
             }
 
             let entry = make_history_entry(
-                trigger, history_outcome, error_message, summary, started_at_unix_secs,
+                trigger, history_outcome, error_message, summary, started_at_unix_secs, db_restored,
             );
             let last_sync = Some(entry.clone());
             let _ = history.append(entry);
@@ -751,6 +751,7 @@ fn handle_device_event(
                         Some("device_detached".to_string()),
                         None,
                         s.started_at_unix_secs,
+                        false,
                     ));
                     state.finish_sync();
                 }
@@ -876,6 +877,7 @@ fn make_history_entry(
     error_message: Option<String>,
     summary: Option<SyncSummary>,
     started_at_unix_secs: u64,
+    db_restored: bool,
 ) -> HistoryEntry {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -889,6 +891,7 @@ fn make_history_entry(
         outcome,
         error_message,
         summary,
+        db_restored,
     }
 }
 

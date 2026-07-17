@@ -41,6 +41,21 @@ pub struct SyncSummary {
     /// compatible (they predate this field).
     #[serde(default)]
     pub metadata_only: usize,
+    /// Whole-album fit-pass deferral rollup (Task 8's `skipped_for_space` on
+    /// the subprocess `finish` event) — tracks/bytes across every album that
+    /// still didn't fit the device's remaining space after the end-of-run
+    /// retry. The `albums` count on the wire event is deliberately NOT
+    /// persisted here (per plan). `#[serde(default)]` keeps pre-existing
+    /// `history.json` entries (written before this field existed)
+    /// deserializing cleanly to zero.
+    #[serde(default)]
+    pub skipped_for_space_tracks: usize,
+    #[serde(default)]
+    pub skipped_for_space_bytes: u64,
+    /// `artwork.failed_sources` from the subprocess `finish` event.
+    /// `#[serde(default)]` for the same backward-compat reason as above.
+    #[serde(default)]
+    pub artwork_failed_sources: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +68,14 @@ pub struct HistoryEntry {
     pub error_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<SyncSummary>,
+    /// `true` when the sync subprocess's `finish` event carried
+    /// `db_restored: true` (Task 4's auto-restore-from-backup path fired
+    /// this run). Omitted (not `false`) on the wire when it didn't fire,
+    /// mirroring the subprocess wire field's old-client-compat convention;
+    /// `#[serde(default)]` lets pre-existing `history.json` entries (written
+    /// before this field existed) deserialize to `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub db_restored: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,7 +154,11 @@ mod tests {
             trigger: SyncTrigger::Manual,
             outcome,
             error_message: None,
-            summary: Some(SyncSummary { add: 1, modify: 0, remove: 0, unchanged: 0, skipped: 0, metadata_only: 0 }),
+            summary: Some(SyncSummary {
+                add: 1, modify: 0, remove: 0, unchanged: 0, skipped: 0, metadata_only: 0,
+                skipped_for_space_tracks: 0, skipped_for_space_bytes: 0, artwork_failed_sources: 0,
+            }),
+            db_restored: false,
         }
     }
 
@@ -183,6 +210,7 @@ mod tests {
             outcome: SyncOutcome::Aborted,
             error_message: Some("too_many_failures: 6 of 10 tracks failed".to_string()),
             summary: None,
+            db_restored: false,
         };
         svc.append(entry.clone()).unwrap();
         let read_back = svc.read();
@@ -198,6 +226,61 @@ mod tests {
         let json = r#"{"add":1,"modify":2,"remove":0,"unchanged":10,"skipped":0}"#;
         let summary: SyncSummary = serde_json::from_str(json).unwrap();
         assert_eq!(summary.metadata_only, 0);
+    }
+
+    #[test]
+    fn sync_summary_new_fields_round_trip() {
+        let summary = SyncSummary {
+            add: 1, modify: 2, remove: 0, unchanged: 10, skipped: 0, metadata_only: 3,
+            skipped_for_space_tracks: 5, skipped_for_space_bytes: 123_456_789,
+            artwork_failed_sources: 2,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let round_tripped: SyncSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, summary);
+        assert_eq!(round_tripped.skipped_for_space_tracks, 5);
+        assert_eq!(round_tripped.skipped_for_space_bytes, 123_456_789);
+        assert_eq!(round_tripped.artwork_failed_sources, 2);
+    }
+
+    #[test]
+    fn sync_summary_without_new_fields_defaults_to_zero() {
+        // Pre-existing history.json entries were written before the
+        // skipped-for-space / artwork fields existed.
+        let json = r#"{"add":1,"modify":2,"remove":0,"unchanged":10,"skipped":0,"metadata_only":0}"#;
+        let summary: SyncSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(summary.skipped_for_space_tracks, 0);
+        assert_eq!(summary.skipped_for_space_bytes, 0);
+        assert_eq!(summary.artwork_failed_sources, 0);
+    }
+
+    #[test]
+    fn history_entry_db_restored_round_trips() {
+        let mut entry = make_entry("2026-07-17T10:00:00Z", SyncOutcome::Ok);
+        entry.db_restored = true;
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(r#""db_restored":true"#));
+        let round_tripped: HistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, entry);
+        assert!(round_tripped.db_restored);
+    }
+
+    #[test]
+    fn history_entry_without_db_restored_field_defaults_to_false() {
+        // Pre-existing history.json entries were written before `db_restored`
+        // existed on HistoryEntry.
+        let json = r#"{"timestamp":"2026-07-17T10:00:00Z","duration_secs":5,"trigger":"manual","outcome":"ok"}"#;
+        let entry: HistoryEntry = serde_json::from_str(json).unwrap();
+        assert!(!entry.db_restored);
+    }
+
+    #[test]
+    fn history_entry_db_restored_omitted_from_wire_when_false() {
+        // Old-client compat, mirroring the subprocess wire field's convention:
+        // absent (not `false`) when it didn't fire.
+        let entry = make_entry("2026-07-17T10:00:00Z", SyncOutcome::Ok);
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("db_restored"));
     }
 
     #[test]
