@@ -159,6 +159,18 @@ pub struct Cli {
         "backfill_rockbox", "scan_library", "restore_db_backup", "dry_run", "rebuild_manifest",
     ])]
     pub replace_library: bool,
+
+    /// Cross-check every synced track's source embedded art against the
+    /// on-iPod DB `has_artwork` flag and the on-disk ithmb thumbnail, then
+    /// exit. Diagnostic + permanent regression harness for the cover-art
+    /// pipeline bugs in LEARNINGS.md ("macOS Artwork Root Cause"). Logs each
+    /// inconsistency found and exits non-zero if any are found (scriptable).
+    /// Requires --ipod (or auto-detect).
+    #[arg(long, conflicts_with_all = [
+        "backfill_rockbox", "scan_library", "restore_db_backup", "replace_library",
+        "dry_run", "rebuild_manifest",
+    ])]
+    pub verify_artwork: bool,
 }
 
 #[cfg(test)]
@@ -396,5 +408,53 @@ mod tests {
         let cli = Cli::try_parse_from(["classick", "--replace-library", "--apply"]).unwrap();
         assert!(cli.replace_library);
         assert!(cli.apply);
+    }
+
+    #[test]
+    fn parses_verify_artwork_flag() {
+        let cli = Cli::try_parse_from(["classick", "--verify-artwork"]).unwrap();
+        assert!(cli.verify_artwork);
+        let cli = Cli::try_parse_from(["classick"]).unwrap();
+        assert!(!cli.verify_artwork);
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_backfill_rockbox() {
+        assert!(
+            Cli::try_parse_from(["classick", "--verify-artwork", "--backfill-rockbox"]).is_err()
+        );
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_scan_library() {
+        assert!(
+            Cli::try_parse_from(["classick", "--verify-artwork", "--scan-library"]).is_err()
+        );
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_restore_db_backup() {
+        assert!(
+            Cli::try_parse_from(["classick", "--verify-artwork", "--restore-db-backup"]).is_err()
+        );
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_replace_library() {
+        assert!(
+            Cli::try_parse_from(["classick", "--verify-artwork", "--replace-library"]).is_err()
+        );
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_dry_run() {
+        assert!(Cli::try_parse_from(["classick", "--verify-artwork", "--dry-run"]).is_err());
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_rebuild_manifest() {
+        assert!(
+            Cli::try_parse_from(["classick", "--verify-artwork", "--rebuild-manifest"]).is_err()
+        );
     }
 }

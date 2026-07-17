@@ -128,6 +128,7 @@ fn test_config() -> Config {
         scan_library: false,
         restore_db_backup: false,
         replace_library: false,
+        verify_artwork: false,
     }
 }
 

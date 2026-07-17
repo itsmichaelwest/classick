@@ -36,6 +36,9 @@ pub struct Config {
     /// One-shot: erase every track on the device, then sync the current
     /// selection from scratch. Never persisted — see `to_persisted`.
     pub replace_library: bool,
+    /// One-shot: audit source-art vs DB-art vs on-disk-ithmb consistency,
+    /// then exit. Never persisted — see `to_persisted`.
+    pub verify_artwork: bool,
 }
 
 impl Config {
@@ -154,6 +157,7 @@ pub fn resolve_with(
         scan_library: cli.scan_library,
         restore_db_backup: cli.restore_db_backup,
         replace_library: cli.replace_library,
+        verify_artwork: cli.verify_artwork,
     })
 }
 
@@ -256,6 +260,7 @@ mod tests {
         assert!(!config.backfill_rockbox);
         assert!(!config.restore_db_backup);
         assert!(!config.replace_library);
+        assert!(!config.verify_artwork);
     }
 
     #[test]
@@ -316,6 +321,34 @@ mod tests {
         let persisted = cfg.to_persisted();
         let toml = toml::to_string(&persisted).unwrap();
         assert!(!toml.contains("replace_library"), "got: {toml}");
+    }
+
+    #[test]
+    fn verify_artwork_threads_through_resolve() {
+        let cli = Cli::try_parse_from([
+            "classick",
+            "--source",
+            r"D:\m",
+            "--verify-artwork",
+        ])
+        .unwrap();
+        let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
+        assert!(cfg.verify_artwork);
+    }
+
+    #[test]
+    fn verify_artwork_is_never_persisted() {
+        let cli = Cli::try_parse_from([
+            "classick",
+            "--source",
+            r"D:\m",
+            "--verify-artwork",
+        ])
+        .unwrap();
+        let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
+        let persisted = cfg.to_persisted();
+        let toml = toml::to_string(&persisted).unwrap();
+        assert!(!toml.contains("verify_artwork"), "got: {toml}");
     }
 
     #[test]
