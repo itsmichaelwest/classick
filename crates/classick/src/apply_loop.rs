@@ -13,6 +13,7 @@ use crate::checkpoint::CheckpointClock;
 use crate::cli::EncoderChoice;
 use crate::config::Config;
 use crate::config_file;
+use crate::device_state;
 use crate::ipod::db::{OwnedDb, TrackHandle};
 use crate::ipod::device;
 use crate::manifest::{self, Action, Manifest, ManifestEntry};
@@ -121,15 +122,51 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         |msg| progress.log(msg),
     );
 
+    // Resolve the device identity now, ahead of the manifest load: the
+    // per-device manifest path (trust-package layout) and the
+    // foreign-manifest guard below both key off the serial, so it must be
+    // known before the first manifest read. `identity` is reused as-is
+    // below, right before `OwnedDb::open`, instead of re-resolving it.
+    let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
+    let serial = device_state::sanitize_serial(&identity.firewire_guid);
+    // One-time move of the legacy flat manifest.json into the per-device
+    // trust-package layout; a no-op once migrated. `config.manifest_path`
+    // keeps meaning "the legacy/root path" (still test-overridable) — the
+    // per-device path returned here is what load/save actually use.
+    let manifest_path = device_state::migrate_legacy_manifest(&config.manifest_path, &serial)?;
+
     // 3. Load (or rebuild) manifest.
     let mut manifest = if config.rebuild_manifest {
         let db = OwnedDb::open(Path::new(&mount))?;
-        let rebuilt = build_rebuild_manifest(&db);
+        let rebuilt = build_rebuild_manifest(&db, &serial);
         // Save eagerly so a crash after this point doesn't lose the rebuild.
-        manifest::save_atomic(&config.manifest_path, &rebuilt)?;
+        manifest::save_atomic(&manifest_path, &rebuilt)?;
         rebuilt
     } else {
-        manifest::load_or_default(&config.manifest_path)?
+        let mut loaded = manifest::load_or_default(&manifest_path)?;
+        if manifest_is_foreign(&loaded, &serial) {
+            tracing::warn!(
+                manifest_serial = ?loaded.ipod_serial,
+                device_serial = %serial,
+                manifest_path = %manifest_path.display(),
+                "manifest belongs to a different iPod; treating as empty for this run",
+            );
+            progress.error(format!(
+                "Manifest at {} was last synced to a different iPod (recorded serial {:?}, \
+                 connected device serial {serial}). Treating it as empty for this run rather \
+                 than risk mismatched track ownership.",
+                manifest_path.display(),
+                loaded.ipod_serial,
+            ));
+            for line in RECOVERY_HINT_LINES {
+                progress.error((*line).to_string());
+            }
+            loaded = Manifest::empty();
+        }
+        // Stamp/adopt this device on every load — covers both a fresh
+        // manifest (ipod_serial was None) and the foreign-reset case above.
+        loaded.ipod_serial = Some(serial.clone());
+        loaded
     };
 
     // 4. Diff. Pass `source::fingerprint` as the slow-path hash callback;
@@ -154,7 +191,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     progress.header(
         config.source.display().to_string(),
         mount.clone(),
-        config.manifest_path.display().to_string(),
+        manifest_path.display().to_string(),
     );
 
     if config.rebuild_manifest {
@@ -306,19 +343,18 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // out of this closure would trigger the misleading "orphan files /
     // --rebuild-manifest" recovery block. Hoisted below.
     let sync_result: Result<RunOutcome> = (|| -> Result<RunOutcome> {
-        // Resolve the (FirewireGuid, ModelNumStr) pair libgpod needs
-        // to sign the iTunesDB iTunes will accept on read. Source
-        // preference: on-disk SysInfo > SCSI INQUIRY VPD pages
-        // (authoritative) > USB PID+capacity heuristic. ModelNumStr
-        // is critical — without it libgpod's checksum_type collapses
-        // to NONE and iTunes refuses the DB ("cannot read the
-        // contents of the iPod"), even though the iPod's firmware
-        // would still play the music.
+        // `identity` (FirewireGuid, ModelNumStr pair libgpod needs to sign
+        // the iTunesDB iTunes will accept on read) was already resolved
+        // above — ahead of the manifest load, to derive `serial` — and is
+        // reused here rather than re-probing SCSI/USB a second time.
+        // ModelNumStr is critical: without it libgpod's checksum_type
+        // collapses to NONE and iTunes refuses the DB ("cannot read the
+        // contents of the iPod"), even though the iPod's firmware would
+        // still play the music.
         //
-        // Resolved BEFORE OwnedDb::open: ModelNumStr also picks the
+        // Still resolved BEFORE OwnedDb::open: ModelNumStr also picks the
         // SysInfoExtended template below, and libgpod reads that file
         // during open.
-        let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
         progress.log(format!(
             "iPod identity: FirewireGuid={}, ModelNumStr={}",
             identity.firewire_guid, identity.model_num_str,
@@ -648,7 +684,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     db.write().context("checkpoint: db.write")
                 })?;
                 manifest.last_source_root = Some(config.source.clone());
-                manifest::save_atomic(&config.manifest_path, &manifest)
+                manifest::save_atomic(&manifest_path, &manifest)
                     .context("checkpoint: manifest save")?;
             }
         }
@@ -672,7 +708,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // Stamp the current source root onto the manifest so the next run's
         // source-change safeguard has something to compare against.
         manifest.last_source_root = Some(config.source.clone());
-        manifest::save_atomic(&config.manifest_path, &manifest)?;
+        manifest::save_atomic(&manifest_path, &manifest)?;
 
         if paused {
             progress.log("Sync paused. Completed tracks were saved. Eject the iPod before unplugging.");
@@ -1225,7 +1261,13 @@ pub fn backfill_rockbox(
     decision_rx: &Receiver<Decision>,
 ) -> Result<RunOutcome> {
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
-    let manifest = manifest::load_or_default(&config.manifest_path)?;
+    // Same per-device manifest as `run`: this reads (never writes) the
+    // manifest, but it must be the same file `run` uses, or a backfill
+    // would silently operate on a stale/legacy copy of the track list.
+    let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
+    let serial = device_state::sanitize_serial(&identity.firewire_guid);
+    let manifest_path = device_state::migrate_legacy_manifest(&config.manifest_path, &serial)?;
+    let manifest = manifest::load_or_default(&manifest_path)?;
     let entries: Vec<&crate::manifest::ManifestEntry> = manifest
         .tracks
         .iter()
@@ -1350,8 +1392,13 @@ fn rebuild_apple_artwork(
     Ok(())
 }
 
-pub(crate) fn build_rebuild_manifest(db: &OwnedDb) -> Manifest {
-    let handles = db.list_tracks_for_rebuild();
+pub(crate) fn build_rebuild_manifest(db: &OwnedDb, serial: &str) -> Manifest {
+    build_rebuild_manifest_from_handles(db.list_tracks_for_rebuild(), serial)
+}
+
+/// Pure core of [`build_rebuild_manifest`], split out so it's unit-testable
+/// without a real libgpod-backed `OwnedDb`.
+pub(crate) fn build_rebuild_manifest_from_handles(handles: Vec<TrackHandle>, serial: &str) -> Manifest {
     let tracks = handles.into_iter().map(|h| ManifestEntry {
         source_path: std::path::PathBuf::new(),
         source_mtime: 0,
@@ -1372,7 +1419,16 @@ pub(crate) fn build_rebuild_manifest(db: &OwnedDb) -> Manifest {
     // last_source_root is intentionally None: the iPod's DB doesn't carry
     // the original source library root. The next normal sync's
     // manifest::save_atomic populates it from config.source.
-    Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks }
+    Manifest { version: 1, ipod_serial: Some(serial.to_string()), last_source_root: None, tracks }
+}
+
+/// True if `manifest.ipod_serial` names a specific device (i.e. is `Some`)
+/// that differs from the currently-connected, already-sanitized `serial`.
+/// A `None` `ipod_serial` — a fresh manifest, or a legacy manifest that
+/// predates this field — is NOT foreign: the sync adopts the device rather
+/// than refusing to proceed.
+pub(crate) fn manifest_is_foreign(manifest: &Manifest, serial: &str) -> bool {
+    matches!(&manifest.ipod_serial, Some(s) if s != serial)
 }
 
 #[cfg(test)]
@@ -1427,6 +1483,54 @@ mod tests {
         let json = r#"{"streams":[],"format":{}}"#;
         let probe: ProbeOutput = serde_json::from_str(json).unwrap();
         assert_eq!(source_format_from_probe(&probe), "unknown");
+    }
+
+    // -- manifest_is_foreign truth table --------------------------------
+
+    #[test]
+    fn manifest_is_foreign_true_when_serial_mismatches() {
+        let mut m = Manifest::empty();
+        m.ipod_serial = Some("AAA111".to_string());
+        assert!(manifest_is_foreign(&m, "BBB222"));
+    }
+
+    #[test]
+    fn manifest_is_foreign_false_when_serial_matches() {
+        let mut m = Manifest::empty();
+        m.ipod_serial = Some("AAA111".to_string());
+        assert!(!manifest_is_foreign(&m, "AAA111"));
+    }
+
+    #[test]
+    fn manifest_is_foreign_false_when_serial_is_none() {
+        // Covers both a brand-new manifest and a legacy (pre-Task-2)
+        // manifest whose `ipod_serial` field predates this feature and
+        // deserializes as None via #[serde(default)] — both cases adopt
+        // the connected device rather than being treated as foreign.
+        let m = Manifest::empty();
+        assert!(!manifest_is_foreign(&m, "AAA111"));
+    }
+
+    // -- build_rebuild_manifest stamps ipod_serial -----------------------
+
+    #[test]
+    fn build_rebuild_manifest_from_handles_stamps_serial() {
+        let handles = vec![
+            TrackHandle {
+                dbid: 111,
+                ipod_relpath: r"iPod_Control\Music\F12\ABCD.m4a".to_string(),
+            },
+            TrackHandle {
+                dbid: 222,
+                ipod_relpath: r"iPod_Control\Music\F34\WXYZ.m4a".to_string(),
+            },
+        ];
+        let m = build_rebuild_manifest_from_handles(handles, "SER123");
+        assert_eq!(m.ipod_serial, Some("SER123".to_string()));
+        assert_eq!(m.tracks.len(), 2);
+        assert_eq!(m.tracks[0].ipod_dbid, 111);
+        assert!(!m.tracks[0].source_known, "rebuilt entries have no known source");
+        assert_eq!(m.last_source_root, None);
     }
 }
 
