@@ -115,20 +115,34 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         None
     };
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
+
+    // Resolve the device identity now, ahead of both selection filtering and
+    // the manifest load: the per-device manifest path (trust-package
+    // layout), the foreign-manifest guard below, and the shared-vs-custom
+    // selection-path resolution just below all key off the serial, so it
+    // must be known before any of that. `identity` is reused as-is below,
+    // right before `OwnedDb::open`, instead of re-resolving it.
+    let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
+    let serial = device_state::sanitize_serial(&identity.firewire_guid);
+
     let sources = preflight::walk_source(config, progress, decision_rx)?;
+    // The sync subprocess never receives the daemon's in-memory IpodIdentity
+    // (no new IPC command for it — see selection design) so, same as
+    // `rockbox_compat`, re-read the persisted config here to learn whether
+    // this device uses a per-device selection. Only trust it when the
+    // serial matches the connected device: a stale persisted identity for a
+    // different iPod must not leak its custom_selection flag onto this one.
+    let persisted_ipod_identity = config_file::load(&config_file::default_path()?)
+        .ok()
+        .flatten()
+        .and_then(|c| c.ipod_identity)
+        .filter(|id| device_state::sanitize_serial(&id.serial) == serial);
     let sources = crate::selection::apply_to_sources(
         sources,
         &config.source,
+        persisted_ipod_identity.as_ref(),
         |msg| progress.log(msg),
     );
-
-    // Resolve the device identity now, ahead of the manifest load: the
-    // per-device manifest path (trust-package layout) and the
-    // foreign-manifest guard below both key off the serial, so it must be
-    // known before the first manifest read. `identity` is reused as-is
-    // below, right before `OwnedDb::open`, instead of re-resolving it.
-    let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
-    let serial = device_state::sanitize_serial(&identity.firewire_guid);
     // One-time move of the legacy flat manifest.json into the per-device
     // trust-package layout; a no-op once migrated. `config.manifest_path`
     // keeps meaning "the legacy/root path" (still test-overridable) — the

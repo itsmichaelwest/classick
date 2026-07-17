@@ -1062,6 +1062,41 @@ fn handle_client_command(
                         if prev.serial == i.serial { i.name = prev.name.clone(); }
                     }
                 }
+                // Seed the per-device selection.json from the shared one the
+                // first time this device flips shared -> custom, so the
+                // user's existing choices carry over instead of silently
+                // resetting to mode=All on the very first per-device load.
+                // Only on the false->true transition (or no prior identity
+                // for this serial) — flipping back to false intentionally
+                // leaves the per-device file dormant, and
+                // seed_custom_selection() is itself a no-op once the
+                // per-device file exists, so re-saving with the flag
+                // already true is harmless. Seeded BEFORE the config save
+                // below so a crash in between never leaves the flag on
+                // with no per-device file backing it.
+                let was_custom = current.ipod_identity.as_ref()
+                    .filter(|prev| prev.serial == i.serial)
+                    .map(|prev| prev.custom_selection)
+                    .unwrap_or(false);
+                if i.custom_selection && !was_custom {
+                    match (
+                        crate::selection::default_selection_path(),
+                        crate::device_state::device_selection_path(&i.serial),
+                    ) {
+                        (Ok(shared), Ok(custom)) => {
+                            if let Err(e) = crate::selection::seed_custom_selection(&shared, &custom) {
+                                tracing::warn!(
+                                    "daemon: failed to seed per-device selection for {}: {e:#}",
+                                    i.serial,
+                                );
+                            }
+                        }
+                        _ => tracing::warn!(
+                            "daemon: cannot resolve selection paths to seed per-device selection for {}",
+                            i.serial,
+                        ),
+                    }
+                }
                 current.ipod_identity = Some(i);
             }
             if let Err(e) = config_file::save(config_path, &current) {
@@ -1291,7 +1326,8 @@ fn handle_client_command(
             );
         }
         DaemonCommand::GetSelection => {
-            let sel = crate::selection::default_selection_path()
+            let identity = config_file::load(config_path).ok().flatten().and_then(|c| c.ipod_identity);
+            let sel = crate::selection::effective_selection_path(identity.as_ref())
                 .map(|p| crate::selection::load_or_all(&p))
                 .unwrap_or_else(|_| crate::selection::Selection::all());
             let _ = reply.send(DaemonEvent::SelectionUpdate { mode: sel.mode, rules: sel.rules });
@@ -1302,7 +1338,8 @@ fn handle_client_command(
                 mode,
                 rules,
             };
-            match crate::selection::default_selection_path() {
+            let identity = config_file::load(config_path).ok().flatten().and_then(|c| c.ipod_identity);
+            match crate::selection::effective_selection_path(identity.as_ref()) {
                 Ok(path) => {
                     if let Err(e) = crate::selection::save_atomic(&path, &sel) {
                         tracing::error!("daemon: failed to save selection: {e:#}");

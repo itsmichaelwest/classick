@@ -152,12 +152,13 @@ pub fn preview(
 /// All (caller keeps using its walk-based cache) or when no index/source is
 /// available.
 pub fn selected_library_count(config_path: &Path) -> Option<usize> {
-    let sel_path = selection::default_selection_path().ok()?;
+    let cfg = crate::config_file::load(config_path).ok().flatten()?;
+    let sel_path = selection::effective_selection_path(cfg.ipod_identity.as_ref()).ok()?;
     let sel = selection::load_or_all(&sel_path);
     if sel.mode == SelectionMode::All {
         return None;
     }
-    let source = crate::config_file::load(config_path).ok().flatten()?.source?;
+    let source = cfg.source?;
     let idx_path = library_index::default_index_path().ok()?;
     let idx = library_index::load_or_empty(&idx_path, &source);
     Some(idx.files.values().filter(|rec| sel.wants(&rec.facts())).count())

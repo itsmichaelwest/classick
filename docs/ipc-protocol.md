@@ -756,6 +756,24 @@ then `/tmp`, with the same `classick.sock` file name.)
 | `unsubscribe_device_events` | (none) |
 | `shutdown` | (none) — daemon exits cleanly after draining current sync |
 
+### `IpodIdentity` gains `custom_selection`
+
+```json
+{"type":"save_config","ipod":{"serial":"000A27002138B0A8","model_label":"iPod Classic 7G","custom_selection":true}}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `custom_selection` | `bool` | Default `false` (shared selection). When `true`, this iPod's sync selection is read from/written to its own per-device `devices/<serial>/selection.json` instead of the shared `<config>/classick/selection.json`. Rides the existing `ipod` field on `config_update`/`save_config` (this table, above) — no new command needed to read or set it. Also governs which file the existing `get_selection`/`save_selection` commands (§"Daemon v1.4.0" below) act on. Older clients that don't send this field get the persisted default (`false`) on load, so they keep reading/writing the shared file exactly as before. |
+
+The first time a device's `custom_selection` flips `false → true` (including
+"no prior identity for this serial", e.g. a brand-new device), the daemon
+seeds the per-device file by copying the current shared `selection.json` so
+the user's existing choices carry over instead of resetting to "sync
+everything". Flipping back to `false` leaves the per-device file in place,
+untouched and dormant — flipping `true` again later re-reads it as-is (no
+re-seed, since the per-device file already exists).
+
 ### Forwarded sync-subprocess events
 
 When the daemon is running a sync, it spawns `ipod-sync --ipc-mode --apply`
