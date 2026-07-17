@@ -1,4 +1,4 @@
-# ipod-sync IPC protocol v1.2.0
+# ipod-sync IPC protocol v1.3.0
 
 Newline-delimited JSON over stdin/stdout, UTF-8, custom typed-envelope.
 Every message is a single-line JSON object with a `type` discriminator
@@ -18,7 +18,7 @@ custom-envelope instead of JSON-RPC 2.0, why WinUI 3 — see
 
 ## 1. Versioning
 
-Protocol version follows **semver**. The current version is **`1.2.0`**.
+Protocol version follows **semver**. The current version is **`1.3.0`**.
 
 The core **MUST** emit a `hello` event (see §4.1) as its first line of
 stdout, carrying the protocol version it speaks. The UI **MUST** read
@@ -122,7 +122,7 @@ Rules:
 | `track_done`  | (none)                                                                                       | Increment completed count                 |
 | `log`         | `message`                                                                                    | Informational log line                    |
 | `error`       | `message`, `recovery_hints?`                                                                 | Non-fatal or fatal error                  |
-| `finish`      | `success`                                                                                    | Run complete; core will close stdout      |
+| `finish`      | `success`, `skipped_for_space?`, `artwork?`, `db_restored?`                                  | Run complete; core will close stdout      |
 | `paused`      | (none)                                                                                       | Run gracefully paused; core will close stdout (new in **1.1.0**) |
 
 The Rust-side enum the events derive from is `ProgressEvent` in
@@ -137,7 +137,7 @@ then proceeds with the rest of the protocol.
 
 | Field              | Type     | Notes                                                       |
 |--------------------|----------|-------------------------------------------------------------|
-| `protocol_version` | `string` | Semver of the wire protocol the core speaks. Currently `1.2.0`. |
+| `protocol_version` | `string` | Semver of the wire protocol the core speaks. Currently `1.3.0`. |
 | `core_version`     | `string` | `CARGO_PKG_VERSION` of the core binary. Informational.       |
 
 ```json
@@ -320,9 +320,27 @@ the child process to exit with code 0 (on `success: true`) or non-zero
 cases; rely on `success` for the user-facing verdict). Mirrors
 `ProgressEvent::Finish`.
 
-| Field     | Type      | Notes                                                |
-|-----------|-----------|------------------------------------------------------|
-| `success` | `boolean` | `true` for a clean run, `false` for fatal failure.   |
+| Field                 | Type      | Notes                                                |
+|-----------------------|-----------|-------------------------------------------------------|
+| `success`             | `boolean` | `true` for a clean run, `false` for fatal failure.   |
+| `skipped_for_space?`  | `object` \| absent | **Since 1.3.0.** Fit-pass deferral rollup — whole albums that didn't fit the device's remaining space, even after the end-of-run retry (§ below). Absent when nothing was deferred. |
+| `artwork?`            | `object` \| absent | **Since 1.3.0.** Artwork embed/refresh rollup. Reserved: always absent until a later core version populates it. |
+| `db_restored?`        | `boolean` \| absent | **Since 1.3.0.** `true` when the core's auto-restore-from-backup path fired this run (the iTunesDB failed to parse and was replaced from the session backup before the sync proceeded). Absent (not `false`) when it didn't fire. |
+
+`skipped_for_space`, when present, has:
+
+| Field    | Type     | Notes                                                          |
+|----------|----------|-----------------------------------------------------------------|
+| `albums` | `number` | Count of distinct albums deferred.                              |
+| `tracks` | `number` | Total tracks across those albums.                                |
+| `bytes`  | `number` | Total source bytes across those albums (the fit pass's estimate, not necessarily the exact on-iPod transcoded size). |
+
+`artwork`, when present, has `embedded`, `eligible`, `failed_sources`
+(all `number`) — reserved shape, not yet populated by any core version.
+
+A pre-1.3.0 core never emits `skipped_for_space`/`artwork`/`db_restored`;
+a UI built against 1.3.0 must treat their absence as "nothing to report",
+per the standard additive-minor-bump rule in §1.
 
 ```json
 {"type":"finish","success":true}
@@ -330,6 +348,14 @@ cases; rely on `success` for the user-facing verdict). Mirrors
 
 ```json
 {"type":"finish","success":false}
+```
+
+```json
+{"type":"finish","success":true,"skipped_for_space":{"albums":14,"tracks":183,"bytes":9876543210}}
+```
+
+```json
+{"type":"finish","success":true,"db_restored":true}
 ```
 
 ### 4.12 `paused`
@@ -703,6 +729,7 @@ Deliberately **not** in v1 — listed so they don't accidentally creep in:
 | 1.0.0    | 0.1.x        | 0.1.x      | Initial M1 | Windows-only UI; cross-platform TUI fallback remains. |
 | 1.1.0    | 0.1.x        | 0.1.x      | Current    | Additive: `pause` command (§5.6) + terminal `paused` event (§4.12). Handshake still requires major version `1` on both sides. |
 | 1.2.0    | 0.1.x        | 0.1.x      | Current    | Additive: optional `eta_secs` field on `track_start` (§4.7), daemon-computed whole-run-average sync ETA. |
+| 1.3.0    | 0.1.x        | 0.1.x      | Current    | Additive: fit engine wired into the apply loop — `finish` gains optional `skipped_for_space`, `artwork` (reserved), and `db_restored` fields (§4.11). |
 
 Bumps will append rows here. Don't edit historical rows.
 

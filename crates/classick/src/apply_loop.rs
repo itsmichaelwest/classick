@@ -14,8 +14,12 @@ use crate::cli::EncoderChoice;
 use crate::config::Config;
 use crate::config_file;
 use crate::device_state;
+use crate::fit::DeferredAlbum;
+use crate::free_space;
+use crate::ipc::SkippedForSpace;
 use crate::ipod::db::{open_with_auto_restore, OwnedDb, TrackHandle};
 use crate::ipod::device;
+use crate::library_index;
 use crate::manifest::{self, Action, Manifest, ManifestEntry};
 use crate::pipeline::OrderedTranscoder;
 use crate::preflight;
@@ -153,6 +157,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     let mut manifest = if config.rebuild_manifest {
         let db = open_with_auto_restore(Path::new(&mount), || {
             progress.log("Restored iPod database from backup after detecting corruption");
+            progress.note_db_restored();
         })?;
         let rebuilt = build_rebuild_manifest(&db, &serial);
         // Save eagerly so a crash after this point doesn't lose the rebuild.
@@ -200,6 +205,58 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         target_encoder,
         config.force_reencode,
     )?;
+
+    // Fit pass (Task 8): defer whole albums that won't fit the device's
+    // remaining space rather than let a mid-sync "disk full" error abort the
+    // run partway through an album. Budget = free bytes + this run's Remove
+    // actions' reclaimed space - a safety reserve (fit::reserve_bytes); see
+    // `compute_budget`. `library_idx` is a stat-cache read (never a rescan)
+    // done once here and reused, by reference, for the end-of-run retry
+    // below — `album_tag_of` is `Copy` (captures only `&library_idx`), so
+    // passing it into `fit::plan_fit` doesn't consume it.
+    let library_idx: Option<library_index::LibraryIndex> = library_index::default_index_path()
+        .ok()
+        .map(|p| library_index::load_or_empty(&p, &config.source));
+    let album_tag_of = |path: &Path| -> Option<String> {
+        library_idx.as_ref()?.files.get(path).map(|t| t.album.clone())
+    };
+    let remove_credit: u64 = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Remove(entry) => Some(entry.source_size),
+            _ => None,
+        })
+        .sum();
+    let storage = free_space::query(Path::new(&mount));
+    if storage.is_none() {
+        progress.log(
+            "Could not determine free space on the iPod; syncing without a size budget."
+                .to_string(),
+        );
+    }
+    let budget = compute_budget(storage, remove_credit);
+    // Snapshot of the pre-fit Add plan, kept around so the end-of-run retry
+    // can reconstruct exactly the Adds belonging to deferred albums (plan_fit
+    // only returns kept Actions + a DeferredAlbum summary, not the dropped
+    // Actions themselves).
+    let original_adds: Vec<SourceEntry> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Add(src) => Some(src.clone()),
+            _ => None,
+        })
+        .collect();
+    let fit_outcome = crate::fit::plan_fit(actions, budget, album_tag_of);
+    let actions = fit_outcome.kept;
+    let deferred = fit_outcome.deferred;
+    if !deferred.is_empty() {
+        progress.log(format!(
+            "Deferred {} album(s) that don't fit this run's space budget; will retry once after \
+             applying the rest.",
+            deferred.len()
+        ));
+    }
+
     let (add, modify, metadata_only, remove, unchanged) = count_actions(&actions);
 
     // Progress was started in main() and is borrowed here. Send the header now
@@ -294,6 +351,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         let effective_remove = if no_delete { 0 } else { remove };
         let total_planned = add + modify + metadata_only + effective_remove;
         progress.summary(add, modify, metadata_only, remove, unchanged, total_planned);
+        log_deferred_summary(progress, &deferred);
         progress.log("Dry run; nothing was written.");
         return Ok(RunOutcome::Completed);
     } else if config.apply || !config.use_tui {
@@ -315,6 +373,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 no_delete
             }
             Ok(Decision::Review(ReviewDecision::DryRun)) => {
+                log_deferred_summary(progress, &deferred);
                 progress.log("Dry run; nothing was written.");
                 return Ok(RunOutcome::Completed);
             }
@@ -345,7 +404,18 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         && metadata_only == 0
         && (remove == 0 || effective_no_delete)
     {
-        progress.log("Nothing to do.");
+        // Deferred albums still count as "nothing else to do" here — free
+        // space hasn't changed since the fit pass queried it moments ago, so
+        // a retry now would just fail again; not worth opening the DB for.
+        // Still surfaced on Finish so the caller knows *why* their new album
+        // didn't show up.
+        if !deferred.is_empty() {
+            let skipped = skipped_for_space(&deferred);
+            progress.log(format!("Nothing else to do; {}", skipped.describe()));
+            progress.note_skipped_for_space(skipped);
+        } else {
+            progress.log("Nothing to do.");
+        }
         return Ok(RunOutcome::Completed);
     }
 
@@ -385,6 +455,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         }
         let db = open_with_auto_restore(Path::new(&mount), || {
             progress.log("Restored iPod database from backup after detecting corruption");
+            progress.note_db_restored();
         })?;
         unsafe {
             let device_ptr = (*db.as_ptr()).device;
@@ -443,6 +514,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         let mut i = 0usize;
         let mut cancelled = false;
         let mut paused = false;
+        // Task 8: actual on-iPod bytes written this run (transcoded/
+        // passthrough file sizes, not source FLAC sizes). Accumulated
+        // across the main loop below AND the end-of-run retry pass.
+        let mut bytes_written: u64 = 0;
         let mut ckpt = CheckpointClock::new(
             crate::CHECKPOINT_MAX_TRACKS,
             Duration::from_secs(crate::CHECKPOINT_MAX_SECONDS),
@@ -608,7 +683,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // skipped — iPod state is "in-between": old track gone,
                     // new not added; the next run's diff sees the missing
                     // iPod entry and re-adds naturally).
-                    commit_pipelined(&transcoder, idx, &db, &mut manifest, &src, deleted, progress, decision_rx)?;
+                    commit_pipelined(&transcoder, idx, &db, &mut manifest, &src, deleted, progress, decision_rx, &mut bytes_written)?;
                     progress.track_done();
                 }
                 Action::Add(src) => {
@@ -620,7 +695,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     );
                     // Add always dispatches a job (see the filter above), so
                     // `take(idx)` always runs here.
-                    commit_pipelined(&transcoder, idx, &db, &mut manifest, &src, true, progress, decision_rx)?;
+                    commit_pipelined(&transcoder, idx, &db, &mut manifest, &src, true, progress, decision_rx, &mut bytes_written)?;
                     progress.track_done();
                 }
                 Action::MetadataOnly { source, entry } => {
@@ -714,6 +789,40 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // channel and die with the process. Their temp files are cleaned up
         // by OS temp-dir housekeeping or the next reconcile pass.
         transcoder.stop();
+
+        // Task 8: end-of-run deferred retry. Runs BEFORE the final commit
+        // below so any tracks it adds land in the same db.write()/manifest
+        // save as everything else — see `retry_deferred`'s doc comment.
+        // Skipped on cancel/pause: the user asked to stop, and free space
+        // hasn't meaningfully changed since the up-front fit pass queried it
+        // moments before the loop started, so a retry would just repeat the
+        // same "doesn't fit" verdict.
+        let final_deferred: Vec<DeferredAlbum> = if !cancelled && !paused && !deferred.is_empty() {
+            retry_deferred(
+                &mount,
+                config,
+                &refalac_version,
+                &db,
+                &mut manifest,
+                &original_adds,
+                deferred,
+                album_tag_of,
+                progress,
+                decision_rx,
+                &mut bytes_written,
+            )?
+        } else {
+            deferred
+        };
+        if !final_deferred.is_empty() {
+            progress.note_skipped_for_space(skipped_for_space(&final_deferred));
+        }
+        if bytes_written > 0 {
+            progress.log(format!(
+                "{} of audio written this run.",
+                crate::ipc::format_bytes_human(bytes_written)
+            ));
+        }
 
         // 6. Final commit. NEITHER is persisted unless we got this far.
         // Also runs after a `cancelled`/`paused` break above so completed
@@ -841,6 +950,139 @@ const RECOVERY_HINT_LINES: &[&str] = &[
     "To recover: re-run with --rebuild-manifest, which will read the iPod's",
     "current DB and create a fresh manifest. Then run normally.",
 ];
+
+// -- Task 8: fit-pass helpers ------------------------------------------
+
+/// Pure budget arithmetic behind the fit pass: free bytes this run's Remove
+/// actions will reclaim, minus a safety reserve — saturating at 0 so a
+/// reserve larger than free+credit reads as "no room" rather than
+/// underflowing. `None` storage (the free-space query failed — unplugged,
+/// permissions, an unqueryable filesystem) means "no budget", which
+/// `fit::plan_fit` treats as fail-open (keep everything; a genuine
+/// out-of-space condition will surface later as a normal iPod-write error).
+/// `pub(crate)` so this can be unit-tested without a real mounted device.
+pub(crate) fn compute_budget(storage: Option<free_space::StorageInfo>, remove_credit: u64) -> Option<u64> {
+    let storage = storage?;
+    let reserve = crate::fit::reserve_bytes(storage.total_bytes);
+    Some(storage.free_bytes.saturating_add(remove_credit).saturating_sub(reserve))
+}
+
+/// Builds the `SkippedForSpace` rollup from a final (post-retry, if any)
+/// deferred-album list.
+pub(crate) fn skipped_for_space(deferred: &[DeferredAlbum]) -> SkippedForSpace {
+    SkippedForSpace {
+        albums: deferred.len(),
+        tracks: deferred.iter().map(|d| d.tracks).sum(),
+        bytes: deferred.iter().map(|d| d.bytes).sum(),
+    }
+}
+
+/// Shared by the three early-return sites (`--dry-run`, interactive
+/// Review's dry-run choice) that need to surface the fit pass's deferral
+/// outcome without running the retry (dry-run writes nothing). No-op when
+/// nothing was deferred.
+fn log_deferred_summary(progress: &Progress, deferred: &[DeferredAlbum]) {
+    if !deferred.is_empty() {
+        progress.log(skipped_for_space(deferred).describe());
+    }
+}
+
+/// Reconstructs the `Add` actions belonging to `deferred` albums from the
+/// full pre-fit Add list, for the end-of-run retry pass. `fit::plan_fit`
+/// only returns kept `Action`s plus a `DeferredAlbum` summary — the dropped
+/// `Action`s themselves aren't retained — so the retry re-derives them here
+/// using the same `album_key`/`album_tag_of` identity as the first pass,
+/// which is what keeps an album's grouping stable across both passes. Pure;
+/// unit-tested without any I/O.
+pub(crate) fn deferred_add_actions(
+    original_adds: &[SourceEntry],
+    deferred: &[DeferredAlbum],
+    album_tag_of: impl Fn(&Path) -> Option<String>,
+) -> Vec<Action> {
+    let deferred_keys: std::collections::HashSet<&str> =
+        deferred.iter().map(|d| d.key.as_str()).collect();
+    original_adds
+        .iter()
+        .filter(|src| {
+            let tag = album_tag_of(&src.path);
+            deferred_keys.contains(crate::fit::album_key(&src.path, tag.as_deref()).as_str())
+        })
+        .cloned()
+        .map(Action::Add)
+        .collect()
+}
+
+/// End-of-run deferred retry (Task 8): after the main apply loop has run,
+/// if the fit pass deferred any albums, re-query free space once and give
+/// them a single second chance — the main loop's Removes may have freed
+/// enough room. Single pass, no loop: whatever `fit::plan_fit` still can't
+/// fit is returned as the final deferred list. Runs BEFORE the run's final
+/// `db.write()`/manifest save (see `run`'s doc comment) so any newly-added
+/// tracks land in the same commit as everything else.
+///
+/// Reuses `commit_pipelined` — the exact same per-track commit/retry/skip
+/// machinery the main loop uses — via a second, small `OrderedTranscoder`
+/// (the main loop's was already `stop()`-ed by the time this runs).
+#[allow(clippy::too_many_arguments)]
+fn retry_deferred(
+    mount: &str,
+    config: &Config,
+    refalac_version: &Option<String>,
+    db: &OwnedDb,
+    manifest: &mut Manifest,
+    original_adds: &[SourceEntry],
+    deferred: Vec<DeferredAlbum>,
+    album_tag_of: impl Fn(&Path) -> Option<String>,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+    bytes_written: &mut u64,
+) -> Result<Vec<DeferredAlbum>> {
+    let candidates = deferred_add_actions(original_adds, &deferred, &album_tag_of);
+    if candidates.is_empty() {
+        return Ok(deferred);
+    }
+
+    // Removes already landed on disk during the main loop, so this fresh
+    // query already reflects any space they reclaimed — no remove credit to
+    // fold in this time (unlike the up-front budget, which had to project it).
+    let storage = free_space::query(Path::new(mount));
+    let budget = compute_budget(storage, 0);
+    let retry_outcome = crate::fit::plan_fit(candidates, budget, &album_tag_of);
+    if retry_outcome.kept.is_empty() {
+        return Ok(retry_outcome.deferred);
+    }
+
+    let total = retry_outcome.kept.len();
+    progress.log(format!("Retrying {total} previously-deferred track(s) that now fit…"));
+
+    let jobs: Vec<(usize, SourceEntry)> = retry_outcome
+        .kept
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, a)| match a {
+            Action::Add(src) => Some((idx, src.clone())),
+            _ => None, // deferred_add_actions only ever produces Adds
+        })
+        .collect();
+    let config_for_workers = config.clone();
+    let refalac_for_workers = refalac_version.clone();
+    let transcoder = OrderedTranscoder::start(
+        jobs,
+        crate::transcode_workers(),
+        crate::PIPELINE_WINDOW,
+        move |src: &SourceEntry| transcode_one(src, &config_for_workers, &refalac_for_workers),
+    );
+
+    for (idx, action) in retry_outcome.kept.into_iter().enumerate() {
+        let Action::Add(src) = action else { continue };
+        progress.track_start(idx + 1, total, format!("ADD {} (retry)", display_path(&src.path)));
+        commit_pipelined(&transcoder, idx, db, manifest, &src, true, progress, decision_rx, bytes_written)?;
+        progress.track_done();
+    }
+    transcoder.stop();
+
+    Ok(retry_outcome.deferred)
+}
 
 /// Run the full MetadataOnly path for one entry: probe + tag-extract +
 /// optional embedded-art extract + libgpod update + recompute source
@@ -1090,6 +1332,7 @@ fn commit_transcoded(
 ///   Retry/Skip/Abort loop around `commit_transcoded`, reusing the same `t`
 ///   on Retry (the transcode already succeeded — only the libgpod add needs
 ///   retrying).
+#[allow(clippy::too_many_arguments)]
 fn commit_pipelined(
     transcoder: &OrderedTranscoder<Transcoded>,
     idx: usize,
@@ -1099,6 +1342,7 @@ fn commit_pipelined(
     commit: bool,
     progress: &Progress,
     decision_rx: &Receiver<Decision>,
+    bytes_written: &mut u64,
 ) -> Result<()> {
     let t = match transcoder.take(idx) {
         Ok(t) => t,
@@ -1114,9 +1358,17 @@ fn commit_pipelined(
         let _ = std::fs::remove_file(&t.temp);
         return Ok(());
     }
+    // Stat before commit_transcoded runs — it removes `t.temp` on success, so
+    // this is the last point the actual on-iPod file size is readable. Task
+    // 8's running tally wants the real transcoded/passthrough size, not the
+    // source FLAC's (which is what fit's budgeting uses as an estimate).
+    let size = std::fs::metadata(&t.temp).map(|m| m.len()).unwrap_or(0);
     loop {
         match commit_transcoded(db, manifest, src, &t) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                *bytes_written += size;
+                return Ok(());
+            }
             Err(e) => match prompt_retry_skip_abort(progress, decision_rx, src, &e)? {
                 PromptOutcome::Retry => continue,
                 PromptOutcome::Skip => {
@@ -1549,6 +1801,112 @@ mod tests {
         assert_eq!(m.tracks[0].ipod_dbid, 111);
         assert!(!m.tracks[0].source_known, "rebuilt entries have no known source");
         assert_eq!(m.last_source_root, None);
+    }
+
+    // -- Task 8: compute_budget ------------------------------------------
+
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn compute_budget_none_storage_is_none() {
+        assert_eq!(compute_budget(None, 1_000), None);
+    }
+
+    #[test]
+    fn compute_budget_underflow_saturates_to_zero() {
+        // 10GB total -> reserve is the 512MB floor (2% of 10GB < 512MB).
+        // free=0, credit=0 -> 0 - 512MB must saturate to 0, not panic/wrap.
+        let storage = free_space::StorageInfo { total_bytes: 10 * GB, free_bytes: 0 };
+        assert_eq!(compute_budget(Some(storage), 0), Some(0));
+    }
+
+    #[test]
+    fn compute_budget_normal_case_is_free_plus_credit_minus_reserve() {
+        let storage = free_space::StorageInfo { total_bytes: 100 * GB, free_bytes: 10 * GB };
+        let remove_credit = 2 * GB;
+        let reserve = crate::fit::reserve_bytes(storage.total_bytes); // 2% of 100GB = 2GB
+        let expected = 10 * GB + remove_credit - reserve;
+        assert_eq!(compute_budget(Some(storage), remove_credit), Some(expected));
+    }
+
+    #[test]
+    fn compute_budget_zero_credit_is_free_minus_reserve() {
+        let storage = free_space::StorageInfo { total_bytes: 100 * GB, free_bytes: 50 * GB };
+        let reserve = crate::fit::reserve_bytes(storage.total_bytes);
+        assert_eq!(compute_budget(Some(storage), 0), Some(50 * GB - reserve));
+    }
+
+    // -- Task 8: deferred_add_actions ------------------------------------
+
+    fn src_entry(path: &str, size: u64) -> SourceEntry {
+        SourceEntry { path: std::path::PathBuf::from(path), mtime: 1_700_000_000, size }
+    }
+
+    fn deferred_album(key: &str, tracks: usize, bytes: u64) -> DeferredAlbum {
+        DeferredAlbum { key: key.to_string(), tracks, bytes }
+    }
+
+    #[test]
+    fn deferred_add_actions_reconstructs_only_deferred_albums() {
+        let original_adds = vec![
+            src_entry("/m/Kept/01.flac", 10),
+            src_entry("/m/Deferred/01.flac", 10),
+            src_entry("/m/Deferred/02.flac", 10),
+        ];
+        let deferred = vec![deferred_album("/m/Deferred", 2, 20)];
+        let actions = deferred_add_actions(&original_adds, &deferred, |_| None);
+        let paths: Vec<_> = actions
+            .iter()
+            .map(|a| match a {
+                Action::Add(s) => s.path.clone(),
+                other => panic!("expected only Add actions, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                std::path::PathBuf::from("/m/Deferred/01.flac"),
+                std::path::PathBuf::from("/m/Deferred/02.flac"),
+            ]
+        );
+    }
+
+    #[test]
+    fn deferred_add_actions_empty_when_nothing_deferred() {
+        let original_adds = vec![src_entry("/m/Kept/01.flac", 10)];
+        let actions = deferred_add_actions(&original_adds, &[], |_| None);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn deferred_add_actions_respects_album_tag_grouping() {
+        // Same identity fit::plan_fit uses: a tag wins over the parent dir.
+        let original_adds = vec![
+            src_entry("/m/dirX/trackA-1.flac", 10),
+            src_entry("/m/dirX/trackA-2.flac", 10),
+            src_entry("/m/dirY/01.flac", 10),
+        ];
+        let deferred = vec![deferred_album("Album Two", 2, 20)];
+        let tag_of = |p: &Path| -> Option<String> {
+            if p.to_string_lossy().contains("trackA") {
+                Some("Album Two".to_string())
+            } else {
+                None
+            }
+        };
+        let actions = deferred_add_actions(&original_adds, &deferred, tag_of);
+        assert_eq!(actions.len(), 2, "only the tagged pair belongs to the deferred album");
+    }
+
+    // -- Task 8: skipped_for_space rollup ---------------------------------
+
+    #[test]
+    fn skipped_for_space_sums_across_albums() {
+        let deferred = vec![deferred_album("A", 3, 100), deferred_album("B", 5, 200)];
+        let rollup = skipped_for_space(&deferred);
+        assert_eq!(rollup.albums, 2);
+        assert_eq!(rollup.tracks, 8);
+        assert_eq!(rollup.bytes, 300);
     }
 }
 

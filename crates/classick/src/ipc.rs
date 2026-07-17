@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Current wire-protocol semver. Bumped per the rules in
 /// `docs/ipc-protocol.md` §1.
-pub const PROTOCOL_VERSION: &str = "1.2.0";
+pub const PROTOCOL_VERSION: &str = "1.3.0";
 
 /// Events emitted from the core to the UI on stdout.
 ///
@@ -80,7 +80,25 @@ pub enum IpcEvent {
         recovery_hints: Vec<String>,
     },
     /// Terminal event. The core closes stdout shortly after. See §4.11.
-    Finish { success: bool },
+    Finish {
+        success: bool,
+        /// Fit-pass (Task 8) deferral rollup: whole albums that didn't fit
+        /// the device's remaining space even after the end-of-run retry.
+        /// Absent when nothing was deferred (all-fit run, or a core older
+        /// than 1.3.0).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        skipped_for_space: Option<SkippedForSpace>,
+        /// Artwork embed/refresh rollup. Always absent until Task 13 wires
+        /// artwork accounting into the apply loop.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artwork: Option<ArtworkSummary>,
+        /// True when Task 4's auto-restore-from-backup path fired this run
+        /// (the iTunesDB failed to parse and was replaced from the session
+        /// backup before the sync proceeded). Omitted (not `false`) on the
+        /// wire when it didn't fire, for old-client compat.
+        #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+        db_restored: bool,
+    },
     /// Terminal event: the sync was gracefully paused (Task 6). Completed
     /// tracks were committed to the iTunesDB + manifest before this was
     /// emitted; the core exits shortly after, same as `finish`. No fields.
@@ -95,6 +113,54 @@ pub struct IpcActionPlanSummary {
     pub metadata_only: usize,
     pub remove: usize,
     pub unchanged: usize,
+}
+
+/// Fit-pass (Task 8) deferral rollup attached to `finish`. Whole-album
+/// granularity mirrors `fit::DeferredAlbum` — `albums`/`tracks`/`bytes` are
+/// sums across every album that still didn't fit after the end-of-run retry.
+/// See `docs/ipc-protocol.md` §4.11.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkippedForSpace {
+    pub albums: usize,
+    pub tracks: usize,
+    pub bytes: u64,
+}
+
+impl SkippedForSpace {
+    /// Human-readable line for TUI/plain-mode output (`progress::run_plain`,
+    /// `apply_event`, and the apply loop's `--dry-run` plan summary). IPC-mode
+    /// UIs render their own copy from the structured fields instead.
+    pub fn describe(&self) -> String {
+        format!(
+            "{} album{} ({}) didn't fit — narrow your selection or free space",
+            self.albums,
+            if self.albums == 1 { "" } else { "s" },
+            format_bytes_human(self.bytes),
+        )
+    }
+}
+
+/// `1.2 GB` / `340 MB` — coarse, human-scale formatting; not used for
+/// anything precision-sensitive. `pub(crate)` so `apply_loop`'s Task-8
+/// bytes-written log line can reuse it.
+pub(crate) fn format_bytes_human(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else {
+        format!("{:.0} MB", b / MB)
+    }
+}
+
+/// Artwork embed/refresh rollup attached to `finish`. Populated by Task 13;
+/// always `None` for now. See `docs/ipc-protocol.md` §4.11.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtworkSummary {
+    pub embedded: usize,
+    pub eligible: usize,
+    pub failed_sources: usize,
 }
 
 /// Commands the UI sends to the core over stdin.
@@ -211,7 +277,16 @@ impl IpcEvent {
             // mirrors it. A fatal failure should emit an `error` event first
             // (so the UI gets the message) and then this `finish` with
             // success: false; the process exits non-zero shortly after.
-            PE::Finish { success } => IpcEvent::Finish { success: *success },
+            //
+            // skipped_for_space/artwork/db_restored are populated on
+            // `Progress` via `note_*` calls during the run (Task 8's fit
+            // pass, Task 4's auto-restore) and read back here unchanged.
+            PE::Finish { success, skipped_for_space, artwork, db_restored } => IpcEvent::Finish {
+                success: *success,
+                skipped_for_space: skipped_for_space.clone(),
+                artwork: artwork.clone(),
+                db_restored: *db_restored,
+            },
             PE::Paused => IpcEvent::Paused,
         })
     }
@@ -363,5 +438,107 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""eta_secs":42"#), "got: {json}");
+    }
+
+    #[test]
+    fn protocol_version_is_1_3_0() {
+        assert_eq!(PROTOCOL_VERSION, "1.3.0");
+    }
+
+    // -- Task 8: Finish gains skipped_for_space / artwork / db_restored ----
+
+    #[test]
+    fn finish_event_omits_new_fields_when_absent() {
+        // Old-client compat: a Finish with nothing new to report must
+        // serialize byte-identical to pre-1.3.0 (no null placeholders).
+        let event = IpcEvent::Finish {
+            success: true,
+            skipped_for_space: None,
+            artwork: None,
+            db_restored: false,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""success":true"#), "got: {json}");
+        assert!(!json.contains("skipped_for_space"), "got: {json}");
+        assert!(!json.contains("artwork"), "got: {json}");
+        assert!(!json.contains("db_restored"), "got: {json}");
+    }
+
+    #[test]
+    fn finish_event_includes_new_fields_when_present() {
+        let event = IpcEvent::Finish {
+            success: true,
+            skipped_for_space: Some(SkippedForSpace {
+                albums: 3,
+                tracks: 40,
+                bytes: 1_234_567,
+            }),
+            artwork: Some(ArtworkSummary {
+                embedded: 10,
+                eligible: 12,
+                failed_sources: 1,
+            }),
+            db_restored: true,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""albums":3"#), "got: {json}");
+        assert!(json.contains(r#""tracks":40"#), "got: {json}");
+        assert!(json.contains(r#""bytes":1234567"#), "got: {json}");
+        assert!(json.contains(r#""embedded":10"#), "got: {json}");
+        assert!(json.contains(r#""eligible":12"#), "got: {json}");
+        assert!(json.contains(r#""failed_sources":1"#), "got: {json}");
+        assert!(json.contains(r#""db_restored":true"#), "got: {json}");
+    }
+
+    #[test]
+    fn finish_event_db_restored_alone_omits_the_option_fields() {
+        // A restore with nothing deferred must not spuriously emit
+        // skipped_for_space/artwork just because db_restored is true.
+        let event = IpcEvent::Finish {
+            success: true,
+            skipped_for_space: None,
+            artwork: None,
+            db_restored: true,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""db_restored":true"#), "got: {json}");
+        assert!(!json.contains("skipped_for_space"), "got: {json}");
+        assert!(!json.contains("artwork"), "got: {json}");
+    }
+
+    #[test]
+    fn from_progress_carries_finish_details_through() {
+        use crate::progress::ProgressEvent;
+        let event = ProgressEvent::Finish {
+            success: false,
+            skipped_for_space: Some(SkippedForSpace {
+                albums: 1,
+                tracks: 2,
+                bytes: 3,
+            }),
+            artwork: None,
+            db_restored: true,
+        };
+        let wire = IpcEvent::from_progress(&event).unwrap();
+        match wire {
+            IpcEvent::Finish { success, skipped_for_space, artwork, db_restored } => {
+                assert!(!success);
+                assert_eq!(skipped_for_space.unwrap().albums, 1);
+                assert!(artwork.is_none());
+                assert!(db_restored);
+            }
+            other => panic!("expected Finish, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skipped_for_space_describe_reads_naturally() {
+        let s = SkippedForSpace { albums: 1, tracks: 8, bytes: 1_200_000_000 };
+        let text = s.describe();
+        assert!(text.starts_with("1 album ("), "got: {text}");
+        assert!(text.contains("didn't fit"), "got: {text}");
+
+        let plural = SkippedForSpace { albums: 3, tracks: 8, bytes: 1_200_000_000 };
+        assert!(plural.describe().starts_with("3 albums ("), "got: {}", plural.describe());
     }
 }
