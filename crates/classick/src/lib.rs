@@ -17,6 +17,18 @@ pub const DISPLAY_NAME: &str = "Classick";
 pub const CHECKPOINT_MAX_TRACKS: usize = 10;
 pub const CHECKPOINT_MAX_SECONDS: u64 = 60;
 
+/// Minimum bytes to hold back below the reported free space when planning
+/// what fits on the device (`fit::reserve_bytes`). FAT32 (the iPod Classic's
+/// filesystem) misbehaves badly when driven to exactly 100% full — libgpod
+/// writes can fail partway through, corrupting the iTunesDB rather than
+/// cleanly rejecting the sync. A fixed floor protects small/near-empty
+/// devices where a fraction-only reserve would round to nearly nothing.
+pub const FIT_RESERVE_MIN_BYTES: u64 = 512 * 1024 * 1024;
+/// Fraction of total device capacity to additionally hold back, on top of
+/// [`FIT_RESERVE_MIN_BYTES`], so large-capacity devices keep a proportional
+/// safety margin rather than always reserving the same fixed floor.
+pub const FIT_RESERVE_FRACTION: f64 = 0.02;
+
 use std::time::Duration;
 
 /// Backoff schedule for transient iPod-write retries (add/copy, delete,
@@ -44,6 +56,7 @@ pub mod config_file;
 pub mod daemon;
 pub mod device_state;
 pub mod ffi;
+pub mod fit;
 pub mod free_space;
 pub mod ipc;
 pub mod ipc_daemon;
