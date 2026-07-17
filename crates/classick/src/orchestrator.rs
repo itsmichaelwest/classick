@@ -63,6 +63,12 @@ pub fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decisio
     if config.backfill_rockbox {
         return apply_loop::backfill_rockbox(&mut config, progress, decision_rx);
     }
+    if config.restore_db_backup {
+        let mount = crate::preflight::resolve_ipod_mount(&config, progress, decision_rx)?;
+        crate::ipod::db::restore_itunesdb_from_backup(std::path::Path::new(&mount))?;
+        progress.log("iTunesDB restored from session backup.".to_string());
+        return Ok(RunOutcome::Completed);
+    }
     apply_loop::run(&mut config, progress, decision_rx)
 }
 

@@ -140,6 +140,13 @@ pub struct Cli {
     /// not re-read.
     #[arg(long, conflicts_with = "backfill_rockbox")]
     pub scan_library: bool,
+
+    /// Restore iPod_Control\iTunes\iTunesDB from the session backup
+    /// (iTunesDB.classick-backup) written at the start of the last sync,
+    /// then exit. A manual escape hatch for a live DB that failed to parse
+    /// and wasn't auto-healed. Requires --ipod (or auto-detect).
+    #[arg(long, conflicts_with_all = ["backfill_rockbox", "scan_library"])]
+    pub restore_db_backup: bool,
 }
 
 #[cfg(test)]
@@ -308,5 +315,24 @@ mod tests {
         .unwrap();
         assert!(cli.rockbox_compat);
         assert!(cli.backfill_rockbox);
+    }
+
+    #[test]
+    fn parses_restore_db_backup_flag() {
+        let cli = Cli::try_parse_from(["classick", "--restore-db-backup"]).unwrap();
+        assert!(cli.restore_db_backup);
+        let cli = Cli::try_parse_from(["classick"]).unwrap();
+        assert!(!cli.restore_db_backup);
+    }
+
+    #[test]
+    fn restore_db_backup_conflicts_with_backfill_rockbox_and_scan_library() {
+        assert!(
+            Cli::try_parse_from(["classick", "--restore-db-backup", "--backfill-rockbox"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["classick", "--restore-db-backup", "--scan-library"]).is_err()
+        );
     }
 }

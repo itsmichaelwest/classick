@@ -32,6 +32,7 @@ pub struct Config {
     pub rockbox_compat: bool,
     pub backfill_rockbox: bool,
     pub scan_library: bool,
+    pub restore_db_backup: bool,
 }
 
 impl Config {
@@ -148,6 +149,7 @@ pub fn resolve_with(
         rockbox_compat,
         backfill_rockbox: cli.backfill_rockbox,
         scan_library: cli.scan_library,
+        restore_db_backup: cli.restore_db_backup,
     })
 }
 
@@ -248,6 +250,7 @@ mod tests {
         assert!(!config.force_reencode);
         assert!(!config.rockbox_compat);
         assert!(!config.backfill_rockbox);
+        assert!(!config.restore_db_backup);
     }
 
     #[test]
@@ -256,6 +259,20 @@ mod tests {
         let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
         assert!(cfg.scan_library);
     }
+
+    #[test]
+    fn restore_db_backup_threads_through_resolve() {
+        let cli = Cli::try_parse_from([
+            "classick",
+            "--source",
+            r"D:\m",
+            "--restore-db-backup",
+        ])
+        .unwrap();
+        let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
+        assert!(cfg.restore_db_backup);
+    }
+
 
     #[test]
     fn cli_encoder_wins_over_persisted_encoder() {
