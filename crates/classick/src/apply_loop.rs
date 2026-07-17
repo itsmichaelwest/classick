@@ -130,6 +130,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     let serial = device_state::sanitize_serial(&identity.firewire_guid);
 
     let sources = preflight::walk_source(config, progress, decision_rx)?;
+    guard_nonempty_walk(&sources, &config.source)?;
     // The sync subprocess never receives the daemon's in-memory IpodIdentity
     // (no new IPC command for it — see selection design) so, same as
     // `rockbox_compat`, re-read the persisted config here to learn whether
@@ -1704,6 +1705,24 @@ pub(crate) fn build_rebuild_manifest_from_handles(handles: Vec<TrackHandle>, ser
     Manifest { version: 1, ipod_serial: Some(serial.to_string()), last_source_root: None, tracks }
 }
 
+/// Guard against a raw source walk that found zero audio files. An empty
+/// walk almost always means something's wrong (unmounted NAS share, typo'd
+/// path, wrong drive letter) — silently proceeding would let the diff read
+/// it as "the user emptied their library" and plan a Remove for every track
+/// on the iPod. Runs on the RAW walk result, BEFORE selection filtering, so
+/// a selection that legitimately excludes everything (an explicit user
+/// action) is unaffected — see `selection::apply_to_sources`.
+pub(crate) fn guard_nonempty_walk(sources: &[SourceEntry], root: &Path) -> Result<()> {
+    if sources.is_empty() {
+        anyhow::bail!(
+            "Source library at {} contains no audio files — not syncing. \
+             If you meant to empty this iPod, use Replace Library.",
+            root.display()
+        );
+    }
+    Ok(())
+}
+
 /// True if `manifest.ipod_serial` names a specific device (i.e. is `Some`)
 /// that differs from the currently-connected, already-sanitized `serial`.
 /// A `None` `ipod_serial` — a fresh manifest, or a legacy manifest that
@@ -1725,6 +1744,58 @@ mod tests {
     fn encoder_str_maps_choices_to_manifest_strings() {
         assert_eq!(encoder_str(EncoderChoice::Ffmpeg), "ffmpeg");
         assert_eq!(encoder_str(EncoderChoice::Refalac), "refalac");
+    }
+
+    fn guard_test_entry(path: &str) -> SourceEntry {
+        SourceEntry { path: std::path::PathBuf::from(path), mtime: 1, size: 10 }
+    }
+
+    /// A raw walk that found zero audio files must never be treated as "the
+    /// user wants an empty iPod" — that's a removal plan in disguise (e.g. a
+    /// disconnected NAS share, a typo'd source path). It's a hard error.
+    #[test]
+    fn guard_nonempty_walk_rejects_empty_walk() {
+        let err = guard_nonempty_walk(&[], Path::new("/m/music")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("contains no audio files"), "got: {msg}");
+        assert!(msg.contains("/m/music"), "got: {msg}");
+    }
+
+    #[test]
+    fn guard_nonempty_walk_allows_nonempty_walk() {
+        let sources = vec![guard_test_entry("/m/music/a.flac")];
+        assert!(guard_nonempty_walk(&sources, Path::new("/m/music")).is_ok());
+    }
+
+    /// The guard runs on the RAW walk result, before selection filtering.
+    /// A selection that legitimately excludes every track (an explicit user
+    /// action) must still proceed — it's `apply_to_sources`/`filter`'s job to
+    /// produce an empty Vec here, not the guard's job to reject it.
+    #[test]
+    fn guard_passes_raw_walk_even_when_selection_would_filter_everything() {
+        let sources = vec![guard_test_entry("/m/music/a.flac")];
+        // Guard sees the raw, non-empty walk result and allows it through.
+        assert!(guard_nonempty_walk(&sources, Path::new("/m/music")).is_ok());
+
+        // Downstream, selection filtering to zero is still allowed to happen —
+        // it never reaches (or re-triggers) the guard.
+        let mut index = crate::library_index::LibraryIndex::empty(std::path::PathBuf::from("/m/music"));
+        let sel = crate::selection::Selection {
+            version: 1,
+            mode: crate::selection::SelectionMode::Include,
+            rules: vec![crate::selection::SelectionRule::Artist { name: "Nobody".into() }],
+        };
+        let (kept, _dirty) = crate::selection::filter(sources, &sel, &mut index, |_| {
+            Ok(crate::library_index::TrackTags {
+                artist: "Someone Else".into(),
+                album_artist: String::new(),
+                album: "Album".into(),
+                genre: "Genre".into(),
+                title: String::new(),
+                duration_ms: 0,
+            })
+        });
+        assert!(kept.is_empty(), "selection filtering everything out must still be allowed");
     }
 
     /// source_format_from_probe pulls codec_name from the first audio stream
