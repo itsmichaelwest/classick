@@ -529,10 +529,19 @@ fn parse_check(path: &Path) -> Result<()> {
 /// disk is touched. If the backup is missing or itself unparseable, this
 /// returns `Err` and the live (corrupt) DB is left exactly as found — we
 /// never destroy the only copy of a DB on the strength of an unverified
-/// replacement. Only once the backup is confirmed good do we rename the
-/// live DB aside to `iTunesDB.corrupt` (replacing any prior aside) and
-/// copy the backup into place via the same `.tmp` + atomic-rename pattern
-/// `backup_itunesdb` uses.
+/// replacement. Only once the backup is confirmed good do we proceed with
+/// the restore sequence.
+///
+/// The sequence is designed to minimize the crash window where no live DB
+/// exists (required by device-detection logic):
+///   1. Copy backup → `.tmp` (same pattern as `backup_itunesdb`)
+///   2. Rename live DB → `iTunesDB.corrupt` (replace-existing)
+///   3. Rename `.tmp` → live `iTunesDB`
+///
+/// If step 1 or 3 fails, clean up the `.tmp` file. If a crash occurs after
+/// step 2 but before step 3, the fully-validated `.tmp` and intact backup
+/// sit next to the `.corrupt` aside, allowing safe manual recovery on the
+/// next run.
 pub fn restore_itunesdb_from_backup(ipod_mount: &Path) -> Result<()> {
     let backup = ipod_mount
         .join("iPod_Control")
@@ -552,6 +561,14 @@ pub fn restore_itunesdb_from_backup(ipod_mount: &Path) -> Result<()> {
         .join("iPod_Control")
         .join("iTunes")
         .join(ITUNESDB_CORRUPT_ASIDE_NAME);
+    let tmp = live.with_extension("tmp");
+
+    // Step 1: copy backup → tmp (same tmp naming pattern already used).
+    std::fs::copy(&backup, &tmp).with_context(|| {
+        format!("failed to copy backup {} -> {}", backup.display(), tmp.display())
+    })?;
+
+    // Step 2: rename live DB → corrupt aside (replace-existing).
     if live.exists() {
         std::fs::rename(&live, &aside).with_context(|| {
             format!(
@@ -562,13 +579,13 @@ pub fn restore_itunesdb_from_backup(ipod_mount: &Path) -> Result<()> {
         })?;
     }
 
-    let tmp = live.with_extension("tmp");
-    std::fs::copy(&backup, &tmp).with_context(|| {
-        format!("failed to copy backup {} -> {}", backup.display(), tmp.display())
-    })?;
-    std::fs::rename(&tmp, &live).with_context(|| {
-        format!("failed to rename restored DB {} -> {}", tmp.display(), live.display())
-    })?;
+    // Step 3: rename tmp → live (atomic on POSIX + Windows 10+).
+    if let Err(e) = std::fs::rename(&tmp, &live) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| {
+            format!("failed to rename restored DB {} -> {}", tmp.display(), live.display())
+        });
+    }
 
     Ok(())
 }
