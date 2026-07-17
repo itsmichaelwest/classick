@@ -1,5 +1,10 @@
 # ipod-sync IPC protocol v1.3.0
 
+> This title's version (`1.3.0`) is the **subprocess** protocol (stdin/stdout,
+> `--ipc-mode`) described below. The separate **daemon** protocol (named-pipe/
+> Unix-socket, UI ↔ daemon) is currently at **`1.6.0`** — see "Daemon v1.6.0"
+> further down this document for its commands/events.
+
 Newline-delimited JSON over stdin/stdout, UTF-8, custom typed-envelope.
 Every message is a single-line JSON object with a `type` discriminator
 field; field names are `snake_case`. Each line is exactly one message.
