@@ -1,5 +1,6 @@
 pub mod db;
 pub mod device;
+pub mod device_playlists;
 pub mod layout;
 #[cfg(target_os = "macos")]
 pub mod macos_iokit;

@@ -12,6 +12,8 @@ pub const ITUNES: &str = "iTunes";
 pub const SYSINFO: &str = "SysInfo";
 pub const ITUNES_DB: &str = "iTunesDB";
 pub const PLAY_COUNTS_BAK: &str = "Play Counts.bak";
+pub const CLASSICK: &str = "classick";
+pub const PLAYLISTS: &str = "playlists";
 
 /// `<mount>\iPod_Control\Device\SysInfo` — the flat-text key/value file we
 /// read FirewireGuid + ModelNumStr from. Present on every iPod we support.
@@ -31,6 +33,16 @@ pub fn itunes_db_path(mount: &Path) -> PathBuf {
 /// removes this file before each `itdb_write`.
 pub fn play_counts_bak_path(mount: &Path) -> PathBuf {
     mount.join(IPOD_CONTROL).join(ITUNES).join(PLAY_COUNTS_BAK)
+}
+
+/// `<mount>\iPod_Control\classick\playlists\` — the on-device mirror of the
+/// host's playlist store (Task 6). Not read by libgpod or the Apple/Rockbox
+/// firmware; purely a Classick-to-Classick backup channel so a fresh
+/// install (or a different machine) can adopt playlists back from a
+/// previously-synced iPod. See `device_playlists::mirror_to_ipod` /
+/// `adopt_from_ipod`.
+pub fn playlists_mirror_dir(mount: &Path) -> PathBuf {
+    mount.join(IPOD_CONTROL).join(CLASSICK).join(PLAYLISTS)
 }
 
 /// Canonical "is this a usable iPod mount?" predicate. Requires BOTH the

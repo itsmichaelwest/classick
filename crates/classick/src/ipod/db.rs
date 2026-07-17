@@ -479,6 +479,148 @@ pub fn wipe_all_tracks(db: &OwnedDb) -> Result<usize> {
     Ok(count)
 }
 
+/// List every playlist in the DB, in on-disk order (a playlist's position
+/// is itself meaningful — the iPod firmware shows playlists in this order),
+/// as `(name, is_mpl)` pairs. `is_mpl` is what callers MUST check before
+/// removing or mutating anything derived from this list — the master
+/// playlist is never one Classick manages. A playlist whose `name` pointer
+/// is NULL (malformed/foreign DB state) reports an empty string rather than
+/// dereferencing a null `CStr`.
+pub fn list_playlists(db: &OwnedDb) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    unsafe {
+        let mut node = (*db.as_ptr()).playlists;
+        while !node.is_null() {
+            let pl = (*node).data as *mut ffi::Itdb_Playlist;
+            if !pl.is_null() {
+                let name = if (*pl).name.is_null() {
+                    String::new()
+                } else {
+                    CStr::from_ptr((*pl).name).to_string_lossy().into_owned()
+                };
+                out.push((name, ffi::itdb_playlist_is_mpl(pl) != 0));
+            }
+            node = (*node).next;
+        }
+    }
+    out
+}
+
+/// Find-or-create the playlist named `name` and make its membership exactly
+/// `dbids`, in order. Used by `device_playlists::reconcile` — this function
+/// itself does no bookkeeping of WHICH playlists Classick manages (that's
+/// the caller's job via the `managed_playlists.json` record); it just makes
+/// one named playlist's membership match `dbids`.
+///
+/// # Failure paths
+/// - `name` contains an interior NUL byte: `Err`, nothing touched (can't
+///   even form the `CString` to look it up).
+/// - `itdb_playlist_by_name` resolves `name` to the iPod's master playlist:
+///   `Err`, nothing touched. Guards against a Classick-managed playlist
+///   name colliding with however the device's MPL happens to be titled —
+///   overwriting the MPL's membership would corrupt the Songs view.
+/// - `itdb_playlist_new` returns NULL (OOM or a libgpod-internal failure):
+///   `Err`, nothing touched.
+/// - A `dbid` in `dbids` has no matching track currently in the DB (stale
+///   reference — e.g. the track was removed since the manifest join that
+///   produced `dbids` ran): that one reference is skipped with
+///   `tracing::warn!` and the rest of the call proceeds normally. One bad
+///   reference should not sink an otherwise-good playlist.
+pub fn ensure_playlist(db: &OwnedDb, name: &str, dbids: &[u64]) -> Result<()> {
+    let name_c = CString::new(name)
+        .map_err(|_| anyhow!("playlist name contains interior NUL byte: {name:?}"))?;
+    unsafe {
+        let mut pl = ffi::itdb_playlist_by_name(db.as_ptr(), name_c.as_ptr() as *mut _);
+        if pl.is_null() {
+            pl = ffi::itdb_playlist_new(name_c.as_ptr(), 0);
+            if pl.is_null() {
+                return Err(anyhow!("itdb_playlist_new returned NULL for {name:?}"));
+            }
+            ffi::itdb_playlist_add(db.as_ptr(), pl, -1);
+        }
+        if ffi::itdb_playlist_is_mpl(pl) != 0 {
+            return Err(anyhow!(
+                "refusing to manage playlist {name:?}: itdb_playlist_by_name resolved it to \
+                 the master playlist"
+            ));
+        }
+
+        // Build the dbid -> track pointer map once per call (a single pass
+        // over the DB's track GList) rather than re-walking the full track
+        // list per member via `find_track_by_dbid` — O(tracks + members)
+        // instead of O(tracks * members).
+        let mut track_by_dbid: std::collections::HashMap<u64, *mut ffi::Itdb_Track> =
+            std::collections::HashMap::new();
+        let mut tnode = (*db.as_ptr()).tracks;
+        while !tnode.is_null() {
+            let t = (*tnode).data as *mut ffi::Itdb_Track;
+            if !t.is_null() {
+                track_by_dbid.insert((*t).dbid as u64, t);
+            }
+            tnode = (*tnode).next;
+        }
+
+        // Collect current members into a Vec before removing any — mutating
+        // while walking the GList frees nodes out from under the walk (same
+        // hazard `wipe_all_tracks` documents for the DB's tracks GList).
+        let mut members: Vec<*mut ffi::Itdb_Track> = Vec::new();
+        let mut mnode = (*pl).members;
+        while !mnode.is_null() {
+            let t = (*mnode).data as *mut ffi::Itdb_Track;
+            if !t.is_null() {
+                members.push(t);
+            }
+            mnode = (*mnode).next;
+        }
+        for t in members {
+            ffi::itdb_playlist_remove_track(pl, t);
+        }
+
+        for dbid in dbids {
+            match track_by_dbid.get(dbid) {
+                Some(&t) => {
+                    ffi::itdb_playlist_add_track(pl, t, -1);
+                }
+                None => {
+                    tracing::warn!(
+                        "ensure_playlist({name:?}): dbid {dbid} not found in DB; skipping"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove the playlist named `name`, if present.
+///
+/// # Failure paths
+/// - No playlist named `name` exists: `Ok(false)` — idempotent, matching
+///   `delete_track`'s "already gone" semantics; a previous partial run or a
+///   user's own deletion isn't an error.
+/// - `name` contains an interior NUL byte: `Err`, nothing touched.
+/// - `name` resolves to the iPod's master playlist: `Err`, nothing
+///   touched — never let a name collision wipe the Songs view.
+pub fn remove_playlist_by_name(db: &OwnedDb, name: &str) -> Result<bool> {
+    let name_c = CString::new(name)
+        .map_err(|_| anyhow!("playlist name contains interior NUL byte: {name:?}"))?;
+    unsafe {
+        let pl = ffi::itdb_playlist_by_name(db.as_ptr(), name_c.as_ptr() as *mut _);
+        if pl.is_null() {
+            return Ok(false);
+        }
+        if ffi::itdb_playlist_is_mpl(pl) != 0 {
+            return Err(anyhow!(
+                "refusing to remove playlist {name:?}: itdb_playlist_by_name resolved it to \
+                 the master playlist"
+            ));
+        }
+        // Frees the Itdb_Playlist and unlinks it from db.playlists.
+        ffi::itdb_playlist_remove(pl);
+    }
+    Ok(true)
+}
+
 /// File name (under `iPod_Control\iTunes\`) we copy `iTunesDB` to
 /// before each sync session, providing a known-good restore point if
 /// the sync crashes mid-write and corrupts the live DB.

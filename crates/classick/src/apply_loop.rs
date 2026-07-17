@@ -5,7 +5,7 @@
 //! and apply together.
 
 use anyhow::{anyhow, Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -154,6 +154,25 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         crate::device_config::DeviceSettings::load_or_migrate(&serial, &global_for_device_settings);
     config.rockbox_compat = effective_rockbox(config.rockbox_compat_cli_flag, &device_settings);
 
+    // Task 6: resolve the on-device playlist-mirror paths once, up front —
+    // reused both for the session-start adopt right below and for the
+    // mirror write after this run's `db.write()` (see the "Final commit"
+    // section further down). Resolution failure (no resolvable config dir)
+    // leaves both as `None`; every downstream use degrades to a no-op
+    // rather than failing the sync — playlist mirroring is a convenience,
+    // not core sync machinery.
+    let playlist_store_root = crate::playlist::PlaylistStore::default_root().ok();
+    let device_subscriptions_file = device_state::device_subscriptions_path(&serial).ok();
+    if let (Some(root), Some(subs)) = (&playlist_store_root, &device_subscriptions_file) {
+        // Runs before anything else this session reads the host playlist
+        // store or this device's subscriptions.json (the sync_set/store
+        // load below, and `subscriptions` a few lines down) — so an
+        // adoption here is visible to the rest of THIS run, not just the
+        // next one. See `device_playlists::adopt_from_ipod`'s doc comment
+        // for the "host store empty AND device mirror non-empty" gate.
+        crate::ipod::device_playlists::adopt_from_ipod(Path::new(&mount), root, subs);
+    }
+
     let sources = preflight::walk_source(config, progress, decision_rx)?;
     guard_nonempty_walk(&sources, &config.source)?;
     // The sync subprocess never receives the daemon's in-memory IpodIdentity
@@ -181,10 +200,21 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     let selection = crate::selection::effective_selection_path(persisted_ipod_identity.as_ref())
         .map(|p| crate::selection::load_or_all(&p))
         .unwrap_or_else(|_| crate::selection::Selection::all());
-    let subscriptions = device_state::device_subscriptions_path(&serial)
-        .map(|p| crate::device_config::Subscriptions::load_or_default(&p))
+    let subscriptions = device_subscriptions_file
+        .as_ref()
+        .map(|p| crate::device_config::Subscriptions::load_or_default(p))
         .unwrap_or_default();
     let mut effective_set: Option<crate::sync_set::EffectiveSet> = None;
+    // Task 6: desired on-device playlists as `(NAME, resolved source paths)`
+    // — `EffectiveSet::playlist_tracks` carries slugs (Task 5's join key
+    // against `Subscriptions`), but the spec wants the on-device playlist
+    // TITLE, so each slug is resolved back to its `Playlist::name()` here,
+    // while `store` is still in scope. `None` (rather than `Some(vec![])`)
+    // when the playlist store itself couldn't be opened this run — that's
+    // "unknown", not "user wants zero playlists", so the reconcile call
+    // near the final commit skips entirely rather than deleting every
+    // previously-managed playlist over a transient store-open failure.
+    let mut desired_playlists_by_name: Option<Vec<(String, Vec<PathBuf>)>> = None;
     let sources = match crate::playlist::PlaylistStore::default_root().and_then(crate::playlist::PlaylistStore::open) {
         Ok(store) => {
             let effective = crate::sync_set::compute(
@@ -204,6 +234,24 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 effective.sources.len(),
                 subscriptions.playlists.len(),
             ));
+            let mut names = Vec::with_capacity(effective.playlist_tracks.len());
+            for (slug, paths) in &effective.playlist_tracks {
+                match store.load(slug) {
+                    Ok(Some(pl)) => names.push((pl.name().to_string(), paths.clone())),
+                    // Both cases below are unexpected here: `slug` only
+                    // reached `playlist_tracks` because `sync_set::compute`
+                    // just loaded it successfully. Treat as a race (deleted
+                    // between then and now) — skip the playlist for THIS
+                    // run's device reconcile rather than failing the sync;
+                    // the next run will naturally drop it (no longer
+                    // desired) or pick it back up if it reappears.
+                    Ok(None) => tracing::warn!(
+                        "device-playlists: '{slug}' vanished from the store between sync_set::compute and now; skipping"
+                    ),
+                    Err(e) => tracing::warn!("device-playlists: failed to re-load '{slug}' for its name: {e:#}"),
+                }
+            }
+            desired_playlists_by_name = Some(names);
             let sources = effective.sources.clone();
             effective_set = Some(effective);
             sources
@@ -215,7 +263,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
             })
         }
     };
-    let _ = &effective_set; // stashed for Task 6 (device-playlist reconcile)
+    let _ = &effective_set; // sources + missing/error counts already consumed above
     // One-time move of the legacy flat manifest.json into the per-device
     // trust-package layout; a no-op once migrated. `config.manifest_path`
     // keeps meaning "the legacy/root path" (still test-overridable) — the
@@ -962,6 +1010,50 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
             ));
         }
 
+        // Task 6: reconcile Classick-managed iTunesDB playlists. Runs AFTER
+        // the track loop (every dbid a desired playlist might reference has
+        // already landed in the in-memory DB, including this run's own new
+        // Adds) and BEFORE the final `db.write()` below, so playlist
+        // creates/updates/removes land in the SAME commit as the track
+        // changes — no separate write, no window where tracks exist on the
+        // device but playlists don't yet reflect them (or vice versa).
+        //
+        // `desired_playlists_by_name` is `None` when the playlist store
+        // couldn't be opened earlier this run (see where it's built,
+        // above) — skip the reconcile entirely rather than pass `desired =
+        // []`, which would read as "the user wants zero playlists" and
+        // remove every previously-managed one over what's really just a
+        // transient store-open failure.
+        if let Some(desired_by_name) = &desired_playlists_by_name {
+            let dbid_by_source_path: std::collections::HashMap<&Path, u64> = manifest
+                .tracks
+                .iter()
+                .map(|e| (e.source_path.as_path(), e.ipod_dbid))
+                .collect();
+            let desired: Vec<(String, Vec<u64>)> = desired_by_name
+                .iter()
+                .map(|(name, paths)| {
+                    let dbids: Vec<u64> = paths
+                        .iter()
+                        .filter_map(|p| dbid_by_source_path.get(p.as_path()).copied())
+                        .collect();
+                    (name.clone(), dbids)
+                })
+                .collect();
+            match crate::ipod::device_playlists::reconcile(&db, &desired, &serial) {
+                Ok(stats) if stats.created + stats.updated + stats.removed > 0 => {
+                    progress.log(format!(
+                        "playlists: {} created, {} updated, {} removed",
+                        stats.created, stats.updated, stats.removed
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(e.context("reconcile Classick-managed iTunesDB playlists"));
+                }
+            }
+        }
+
         // 6. Final commit. NEITHER is persisted unless we got this far.
         // Also runs after a `cancelled`/`paused` break above so completed
         // tracks get a coherent final flush (no orphan pile-up under
@@ -969,6 +1061,15 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // if the last checkpoint just fired, this re-writes the same state.
         progress.log("Writing iPod DB...");
         db.write()?;
+        // Task 6: mirror the host playlist store + this device's
+        // subscriptions.json onto the iPod, now that the DB write above
+        // confirms the reconciled playlists (and the tracks they
+        // reference) are actually persisted. Best-effort — see
+        // `device_playlists::mirror_to_ipod`'s doc comment; a mirror
+        // failure never fails an otherwise-successful sync.
+        if let (Some(root), Some(subs)) = (&playlist_store_root, &device_subscriptions_file) {
+            crate::ipod::device_playlists::mirror_to_ipod(Path::new(&mount), root, subs);
+        }
         progress.log("Writing manifest...");
         // Stamp the current source root onto the manifest so the next run's
         // source-change safeguard has something to compare against.

@@ -107,6 +107,20 @@ pub fn artwork_dirty_marker_path_in(root: &Path, serial: &str) -> Result<PathBuf
     Ok(device_dir_in(root, serial)?.join("artwork-dirty"))
 }
 
+/// Path to a device's `managed_playlists.json` — the record of on-device
+/// playlist names Classick currently manages (see
+/// `ipod::device_playlists::reconcile`'s doc comment for why managed
+/// identity is recorded here rather than inferred from playlist names),
+/// creating the device dir on demand.
+pub fn managed_playlists_path(serial: &str) -> Result<PathBuf> {
+    Ok(device_dir(serial)?.join("managed_playlists.json"))
+}
+
+/// Test/override variant of [`managed_playlists_path`].
+pub fn managed_playlists_path_in(root: &Path, serial: &str) -> Result<PathBuf> {
+    Ok(device_dir_in(root, serial)?.join("managed_playlists.json"))
+}
+
 /// One-time migration of the legacy flat `manifest.json` into the per-device
 /// layout. If `legacy_path` exists and the per-device manifest does not,
 /// moves it there (rename, falling back to copy+delete across filesystems).
@@ -210,6 +224,10 @@ mod tests {
         let settings = device_settings_path_in(&root, "0xABC").unwrap();
         assert_eq!(settings, root.join("devices").join("ABC").join("settings.json"));
         assert!(settings.parent().unwrap().is_dir(), "device_dir is created on demand");
+
+        let managed = managed_playlists_path_in(&root, "0xABC").unwrap();
+        assert_eq!(managed, root.join("devices").join("ABC").join("managed_playlists.json"));
+        assert!(managed.parent().unwrap().is_dir(), "device_dir is created on demand");
     }
 
     #[test]
