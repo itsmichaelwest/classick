@@ -77,6 +77,7 @@ pub mod scan;
 pub mod scsi_inquiry;
 pub mod selection;
 pub mod source;
+pub mod sync_set;
 pub mod sysinfo_extended;
 pub mod tags;
 pub mod transcode;

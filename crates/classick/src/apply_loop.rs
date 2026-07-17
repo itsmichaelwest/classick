@@ -168,12 +168,54 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         .flatten()
         .and_then(|c| c.ipod_identity)
         .filter(|id| device_state::sanitize_serial(&id.serial) == serial);
-    let sources = crate::selection::apply_to_sources(
-        sources,
-        &config.source,
-        persisted_ipod_identity.as_ref(),
-        |msg| progress.log(msg),
-    );
+    // Task 5 (sync_set): device content = scope selection ∪ subscribed
+    // playlists. `library_idx` is loaded once here (moved up from the fit
+    // pass below, which reuses this same value by reference) since sync_set
+    // needs it too. `sources` (the walk) is the existence oracle for
+    // playlist tracks — see `sync_set::compute`'s doc comment.
+    let library_idx: Option<library_index::LibraryIndex> = library_index::default_index_path()
+        .ok()
+        .map(|p| library_index::load_or_empty(&p, &config.source));
+    let index_for_sync_set =
+        library_idx.clone().unwrap_or_else(|| library_index::LibraryIndex::empty(config.source.clone()));
+    let selection = crate::selection::effective_selection_path(persisted_ipod_identity.as_ref())
+        .map(|p| crate::selection::load_or_all(&p))
+        .unwrap_or_else(|_| crate::selection::Selection::all());
+    let subscriptions = device_state::device_subscriptions_path(&serial)
+        .map(|p| crate::device_config::Subscriptions::load_or_default(&p))
+        .unwrap_or_default();
+    let mut effective_set: Option<crate::sync_set::EffectiveSet> = None;
+    let sources = match crate::playlist::PlaylistStore::default_root().and_then(crate::playlist::PlaylistStore::open) {
+        Ok(store) => {
+            let effective = crate::sync_set::compute(
+                sources, &selection, &subscriptions, &store, &index_for_sync_set, &config.source,
+            );
+            for (slug, err) in &effective.playlist_errors {
+                progress.log(format!("playlist '{slug}': {err}"));
+            }
+            if effective.missing_playlist_tracks > 0 {
+                progress.log(format!(
+                    "playlists: {} track(s) referenced but not found in the source walk",
+                    effective.missing_playlist_tracks
+                ));
+            }
+            progress.log(format!(
+                "sync set: {} source track(s) ({} playlist(s) subscribed)",
+                effective.sources.len(),
+                subscriptions.playlists.len(),
+            ));
+            let sources = effective.sources.clone();
+            effective_set = Some(effective);
+            sources
+        }
+        Err(e) => {
+            tracing::warn!("playlists: cannot open playlist store ({e:#}); syncing scope selection only");
+            crate::selection::apply_to_sources(sources, &config.source, persisted_ipod_identity.as_ref(), |msg| {
+                progress.log(msg)
+            })
+        }
+    };
+    let _ = &effective_set; // stashed for Task 6 (device-playlist reconcile)
     // One-time move of the legacy flat manifest.json into the per-device
     // trust-package layout; a no-op once migrated. `config.manifest_path`
     // keeps meaning "the legacy/root path" (still test-overridable) — the
@@ -238,12 +280,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // run partway through an album. Budget = free bytes + this run's Remove
     // actions' reclaimed space - a safety reserve (fit::reserve_bytes); see
     // `compute_budget`. `library_idx` is a stat-cache read (never a rescan)
-    // done once here and reused, by reference, for the end-of-run retry
-    // below — `album_tag_of` is `Copy` (captures only `&library_idx`), so
-    // passing it into `fit::plan_fit` doesn't consume it.
-    let library_idx: Option<library_index::LibraryIndex> = library_index::default_index_path()
-        .ok()
-        .map(|p| library_index::load_or_empty(&p, &config.source));
+    // loaded once above (sync_set needs it too) and reused, by reference,
+    // for the end-of-run retry below — `album_tag_of` is `Copy` (captures
+    // only `&library_idx`), so passing it into `fit::plan_fit` doesn't
+    // consume it.
     let album_tag_of = |path: &Path| -> Option<String> {
         library_idx.as_ref()?.files.get(path).map(|t| t.album.clone())
     };
