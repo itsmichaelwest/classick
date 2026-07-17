@@ -1092,7 +1092,7 @@ replace, matching how `backfill_rockbox` is recorded.
 ## Daemon v1.6.0 — Playlist CRUD, per-device config, device preview (2026-07-18)
 
 The daemon now emits `hello` with `protocol_version = "1.6.0"`. Purely
-additive over v1.5.0: seven new commands, three new events, and a
+additive over v1.5.0: seven new commands, four new events, and a
 deprecation note (no removed/changed fields) for `get_selection`/
 `save_selection`/`custom_selection`. See `crates/classick/src/playlist.rs`,
 `playlist_rules.rs`, `device_config.rs`, and `sync_set.rs` for the
@@ -1103,7 +1103,7 @@ host-side types these wire shapes mirror.
 | Type | Fields | Behavior |
 |---|---|---|
 | `list_playlists` | (none) | Replies `playlists_update`: every playlist in the store. |
-| `get_playlist` | `slug` | Replies `playlists_update`, filtered to the one matching `slug` (an empty `playlists` list if no such playlist exists) — reuses the list event rather than introducing a single-playlist one. |
+| `get_playlist` | `slug` | Replies `playlist_detail`: that playlist's full content (track list or rule set), for the editor. `error` is set instead when the slug doesn't exist, the store can't be opened, or the on-disk file fails to parse. |
 | `save_playlist` | `playlist` (a `PlaylistPayload`, below) | Create (absent `playlist.slug`) or replace (present `playlist.slug`) a playlist; persists atomically. No direct reply; broadcasts a fresh `playlists_update` to every client. |
 | `delete_playlist` | `slug` | Delete a playlist by slug; no-op (still broadcasts) if the slug doesn't exist. No direct reply; broadcasts a fresh `playlists_update`. |
 | `get_device_config` | `serial` | Replies `device_config_update` for that device: its resolved selection + subscriptions + settings. Never fails — an unknown `serial` resolves to each part's default. |
@@ -1145,8 +1145,17 @@ of the wire contract):
 | Type | Fields |
 |---|---|
 | `playlists_update` | `playlists[]` — `{slug, name, kind, tracks, bytes, error?}`. `kind` is `"manual"` \| `"smart"`. `tracks`/`bytes` are computed against the **cached library index** (never a walk): manual playlists resolve their source-relative tracks against the index (an entry the index doesn't know about is dropped, same "oracle" idea as `sync_set::compute` but index- instead of walk-backed); smart playlists evaluate their rules directly against the index. Sorted by `slug`. A playlist FILE the store failed to parse still surfaces here — named from its filename, `tracks`/`bytes` `0`, `error` set to the parse failure — instead of silently vanishing from the list. |
+| `playlist_detail` | `slug`, `name?`, `kind?` (`"manual"` \| `"smart"`), `tracks?` (`string[]`, manual only), `rules?` (a `SmartRules` object, smart only), `error?`. Reply to `get_playlist`. On success `name`/`kind` are set together with the matching content field (`tracks` for manual, `rules` for smart) — unlike `playlists_update`'s summary, `tracks` here is the actual ordered path list, not a count. On failure (no playlist at `slug`, an unopenable store, or an on-disk file that fails to parse) `error` is set and `name`/`kind`/`tracks`/`rules` are all omitted. |
 | `device_config_update` | `serial`, `selection` (`{mode, rules}`), `subscriptions` (`{playlists}`), `settings` (`{auto_sync, rockbox_compat}`). |
 | `device_preview` | `selected_tracks`, `selected_bytes` (the scope-selection footprint, source-size estimate), `playlist_extra_tracks`, `playlist_extra_bytes` (subscribed-playlist members NOT already in the selection scope — the union's out-of-scope delta), `projected_free_bytes` (`u64 \| null`). `null` whenever the previewed `serial` isn't the device currently connected (no live `StorageInfo` to project from) — mirrors `library_update.scanned_at_unix_secs`'s "meaningful null" convention, not omission. When present, it's `current_free_bytes − (selected_bytes + playlist_extra_bytes)` — a conservative "as if syncing from empty" estimate, since this computation has no manifest/on-device knowledge of what's already synced. See `daemon::library::compute_device_preview` for the exact math and its unit tests. |
+
+`playlist_detail` example payloads:
+
+```json
+{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":["Artist/Album/01.flac","B/02.flac"]}
+{"type":"playlist_detail","slug":"recent-idm","name":"Recent IDM","kind":"smart","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0}}
+{"type":"playlist_detail","slug":"ghost","error":"no such playlist"}
+```
 
 ### `get_selection`/`save_selection`/`custom_selection` deprecated
 

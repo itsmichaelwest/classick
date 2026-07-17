@@ -117,6 +117,32 @@ pub enum DaemonEvent {
     PlaylistsUpdate {
         playlists: Vec<PlaylistSummary>,
     },
+    /// Reply to `get_playlist`: the one playlist's full content — unlike
+    /// `PlaylistsUpdate`'s per-list summary (track count only), this is
+    /// what the playlist editor needs to actually render/edit a playlist.
+    /// `name`/`kind` are `Some` together with the matching content field
+    /// (`tracks` for manual, `rules` for smart) on success; on failure
+    /// (unopenable store, no playlist at `slug`, or an on-disk file that
+    /// failed to parse) `name`/`kind`/`tracks`/`rules` are all `None` and
+    /// `error` is set instead — so the requester can tell "not found" from
+    /// "found, empty" (e.g. a manual playlist with zero tracks).
+    PlaylistDetail {
+        slug: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<PlaylistKind>,
+        /// Source-relative track paths, in order. `Some` only when
+        /// `kind` is `manual`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tracks: Option<Vec<String>>,
+        /// `Some` only when `kind` is `smart` — exactly as
+        /// `playlist_rules::SmartRules` serializes.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rules: Option<crate::playlist_rules::SmartRules>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Reply to `get_device_config`, and broadcast to all clients after
     /// `save_device_config`. One device's resolved selection +
     /// subscriptions + settings.
@@ -366,9 +392,13 @@ pub enum DaemonCommand {
     /// aborting the reply, and a store-open failure (e.g. an unwritable
     /// config dir) degrades to an empty `playlists` list (logged).
     ListPlaylists,
-    /// Reply: `playlists_update`, filtered to the one matching `slug` (an
-    /// empty `playlists` list if no such playlist exists). Same fail-open
-    /// behavior as `ListPlaylists`.
+    /// Reply: `playlist_detail` for the one matching `slug` — full content
+    /// (the manual track list or the smart rule set), for the playlist
+    /// editor. Unlike `ListPlaylists`'s fail-open posture, a missing slug,
+    /// an unopenable store, or an on-disk file that fails to parse all
+    /// reply with `error` set (see `PlaylistDetail`) rather than degrading
+    /// to an empty result — the requester needs to distinguish "not found"
+    /// from "found, empty".
     GetPlaylist {
         slug: String,
     },
@@ -664,6 +694,71 @@ mod tests {
         let cmd: DaemonCommand =
             serde_json::from_str(r#"{"type":"delete_playlist","slug":"gym"}"#).unwrap();
         assert!(matches!(cmd, DaemonCommand::DeletePlaylist { slug } if slug == "gym"));
+    }
+
+    #[test]
+    fn playlist_detail_manual_serializes_with_tracks_and_no_rules() {
+        let evt = DaemonEvent::PlaylistDetail {
+            slug: "gym".into(),
+            name: Some("Gym".into()),
+            kind: Some(PlaylistKind::Manual),
+            tracks: Some(vec!["Artist/Album/01.flac".into(), "B/02.flac".into()]),
+            rules: None,
+            error: None,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":["Artist/Album/01.flac","B/02.flac"]}"#,
+            "got: {json}"
+        );
+    }
+
+    #[test]
+    fn playlist_detail_smart_serializes_with_rules_and_no_tracks() {
+        let evt = DaemonEvent::PlaylistDetail {
+            slug: "recent-idm".into(),
+            name: Some("Recent IDM".into()),
+            kind: Some(PlaylistKind::Smart),
+            tracks: None,
+            rules: Some(crate::playlist_rules::SmartRules {
+                version: 1,
+                matching: crate::playlist_rules::Match::All,
+                rules: vec![crate::playlist_rules::Rule {
+                    field: crate::playlist_rules::Field::Genre,
+                    op: crate::playlist_rules::Op::Is,
+                    value: "IDM".into(),
+                }],
+                limit: None,
+                order: crate::playlist_rules::Order::Alpha,
+                seed: 0,
+            }),
+            error: None,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"playlist_detail","slug":"recent-idm","name":"Recent IDM","kind":"smart","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0}}"#,
+            "got: {json}"
+        );
+    }
+
+    #[test]
+    fn playlist_detail_error_omits_name_kind_tracks_and_rules() {
+        let evt = DaemonEvent::PlaylistDetail {
+            slug: "ghost".into(),
+            name: None,
+            kind: None,
+            tracks: None,
+            rules: None,
+            error: Some("no such playlist".into()),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"playlist_detail","slug":"ghost","error":"no such playlist"}"#,
+            "got: {json}"
+        );
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::daemon::scheduler::SyncScheduler;
 use crate::daemon::state::{DaemonState, SessionKind, StateMachine, TriggerOutcome};
 use crate::daemon::sync_orchestrator::{self, OrchestratorOutcome};
 use crate::ipc_daemon::{
-    DaemonCommand, DaemonEvent, DaemonStateLabel, SyncRejectReason, TriggerSource,
+    DaemonCommand, DaemonEvent, DaemonStateLabel, PlaylistKind, SyncRejectReason, TriggerSource,
 };
 use crate::ipod::device::DetectedIpod;
 use anyhow::Result;
@@ -1483,7 +1483,7 @@ fn handle_client_command(
             let _ = reply.send(build_playlists_update(config_path));
         }
         DaemonCommand::GetPlaylist { slug } => {
-            let _ = reply.send(build_playlist_detail(config_path, &slug));
+            let _ = reply.send(build_playlist_detail(&slug));
         }
         DaemonCommand::SavePlaylist { playlist } => {
             let Ok(store) = open_playlist_store() else {
@@ -1658,15 +1658,58 @@ fn build_playlists_update(config_path: &std::path::Path) -> DaemonEvent {
     }
 }
 
-/// `get_playlist` reply: reuses `build_playlists_update`'s full listing,
-/// filtered to the one matching `slug` (0 or 1 entries) — see the
-/// `GetPlaylist` doc comment in `ipc_daemon.rs` for why this doesn't
-/// introduce a separate single-playlist event.
-fn build_playlist_detail(config_path: &std::path::Path, slug: &str) -> DaemonEvent {
-    let DaemonEvent::PlaylistsUpdate { playlists } = build_playlists_update(config_path) else {
-        unreachable!("build_playlists_update always returns PlaylistsUpdate");
+/// `get_playlist` reply: this playlist's full content — the manual track
+/// list or the smart rule set — for the editor, unlike
+/// `build_playlists_update`'s per-list summaries (track count only). An
+/// unopenable store, a missing slug, or an on-disk file that fails to
+/// parse all reply with `error` set (and every content field `None`)
+/// rather than degrading to an empty result — see the `PlaylistDetail`
+/// and `GetPlaylist` doc comments in `ipc_daemon.rs`.
+fn build_playlist_detail(slug: &str) -> DaemonEvent {
+    let store = match open_playlist_store() {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!("daemon: get_playlist({slug}): could not open playlist store ({e:#})");
+            return DaemonEvent::PlaylistDetail {
+                slug: slug.to_string(), name: None, kind: None, tracks: None, rules: None,
+                error: Some(format!("could not open playlist store: {e:#}")),
+            };
+        }
     };
-    DaemonEvent::PlaylistsUpdate { playlists: playlists.into_iter().filter(|p| p.slug == slug).collect() }
+    match store.load(slug) {
+        Ok(Some(crate::playlist::Playlist::Manual(m))) => DaemonEvent::PlaylistDetail {
+            slug: m.slug,
+            name: Some(m.name),
+            kind: Some(PlaylistKind::Manual),
+            tracks: Some(
+                m.tracks.into_iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect(),
+            ),
+            rules: None,
+            error: None,
+        },
+        Ok(Some(crate::playlist::Playlist::Smart(s))) => DaemonEvent::PlaylistDetail {
+            slug: s.slug,
+            name: Some(s.name),
+            kind: Some(PlaylistKind::Smart),
+            tracks: None,
+            rules: Some(s.rules),
+            error: None,
+        },
+        Ok(None) => {
+            tracing::warn!("daemon: get_playlist({slug}): no such playlist");
+            DaemonEvent::PlaylistDetail {
+                slug: slug.to_string(), name: None, kind: None, tracks: None, rules: None,
+                error: Some("no such playlist".to_string()),
+            }
+        }
+        Err(e) => {
+            tracing::warn!("daemon: get_playlist({slug}): failed to read ({e:#})");
+            DaemonEvent::PlaylistDetail {
+                slug: slug.to_string(), name: None, kind: None, tracks: None, rules: None,
+                error: Some(format!("{e:#}")),
+            }
+        }
+    }
 }
 
 /// `get_device_config` reply / `save_device_config` broadcast payload: one
