@@ -122,8 +122,21 @@ fn effective_device_selection_path_at(shared: &Path, custom: &Path) -> Result<Pa
 /// [`effective_selection_path`]'s `custom_selection`-gated behavior — the
 /// `custom_selection` field is no longer consulted here.
 pub fn effective_device_selection_path(serial: &str) -> Result<PathBuf> {
-    let shared = default_selection_path()?;
-    let custom = crate::device_state::device_selection_path(serial)?;
+    let root = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve config dir"))?
+        .join(crate::PROJECT_DIR);
+    effective_device_selection_path_in(&root, serial)
+}
+
+/// Test/override variant of [`effective_device_selection_path`]: same
+/// always-per-device, seed-once contract, resolved under `root` (the
+/// `<config>/classick` directory) instead of the real config dir. Mirrors
+/// `device_state::device_dir_in`'s root-injection pattern so callers can
+/// exercise the sync-path selection resolution without touching the real
+/// per-user config directory.
+pub fn effective_device_selection_path_in(root: &Path, serial: &str) -> Result<PathBuf> {
+    let shared = root.join("selection.json");
+    let custom = crate::device_state::device_selection_path_in(root, serial)?;
     effective_device_selection_path_at(&shared, &custom)
 }
 
@@ -237,17 +250,18 @@ pub fn filter(
     (kept, dirty)
 }
 
-/// Sync-path entry point: load selection + index from their default (or
-/// per-device, if `identity` has `custom_selection` on) paths, filter,
-/// persist inline-probe additions. mode=All is a zero-cost passthrough (no
-/// index load, no writes).
+/// Sync-path entry point: load selection + index from `serial`'s per-device
+/// path (Fix 1 — always per-device, never the deprecated shared/custom
+/// split; see [`effective_device_selection_path`]), filter, persist
+/// inline-probe additions. mode=All is a zero-cost passthrough (no index
+/// load, no writes).
 pub fn apply_to_sources(
     sources: Vec<SourceEntry>,
     source_root: &std::path::Path,
-    identity: Option<&crate::config_file::IpodIdentity>,
+    serial: &str,
     progress_log: impl Fn(String),
 ) -> Vec<SourceEntry> {
-    let sel_path = match effective_selection_path(identity) {
+    let sel_path = match effective_device_selection_path(serial) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("selection: cannot resolve selection path ({e:#}); syncing everything");
@@ -596,6 +610,73 @@ mod tests {
         if let Some(dir) = p.parent() {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn effective_device_selection_path_in_resolves_root_injected() {
+        let base = std::env::temp_dir()
+            .join(format!("classick-effdev-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let serial = "SER-IN-TEST";
+        let p = effective_device_selection_path_in(&base, serial).unwrap();
+        assert_eq!(
+            p,
+            crate::device_state::device_selection_path_in(&base, serial).unwrap(),
+            "root-injected variant must resolve under the given root, not the real config dir"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Regression for the CRITICAL sync-path bug (Fix 1): `apply_loop::run`
+    /// used to resolve selection via the deprecated `custom_selection`-gated
+    /// `effective_selection_path`, which for `custom_selection: false`
+    /// (the default) reads the *shared* root `selection.json` — silently
+    /// ignoring whatever the daemon/UI wrote to this device's own
+    /// `devices/<serial>/selection.json` via `save_device_config`. The sync
+    /// path now calls `effective_device_selection_path` (same as every
+    /// daemon read/write site) unconditionally, so it must resolve to the
+    /// per-device file even when an identity carrying
+    /// `custom_selection: false` exists — because the sync path no longer
+    /// consults that flag at all.
+    #[test]
+    fn effective_device_selection_path_in_ignores_custom_selection_flag() {
+        let base = std::env::temp_dir()
+            .join(format!("classick-syncpath-sel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let serial = "SYNCPATH-SER1";
+        // custom_selection=false is the scenario that broke: the deprecated
+        // resolver would treat this as "use the shared file".
+        let id = identity(serial, false);
+
+        // The daemon/UI already wrote a per-device selection (e.g. via
+        // save_device_config), independent of the shared file.
+        let per_device_path = crate::device_state::device_selection_path_in(&base, serial).unwrap();
+        let per_device_sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
+            SelectionRule::Artist { name: "Only On This iPod".into() },
+        ]};
+        save_atomic(&per_device_path, &per_device_sel).unwrap();
+
+        // The shared file represents a distinct (default, mode=All) state
+        // — if the sync path read this instead, `wants()` would diverge.
+        let shared_path = base.join("selection.json");
+        save_atomic(&shared_path, &Selection::all()).unwrap();
+
+        // Sanity check: this is genuinely the `custom_selection=false` case
+        // the deprecated resolver special-cased to "shared".
+        assert!(!id.custom_selection);
+
+        let resolved = effective_device_selection_path_in(&base, serial).unwrap();
+        assert_eq!(resolved, per_device_path,
+            "sync-path selection resolution must use the per-device file regardless of custom_selection");
+        assert_ne!(resolved, shared_path);
+
+        let loaded = load_or_all(&resolved);
+        assert_eq!(loaded, per_device_sel,
+            "sync-path resolution must load the per-device selection, not the shared default");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

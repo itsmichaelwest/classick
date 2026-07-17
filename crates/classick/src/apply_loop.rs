@@ -175,18 +175,6 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
 
     let sources = preflight::walk_source(config, progress, decision_rx)?;
     guard_nonempty_walk(&sources, &config.source)?;
-    // The sync subprocess never receives the daemon's in-memory IpodIdentity
-    // (no new IPC command for it — see selection design) so, same as
-    // `rockbox_compat` above, re-read the persisted config here to learn
-    // whether this device uses a per-device selection. Only trust it when
-    // the serial matches the connected device: a stale persisted identity
-    // for a different iPod must not leak its custom_selection flag onto
-    // this one.
-    let persisted_ipod_identity = config_file::load(&config_file::default_path()?)
-        .ok()
-        .flatten()
-        .and_then(|c| c.ipod_identity)
-        .filter(|id| device_state::sanitize_serial(&id.serial) == serial);
     // Task 5 (sync_set): device content = scope selection ∪ subscribed
     // playlists. `library_idx` is loaded once here (moved up from the fit
     // pass below, which reuses this same value by reference) since sync_set
@@ -197,7 +185,12 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         .map(|p| library_index::load_or_empty(&p, &config.source));
     let index_for_sync_set =
         library_idx.clone().unwrap_or_else(|| library_index::LibraryIndex::empty(config.source.clone()));
-    let selection = crate::selection::effective_selection_path(persisted_ipod_identity.as_ref())
+    // Fix 1 (per-device selection ignored by sync): always resolve this
+    // device's own `devices/<serial>/selection.json` — never the deprecated
+    // `custom_selection`-gated shared/per-device split. This must match
+    // every daemon read/write site (daemon/runtime.rs, daemon/library.rs),
+    // which already use `effective_device_selection_path`.
+    let selection = crate::selection::effective_device_selection_path(&serial)
         .map(|p| crate::selection::load_or_all(&p))
         .unwrap_or_else(|_| crate::selection::Selection::all());
     let subscriptions = device_subscriptions_file
@@ -258,7 +251,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         }
         Err(e) => {
             tracing::warn!("playlists: cannot open playlist store ({e:#}); syncing scope selection only");
-            crate::selection::apply_to_sources(sources, &config.source, persisted_ipod_identity.as_ref(), |msg| {
+            crate::selection::apply_to_sources(sources, &config.source, &serial, |msg| {
                 progress.log(msg)
             })
         }
