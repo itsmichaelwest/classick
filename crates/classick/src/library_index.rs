@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const INDEX_VERSION: u32 = 1;
+/// v2 added `IndexedTrack::year` (playlist_rules Field::Year needs cached
+/// year data). Bumped so `load_or_empty` discards any v1 cache instead of
+/// serving `year: None` forever for files whose (mtime,size) never drift —
+/// see `load_or_empty`.
+pub const INDEX_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexedTrack {
@@ -31,6 +35,10 @@ pub struct IndexedTrack {
     pub title: String,
     #[serde(default)]
     pub duration_ms: u64,
+    /// Release year, parsed from the tag's date string. `None` when the
+    /// file has no date tag, or (pre-v2 caches) was never probed for one.
+    #[serde(default)]
+    pub year: Option<i32>,
 }
 
 impl IndexedTrack {
@@ -70,6 +78,7 @@ pub struct TrackTags {
     pub genre: String,
     pub title: String,
     pub duration_ms: u64,
+    pub year: Option<i32>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -87,19 +96,31 @@ pub fn default_index_path() -> Result<PathBuf> {
     Ok(dir.join(crate::PROJECT_DIR).join("library-index.json"))
 }
 
-/// Load the cache. Missing/corrupt/different-root all mean the same thing:
-/// start from an empty index for `source_root` (full rescan). Never errors —
-/// the index is a cache, not a source of truth.
+/// Load the cache. Missing/corrupt/different-root/stale-version all mean
+/// the same thing: start from an empty index for `source_root` (full
+/// rescan). Never errors — the index is a cache, not a source of truth.
+///
+/// The version check matters beyond schema drift: `update_index` only
+/// re-probes a file when its (mtime,size) changed, so a cache built before
+/// a new cached field existed (e.g. `year` in v2) would otherwise serve
+/// `None` for that field forever on an unchanged library. A version bump
+/// forces one full rescan to backfill it.
 pub fn load_or_empty(path: &Path, source_root: &Path) -> LibraryIndex {
     let loaded: Option<LibraryIndex> = std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
     match loaded {
-        Some(idx) if idx.source_root == source_root => idx,
-        Some(idx) => {
+        Some(idx) if idx.source_root == source_root && idx.version == INDEX_VERSION => idx,
+        Some(idx) if idx.source_root != source_root => {
             tracing::info!(
                 "library_index: source root changed ({} -> {}); starting fresh",
                 idx.source_root.display(), source_root.display());
+            LibraryIndex::empty(source_root.to_path_buf())
+        }
+        Some(idx) => {
+            tracing::info!(
+                "library_index: cache version changed ({} -> {INDEX_VERSION}); starting fresh",
+                idx.version);
             LibraryIndex::empty(source_root.to_path_buf())
         }
         None => LibraryIndex::empty(source_root.to_path_buf()),
@@ -142,6 +163,10 @@ pub fn read_track_tags(path: &Path) -> Result<TrackTags> {
         tags.album = get(&ItemKey::AlbumTitle);
         tags.genre = get(&ItemKey::Genre);
         tags.title = get(&ItemKey::TrackTitle);
+        tags.year = t
+            .get_string(&ItemKey::Year)
+            .or_else(|| t.get_string(&ItemKey::RecordingDate))
+            .and_then(crate::tags::parse_year);
     }
     tags.duration_ms = tagged.properties().duration().as_millis() as u64;
     Ok(tags)
@@ -202,6 +227,7 @@ pub fn update_index(
             genre: tags.genre,
             title: tags.title,
             duration_ms: tags.duration_ms,
+            year: tags.year,
         });
     }
 
@@ -230,6 +256,7 @@ mod tests {
             genre: "G".to_string(),
             title: "T".to_string(),
             duration_ms: 1000,
+            year: None,
         }
     }
 
@@ -239,7 +266,7 @@ mod tests {
         let mut index = LibraryIndex::empty(root);
         index.files.insert(PathBuf::from("/music/a.flac"), IndexedTrack {
             mtime: 100, size: 5, artist: "X".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1,
+            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
         });
         let entries = vec![entry("/music/a.flac", 100, 5)];
         let stats = update_index(&mut index, &entries,
@@ -264,7 +291,7 @@ mod tests {
         let mut index = LibraryIndex::empty(PathBuf::from("/music"));
         index.files.insert(PathBuf::from("/music/a.flac"), IndexedTrack {
             mtime: 100, size: 5, artist: "Old".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1,
+            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
         });
         let entries = vec![entry("/music/a.flac", 200, 5)]; // mtime bumped
         let stats = update_index(&mut index, &entries, |_| Ok(tags("New")), |_, _, _| {});
@@ -277,7 +304,7 @@ mod tests {
         let mut index = LibraryIndex::empty(PathBuf::from("/music"));
         index.files.insert(PathBuf::from("/music/gone.flac"), IndexedTrack {
             mtime: 1, size: 1, artist: "X".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1,
+            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
         });
         let stats = update_index(&mut index, &[], |_| unreachable!(), |_, _, _| {});
         assert_eq!(stats.dropped, 1);
@@ -303,7 +330,7 @@ mod tests {
         let mut index = LibraryIndex::empty(PathBuf::from("/music"));
         index.files.insert(PathBuf::from("/music/hit.flac"), IndexedTrack {
             mtime: 1, size: 1, artist: "X".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1,
+            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
         });
         let entries = vec![entry("/music/hit.flac", 1, 1), entry("/music/miss.flac", 2, 2)];
         let mut seen = Vec::new();
@@ -317,7 +344,7 @@ mod tests {
         let mut index = LibraryIndex::empty(PathBuf::from("/music"));
         index.files.insert(PathBuf::from("/music/hit.flac"), IndexedTrack {
             mtime: 1, size: 1, artist: "X".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1,
+            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
         });
         let entries = vec![entry("/music/hit.flac", 1, 1), entry("/music/miss.flac", 2, 2)];
         let stale = stale_entries(&index, &entries);
@@ -367,6 +394,42 @@ mod tests {
         assert_eq!(tags.album, "Test Album");
         assert_eq!(tags.album_artist, "Test AA");
         assert_eq!(tags.genre, "Electronic");
+        assert_eq!(tags.year, Some(2024), "fixture's date=2024 Vorbis comment parses to a year");
         assert!(tags.duration_ms >= 900, "1s fixture should have ~1000ms duration");
+    }
+
+    #[test]
+    fn load_or_empty_discards_index_on_version_mismatch() {
+        // Simulates an on-disk cache written by a previous INDEX_VERSION: even
+        // though source_root matches, a version bump must force a full rescan
+        // rather than silently serving stale-shaped records (e.g. `year: None`
+        // forever for files whose mtime/size never changes again).
+        let base = std::env::temp_dir().join(format!("classick-idx-ver-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let path = base.join("library-index.json");
+        let mut stale = LibraryIndex::empty(PathBuf::from("/music"));
+        stale.version = INDEX_VERSION - 1;
+        stale.scanned_at_unix_secs = Some(99);
+        stale.files.insert(PathBuf::from("/music/a.flac"), IndexedTrack {
+            mtime: 1, size: 1, artist: "X".into(), album_artist: String::new(),
+            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
+        });
+        save_atomic(&path, &stale).unwrap();
+
+        let loaded = load_or_empty(&path, &PathBuf::from("/music"));
+        assert_eq!(loaded.version, INDEX_VERSION, "reset to the current version");
+        assert_eq!(loaded.scanned_at_unix_secs, None, "version bump forces full rescan");
+        assert!(loaded.files.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn indexed_track_without_year_key_deserializes_to_none() {
+        // A pre-v2 cache entry (or any hand-written JSON) that never had a
+        // "year" key at all must still decode, defaulting to None — the
+        // #[serde(default)] contract legacy files rely on.
+        let json = r#"{"mtime":1,"size":5,"artist":"X","album_artist":"","album":"A","genre":"G","title":"T","duration_ms":1}"#;
+        let track: IndexedTrack = serde_json::from_str(json).unwrap();
+        assert_eq!(track.year, None);
     }
 }

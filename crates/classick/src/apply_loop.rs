@@ -2163,6 +2163,7 @@ mod tests {
                 genre: "Genre".into(),
                 title: String::new(),
                 duration_ms: 0,
+                year: None,
             })
         });
         assert!(kept.is_empty(), "selection filtering everything out must still be allowed");

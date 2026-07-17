@@ -176,7 +176,7 @@ mod tests {
             mtime: 1, size,
             artist: artist.into(), album_artist: album_artist.into(),
             album: album.into(), genre: genre.into(),
-            title: String::new(), duration_ms: 0,
+            title: String::new(), duration_ms: 0, year: None,
         }
     }
 

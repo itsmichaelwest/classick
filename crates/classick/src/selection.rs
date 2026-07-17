@@ -192,6 +192,7 @@ pub fn filter(
                             artist: tags.artist, album_artist: tags.album_artist,
                             album: tags.album, genre: tags.genre,
                             title: tags.title, duration_ms: tags.duration_ms,
+                            year: tags.year,
                         });
                         dirty = true;
                     }
@@ -284,7 +285,7 @@ mod tests {
             mtime: 1, size: 10,
             artist: artist.to_string(), album_artist: String::new(),
             album: album.to_string(), genre: genre.to_string(),
-            title: String::new(), duration_ms: 0,
+            title: String::new(), duration_ms: 0, year: None,
         }
     }
 
@@ -563,7 +564,7 @@ mod tests {
         ]};
         let (kept, dirty) = filter(vec![src("/m/fresh.flac")], &sel, &mut index, |_| Ok(TrackTags {
             artist: "Autechre".into(), album_artist: String::new(),
-            album: "Amber".into(), genre: "IDM".into(), title: String::new(), duration_ms: 0,
+            album: "Amber".into(), genre: "IDM".into(), title: String::new(), duration_ms: 0, year: None,
         }));
         assert_eq!(kept.len(), 1);
         assert!(dirty, "inline probe must mark the index dirty so the caller saves it");
@@ -578,14 +579,14 @@ mod tests {
         index.files.insert(PathBuf::from("/m/a.flac"), IndexedTrack {
             mtime: 999, size: 999, // differs from src()'s (1, 10)
             artist: "Old".into(), album_artist: String::new(),
-            album: "X".into(), genre: "Rock".into(), title: String::new(), duration_ms: 0,
+            album: "X".into(), genre: "Rock".into(), title: String::new(), duration_ms: 0, year: None,
         });
         let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
             SelectionRule::Artist { name: "New".into() },
         ]};
         let (kept, dirty) = filter(vec![src("/m/a.flac")], &sel, &mut index, |_| Ok(TrackTags {
             artist: "New".into(), album_artist: String::new(),
-            album: "X".into(), genre: "Rock".into(), title: String::new(), duration_ms: 0,
+            album: "X".into(), genre: "Rock".into(), title: String::new(), duration_ms: 0, year: None,
         }));
         assert_eq!(kept.len(), 1, "re-probed tags now match the rule");
         assert!(dirty);
@@ -652,7 +653,7 @@ mod tests {
         let sources = vec![src("/m/a.flac")];
         let kept = apply_with_paths(sources, &root, &sel_path, &idx_path, |_| Ok(TrackTags {
             artist: "Autechre".into(), album_artist: String::new(),
-            album: "Amber".into(), genre: "IDM".into(), title: String::new(), duration_ms: 0,
+            album: "Amber".into(), genre: "IDM".into(), title: String::new(), duration_ms: 0, year: None,
         }), |_msg| {});
         assert_eq!(kept.len(), 1);
 
