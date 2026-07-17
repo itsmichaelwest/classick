@@ -90,6 +90,36 @@ pub fn default_selection_path() -> Result<PathBuf> {
     Ok(dir.join(crate::PROJECT_DIR).join("selection.json"))
 }
 
+/// Which selection.json a given iPod actually uses: its own per-device file
+/// when `custom_selection` is on, otherwise the shared one. `identity` is
+/// `None` when no iPod is configured yet (or the caller doesn't know it) —
+/// that degrades to shared, same as `custom_selection: false`.
+pub fn effective_selection_path(identity: Option<&crate::config_file::IpodIdentity>) -> Result<PathBuf> {
+    match identity {
+        Some(id) if id.custom_selection => crate::device_state::device_selection_path(&id.serial),
+        _ => default_selection_path(),
+    }
+}
+
+/// One-time seed when a device switches shared -> custom: copy the shared
+/// selection.json to the new per-device path so the user's existing choices
+/// carry over instead of silently resetting to mode=All. No-op if there's
+/// nothing to seed (`shared` missing) or the per-device file already exists
+/// (never clobber an established custom selection).
+pub fn seed_custom_selection(shared: &Path, custom: &Path) -> Result<()> {
+    if custom.exists() || !shared.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = custom.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create dir {}", parent.display()))?;
+    }
+    std::fs::copy(shared, custom).with_context(|| {
+        format!("seed custom selection {} -> {}", shared.display(), custom.display())
+    })?;
+    Ok(())
+}
+
 /// Never errors: missing or unparseable selection degrades to mode=All
 /// (today's sync-everything behavior) with a logged warning.
 pub fn load_or_all(path: &Path) -> Selection {
@@ -180,15 +210,17 @@ pub fn filter(
     (kept, dirty)
 }
 
-/// Sync-path entry point: load selection + index from their default paths,
-/// filter, persist inline-probe additions. mode=All is a zero-cost
-/// passthrough (no index load, no writes).
+/// Sync-path entry point: load selection + index from their default (or
+/// per-device, if `identity` has `custom_selection` on) paths, filter,
+/// persist inline-probe additions. mode=All is a zero-cost passthrough (no
+/// index load, no writes).
 pub fn apply_to_sources(
     sources: Vec<SourceEntry>,
     source_root: &std::path::Path,
+    identity: Option<&crate::config_file::IpodIdentity>,
     progress_log: impl Fn(String),
 ) -> Vec<SourceEntry> {
-    let sel_path = match default_selection_path() {
+    let sel_path = match effective_selection_path(identity) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("selection: cannot resolve selection path ({e:#}); syncing everything");
@@ -369,6 +401,131 @@ mod tests {
         ]};
         save_atomic(&path, &sel).unwrap();
         assert_eq!(load_or_all(&path), sel);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn identity(serial: &str, custom_selection: bool) -> crate::config_file::IpodIdentity {
+        crate::config_file::IpodIdentity {
+            serial: serial.to_string(),
+            model_label: String::new(),
+            name: None,
+            custom_selection,
+        }
+    }
+
+    #[test]
+    fn effective_selection_path_none_identity_is_shared() {
+        assert_eq!(effective_selection_path(None).unwrap(), default_selection_path().unwrap());
+    }
+
+    #[test]
+    fn effective_selection_path_shared_when_flag_false() {
+        let id = identity("EFFPATH-SHARED-TEST", false);
+        assert_eq!(
+            effective_selection_path(Some(&id)).unwrap(),
+            default_selection_path().unwrap(),
+            "custom_selection=false must resolve to the shared path"
+        );
+    }
+
+    #[test]
+    fn effective_selection_path_custom_when_flag_true() {
+        let id = identity("EFFPATH-CUSTOM-TEST", true);
+        let p = effective_selection_path(Some(&id)).unwrap();
+        assert_eq!(
+            p,
+            crate::device_state::device_selection_path("EFFPATH-CUSTOM-TEST").unwrap(),
+            "custom_selection=true must resolve to the per-device path"
+        );
+        assert_ne!(p, default_selection_path().unwrap());
+        // device_selection_path() creates the device dir as a side effect
+        // (real config dir, since effective_selection_path has no root-
+        // injected variant); clean it up so tests don't litter the real
+        // per-user config directory.
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn seed_custom_selection_copies_shared_to_custom_when_missing() {
+        let base = std::env::temp_dir()
+            .join(format!("classick-seed-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let shared = base.join("selection.json");
+        let custom = base.join("devices").join("SER1").join("selection.json");
+        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
+            SelectionRule::Artist { name: "Boards of Canada".into() },
+        ]};
+        save_atomic(&shared, &sel).unwrap();
+
+        seed_custom_selection(&shared, &custom).unwrap();
+
+        assert!(custom.exists(), "seed must create the per-device file");
+        assert_eq!(load_or_all(&custom), sel, "seeded content must match the shared selection");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn seed_custom_selection_noop_when_shared_missing() {
+        let base = std::env::temp_dir()
+            .join(format!("classick-seed-noshared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let shared = base.join("selection.json"); // never written
+        let custom = base.join("devices").join("SER1").join("selection.json");
+
+        seed_custom_selection(&shared, &custom).unwrap();
+
+        assert!(!custom.exists(), "nothing to seed from; custom must stay absent");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn seed_custom_selection_never_clobbers_existing_custom() {
+        let base = std::env::temp_dir()
+            .join(format!("classick-seed-noclobber-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let shared = base.join("selection.json");
+        let custom = base.join("devices").join("SER1").join("selection.json");
+        save_atomic(&shared, &Selection { version: 1, mode: SelectionMode::Include, rules: vec![
+            SelectionRule::Artist { name: "Shared Artist".into() },
+        ]}).unwrap();
+        let established = Selection { version: 1, mode: SelectionMode::Exclude, rules: vec![
+            SelectionRule::Genre { name: "Podcast".into() },
+        ]};
+        save_atomic(&custom, &established).unwrap();
+
+        seed_custom_selection(&shared, &custom).unwrap();
+
+        assert_eq!(
+            load_or_all(&custom), established,
+            "an already-established per-device selection must never be overwritten"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn seed_custom_selection_is_idempotent() {
+        // Calling it twice (e.g. two SaveConfig saves in a row with the flag
+        // already true) must not re-copy or error the second time.
+        let base = std::env::temp_dir()
+            .join(format!("classick-seed-idempotent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let shared = base.join("selection.json");
+        let custom = base.join("devices").join("SER1").join("selection.json");
+        save_atomic(&shared, &Selection::all()).unwrap();
+
+        seed_custom_selection(&shared, &custom).unwrap();
+        assert!(custom.exists());
+        // Mutate the custom file so a second copy would be observable.
+        let user_edit = Selection { version: 1, mode: SelectionMode::Exclude, rules: vec![
+            SelectionRule::Genre { name: "Live".into() },
+        ]};
+        save_atomic(&custom, &user_edit).unwrap();
+
+        seed_custom_selection(&shared, &custom).unwrap();
+
+        assert_eq!(load_or_all(&custom), user_edit, "second seed call must be a no-op");
         let _ = std::fs::remove_dir_all(&base);
     }
 

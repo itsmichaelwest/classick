@@ -53,6 +53,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Ioctl",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Native IOKit/CoreFoundation FFI for device identity (mount->FirewireGuid via
 # statfs BSD name -> IORegistry) + event-driven hotplug. servo/core-foundation-rs
@@ -60,7 +63,7 @@ windows-sys = { version = "0.59", features = [
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
 io-kit-sys = "0.4"
-libc = "0.2"
+# libc comes from the cfg(unix) table above — macOS matches that cfg too.
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["test-util"] }

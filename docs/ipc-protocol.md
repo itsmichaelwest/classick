@@ -1,4 +1,4 @@
-# ipod-sync IPC protocol v1.2.0
+# ipod-sync IPC protocol v1.3.0
 
 Newline-delimited JSON over stdin/stdout, UTF-8, custom typed-envelope.
 Every message is a single-line JSON object with a `type` discriminator
@@ -18,7 +18,7 @@ custom-envelope instead of JSON-RPC 2.0, why WinUI 3 — see
 
 ## 1. Versioning
 
-Protocol version follows **semver**. The current version is **`1.2.0`**.
+Protocol version follows **semver**. The current version is **`1.3.0`**.
 
 The core **MUST** emit a `hello` event (see §4.1) as its first line of
 stdout, carrying the protocol version it speaks. The UI **MUST** read
@@ -122,7 +122,7 @@ Rules:
 | `track_done`  | (none)                                                                                       | Increment completed count                 |
 | `log`         | `message`                                                                                    | Informational log line                    |
 | `error`       | `message`, `recovery_hints?`                                                                 | Non-fatal or fatal error                  |
-| `finish`      | `success`                                                                                    | Run complete; core will close stdout      |
+| `finish`      | `success`, `skipped_for_space?`, `artwork?`, `db_restored?`                                  | Run complete; core will close stdout      |
 | `paused`      | (none)                                                                                       | Run gracefully paused; core will close stdout (new in **1.1.0**) |
 
 The Rust-side enum the events derive from is `ProgressEvent` in
@@ -137,7 +137,7 @@ then proceeds with the rest of the protocol.
 
 | Field              | Type     | Notes                                                       |
 |--------------------|----------|-------------------------------------------------------------|
-| `protocol_version` | `string` | Semver of the wire protocol the core speaks. Currently `1.2.0`. |
+| `protocol_version` | `string` | Semver of the wire protocol the core speaks. Currently `1.3.0`. |
 | `core_version`     | `string` | `CARGO_PKG_VERSION` of the core binary. Informational.       |
 
 ```json
@@ -320,9 +320,31 @@ the child process to exit with code 0 (on `success: true`) or non-zero
 cases; rely on `success` for the user-facing verdict). Mirrors
 `ProgressEvent::Finish`.
 
-| Field     | Type      | Notes                                                |
-|-----------|-----------|------------------------------------------------------|
-| `success` | `boolean` | `true` for a clean run, `false` for fatal failure.   |
+| Field                 | Type      | Notes                                                |
+|-----------------------|-----------|-------------------------------------------------------|
+| `success`             | `boolean` | `true` for a clean run, `false` for fatal failure.   |
+| `skipped_for_space?`  | `object` \| absent | **Since 1.3.0.** Fit-pass deferral rollup — whole albums that didn't fit the device's remaining space, even after the end-of-run retry (§ below). Absent when nothing was deferred. |
+| `artwork?`            | `object` \| absent | **Since 1.3.0.** Cover-art rollup across this run's Add/Modify/MetadataOnly actions (Task 13; previously reserved and always absent). Absent when the run never reached the apply loop (dry-run, review-abort, or "nothing to do" with no pending artwork repair). |
+| `db_restored?`        | `boolean` \| absent | **Since 1.3.0.** `true` when the core's auto-restore-from-backup path fired this run (the iTunesDB failed to parse and was replaced from the session backup before the sync proceeded). Absent (not `false`) when it didn't fire. |
+
+`skipped_for_space`, when present, has:
+
+| Field    | Type     | Notes                                                          |
+|----------|----------|-----------------------------------------------------------------|
+| `albums` | `number` | Count of distinct albums deferred.                              |
+| `tracks` | `number` | Total tracks across those albums.                                |
+| `bytes`  | `number` | Total source bytes across those albums (the fit pass's estimate, not necessarily the exact on-iPod transcoded size). |
+
+`artwork`, when present, has `embedded`, `eligible`, `failed_sources` (all
+`number`): `eligible` counts sources with embedded art, `embedded` counts
+those successfully written to the device (Apple thumbnail and/or, under
+`rockbox_compat`, the on-device file's own tags), `failed_sources` counts
+those whose art extraction/decode failed (also warn-logged with the source
+path).
+
+A pre-1.3.0 core never emits `skipped_for_space`/`artwork`/`db_restored`;
+a UI built against 1.3.0 must treat their absence as "nothing to report",
+per the standard additive-minor-bump rule in §1.
 
 ```json
 {"type":"finish","success":true}
@@ -330,6 +352,14 @@ cases; rely on `success` for the user-facing verdict). Mirrors
 
 ```json
 {"type":"finish","success":false}
+```
+
+```json
+{"type":"finish","success":true,"skipped_for_space":{"albums":14,"tracks":183,"bytes":9876543210}}
+```
+
+```json
+{"type":"finish","success":true,"db_restored":true}
 ```
 
 ### 4.12 `paused`
@@ -350,6 +380,12 @@ the manifest left off, so there is no separate "resume" command (see §5.6).
 ```json
 {"type":"paused"}
 ```
+
+In practice the core still emits a trailing `finish{success:true}` right
+after `paused` (§4.11) — `paused` itself carries no fields, but the run's
+rollup (`skipped_for_space`, `artwork`, `db_restored`) is only ever attached
+to `finish`, so the daemon's history entry for a paused run reads those
+fields off that trailing `finish`, not off `paused`.
 
 ---
 
@@ -701,8 +737,9 @@ Deliberately **not** in v1 — listed so they don't accidentally creep in:
 | Protocol | Core version | UI version | Status     | Notes                                  |
 |----------|--------------|------------|------------|----------------------------------------|
 | 1.0.0    | 0.1.x        | 0.1.x      | Initial M1 | Windows-only UI; cross-platform TUI fallback remains. |
-| 1.1.0    | 0.1.x        | 0.1.x      | Current    | Additive: `pause` command (§5.6) + terminal `paused` event (§4.12). Handshake still requires major version `1` on both sides. |
-| 1.2.0    | 0.1.x        | 0.1.x      | Current    | Additive: optional `eta_secs` field on `track_start` (§4.7), daemon-computed whole-run-average sync ETA. |
+| 1.1.0    | 0.1.x        | 0.1.x      | Superseded | Additive: `pause` command (§5.6) + terminal `paused` event (§4.12). Handshake still requires major version `1` on both sides. |
+| 1.2.0    | 0.1.x        | 0.1.x      | Superseded | Additive: optional `eta_secs` field on `track_start` (§4.7), daemon-computed whole-run-average sync ETA. |
+| 1.3.0    | 0.1.x        | 0.1.x      | Current    | Additive: fit engine wired into the apply loop — `finish` gains optional `skipped_for_space`, `artwork` (previously reserved and always absent; populated as of this bump), and `db_restored` fields (§4.11). |
 
 Bumps will append rows here. Don't edit historical rows.
 
@@ -715,7 +752,7 @@ Bumps will append rows here. Don't edit historical rows.
 > `major.minor.patch` scheme and both currently sit on major `1`, but their
 > minor versions move on separate schedules and a matching number (e.g. both
 > once being `1.1.0`) is coincidence, not a shared release train. As of this
-> writing the daemon protocol is at **`1.4.0`** — see "Daemon v1.4.0" below;
+> writing the daemon protocol is at **`1.5.0`** — see "Daemon v1.5.0" below;
 > this section is kept as the historical record of the `1.1.0` daemon bump.
 
 When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows) or a
@@ -755,6 +792,24 @@ then `/tmp`, with the same `classick.sock` file name.)
 | `subscribe_device_events` | (none) — daemon starts forwarding `device_connected` events for any iPod, not just configured |
 | `unsubscribe_device_events` | (none) |
 | `shutdown` | (none) — daemon exits cleanly after draining current sync |
+
+### `IpodIdentity` gains `custom_selection`
+
+```json
+{"type":"save_config","ipod":{"serial":"000A27002138B0A8","model_label":"iPod Classic 7G","custom_selection":true}}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `custom_selection` | `bool` | Default `false` (shared selection). When `true`, this iPod's sync selection is read from/written to its own per-device `devices/<serial>/selection.json` instead of the shared `<config>/classick/selection.json`. Rides the existing `ipod` field on `config_update`/`save_config` (this table, above) — no new command needed to read or set it. Also governs which file the existing `get_selection`/`save_selection` commands (§"Daemon v1.4.0" below) act on. Older clients that don't send this field get the persisted default (`false`) on load, so they keep reading/writing the shared file exactly as before. |
+
+The first time a device's `custom_selection` flips `false → true` (including
+"no prior identity for this serial", e.g. a brand-new device), the daemon
+seeds the per-device file by copying the current shared `selection.json` so
+the user's existing choices carry over instead of resetting to "sync
+everything". Flipping back to `false` leaves the per-device file in place,
+untouched and dormant — flipping `true` again later re-reads it as-is (no
+re-seed, since the per-device file already exists).
 
 ### Forwarded sync-subprocess events
 
@@ -952,3 +1007,82 @@ additions, matching §2's unknown-message tolerance.
 `status_update.library_count` is now the **selected** track count — the "Y"
 in "X of Y synced" is what the current selection wants on the iPod, not the
 raw folder count. Under `mode: "all"` the value is unchanged.
+
+---
+
+## Daemon v1.5.0 — Skipped-for-space + artwork summary on history (2026-07-17)
+
+The daemon now emits `hello` with `protocol_version = "1.5.0"`. Purely
+additive over v1.4.0: one new command (`replace_library`, below); no changed
+or removed fields — three new fields on the persisted `SyncSummary` shape
+and one new field on `HistoryEntry`, both of which already ride the
+existing `status_update.last_sync` and `history_update.entries` payloads
+(see the `v1.1.0` daemon-extensions section above for those event shapes).
+No separate status plumbing was needed: `last_sync: Option<HistoryEntry>`
+on `status_update` carries whatever fields `HistoryEntry` has, so UIs pick
+these up automatically once the daemon starts persisting them.
+
+The daemon builds these fields from the sync subprocess's `finish` event
+(§4.11 above), which since subprocess protocol `1.3.0` already carries
+`skipped_for_space` (whole-album fit-pass deferral) and `artwork` (embed
+rollup) — Task 8 added those wire fields; this bump is the daemon actually
+reading and persisting them into `history.json`, plus `db_restored`.
+
+### `SyncSummary` gains three fields
+
+| Field | Type | Notes |
+|---|---|---|
+| `skipped_for_space_tracks` | `usize` | From the subprocess `finish` event's `skipped_for_space.tracks`. `0` when nothing was deferred, or the field was absent (older core, or an all-fit run). |
+| `skipped_for_space_bytes` | `u64` | From `skipped_for_space.bytes`. |
+| `artwork_failed_sources` | `usize` | From the subprocess `finish` event's `artwork.failed_sources`. |
+
+Note `skipped_for_space.albums` (also present on the subprocess wire event)
+is deliberately **not** persisted onto `SyncSummary` — only `tracks`/`bytes`
+carry through. All three fields are `#[serde(default)]`: pre-existing
+`history.json` entries (written before this field existed) deserialize with
+them at `0`.
+
+### `HistoryEntry` gains `db_restored`
+
+| Field | Type | Notes |
+|---|---|---|
+| `db_restored` | `bool` | Mirrors the subprocess `finish` event's `db_restored` (§4.11) — `true` when Task 4's auto-restore-from-backup path fired during that sync. `#[serde(default, skip_serializing_if = "std::ops::Not::not")]`: omitted from the wire/`history.json` when `false` (old-client-compat, matching the subprocess field's own convention), and pre-existing entries without it deserialize to `false`. |
+
+Only `OrchestratorOutcome::Completed` (a subprocess run that reached its
+terminal `finish` line) ever populates a non-default `db_restored` — a
+sync that's cancelled, bailed past the 50%-failure threshold, or force-
+killed after a stalled pause never gets to read `finish`, so those history
+entries keep `db_restored: false`.
+
+### New command: `replace_library`
+
+```json
+{"type":"replace_library"}
+```
+
+One-shot, user-triggered "erase and start over": wipes **every** track
+currently on the iPod, then falls straight through to an ordinary sync of
+the current selection (`apply_loop::replace_library`, Task 11). The daemon
+spawns `classick.exe --ipc-mode --replace-library --apply --ipod <drive>`
+and reports progress through the **same forwarded-event vocabulary** as a
+normal sync (`summary`, `track_start`, `track_done`, `log`, `error`,
+`finish` — see "Forwarded sync-subprocess events" above) — UI clients
+don't need to special-case a replace's progress display. `--apply` is what
+makes the core skip its own interactive erase-confirmation prompt; the UI
+is expected to obtain the user's confirmation itself (a typed/explicit
+confirmation, not a simple yes/no) before ever sending this command.
+
+`replace_library` reuses the exact same state-machine guard, cancel/pause
+signaling, and prompt-decision relay as `trigger_sync`/`backfill_rockbox`:
+it is rejected if a sync (or a backfill, or another replace) is already in
+progress, and rejected if no iPod is currently connected. Because it shares
+the guard, a sync/backfill/replace can never run concurrently — whichever
+request lands first occupies the `Syncing` state until it completes.
+Unlike `backfill_rockbox`/`scan_library` (which stay silent and just log +
+drop on their no-op paths), `replace_library` is destructive — it wipes
+every track on the iPod — so both guards reply with `sync_rejected`
+(`reason: "already_syncing"` or `"no_ipod"`), matching `trigger_sync`'s
+reply mechanism, so the UI always gets a definitive answer rather than a
+request that silently goes nowhere. The resulting history entry records
+`trigger: "manual"` — there is no dedicated `SyncTrigger` variant for a
+replace, matching how `backfill_rockbox` is recorded.

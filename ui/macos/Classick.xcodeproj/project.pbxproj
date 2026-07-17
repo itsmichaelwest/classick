@@ -218,6 +218,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 3F02007BD03702B98E3A34EF /* Build configuration list for PBXNativeTarget "Classick" */;
 			buildPhases = (
+				393742069D8835021EEEFFAE /* Build classick daemon (cargo) */,
 				7AA331F5FD77AF9464075783 /* Sources */,
 				71B111CAEBB7DFCF2D80FF33 /* Resources */,
 				2F49DCA12E6D5B6CFCA73A49 /* Frameworks */,
@@ -320,6 +321,25 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -e\nSRC=\"$SRCROOT/../../target/release/classick\"\nDST=\"$BUILT_PRODUCTS_DIR/$FULL_PRODUCT_NAME/Contents/Resources\"\nif [ -f \"$SRC\" ]; then\n  mkdir -p \"$DST\"\n  cp \"$SRC\" \"$DST/classick\"\n  echo \"embedded daemon from $SRC\"\nelse\n  echo \"warning: $SRC not found — run 'cargo build --release' so the app can spawn the daemon\"\nfi\n";
+		};
+		393742069D8835021EEEFFAE /* Build classick daemon (cargo) */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build classick daemon (cargo)";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\n# Xcode script phases get a minimal PATH; rustup installs live in\n# ~/.cargo/bin (homebrew fallback for good measure).\nexport PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"\necho \"cargo build --release (workspace root)\"\ncargo build --release --manifest-path \"$SRCROOT/../../Cargo.toml\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -475,6 +495,7 @@
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -560,6 +581,7 @@
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				INFOPLIST_FILE = Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

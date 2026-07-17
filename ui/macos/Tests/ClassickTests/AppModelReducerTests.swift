@@ -13,6 +13,47 @@ final class AppModelReducerTests: XCTestCase {
         XCTAssertFalse(off.rockboxCompat)
     }
 
+    /// Regression (protocol 1.5.0): finishing setup builds a fresh
+    /// `IpodIdentity` from the connected device, and SaveConfig replaces the
+    /// whole `ipod` blob — so re-running setup against the *same* paired
+    /// device must carry `custom_selection` through, mirroring
+    /// `testSetupWizardPreservesRockboxCompat` for `rockboxCompat`.
+    func testSetupWizardPreservesCustomSelection() {
+        let device = DeviceState(serial: "0xA", model: "iPod Classic (3rd gen)", name: "iPod", drive: "/Volumes/IPOD")
+        let preserved = AppDelegate.setupIpodIdentity(device: device, preservingCustomSelection: true)
+        XCTAssertEqual(preserved?.customSelection, true, "wizard must preserve an enabled custom-selection toggle")
+        let off = AppDelegate.setupIpodIdentity(device: device, preservingCustomSelection: false)
+        XCTAssertEqual(off?.customSelection, false)
+        XCTAssertNil(AppDelegate.setupIpodIdentity(device: nil, preservingCustomSelection: true), "no device -> no identity to save")
+    }
+
+    func testFinishSyncEventPopulatesSkippedForSpaceArtworkAndDbRestoredState() {
+        let m = AppModel()
+        m.apply(.syncEvent(line: #"{"type":"finish","success":true,"skipped_for_space":{"albums":14,"tracks":183,"bytes":9876543210},"artwork":{"embedded":40,"eligible":42,"failed_sources":2},"db_restored":true}"#))
+        XCTAssertEqual(m.lastRunSkippedForSpace, SkippedForSpace(albums: 14, tracks: 183, bytes: 9_876_543_210))
+        XCTAssertEqual(m.lastRunArtwork, ArtworkSummary(embedded: 40, eligible: 42, failedSources: 2))
+        XCTAssertTrue(m.lastRunDbRestored)
+    }
+
+    /// Regression: a library-scan's `finish` event never carries
+    /// `skipped_for_space`/`artwork`/`db_restored` — those fields are
+    /// sync-only. A scan finishing right after a real sync must not clobber
+    /// that sync's rollup back to nil/nil/false.
+    func testScanFinishDoesNotClobberPriorSyncRollup() {
+        let m = AppModel()
+        m.apply(.syncEvent(line: #"{"type":"finish","success":true,"skipped_for_space":{"albums":14,"tracks":183,"bytes":9876543210},"artwork":{"embedded":40,"eligible":42,"failed_sources":2},"db_restored":true}"#))
+        XCTAssertEqual(m.lastRunSkippedForSpace, SkippedForSpace(albums: 14, tracks: 183, bytes: 9_876_543_210))
+        XCTAssertEqual(m.lastRunArtwork, ArtworkSummary(embedded: 40, eligible: 42, failedSources: 2))
+        XCTAssertTrue(m.lastRunDbRestored)
+
+        m.apply(.statusUpdate(.init(state: .scanning, configured: true, ipodConnected: true, lastSync: nil, storage: nil)))
+        m.apply(.syncEvent(line: #"{"type":"finish","success":true}"#))
+
+        XCTAssertEqual(m.lastRunSkippedForSpace, SkippedForSpace(albums: 14, tracks: 183, bytes: 9_876_543_210))
+        XCTAssertEqual(m.lastRunArtwork, ArtworkSummary(embedded: 40, eligible: 42, failedSources: 2))
+        XCTAssertTrue(m.lastRunDbRestored)
+    }
+
     func testDeviceConnectThenDisconnect() {
         let m = AppModel()
         m.apply(.deviceConnected(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "Michael’s iPod"))
@@ -203,6 +244,77 @@ final class AppModelReducerTests: XCTestCase {
         if case let .syncing(current, total, _, eta) = m.phase {
             XCTAssertEqual(current, 5); XCTAssertEqual(total, 10); XCTAssertEqual(eta, 42)
         } else { XCTFail("expected syncing, got \(m.phase)") }
+    }
+
+    // MARK: - Task 17: Replace Library, selection toggle, device-row rollup lines
+
+    /// Typed-confirmation gate: only an exact, case-sensitive match of the
+    /// device name arms the Replace Library confirm button.
+    func testReplaceConfirmationArmsOnlyOnExactName() {
+        XCTAssertTrue(ReplaceConfirmation.isArmed(input: "Michael's iPod", deviceName: "Michael's iPod"))
+        XCTAssertFalse(ReplaceConfirmation.isArmed(input: "", deviceName: "Michael's iPod"))
+        XCTAssertFalse(ReplaceConfirmation.isArmed(input: "michael's ipod", deviceName: "Michael's iPod"), "must be case-sensitive")
+        XCTAssertFalse(ReplaceConfirmation.isArmed(input: "Michael's iPo", deviceName: "Michael's iPod"), "must be an exact match, not a prefix")
+        XCTAssertFalse(ReplaceConfirmation.isArmed(input: "Michael's iPod ", deviceName: "Michael's iPod"), "trailing whitespace must not arm")
+        // An empty device name (shouldn't happen in practice, but guards
+        // against an empty input trivially "matching" an empty name).
+        XCTAssertFalse(ReplaceConfirmation.isArmed(input: "", deviceName: ""))
+    }
+
+    /// Bytes -> GB formatting is fixed at one decimal place, not
+    /// `ByteCountFormatter`'s auto-unit/auto-precision behavior.
+    func testSkippedForSpaceLabelFormatting() {
+        XCTAssertEqual(DeviceRowFormatting.gbString(9_876_543_210), "9.9 GB")
+        XCTAssertEqual(DeviceRowFormatting.gbString(1_000_000_000), "1.0 GB")
+        XCTAssertEqual(DeviceRowFormatting.gbString(0), "0.0 GB")
+
+        let line = DeviceRowFormatting.skippedForSpaceLine(
+            syncedSummary: "1317 of 1500",
+            skipped: SkippedForSpace(albums: 14, tracks: 183, bytes: 9_876_543_210))
+        XCTAssertEqual(line, "Synced 1317 of 1500 — 14 albums didn't fit (9.9 GB)")
+
+        XCTAssertNil(DeviceRowFormatting.skippedForSpaceLine(syncedSummary: "1500 of 1500", skipped: nil))
+        XCTAssertNil(
+            DeviceRowFormatting.skippedForSpaceLine(
+                syncedSummary: "1500 of 1500",
+                skipped: SkippedForSpace(albums: 0, tracks: 0, bytes: 0)),
+            "nothing skipped this run -> no line")
+    }
+
+    /// Artwork-missing line only shows when the run's rollup indicates a
+    /// shortfall, and reports the shortfall count (falling back to
+    /// `failedSources` if the counts don't line up).
+    func testArtworkMissingLineVisibility() {
+        XCTAssertNil(DeviceRowFormatting.artworkMissingLine(nil))
+        XCTAssertNil(
+            DeviceRowFormatting.artworkMissingLine(ArtworkSummary(embedded: 42, eligible: 42, failedSources: 0)),
+            "everything embedded, nothing failed -> no line")
+
+        XCTAssertEqual(
+            DeviceRowFormatting.artworkMissingLine(ArtworkSummary(embedded: 40, eligible: 42, failedSources: 2)),
+            "Art missing for 2 tracks")
+        XCTAssertEqual(
+            DeviceRowFormatting.artworkMissingLine(ArtworkSummary(embedded: 1, eligible: 2, failedSources: 0)),
+            "Art missing for 1 track", "singular for a shortfall of exactly one")
+        XCTAssertEqual(
+            DeviceRowFormatting.artworkMissingLine(ArtworkSummary(embedded: 42, eligible: 42, failedSources: 3)),
+            "Art missing for 3 tracks", "failedSources > 0 with no embed shortfall still surfaces")
+    }
+
+    /// The Selection picker's save path (Task 17): SaveConfig replaces the
+    /// whole `ipod` blob, so flipping `customSelection` must carry the
+    /// existing serial/model_label/name through untouched — mirrors
+    /// `testSetupWizardPreservesCustomSelection` for the setup wizard's own
+    /// identity-construction site.
+    func testSaveIpodSelectionPreservesIdentityFields() {
+        let existing = IpodIdentity(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", name: "Michael's iPod", customSelection: false)
+        let flipped = AppDelegate.withCustomSelection(true, from: existing)
+        XCTAssertEqual(flipped?.serial, "0xA")
+        XCTAssertEqual(flipped?.modelLabel, "iPod Classic (3rd gen)")
+        XCTAssertEqual(flipped?.name, "Michael's iPod")
+        XCTAssertEqual(flipped?.customSelection, true)
+
+        XCTAssertNil(AppDelegate.withCustomSelection(true, from: nil), "no persisted identity yet -> nothing to save")
     }
 
     @MainActor

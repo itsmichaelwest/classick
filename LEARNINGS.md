@@ -531,3 +531,17 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   would have. Reinforces the existing "adding a Swift file needs `xcodegen
   generate`" rule — worth checking `git status` on the pbxproj at the end of
   any multi-task branch, not just after each individual file add.
+
+## libgpod F-dir fake-mount gotcha (2026-07-17)
+
+- **`itdb_cp_track_to_ipod` round-robins into EXISTING `iPod_Control/Music/F##`
+  dirs — it never creates one.** If none exist, the call fails with "No 'F..'
+  directories found" rather than making `F00` on the fly. Real devices always
+  have `F00..F49` (or similar) from the factory Restore, so this never bites
+  on hardware.
+- **Integration tests that build a fake mount from scratch must pre-create at
+  least `Music/F00`** before adding any track, or every `itdb_cp_track_to_ipod`
+  call in the test fails immediately. See the `fake_mount()`/`ipod_mount()`
+  helpers in `tests/fit_retry_integration.rs`, `tests/wipe_all_tracks_integration.rs`,
+  and `tests/auto_restore_integration.rs` for the pattern
+  (`std::fs::create_dir_all(base.join("iPod_Control").join("Music").join("F00"))`).

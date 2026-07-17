@@ -4,7 +4,7 @@
 //! JSON, snake_case "type" discriminator, additive.
 //!
 //! Spec §7. Protocol semver: daemon emits hello with
-//! `protocol_version = "1.4.0"` since this extends M1's "1.0.0".
+//! `protocol_version = "1.5.0"` since this extends M1's "1.0.0".
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
 use crate::daemon::device_storage::StorageInfo;
@@ -12,7 +12,7 @@ use crate::daemon::history::HistoryEntry;
 use crate::selection::{SelectionMode, SelectionRule};
 use serde::{Deserialize, Serialize};
 
-pub const DAEMON_PROTOCOL_VERSION: &str = "1.4.0";
+pub const DAEMON_PROTOCOL_VERSION: &str = "1.5.0";
 
 /// Events from daemon → UI clients (in addition to forwarded sync-
 /// subprocess events from `src/ipc.rs`).
@@ -198,6 +198,12 @@ pub enum DaemonCommand {
     /// Rockbox can read it. Spawns a `--backfill-rockbox` subprocess; reports
     /// sync-style progress. No-op if a sync is already running.
     BackfillRockbox,
+    /// Erase every track on the iPod, then sync the current selection from
+    /// scratch. Spawns a `--replace-library --apply` subprocess; reports
+    /// sync-style progress. `--apply` skips the core's interactive
+    /// confirmation prompt — the UI does its own typed confirmation before
+    /// ever sending this command. No-op if a sync is already running.
+    ReplaceLibrary,
     /// Reply: library_update from the cached index (may be never-scanned).
     GetLibrary,
     /// Spawn a --scan-library subprocess under the shared sync guard.
@@ -238,12 +244,12 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"hello""#));
-        assert!(json.contains(r#""protocol_version":"1.4.0""#));
+        assert!(json.contains(r#""protocol_version":"1.5.0""#));
     }
 
     #[test]
-    fn protocol_version_is_1_4_0() {
-        assert_eq!(DAEMON_PROTOCOL_VERSION, "1.4.0");
+    fn protocol_version_is_1_5_0() {
+        assert_eq!(DAEMON_PROTOCOL_VERSION, "1.5.0");
     }
 
     #[test]
@@ -369,6 +375,31 @@ mod tests {
             serde_json::from_str::<DaemonCommand>(json).unwrap(),
             DaemonCommand::BackfillRockbox
         ));
+    }
+
+    #[test]
+    fn replace_library_deserializes() {
+        let json = r#"{"type":"replace_library"}"#;
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(json).unwrap(),
+            DaemonCommand::ReplaceLibrary
+        ));
+    }
+
+    /// `replace_library`'s busy/no-device guards (runtime.rs) reply with
+    /// these two `SyncRejected` variants — unlike `TriggerSync`'s NotConfigured
+    /// path, `replace_library` never sends that third reason. Locks the wire
+    /// shape those replies depend on.
+    #[test]
+    fn sync_rejected_serializes_already_syncing_and_no_ipod() {
+        let already_syncing = DaemonEvent::SyncRejected { reason: SyncRejectReason::AlreadySyncing };
+        let json = serde_json::to_string(&already_syncing).unwrap();
+        assert!(json.contains(r#""type":"sync_rejected""#));
+        assert!(json.contains(r#""reason":"already_syncing""#), "got: {json}");
+
+        let no_ipod = DaemonEvent::SyncRejected { reason: SyncRejectReason::NoIpod };
+        let json = serde_json::to_string(&no_ipod).unwrap();
+        assert!(json.contains(r#""reason":"no_ipod""#), "got: {json}");
     }
 
     #[test]

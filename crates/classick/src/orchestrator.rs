@@ -63,6 +63,36 @@ pub fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decisio
     if config.backfill_rockbox {
         return apply_loop::backfill_rockbox(&mut config, progress, decision_rx);
     }
+    if config.restore_db_backup {
+        let mount = crate::preflight::resolve_ipod_mount(&config, progress, decision_rx)?;
+        crate::ipod::db::restore_itunesdb_from_backup(std::path::Path::new(&mount))?;
+        progress.log("iTunesDB restored from session backup.".to_string());
+        return Ok(RunOutcome::Completed);
+    }
+    if config.verify_artwork {
+        // Exit-code mechanism: same pattern main.rs already uses for every
+        // other failure — return Err so anyhow's Termination impl maps it to
+        // exit code 1 (scriptable). Individual failures are already logged
+        // via progress.log inside verify_artwork; this Err just carries the
+        // summary anyhow prints / surfaces to progress.error before exit.
+        let report = crate::art_audit::verify_artwork(&config, progress)?;
+        if report.failures.is_empty() {
+            return Ok(RunOutcome::Completed);
+        }
+        return Err(anyhow!(
+            "artwork audit found {} inconsistenc{} out of {} track(s) checked",
+            report.failures.len(),
+            if report.failures.len() == 1 { "y" } else { "ies" },
+            report.checked,
+        ));
+    }
+    if config.replace_library {
+        // Unlike the branches above, this isn't a run-and-exit one-shot: it
+        // wipes the device, then falls through to a full `apply_loop::run`
+        // sync of the current selection. See `apply_loop::replace_library`'s
+        // doc comment for the full sequence.
+        return apply_loop::replace_library(&mut config, progress, decision_rx);
+    }
     apply_loop::run(&mut config, progress, decision_rx)
 }
 

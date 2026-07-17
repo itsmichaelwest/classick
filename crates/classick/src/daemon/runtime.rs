@@ -80,6 +80,20 @@ pub async fn run_daemon() -> Result<()> {
         })
     });
 
+    let exe_for_replace = std::env::current_exe()?;
+    let event_tx_for_replace = event_tx.clone();
+    let spawn_replace_library: SpawnFn =
+        Arc::new(move |drive: String, cancel_rx, pause_rx, prompt_rx| {
+            let exe = exe_for_replace.clone();
+            let event_tx = event_tx_for_replace.clone();
+            Box::pin(async move {
+                sync_orchestrator::run_replace_library(
+                    exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx,
+                )
+                .await
+            })
+        });
+
     let exe_for_scan = std::env::current_exe()?;
     let event_tx_for_scan = event_tx.clone();
     let spawn_scan: SpawnFn = Arc::new(move |_drive: String, cancel_rx, pause_rx, prompt_rx| {
@@ -98,6 +112,7 @@ pub async fn run_daemon() -> Result<()> {
         watcher: Box::new(PollingDeviceWatcher::new_production()),
         spawn_sync,
         spawn_backfill,
+        spawn_replace_library,
         spawn_scan,
         schedule_minutes,
         preset_event_tx: Some(event_tx),
@@ -138,6 +153,14 @@ pub struct DaemonDeps {
     /// cancel/pause/prompt channels, and event relay as a normal sync — so
     /// a backfill and a sync can never run concurrently.
     pub spawn_backfill: SpawnFn,
+    /// Same shape as `spawn_sync`, but drives a `--replace-library --apply`
+    /// subprocess (`sync_orchestrator::run_replace_library` in production)
+    /// instead of plain `--apply`. Used by the `DaemonCommand::ReplaceLibrary`
+    /// arm, which reuses `start_sync_session` — the same state-machine
+    /// guard, cancel/pause/prompt channels, and event relay as a normal
+    /// sync — so a replace and a sync (or backfill) can never run
+    /// concurrently.
+    pub spawn_replace_library: SpawnFn,
     /// Same shape as `spawn_sync`, but drives a `--scan-library` subprocess
     /// (`sync_orchestrator::run_scan` in production). The `drive` argument is
     /// ignored — a scan touches no device. Used by `DaemonCommand::ScanLibrary`
@@ -251,6 +274,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<InternalEvent>();
     let spawn_sync = deps.spawn_sync;
     let spawn_backfill = deps.spawn_backfill;
+    let spawn_replace_library = deps.spawn_replace_library;
     let spawn_scan = deps.spawn_scan;
     // Cancellation signal for the currently-running sync (if any). Set
     // by start_sync_session; taken + sent by handle_client_command's
@@ -314,6 +338,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &connected,
                     &spawn_sync,
                     &spawn_backfill,
+                    &spawn_replace_library,
                     &spawn_scan,
                     &internal_tx,
                     &mut cancel_tx_holder,
@@ -559,15 +584,15 @@ fn handle_internal_event(
                 return;
             }
 
-            let (history_outcome, error_message, summary) = match outcome {
-                Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary }) => {
-                    (SyncOutcome::Ok, None, summary)
+            let (history_outcome, error_message, summary, db_restored) = match outcome {
+                Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary, db_restored }) => {
+                    (SyncOutcome::Ok, None, summary, db_restored)
                 }
-                Ok(OrchestratorOutcome::Completed { outcome, summary }) => {
-                    (outcome, Some("sync subprocess reported failure".to_string()), summary)
+                Ok(OrchestratorOutcome::Completed { outcome, summary, db_restored }) => {
+                    (outcome, Some("sync subprocess reported failure".to_string()), summary, db_restored)
                 }
                 Ok(OrchestratorOutcome::Aborted { reason, summary }) => {
-                    (SyncOutcome::Aborted, Some(reason), summary)
+                    (SyncOutcome::Aborted, Some(reason), summary, false)
                 }
                 // A graceful pause isn't a failure or a user-driven abort of
                 // the *library* — it's recorded as Aborted (reason "paused")
@@ -575,10 +600,10 @@ fn handle_internal_event(
                 // the live "paused" signal itself rode the raw SyncEvent
                 // stream the UI's Phase.paused reducer watches directly.
                 Ok(OrchestratorOutcome::Paused { summary }) => {
-                    (SyncOutcome::Aborted, Some("paused".to_string()), summary)
+                    (SyncOutcome::Aborted, Some("paused".to_string()), summary, false)
                 }
                 Err(e) => {
-                    (SyncOutcome::Error, Some(format!("orchestrator: {e:#}")), None)
+                    (SyncOutcome::Error, Some(format!("orchestrator: {e:#}")), None, false)
                 }
             };
 
@@ -596,7 +621,7 @@ fn handle_internal_event(
             }
 
             let entry = make_history_entry(
-                trigger, history_outcome, error_message, summary, started_at_unix_secs,
+                trigger, history_outcome, error_message, summary, started_at_unix_secs, db_restored,
             );
             let last_sync = Some(entry.clone());
             let _ = history.append(entry);
@@ -751,6 +776,7 @@ fn handle_device_event(
                         Some("device_detached".to_string()),
                         None,
                         s.started_at_unix_secs,
+                        false,
                     ));
                     state.finish_sync();
                 }
@@ -876,6 +902,7 @@ fn make_history_entry(
     error_message: Option<String>,
     summary: Option<SyncSummary>,
     started_at_unix_secs: u64,
+    db_restored: bool,
 ) -> HistoryEntry {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -889,6 +916,7 @@ fn make_history_entry(
         outcome,
         error_message,
         summary,
+        db_restored,
     }
 }
 
@@ -1016,6 +1044,7 @@ fn handle_client_command(
     connected: &Option<DetectedIpod>,
     spawn_sync: &SpawnFn,
     spawn_backfill: &SpawnFn,
+    spawn_replace_library: &SpawnFn,
     spawn_scan: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
     cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
@@ -1060,6 +1089,41 @@ fn handle_client_command(
                 if i.name.is_none() {
                     if let Some(prev) = current.ipod_identity.as_ref() {
                         if prev.serial == i.serial { i.name = prev.name.clone(); }
+                    }
+                }
+                // Seed the per-device selection.json from the shared one the
+                // first time this device flips shared -> custom, so the
+                // user's existing choices carry over instead of silently
+                // resetting to mode=All on the very first per-device load.
+                // Only on the false->true transition (or no prior identity
+                // for this serial) — flipping back to false intentionally
+                // leaves the per-device file dormant, and
+                // seed_custom_selection() is itself a no-op once the
+                // per-device file exists, so re-saving with the flag
+                // already true is harmless. Seeded BEFORE the config save
+                // below so a crash in between never leaves the flag on
+                // with no per-device file backing it.
+                let was_custom = current.ipod_identity.as_ref()
+                    .filter(|prev| prev.serial == i.serial)
+                    .map(|prev| prev.custom_selection)
+                    .unwrap_or(false);
+                if i.custom_selection && !was_custom {
+                    match (
+                        crate::selection::default_selection_path(),
+                        crate::device_state::device_selection_path(&i.serial),
+                    ) {
+                        (Ok(shared), Ok(custom)) => {
+                            if let Err(e) = crate::selection::seed_custom_selection(&shared, &custom) {
+                                tracing::warn!(
+                                    "daemon: failed to seed per-device selection for {}: {e:#}",
+                                    i.serial,
+                                );
+                            }
+                        }
+                        _ => tracing::warn!(
+                            "daemon: cannot resolve selection paths to seed per-device selection for {}",
+                            i.serial,
+                        ),
                     }
                 }
                 current.ipod_identity = Some(i);
@@ -1202,6 +1266,54 @@ fn handle_client_command(
                 *library_count_cache,
             );
         }
+        DaemonCommand::ReplaceLibrary => {
+            // Mirrors BackfillRockbox's arm exactly, just pointed at
+            // `spawn_replace_library` (a `--replace-library --apply`
+            // subprocess) instead of `spawn_backfill`. `start_sync_session`'s
+            // state-machine check is what makes a replace mutually exclusive
+            // with a sync/backfill — whichever gets there first flips state
+            // to Syncing and the other is dropped/no-op. The UI does its own
+            // typed confirmation before ever sending this command, so there's
+            // no confirmation prompt to relay here (`--apply` already skips
+            // the core's interactive one). Unlike BackfillRockbox/ScanLibrary,
+            // this command is destructive (wipes the on-device library), so
+            // a busy/no-device guard replies with `SyncRejected` (mirroring
+            // TriggerSync's reply mechanism) instead of silently dropping —
+            // the UI needs a definitive answer before it can retry or warn.
+            if !state.is_idle() {
+                let _ = reply.send(DaemonEvent::SyncRejected {
+                    reason: SyncRejectReason::AlreadySyncing,
+                });
+                tracing::debug!(
+                    "daemon: client {client_id} sent replace_library but a sync is already in progress"
+                );
+                return false;
+            }
+            let Some(device) = connected.as_ref() else {
+                let _ = reply.send(DaemonEvent::SyncRejected { reason: SyncRejectReason::NoIpod });
+                tracing::debug!(
+                    "daemon: client {client_id} sent replace_library but no iPod is connected"
+                );
+                return false;
+            };
+            tracing::info!(
+                "daemon: client {client_id} triggered a library replace for {}",
+                device.serial
+            );
+            start_sync_session(
+                SyncTrigger::Manual,
+                device.serial.clone(),
+                device.drive.clone(),
+                state,
+                event_tx,
+                spawn_replace_library,
+                internal_tx,
+                cancel_tx_holder,
+                prompt_tx_holder,
+                pause_tx_holder,
+                *library_count_cache,
+            );
+        }
         DaemonCommand::CancelSync => {
             // Wake the orchestrator's cancel arm. The orchestrator
             // writes a Cancel command to subprocess stdin and force-kills
@@ -1291,7 +1403,8 @@ fn handle_client_command(
             );
         }
         DaemonCommand::GetSelection => {
-            let sel = crate::selection::default_selection_path()
+            let identity = config_file::load(config_path).ok().flatten().and_then(|c| c.ipod_identity);
+            let sel = crate::selection::effective_selection_path(identity.as_ref())
                 .map(|p| crate::selection::load_or_all(&p))
                 .unwrap_or_else(|_| crate::selection::Selection::all());
             let _ = reply.send(DaemonEvent::SelectionUpdate { mode: sel.mode, rules: sel.rules });
@@ -1302,7 +1415,8 @@ fn handle_client_command(
                 mode,
                 rules,
             };
-            match crate::selection::default_selection_path() {
+            let identity = config_file::load(config_path).ok().flatten().and_then(|c| c.ipod_identity);
+            match crate::selection::effective_selection_path(identity.as_ref()) {
                 Ok(path) => {
                     if let Err(e) = crate::selection::save_atomic(&path, &sel) {
                         tracing::error!("daemon: failed to save selection: {e:#}");

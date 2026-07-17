@@ -66,6 +66,10 @@ private struct GeneralTab: View {
                 }
             }
 
+            Text("Classick backs up your iPod's database before every sync.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
             Toggle(
                 "Sync automatically on plug-in",
                 isOn: Binding(

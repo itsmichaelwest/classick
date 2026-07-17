@@ -1,7 +1,7 @@
 //! libgpod DB operations wrapped in RAII Rust types.
 
 use crate::ffi;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::ptr;
@@ -437,6 +437,48 @@ impl Drop for OwnedDb {
     }
 }
 
+/// Remove every track from `db`: delete each track's on-disk file (best
+/// effort — a missing file is not an error, mirroring `delete_track`),
+/// unlink it from every playlist, then remove + free the `Itdb_Track`.
+/// Does NOT call `itdb_write`; the caller batches that once after this
+/// returns. Returns the number of tracks removed.
+///
+/// Used by `--replace-library` (Task 11) to erase the device before
+/// re-syncing the current selection from scratch. Proven sequence —
+/// see `examples/wipe-tracks.rs` and the 2026-05-17 LEARNINGS entry:
+/// `itdb_playlist_remove_track(NULL, track)` removes a track from every
+/// playlist in one call, and `itdb_track_remove` alone (no separate
+/// `itdb_track_unlink`) handles both the DB tracks-list removal and the
+/// struct free.
+///
+/// Track pointers are collected into a `Vec` before iterating rather than
+/// walking `(*node).next` while removing — `itdb_track_remove` frees the
+/// GList node out from under an in-progress walk otherwise.
+pub fn wipe_all_tracks(db: &OwnedDb) -> Result<usize> {
+    let mut tracks: Vec<*mut ffi::Itdb_Track> = Vec::new();
+    unsafe {
+        let mut node = (*db.as_ptr()).tracks;
+        while !node.is_null() {
+            tracks.push((*node).data as *mut ffi::Itdb_Track);
+            node = (*node).next;
+        }
+    }
+    let count = tracks.len();
+    unsafe {
+        for track in tracks {
+            let fname_c = ffi::itdb_filename_on_ipod(track);
+            if !fname_c.is_null() {
+                let path_str = CStr::from_ptr(fname_c).to_string_lossy().into_owned();
+                let _ = std::fs::remove_file(Path::new(&path_str));
+                ffi::g_free(fname_c as *mut std::os::raw::c_void);
+            }
+            ffi::itdb_playlist_remove_track(ptr::null_mut(), track);
+            ffi::itdb_track_remove(track);
+        }
+    }
+    Ok(count)
+}
+
 /// File name (under `iPod_Control\iTunes\`) we copy `iTunesDB` to
 /// before each sync session, providing a known-good restore point if
 /// the sync crashes mid-write and corrupts the live DB.
@@ -497,6 +539,138 @@ pub fn backup_itunesdb(ipod_mount: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// File name (under `iPod_Control\iTunes\`) a corrupt live `iTunesDB` is
+/// renamed to by `restore_itunesdb_from_backup` before the backup is
+/// copied into its place. Single slot — a second corruption in a later
+/// session overwrites whatever was set aside before, on the theory that
+/// only the most recent corrupt copy is worth keeping for inspection.
+pub const ITUNESDB_CORRUPT_ASIDE_NAME: &str = "iTunesDB.corrupt";
+
+/// Parse `path` with libgpod and immediately discard the result. Used to
+/// validate a candidate iTunesDB (e.g. the session backup) without
+/// wiring it up as the live, in-memory `OwnedDb` for the rest of the run.
+fn parse_check(path: &Path) -> Result<()> {
+    let path_c = path_to_cstring(path)?;
+    unsafe {
+        let mut err: *mut ffi::GError = ptr::null_mut();
+        let db = ffi::itdb_parse_file(path_c.as_ptr(), &mut err);
+        if db.is_null() {
+            return Err(gerror_to_anyhow("itdb_parse_file", err));
+        }
+        ffi::itdb_free(db);
+    }
+    Ok(())
+}
+
+/// Restore `iTunesDB` from the session backup (`iTunesDB.classick-backup`)
+/// after detecting the live DB won't parse.
+///
+/// Order matters: the backup is validated with libgpod BEFORE anything on
+/// disk is touched. If the backup is missing or itself unparseable, this
+/// returns `Err` and the live (corrupt) DB is left exactly as found — we
+/// never destroy the only copy of a DB on the strength of an unverified
+/// replacement. Only once the backup is confirmed good do we proceed with
+/// the restore sequence.
+///
+/// The sequence is designed to minimize the crash window where no live DB
+/// exists (required by device-detection logic):
+///   1. Copy backup → `.tmp` (same pattern as `backup_itunesdb`)
+///   2. Rename live DB → `iTunesDB.corrupt` (replace-existing)
+///   3. Rename `.tmp` → live `iTunesDB`
+///
+/// If step 1 or 3 fails, clean up the `.tmp` file. If a crash occurs after
+/// step 2 but before step 3, the fully-validated `.tmp` and intact backup
+/// sit next to the `.corrupt` aside, allowing safe manual recovery on the
+/// next run.
+pub fn restore_itunesdb_from_backup(ipod_mount: &Path) -> Result<()> {
+    let backup = ipod_mount
+        .join("iPod_Control")
+        .join("iTunes")
+        .join(ITUNESDB_BACKUP_NAME);
+    if !backup.exists() {
+        return Err(anyhow!(
+            "no session backup found at {} to restore from",
+            backup.display()
+        ));
+    }
+    parse_check(&backup)
+        .map_err(|e| anyhow!("session backup at {} does not parse: {e:#}", backup.display()))?;
+
+    let live = crate::ipod::layout::itunes_db_path(ipod_mount);
+    let aside = ipod_mount
+        .join("iPod_Control")
+        .join("iTunes")
+        .join(ITUNESDB_CORRUPT_ASIDE_NAME);
+    let tmp = live.with_extension("tmp");
+
+    // Step 1: copy backup → tmp (same tmp naming pattern already used).
+    std::fs::copy(&backup, &tmp).with_context(|| {
+        format!("failed to copy backup {} -> {}", backup.display(), tmp.display())
+    })?;
+
+    // Step 2: rename live DB → corrupt aside (replace-existing).
+    if live.exists() {
+        std::fs::rename(&live, &aside).with_context(|| {
+            format!(
+                "failed to set aside corrupt DB {} -> {}",
+                live.display(),
+                aside.display()
+            )
+        })?;
+    }
+
+    // Step 3: rename tmp → live (atomic on POSIX + Windows 10+).
+    if let Err(e) = std::fs::rename(&tmp, &live) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| {
+            format!("failed to rename restored DB {} -> {}", tmp.display(), live.display())
+        });
+    }
+
+    Ok(())
+}
+
+/// Open the live iTunesDB, silently self-healing from the session backup
+/// if the live DB fails to parse (e.g. a crash mid-write left it
+/// truncated/corrupt). `on_restore` fires exactly once, only when a
+/// restore actually happened and the re-open succeeded — callers use it
+/// to log the event and record it for the sync history, per the
+/// invisible-trust design (no prompts; the user just sees a working sync).
+///
+/// If the live DB fails to parse AND the restore attempt also fails
+/// (backup missing or itself unparseable), this returns the ORIGINAL
+/// `OwnedDb::open` error — not the restore error — wrapped with context
+/// naming both manual remedies (`--rebuild-manifest`, `--restore-db-backup`)
+/// so the user isn't left with a dead end.
+pub fn open_with_auto_restore(
+    ipod_mount: &Path,
+    on_restore: impl FnOnce(),
+) -> Result<OwnedDb> {
+    match OwnedDb::open(ipod_mount) {
+        Ok(db) => Ok(db),
+        Err(open_err) => {
+            if restore_itunesdb_from_backup(ipod_mount).is_err() {
+                return Err(open_err.context(
+                    "iTunesDB failed to parse and could not be auto-restored from backup; \
+                     try `--rebuild-manifest` to rebuild from the iPod's on-disk state, or \
+                     `--restore-db-backup` to restore the session backup manually",
+                ));
+            }
+            match OwnedDb::open(ipod_mount) {
+                Ok(db) => {
+                    on_restore();
+                    Ok(db)
+                }
+                Err(reopen_err) => Err(reopen_err.context(
+                    "restored iTunesDB from backup but it failed to re-open; try \
+                     `--rebuild-manifest` to rebuild from the iPod's on-disk state, or \
+                     `--restore-db-backup` to restore the session backup manually",
+                )),
+            }
+        }
+    }
 }
 
 /// Read the iPod's user-set name (the master playlist's `name` field

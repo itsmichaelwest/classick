@@ -51,6 +51,16 @@ final class AppModel {
     private(set) var libraryCount: Int?
     private(set) var history: [HistoryEntry] = []
 
+    // Protocol 1.5.0: the most recently completed run's `finish` rollups,
+    // for immediate post-sync display (Task 17). These are separate from
+    // `lastSync`/`history`'s own `summary`/`dbRestored` (which the daemon
+    // persists and rebroadcasts) because a live `finish` line arrives over
+    // the forwarded sync_event stream before the daemon's own
+    // history_update/status_update catches up.
+    private(set) var lastRunSkippedForSpace: SkippedForSpace?
+    private(set) var lastRunArtwork: ArtworkSummary?
+    private(set) var lastRunDbRestored = false
+
     struct SelectionState: Equatable, Sendable {
         var mode: SelectionMode
         var rules: [SelectionRule]
@@ -230,12 +240,15 @@ final class AppModel {
             } else {
                 phase = .syncing(current: current, total: total, label: label, etaSecs: etaSecs)
             }
-        case .finish:
+        case let .finish(_, skippedForSpace, artwork, dbRestored):
             if isScanning {
-                // The daemon's post-scan Idle status will confirm; don't leave
-                // a stale `.scanning`. Fall back to the derived resting phase.
+                // A scan's finish never carries these fields (they're
+                // sync-only) — don't clobber the last real sync's rollup.
                 phase = computePhase(targetSyncing: false)
             } else {
+                lastRunSkippedForSpace = skippedForSpace
+                lastRunArtwork = artwork
+                lastRunDbRestored = dbRestored
                 phase = .idle
             }
         case let .prompt(id, message, options):

@@ -26,7 +26,16 @@ const PAUSE_DRAIN_GRACE: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestratorOutcome {
-    Completed { outcome: SyncOutcome, summary: Option<SyncSummary> },
+    Completed {
+        outcome: SyncOutcome,
+        summary: Option<SyncSummary>,
+        /// Mirrors the subprocess `finish` event's `db_restored` field
+        /// (Task 4's auto-restore-from-backup path). Only ever observed on
+        /// this variant: `Aborted`/`Paused` exits (cancel, >50% bail, pause
+        /// backstop) tear the subprocess down before its terminal `finish`
+        /// line is read, so there's nothing to parse it from.
+        db_restored: bool,
+    },
     Aborted { reason: String, summary: Option<SyncSummary> },
     /// The subprocess emitted `{"type":"paused"}` (graceful drain +
     /// checkpoint) and then exited on its own. Distinct from `Aborted`:
@@ -58,6 +67,19 @@ pub fn build_command(exe: &std::path::Path, drive: &str, rockbox_compat: bool) -
 /// rather than running a full add/modify/remove sync.
 pub fn build_backfill_command(exe: &std::path::Path, drive: &str) -> Command {
     base_command(exe, "--backfill-rockbox", Some(drive))
+}
+
+/// Build the replace-library subprocess command: same stdio/no-console
+/// setup as `build_command`, but `--replace-library --apply` instead of
+/// plain `--apply` — it wipes every track on the iPod before falling
+/// through to a normal sync of the current selection. `--apply` is what
+/// makes `apply_loop::replace_library` skip its interactive confirmation
+/// prompt (see `should_skip_replace_confirmation`); the UI does its own
+/// typed confirmation before ever sending the `replace_library` command.
+pub fn build_replace_library_command(exe: &std::path::Path, drive: &str) -> Command {
+    let mut cmd = base_command(exe, "--replace-library", Some(drive));
+    cmd.arg("--apply");
+    cmd
 }
 
 /// Build the library-scan subprocess command. No --ipod: a scan only reads
@@ -161,6 +183,26 @@ pub async fn run_backfill(
     drive_child(exe, cmd, cancel_rx, pause_rx, prompt_decisions_rx, event_tx).await
 }
 
+/// Run the one-shot replace-library subprocess (`--replace-library
+/// --apply`) through the same drive-to-completion machinery as `run`/
+/// `run_backfill` — identical event forwarding, failure-bail threshold,
+/// cancel/pause handling — so the UI sees ordinary sync-style progress for
+/// a replace with no special-casing on its side. `event_tx` is the SAME
+/// broadcast channel `run`/`run_backfill` use, so a `DecidePrompt`/
+/// `CancelSync`/`Pause` sent while a replace is in flight behaves exactly
+/// as it would during a normal sync.
+pub async fn run_replace_library(
+    exe: PathBuf,
+    drive: String,
+    cancel_rx: oneshot::Receiver<()>,
+    pause_rx: oneshot::Receiver<()>,
+    prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
+    event_tx: broadcast::Sender<DaemonEvent>,
+) -> Result<OrchestratorOutcome> {
+    let cmd = build_replace_library_command(&exe, &drive);
+    drive_child(exe, cmd, cancel_rx, pause_rx, prompt_decisions_rx, event_tx).await
+}
+
 /// Run a --scan-library subprocess through the same drive-to-completion
 /// machinery as syncs/backfills (event forwarding, cancel/pause, bail
 /// threshold — mostly inert for a scan, but shared code is shared behavior).
@@ -191,6 +233,7 @@ async fn drive_child(
     let mut tracker = FailureTracker::default();
     let mut last_summary: Option<SyncSummary> = None;
     let mut finish_success: Option<bool> = None;
+    let mut finish_db_restored = false;
     let mut paused = false;
     // Guards re-polling `pause_rx` after it has already fired once — a
     // oneshot::Receiver panics if polled again past Ready. Once the pause
@@ -244,6 +287,21 @@ async fn drive_child(
                     }
                     "finish" => {
                         finish_success = value.get("success").and_then(|v| v.as_bool());
+                        finish_db_restored = db_restored_from_finish_value(&value);
+                        // The "summary" event (parsed above, into
+                        // `last_summary`) always precedes "finish" in the
+                        // wire stream, but the skipped-for-space/artwork
+                        // fields only ride the *finish* event (Task 8), so
+                        // merge them into the already-captured summary here.
+                        // If a summary event was somehow never seen, fall
+                        // back to a zeroed one rather than silently dropping
+                        // the fit-pass/artwork rollup.
+                        let summary = last_summary.get_or_insert_with(|| SyncSummary {
+                            add: 0, modify: 0, remove: 0, unchanged: 0, skipped: 0,
+                            metadata_only: 0, skipped_for_space_tracks: 0,
+                            skipped_for_space_bytes: 0, artwork_failed_sources: 0,
+                        });
+                        merge_finish_fields_into_summary(summary, &value);
                     }
                     "paused" => {
                         paused = true;
@@ -317,7 +375,11 @@ async fn drive_child(
         Some(true) => SyncOutcome::Ok,
         _ => SyncOutcome::Error,
     };
-    Ok(OrchestratorOutcome::Completed { outcome, summary: last_summary })
+    Ok(OrchestratorOutcome::Completed {
+        outcome,
+        summary: last_summary,
+        db_restored: finish_db_restored,
+    })
 }
 
 fn summary_from_value(v: &Value) -> SyncSummary {
@@ -334,7 +396,35 @@ fn summary_from_value(v: &Value) -> SyncSummary {
         // undercount (runtime.rs), letting "X of Y synced" show X > Y after
         // a tag-only sync.
         metadata_only: v.get("metadata_only").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+        // Populated later, when the "finish" event arrives (see the
+        // "finish" match arm above) — the "summary" event this function
+        // parses doesn't carry them.
+        skipped_for_space_tracks: 0,
+        skipped_for_space_bytes: 0,
+        artwork_failed_sources: 0,
     }
+}
+
+/// Extracts `db_restored` from a raw `finish` event `Value`. `false` when
+/// absent, matching the wire's old-client-compat convention (the field is
+/// omitted rather than sent as `false`).
+fn db_restored_from_finish_value(v: &Value) -> bool {
+    v.get("db_restored").and_then(|x| x.as_bool()).unwrap_or(false)
+}
+
+/// Merges the `skipped_for_space`/`artwork` rollups from a raw `finish`
+/// event `Value` into an already-captured `SyncSummary` (built from the
+/// preceding `summary` event). Note `skipped_for_space.albums` is
+/// deliberately NOT persisted — only `tracks`/`bytes` map onto
+/// `SyncSummary`, per plan.
+fn merge_finish_fields_into_summary(summary: &mut SyncSummary, v: &Value) {
+    let skipped_for_space = v.get("skipped_for_space");
+    summary.skipped_for_space_tracks = skipped_for_space
+        .and_then(|s| s.get("tracks")).and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+    summary.skipped_for_space_bytes = skipped_for_space
+        .and_then(|s| s.get("bytes")).and_then(|x| x.as_u64()).unwrap_or(0);
+    summary.artwork_failed_sources = v.get("artwork")
+        .and_then(|a| a.get("failed_sources")).and_then(|x| x.as_u64()).unwrap_or(0) as usize;
 }
 
 /// Resolves at `deadline` if one is armed; otherwise never resolves. Lets
@@ -423,6 +513,17 @@ mod tests {
     }
 
     #[test]
+    fn build_replace_library_command_passes_replace_and_apply_flags() {
+        let cmd = build_replace_library_command(&PathBuf::from("classick.exe"), "G:\\");
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("--ipc-mode"));
+        assert!(dbg.contains("--replace-library"));
+        assert!(dbg.contains("--apply"));
+        assert!(dbg.contains("--ipod"));
+        assert!(dbg.contains("G:\\"));
+    }
+
+    #[test]
     fn build_scan_command_passes_scan_flag_without_ipod() {
         let cmd = build_scan_command(&PathBuf::from("classick"));
         let dbg = format!("{cmd:?}");
@@ -484,5 +585,56 @@ mod tests {
         let v = serde_json::json!({"add": 1, "modify": 0, "remove": 0, "unchanged": 5});
         let summary = summary_from_value(&v);
         assert_eq!(summary.metadata_only, 0);
+    }
+
+    // -- Task 9: finish-event fields merged onto SyncSummary/db_restored ---
+
+    #[test]
+    fn merge_finish_fields_maps_skipped_for_space_tracks_and_bytes_not_albums() {
+        let v = serde_json::json!({
+            "type": "finish",
+            "success": true,
+            "skipped_for_space": {"albums": 14, "tracks": 183, "bytes": 9_876_543_210u64},
+        });
+        let mut summary = summary_from_value(&serde_json::json!({}));
+        merge_finish_fields_into_summary(&mut summary, &v);
+        assert_eq!(summary.skipped_for_space_tracks, 183);
+        assert_eq!(summary.skipped_for_space_bytes, 9_876_543_210);
+        // `albums` is deliberately not part of SyncSummary at all — there's
+        // no field to even accidentally populate; this test documents that.
+    }
+
+    #[test]
+    fn merge_finish_fields_maps_artwork_failed_sources() {
+        let v = serde_json::json!({
+            "type": "finish",
+            "success": true,
+            "artwork": {"embedded": 10, "eligible": 12, "failed_sources": 2},
+        });
+        let mut summary = summary_from_value(&serde_json::json!({}));
+        merge_finish_fields_into_summary(&mut summary, &v);
+        assert_eq!(summary.artwork_failed_sources, 2);
+    }
+
+    #[test]
+    fn merge_finish_fields_defaults_to_zero_when_absent() {
+        let v = serde_json::json!({"type": "finish", "success": true});
+        let mut summary = summary_from_value(&serde_json::json!({}));
+        merge_finish_fields_into_summary(&mut summary, &v);
+        assert_eq!(summary.skipped_for_space_tracks, 0);
+        assert_eq!(summary.skipped_for_space_bytes, 0);
+        assert_eq!(summary.artwork_failed_sources, 0);
+    }
+
+    #[test]
+    fn db_restored_from_finish_value_parses_true() {
+        let v = serde_json::json!({"type": "finish", "success": true, "db_restored": true});
+        assert!(db_restored_from_finish_value(&v));
+    }
+
+    #[test]
+    fn db_restored_from_finish_value_defaults_false_when_absent() {
+        let v = serde_json::json!({"type": "finish", "success": true});
+        assert!(!db_restored_from_finish_value(&v));
     }
 }

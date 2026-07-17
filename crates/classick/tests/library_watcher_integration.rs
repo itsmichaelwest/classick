@@ -88,7 +88,7 @@ fn noop_spawn(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<OrchestratorOutcome>> + Send>>
 {
     Box::pin(async move {
-        Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary: None })
+        Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary: None, db_restored: false })
     })
 }
 
@@ -130,7 +130,7 @@ async fn sandbox_with_source() -> WatcherSandbox {
                            _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
         scan_spawns_for_closure.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
-            Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary: None })
+            Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary: None, db_restored: false })
         })
             as std::pin::Pin<
                 Box<dyn std::future::Future<Output = anyhow::Result<OrchestratorOutcome>> + Send>,
@@ -143,6 +143,7 @@ async fn sandbox_with_source() -> WatcherSandbox {
         watcher: Box::new(NoDeviceWatcher(device_rx)),
         spawn_sync: Arc::new(noop_spawn),
         spawn_backfill: Arc::new(noop_spawn),
+        spawn_replace_library: Arc::new(noop_spawn),
         spawn_scan: Arc::new(spawn_scan),
         schedule_minutes: 0,
         preset_event_tx: None,

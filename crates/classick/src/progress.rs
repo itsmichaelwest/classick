@@ -11,8 +11,11 @@ use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
 use std::collections::VecDeque;
 use std::io::IsTerminal;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use crate::ipc::{ArtworkSummary, SkippedForSpace};
 
 /// Whole-run-average sync ETA. Shared by the TUI and IPC progress backends so
 /// both surface an identical estimate. Deliberately simple: elapsed time since
@@ -133,16 +136,39 @@ pub enum ProgressEvent {
     /// `finish.success`, and by the process exit code in main (anyhow's
     /// `Termination` impl on the Err path already maps to a non-zero exit;
     /// this just makes sure the Finish event itself agrees).
-    Finish { success: bool },
+    ///
+    /// `skipped_for_space`/`artwork`/`db_restored` are populated from
+    /// `Progress`'s internal `finish_details` state (set via `note_*`
+    /// methods during the run) rather than passed as a `finish()` argument —
+    /// see `Progress::note_db_restored`/`note_skipped_for_space`.
+    Finish {
+        success: bool,
+        skipped_for_space: Option<SkippedForSpace>,
+        artwork: Option<ArtworkSummary>,
+        db_restored: bool,
+    },
     /// Terminal event: graceful pause (see `Decision::Pause`). Completed
     /// tracks were already committed to the iTunesDB + manifest by the apply
     /// loop's final checkpoint before this is sent. No fields.
     Paused,
 }
 
+/// Data accumulated during a run via `Progress::note_*` and read once by
+/// `finish()` to populate the terminal `Finish` event's optional fields.
+/// Behind a `Mutex` because `Progress` is shared as `&Progress` across the
+/// apply loop's call chain (preflight, apply_loop, the Task-4 auto-restore
+/// closures) rather than threaded through as an explicit return value.
+#[derive(Debug, Clone, Default)]
+struct FinishDetails {
+    skipped_for_space: Option<SkippedForSpace>,
+    artwork: Option<ArtworkSummary>,
+    db_restored: bool,
+}
+
 pub struct Progress {
     sender: Sender<ProgressEvent>,
     thread: Option<JoinHandle<()>>,
+    finish_details: Mutex<FinishDetails>,
 }
 
 impl Progress {
@@ -182,7 +208,11 @@ impl Progress {
             }
         });
         Ok((
-            Self { sender: event_tx, thread: Some(thread) },
+            Self {
+                sender: event_tx,
+                thread: Some(thread),
+                finish_details: Mutex::new(FinishDetails::default()),
+            },
             decision_rx,
         ))
     }
@@ -234,6 +264,36 @@ impl Progress {
         let _ = self.sender.send(ProgressEvent::Paused);
     }
 
+    /// Records that Task 4's auto-restore-from-backup path fired this run
+    /// (iTunesDB failed to parse and was replaced from the session backup
+    /// before the sync proceeded). Surfaced as `finish.db_restored: true`.
+    /// Idempotent — safe to call more than once in the unlikely event both
+    /// `open_with_auto_restore` call sites in `apply_loop::run` fire.
+    pub fn note_db_restored(&self) {
+        if let Ok(mut d) = self.finish_details.lock() {
+            d.db_restored = true;
+        }
+    }
+
+    /// Records the fit pass's (Task 8) final deferral rollup — whatever the
+    /// end-of-run retry still couldn't fit. Surfaced as
+    /// `finish.skipped_for_space`. Overwrites any previous value; callers
+    /// are expected to call this at most once, with the final tally.
+    pub fn note_skipped_for_space(&self, skipped: SkippedForSpace) {
+        if let Ok(mut d) = self.finish_details.lock() {
+            d.skipped_for_space = Some(skipped);
+        }
+    }
+
+    /// Records this run's cover-art embed/refresh rollup (Task 13). Surfaced
+    /// as `finish.artwork`. Overwrites any previous value; callers are
+    /// expected to call this at most once, with the final tally.
+    pub fn note_artwork_summary(&self, summary: ArtworkSummary) {
+        if let Ok(mut d) = self.finish_details.lock() {
+            d.artwork = Some(summary);
+        }
+    }
+
     /// Drains the channel and joins the worker thread. Call once at the end.
     ///
     /// Returns `Err` if the worker thread panicked (e.g. crossterm setup
@@ -256,7 +316,13 @@ impl Progress {
         const JOIN_DEADLINE: Duration = Duration::from_secs(5);
         const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-        let _ = self.sender.send(ProgressEvent::Finish { success });
+        let details = self.finish_details.lock().map(|d| d.clone()).unwrap_or_default();
+        let _ = self.sender.send(ProgressEvent::Finish {
+            success,
+            skipped_for_space: details.skipped_for_space,
+            artwork: details.artwork,
+            db_restored: details.db_restored,
+        });
         if let Some(t) = self.thread.take() {
             let deadline = Instant::now() + JOIN_DEADLINE;
             while !t.is_finished() {
@@ -327,8 +393,14 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
             ProgressEvent::Log(s) => println!("{s}"),
             ProgressEvent::Error(s) => eprintln!("ERROR: {s}"),
             // success bool is ignored in plain mode (the process exit code
-            // conveys it; we don't print a banner either way).
-            ProgressEvent::Finish { .. } => break,
+            // conveys it; we don't print a banner either way). db_restored
+            // is skipped too — the on_restore closure already logged it.
+            ProgressEvent::Finish { skipped_for_space, .. } => {
+                if let Some(s) = &skipped_for_space {
+                    println!("{}", s.describe());
+                }
+                break;
+            }
             ProgressEvent::Paused => {
                 println!("Paused. Completed tracks were saved.");
                 break;
@@ -723,8 +795,16 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
         ProgressEvent::Log(s) => state.push_log(s),
         ProgressEvent::Error(s) => state.push_log(format!("ERROR: {s}")),
         // TUI doesn't surface success/failure directly here — the process
-        // exit code carries it. We just tear down the draw loop.
-        ProgressEvent::Finish { .. } => { *finished = true; }
+        // exit code carries it. We just tear down the draw loop. One more
+        // `terminal.draw` runs after this (see `run_tui`'s loop body) before
+        // teardown, so a log line pushed here does get one frame of
+        // visibility.
+        ProgressEvent::Finish { skipped_for_space, .. } => {
+            if let Some(s) = &skipped_for_space {
+                state.push_log(s.describe());
+            }
+            *finished = true;
+        }
         ProgressEvent::Paused => {
             state.push_log("Paused. Completed tracks were saved.".to_string());
             *finished = true;

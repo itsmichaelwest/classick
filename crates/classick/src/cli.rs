@@ -140,6 +140,37 @@ pub struct Cli {
     /// not re-read.
     #[arg(long, conflicts_with = "backfill_rockbox")]
     pub scan_library: bool,
+
+    /// Restore iPod_Control\iTunes\iTunesDB from the session backup
+    /// (iTunesDB.classick-backup) written at the start of the last sync,
+    /// then exit. A manual escape hatch for a live DB that failed to parse
+    /// and wasn't auto-healed. Requires --ipod (or auto-detect).
+    #[arg(long, conflicts_with_all = ["backfill_rockbox", "scan_library"])]
+    pub restore_db_backup: bool,
+
+    /// Erase EVERY track on the iPod, then sync the current selection from
+    /// scratch. Unlike a normal sync (which only removes tracks the source
+    /// no longer has), this wipes the device's existing library
+    /// unconditionally before applying. Confirmed interactively unless
+    /// --apply is also passed. Cannot be combined with the other one-shot
+    /// modes below (dry-run has no meaning for a destructive operation, and
+    /// a rebuilt/foreign manifest is moot once the device is wiped).
+    #[arg(long, conflicts_with_all = [
+        "backfill_rockbox", "scan_library", "restore_db_backup", "dry_run", "rebuild_manifest",
+    ])]
+    pub replace_library: bool,
+
+    /// Cross-check every synced track's source embedded art against the
+    /// on-iPod DB `has_artwork` flag and the on-disk ithmb thumbnail, then
+    /// exit. Diagnostic + permanent regression harness for the cover-art
+    /// pipeline bugs in LEARNINGS.md ("macOS Artwork Root Cause"). Logs each
+    /// inconsistency found and exits non-zero if any are found (scriptable).
+    /// Requires --ipod (or auto-detect).
+    #[arg(long, conflicts_with_all = [
+        "backfill_rockbox", "scan_library", "restore_db_backup", "replace_library",
+        "dry_run", "rebuild_manifest",
+    ])]
+    pub verify_artwork: bool,
 }
 
 #[cfg(test)]
@@ -308,5 +339,122 @@ mod tests {
         .unwrap();
         assert!(cli.rockbox_compat);
         assert!(cli.backfill_rockbox);
+    }
+
+    #[test]
+    fn parses_restore_db_backup_flag() {
+        let cli = Cli::try_parse_from(["classick", "--restore-db-backup"]).unwrap();
+        assert!(cli.restore_db_backup);
+        let cli = Cli::try_parse_from(["classick"]).unwrap();
+        assert!(!cli.restore_db_backup);
+    }
+
+    #[test]
+    fn restore_db_backup_conflicts_with_backfill_rockbox_and_scan_library() {
+        assert!(
+            Cli::try_parse_from(["classick", "--restore-db-backup", "--backfill-rockbox"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["classick", "--restore-db-backup", "--scan-library"]).is_err()
+        );
+    }
+
+    #[test]
+    fn parses_replace_library_flag() {
+        let cli = Cli::try_parse_from(["classick", "--replace-library"]).unwrap();
+        assert!(cli.replace_library);
+        let cli = Cli::try_parse_from(["classick"]).unwrap();
+        assert!(!cli.replace_library);
+    }
+
+    #[test]
+    fn replace_library_conflicts_with_backfill_rockbox() {
+        assert!(
+            Cli::try_parse_from(["classick", "--replace-library", "--backfill-rockbox"]).is_err()
+        );
+    }
+
+    #[test]
+    fn replace_library_conflicts_with_scan_library() {
+        assert!(
+            Cli::try_parse_from(["classick", "--replace-library", "--scan-library"]).is_err()
+        );
+    }
+
+    #[test]
+    fn replace_library_conflicts_with_restore_db_backup() {
+        assert!(
+            Cli::try_parse_from(["classick", "--replace-library", "--restore-db-backup"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn replace_library_conflicts_with_dry_run() {
+        assert!(Cli::try_parse_from(["classick", "--replace-library", "--dry-run"]).is_err());
+    }
+
+    #[test]
+    fn replace_library_conflicts_with_rebuild_manifest() {
+        assert!(
+            Cli::try_parse_from(["classick", "--replace-library", "--rebuild-manifest"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn replace_library_combines_with_apply() {
+        let cli = Cli::try_parse_from(["classick", "--replace-library", "--apply"]).unwrap();
+        assert!(cli.replace_library);
+        assert!(cli.apply);
+    }
+
+    #[test]
+    fn parses_verify_artwork_flag() {
+        let cli = Cli::try_parse_from(["classick", "--verify-artwork"]).unwrap();
+        assert!(cli.verify_artwork);
+        let cli = Cli::try_parse_from(["classick"]).unwrap();
+        assert!(!cli.verify_artwork);
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_backfill_rockbox() {
+        assert!(
+            Cli::try_parse_from(["classick", "--verify-artwork", "--backfill-rockbox"]).is_err()
+        );
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_scan_library() {
+        assert!(
+            Cli::try_parse_from(["classick", "--verify-artwork", "--scan-library"]).is_err()
+        );
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_restore_db_backup() {
+        assert!(
+            Cli::try_parse_from(["classick", "--verify-artwork", "--restore-db-backup"]).is_err()
+        );
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_replace_library() {
+        assert!(
+            Cli::try_parse_from(["classick", "--verify-artwork", "--replace-library"]).is_err()
+        );
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_dry_run() {
+        assert!(Cli::try_parse_from(["classick", "--verify-artwork", "--dry-run"]).is_err());
+    }
+
+    #[test]
+    fn verify_artwork_conflicts_with_rebuild_manifest() {
+        assert!(
+            Cli::try_parse_from(["classick", "--verify-artwork", "--rebuild-manifest"]).is_err()
+        );
     }
 }

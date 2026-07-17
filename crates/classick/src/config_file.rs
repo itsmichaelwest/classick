@@ -69,6 +69,13 @@ pub struct IpodIdentity {
     /// user has renamed it. `None` if the iTunesDB couldn't be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// When true, this iPod's sync selection is read from/written to its own
+    /// per-device `devices/<serial>/selection.json` instead of the shared
+    /// `selection.json`. Absent/false = shared (today's behavior), so old
+    /// config files and older clients that never send this field keep
+    /// working unchanged. See `selection::effective_selection_path`.
+    #[serde(default)]
+    pub custom_selection: bool,
 }
 
 fn default_true() -> bool { true }
@@ -288,6 +295,7 @@ encoder = "ffmpeg"
                 serial: "EXAMPLE1234".to_string(),
                 model_label: "iPod Classic 7G".to_string(),
                 name: None,
+                custom_selection: true,
             }),
             ..PersistedConfig::default()
         };
@@ -295,5 +303,35 @@ encoder = "ffmpeg"
         let toml_text = toml::to_string(&cfg).expect("serialize");
         let parsed: PersistedConfig = toml::from_str(&toml_text).expect("round-trip");
         assert_eq!(cfg, parsed);
+        assert!(parsed.ipod_identity.unwrap().custom_selection);
+    }
+
+    #[test]
+    fn ipod_identity_custom_selection_absent_deserializes_false() {
+        // Old config files (and older clients that don't know the field)
+        // never write `custom_selection` at all — it must default to false
+        // (shared selection), not error or panic.
+        let toml_text = r#"
+[ipod_identity]
+serial = "EXAMPLE1234"
+model_label = "iPod Classic 7G"
+"#;
+        let cfg: PersistedConfig = toml::from_str(toml_text).expect("parse");
+        let identity = cfg.ipod_identity.expect("ipod_identity present");
+        assert!(!identity.custom_selection, "absent field must default to false (shared)");
+    }
+
+    #[test]
+    fn ipod_identity_custom_selection_true_round_trips() {
+        let identity = IpodIdentity {
+            serial: "SER1".to_string(),
+            model_label: "iPod Classic 7G".to_string(),
+            name: None,
+            custom_selection: true,
+        };
+        let toml_text = toml::to_string(&identity).expect("serialize");
+        assert!(toml_text.contains("custom_selection = true"));
+        let parsed: IpodIdentity = toml::from_str(&toml_text).expect("round-trip");
+        assert_eq!(identity, parsed);
     }
 }
