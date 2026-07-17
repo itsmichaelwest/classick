@@ -324,7 +324,7 @@ cases; rely on `success` for the user-facing verdict). Mirrors
 |-----------------------|-----------|-------------------------------------------------------|
 | `success`             | `boolean` | `true` for a clean run, `false` for fatal failure.   |
 | `skipped_for_space?`  | `object` \| absent | **Since 1.3.0.** Fit-pass deferral rollup — whole albums that didn't fit the device's remaining space, even after the end-of-run retry (§ below). Absent when nothing was deferred. |
-| `artwork?`            | `object` \| absent | **Since 1.3.0.** Artwork embed/refresh rollup. Reserved: always absent until a later core version populates it. |
+| `artwork?`            | `object` \| absent | **Since 1.3.0.** Cover-art rollup across this run's Add/Modify/MetadataOnly actions (Task 13; previously reserved and always absent). Absent when the run never reached the apply loop (dry-run, review-abort, or "nothing to do" with no pending artwork repair). |
 | `db_restored?`        | `boolean` \| absent | **Since 1.3.0.** `true` when the core's auto-restore-from-backup path fired this run (the iTunesDB failed to parse and was replaced from the session backup before the sync proceeded). Absent (not `false`) when it didn't fire. |
 
 `skipped_for_space`, when present, has:
@@ -335,8 +335,12 @@ cases; rely on `success` for the user-facing verdict). Mirrors
 | `tracks` | `number` | Total tracks across those albums.                                |
 | `bytes`  | `number` | Total source bytes across those albums (the fit pass's estimate, not necessarily the exact on-iPod transcoded size). |
 
-`artwork`, when present, has `embedded`, `eligible`, `failed_sources`
-(all `number`) — reserved shape, not yet populated by any core version.
+`artwork`, when present, has `embedded`, `eligible`, `failed_sources` (all
+`number`): `eligible` counts sources with embedded art, `embedded` counts
+those successfully written to the device (Apple thumbnail and/or, under
+`rockbox_compat`, the on-device file's own tags), `failed_sources` counts
+those whose art extraction/decode failed (also warn-logged with the source
+path).
 
 A pre-1.3.0 core never emits `skipped_for_space`/`artwork`/`db_restored`;
 a UI built against 1.3.0 must treat their absence as "nothing to report",

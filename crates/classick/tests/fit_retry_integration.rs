@@ -10,7 +10,7 @@
 //! can be driven here with an arbitrary budget without needing a real
 //! mounted device whose free space we could control.
 
-use classick::apply_loop::retry_deferred;
+use classick::apply_loop::{retry_deferred, ArtworkCounts};
 use classick::cli::EncoderChoice;
 use classick::config::Config;
 use classick::ffi;
@@ -150,6 +150,7 @@ fn retry_deferred_commits_album_when_budget_is_sufficient() {
     let mut manifest = Manifest::empty();
     let (progress, decision_rx) = Progress::start(false, false).unwrap();
     let mut bytes_written: u64 = 0;
+    let mut artwork_counts = ArtworkCounts::default();
 
     let result = retry_deferred(
         &config,
@@ -163,6 +164,7 @@ fn retry_deferred_commits_album_when_budget_is_sufficient() {
         &progress,
         &decision_rx,
         &mut bytes_written,
+        &mut artwork_counts,
     )
     .expect("retry_deferred should succeed");
 
@@ -196,6 +198,7 @@ fn retry_deferred_leaves_album_deferred_when_budget_is_insufficient() {
     let mut manifest = Manifest::empty();
     let (progress, decision_rx) = Progress::start(false, false).unwrap();
     let mut bytes_written: u64 = 0;
+    let mut artwork_counts = ArtworkCounts::default();
 
     let result = retry_deferred(
         &config,
@@ -209,6 +212,7 @@ fn retry_deferred_leaves_album_deferred_when_budget_is_insufficient() {
         &progress,
         &decision_rx,
         &mut bytes_written,
+        &mut artwork_counts,
     )
     .expect("retry_deferred should succeed (a deferral is not an error)");
 

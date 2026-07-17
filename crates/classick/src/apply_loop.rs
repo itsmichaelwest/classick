@@ -260,6 +260,25 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
 
     let (add, modify, metadata_only, remove, unchanged) = count_actions(&actions);
 
+    // Task 13: resolve the artwork-dirty marker up front. Its presence means
+    // a previous pause/cancel/crash left a mid-loop checkpoint's cover-art
+    // thumbnails unrepaired (`rebuild_apple_artwork`'s doc comment explains
+    // why `db.write()` on a parsed DB drops them). Checked again below, both
+    // to keep the "nothing to sync" early return from skipping a pending
+    // repair (the `should_rebuild_artwork(0, N, true) -> true` case) and to
+    // feed `should_rebuild_artwork`'s OR-clause at the end of a real run.
+    // Resolution failure (e.g. no resolvable config dir) is logged and
+    // treated as "marker support unavailable this run" — never fails the
+    // sync; it just falls back to the pre-Task-13 `changed > 0` gate.
+    let marker_path = match device_state::artwork_dirty_marker_path(&serial) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!("artwork-dirty marker: path resolution failed: {e:#}");
+            None
+        }
+    };
+    let marker_present_before_apply = marker_path.as_ref().is_some_and(|p| p.exists());
+
     // Progress was started in main() and is borrowed here. Send the header now
     // that we know what to display.
     progress.header(
@@ -404,6 +423,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         && modify == 0
         && metadata_only == 0
         && (remove == 0 || effective_no_delete)
+        && !marker_present_before_apply
     {
         // Deferred albums still count as "nothing else to do" here — free
         // space hasn't changed since the fit pass queried it moments ago, so
@@ -418,6 +438,23 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
             progress.log("Nothing to do.");
         }
         return Ok(RunOutcome::Completed);
+    }
+    if marker_present_before_apply
+        && add == 0
+        && modify == 0
+        && metadata_only == 0
+        && (remove == 0 || effective_no_delete)
+    {
+        // Task 13: the diff itself has nothing to sync, but a previous
+        // pause/cancel/crash left cover art unrepaired (the artwork-dirty
+        // marker is still set). Fall through into the apply loop instead of
+        // the early return above — the loop body will process zero actions,
+        // but the post-loop `should_rebuild_artwork` gate sees
+        // `marker_present == true` and repairs anyway.
+        progress.log(
+            "Nothing to sync, but a previous interrupted sync left artwork unrepaired — \
+             repairing before finishing…",
+        );
     }
 
     // 5. Apply actions + 6. Commit DB + manifest.
@@ -519,6 +556,11 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // passthrough file sizes, not source FLAC sizes). Accumulated
         // across the main loop below AND the end-of-run retry pass.
         let mut bytes_written: u64 = 0;
+        // Task 13: per-track cover-art outcome tally for `ArtworkSummary`,
+        // populated by `commit_pipelined` (Add/Modify) and the MetadataOnly
+        // arm below, surfaced via `progress.note_artwork_summary` near the
+        // end of this closure.
+        let mut artwork_counts = ArtworkCounts::default();
         let mut ckpt = CheckpointClock::new(
             crate::CHECKPOINT_MAX_TRACKS,
             Duration::from_secs(crate::CHECKPOINT_MAX_SECONDS),
@@ -684,7 +726,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // skipped — iPod state is "in-between": old track gone,
                     // new not added; the next run's diff sees the missing
                     // iPod entry and re-adds naturally).
-                    commit_pipelined(&transcoder, idx, &db, &mut manifest, &src, deleted, progress, decision_rx, &mut bytes_written)?;
+                    commit_pipelined(
+                        &transcoder, idx, &db, &mut manifest, &src, deleted, progress, decision_rx,
+                        &mut bytes_written, &mut artwork_counts,
+                    )?;
                     progress.track_done();
                 }
                 Action::Add(src) => {
@@ -696,7 +741,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     );
                     // Add always dispatches a job (see the filter above), so
                     // `take(idx)` always runs here.
-                    commit_pipelined(&transcoder, idx, &db, &mut manifest, &src, true, progress, decision_rx, &mut bytes_written)?;
+                    commit_pipelined(
+                        &transcoder, idx, &db, &mut manifest, &src, true, progress, decision_rx,
+                        &mut bytes_written, &mut artwork_counts,
+                    )?;
                     progress.track_done();
                 }
                 Action::MetadataOnly { source, entry } => {
@@ -709,9 +757,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // Whole metadata-update sequence is bundled into
                     // `do_metadata_only` so the retry loop has a single
                     // fallible call to wrap. Skip leaves manifest as-is.
-                    let updated: Option<ManifestEntry> = loop {
+                    let updated: Option<(ManifestEntry, ArtOutcome)> = loop {
                         match do_metadata_only(&db, &source, &entry, config) {
-                            Ok(new_entry) => break Some(new_entry),
+                            Ok((new_entry, art_outcome)) => break Some((new_entry, art_outcome)),
                             Err(e) => {
                                 let msg = format!(
                                     "Failed to update metadata for {}:\n  {e:#}\n\nChoose:",
@@ -751,11 +799,12 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                             }
                         }
                     };
-                    if let Some(new_entry) = updated {
+                    if let Some((new_entry, art_outcome)) = updated {
                         // Refresh the manifest entry — same iPod identity,
                         // new source fingerprint + mtime/size.
                         manifest.tracks.retain(|e| e.ipod_dbid != entry.ipod_dbid);
                         manifest.tracks.push(new_entry);
+                        artwork_counts.record(art_outcome);
                     }
                     progress.track_done();
                 }
@@ -780,6 +829,16 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 manifest.last_source_root = Some(config.source.clone());
                 manifest::save_atomic(&manifest_path, &manifest)
                     .context("checkpoint: manifest save")?;
+                // Task 13: this `db.write()` is a `parsed`-DB write — libgpod
+                // drops existing tracks' F1069 thumbnails on it (see the
+                // `rebuild_apple_artwork` doc comment below). Mark the device
+                // dirty so ANY exit from here on (this run's own end-of-run
+                // rebuild, or — if we pause/cancel/crash before that runs —
+                // the *next* run's `should_rebuild_artwork` gate) knows a
+                // repair is owed. Best-effort; never fails the sync.
+                if let Some(marker) = &marker_path {
+                    touch_marker(marker);
+                }
             }
         }
 
@@ -818,6 +877,7 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 progress,
                 decision_rx,
                 &mut bytes_written,
+                &mut artwork_counts,
             )?
         } else {
             deferred
@@ -825,6 +885,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         if !final_deferred.is_empty() {
             progress.note_skipped_for_space(skipped_for_space(&final_deferred));
         }
+        // Task 13: surface this run's art tally regardless of outcome
+        // (completed/paused/cancelled) — whatever actually got processed
+        // above is worth reporting either way.
+        progress.note_artwork_summary(artwork_counts.to_summary());
         if bytes_written > 0 {
             progress.log(format!(
                 "{} of audio written this run.",
@@ -876,49 +940,73 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // references (see `rebuild_apple_artwork`, verified on-device). So rebuild
     // the ArtworkDB fresh from source art for the whole library, and re-embed
     // the Rockbox `.m4a` tags/art for those tracks when `rockbox_compat` is on.
-    // Runs after ANY DB-changing completed sync (gate on `changed > 0` alone —
-    // NOT `&& unchanged > 0`): a bulk retag applied to the whole library is all
-    // MetadataOnly with zero unchanged tracks, yet the closure's write already
-    // ran over stale ithmb, so it still needs the rebuild. On a fresh/full sync
-    // it's a redundant (idempotent, guarded) re-thumbnail — cheap vs. the sync
-    // itself, and robust regardless of libgpod's exact preservation behavior.
-    // Skipped on pause and rebuild-manifest. (No audio re-copy.)
+    // On a fresh/full sync it's a redundant (idempotent, guarded) re-thumbnail
+    // — cheap vs. the sync itself, and robust regardless of libgpod's exact
+    // preservation behavior. Skipped on pause and rebuild-manifest. (No audio
+    // re-copy.)
+    //
+    // Gate is `should_rebuild_artwork` (Task 13): `changed > 0` alone (not
+    // `&& unchanged > 0` — see that fn's doc comment for the 05d15ce
+    // bulk-retag case it must keep covering) OR the artwork-dirty marker is
+    // present, i.e. a previous pause/cancel/crash left a mid-loop
+    // checkpoint's thumbnails unrepaired and this run must repair them even
+    // if its own diff is entirely Unchanged.
     let changed = add + modify + metadata_only + remove;
-    if matches!(sync_result, Ok(RunOutcome::Completed))
-        && !config.rebuild_manifest
-        && changed > 0
-    {
-        progress.log("Refreshing artwork for existing tracks (no re-copy)…".to_string());
-        let mut refreshed: Vec<(u64, crate::ipod::db::Tags, Option<Vec<u8>>)> = Vec::new();
-        for entry in manifest
-            .tracks
-            .iter()
-            .filter(|e| e.source_known && !e.ipod_relpath.is_empty())
-        {
-            let device_file = Path::new(&mount)
-                .join(entry.ipod_relpath.replace('\\', std::path::MAIN_SEPARATOR_STR));
-            if !device_file.exists() || !entry.source_path.exists() {
-                continue;
-            }
-            match source_tags_and_art(&entry.source_path, &config.ffmpeg) {
-                Ok((tags, art)) => {
-                    if config.rockbox_compat && entry.encoder != "passthrough" {
-                        let _ = crate::artwork::embed_track_metadata(
-                            &device_file,
-                            &tags,
-                            art.as_deref(),
-                        );
+    if matches!(sync_result, Ok(RunOutcome::Completed)) && !config.rebuild_manifest {
+        let marker_present = marker_path.as_ref().is_some_and(|p| p.exists());
+        if should_rebuild_artwork(changed, unchanged, marker_present) {
+            progress.log("Refreshing artwork for existing tracks (no re-copy)…".to_string());
+            let mut refreshed: Vec<(u64, crate::ipod::db::Tags, Option<Vec<u8>>)> = Vec::new();
+            for entry in manifest
+                .tracks
+                .iter()
+                .filter(|e| e.source_known && !e.ipod_relpath.is_empty())
+            {
+                let device_file = Path::new(&mount)
+                    .join(entry.ipod_relpath.replace('\\', std::path::MAIN_SEPARATOR_STR));
+                if !device_file.exists() || !entry.source_path.exists() {
+                    continue;
+                }
+                match source_tags_and_art(&entry.source_path, &config.ffmpeg) {
+                    Ok((tags, art)) => {
+                        if config.rockbox_compat && entry.encoder != "passthrough" {
+                            let _ = crate::artwork::embed_track_metadata(
+                                &device_file,
+                                &tags,
+                                art.as_deref(),
+                            );
+                        }
+                        refreshed.push((entry.ipod_dbid, tags, art));
                     }
-                    refreshed.push((entry.ipod_dbid, tags, art));
+                    Err(e) => {
+                        tracing::warn!("art refresh: {} skipped: {e:#}", entry.source_path.display())
+                    }
+                }
+            }
+            match rebuild_apple_artwork(Path::new(&mount), &refreshed) {
+                Ok(()) => {
+                    progress.log("Artwork refreshed.".to_string());
+                    // Repair landed — clear the marker so a future run's gate
+                    // doesn't force a rebuild it no longer needs.
+                    if let Some(marker) = &marker_path {
+                        clear_marker(marker);
+                    }
                 }
                 Err(e) => {
-                    tracing::warn!("art refresh: {} skipped: {e:#}", entry.source_path.display())
+                    progress.log(format!("Apple artwork not refreshed ({e:#})."));
+                    // Repair still owed — leave the marker set so the NEXT
+                    // run's gate retries it via `marker_present`, per the
+                    // "every exit path repairs before or at the next
+                    // session" invariant.
                 }
             }
-        }
-        match rebuild_apple_artwork(Path::new(&mount), &refreshed) {
-            Ok(()) => progress.log("Artwork refreshed.".to_string()),
-            Err(e) => progress.log(format!("Apple artwork not refreshed ({e:#}).")),
+        } else if let Some(marker) = &marker_path {
+            // Nothing to repair this run (no DB-changing sync, no
+            // outstanding marker — `marker_present` was already false or
+            // `should_rebuild_artwork` would have been true). Harmless no-op
+            // when absent; defensively clears a stale marker if one somehow
+            // slipped through.
+            clear_marker(marker);
         }
     }
 
@@ -1158,6 +1246,7 @@ pub fn retry_deferred(
     progress: &Progress,
     decision_rx: &Receiver<Decision>,
     bytes_written: &mut u64,
+    artwork_counts: &mut ArtworkCounts,
 ) -> Result<Vec<DeferredAlbum>> {
     let candidates = deferred_add_actions(original_adds, &deferred, &album_tag_of);
     if candidates.is_empty() {
@@ -1193,7 +1282,10 @@ pub fn retry_deferred(
     for (idx, action) in retry_outcome.kept.into_iter().enumerate() {
         let Action::Add(src) = action else { continue };
         progress.track_start(idx + 1, total, format!("ADD {} (retry)", display_path(&src.path)));
-        commit_pipelined(&transcoder, idx, db, manifest, &src, true, progress, decision_rx, bytes_written)?;
+        commit_pipelined(
+            &transcoder, idx, db, manifest, &src, true, progress, decision_rx, bytes_written,
+            artwork_counts,
+        )?;
         progress.track_done();
     }
     transcoder.stop();
@@ -1203,28 +1295,44 @@ pub fn retry_deferred(
 
 /// Run the full MetadataOnly path for one entry: probe + tag-extract +
 /// optional embedded-art extract + libgpod update + recompute source
-/// fingerprint. Returns the freshly-built ManifestEntry to push.
+/// fingerprint. Returns the freshly-built ManifestEntry to push, plus this
+/// track's `ArtOutcome` for the run's `ArtworkSummary` (Task 13).
 ///
 /// Bundled into one fallible call so the per-track retry/skip loop in `run`
 /// has a single closure to retry — anything failing inside re-runs the lot.
+///
+/// Art extraction failure is deliberately NON-fatal to the metadata update
+/// (mirrors `transcode_one`'s treatment): falling back to no art and
+/// warn-logging the source path + reason lets the tag update still land,
+/// rather than aborting the whole MetadataOnly action — and lets the
+/// failure feed `ArtworkSummary.failed_sources` rather than only surfacing
+/// as a generic "Failed to update metadata" retry/skip/abort prompt.
 pub(crate) fn do_metadata_only(
     db: &OwnedDb,
     source: &SourceEntry,
     entry: &ManifestEntry,
     config: &Config,
-) -> Result<ManifestEntry> {
+) -> Result<(ManifestEntry, ArtOutcome)> {
     let probe = transcode::probe(&source.path, &config.ffmpeg)
         .with_context(|| format!("probe {}", source.path.display()))?;
     let tags = tags_from_probe(&probe);
-    let art = if has_embedded_art(&probe) {
+    let has_art = has_embedded_art(&probe);
+    let art: Option<Vec<u8>> = if has_art {
         let art_path = transcode::temp_art_path();
-        transcode::extract_cover_art(&source.path, &art_path, &config.ffmpeg)?;
-        let bytes = std::fs::read(&art_path)?;
+        let extracted = transcode::extract_cover_art(&source.path, &art_path, &config.ffmpeg)
+            .and_then(|()| std::fs::read(&art_path).map_err(Into::into));
         let _ = std::fs::remove_file(&art_path);
-        Some(bytes)
+        match extracted {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::warn!("art extract failed for {}: {e:#}", source.path.display());
+                None
+            }
+        }
     } else {
         None
     };
+    let art_outcome = ArtOutcome::from_probe(has_art, art.is_some());
     db.update_track_metadata(entry.ipod_dbid, &tags, art.as_deref())
         .with_context(|| format!(
             "update_track_metadata dbid {} for {}",
@@ -1233,21 +1341,24 @@ pub(crate) fn do_metadata_only(
         ))?;
     let new_file_fp = source::fingerprint(&source.path)
         .with_context(|| format!("fingerprint {}", source.path.display()))?;
-    Ok(ManifestEntry {
-        source_path: source.path.clone(),
-        source_mtime: source.mtime,
-        source_size: source.size,
-        source_fingerprint: new_file_fp,
-        ipod_dbid: entry.ipod_dbid,
-        ipod_relpath: entry.ipod_relpath.clone(),
-        source_known: true,
-        audio_fingerprint: entry.audio_fingerprint.clone(),
-        // MetadataOnly preserves the iPod-side file body verbatim, so the
-        // encoder identity is unchanged. Copy from the existing entry.
-        encoder: entry.encoder.clone(),
-        encoder_version: entry.encoder_version.clone(),
-        source_format: entry.source_format.clone(),
-    })
+    Ok((
+        ManifestEntry {
+            source_path: source.path.clone(),
+            source_mtime: source.mtime,
+            source_size: source.size,
+            source_fingerprint: new_file_fp,
+            ipod_dbid: entry.ipod_dbid,
+            ipod_relpath: entry.ipod_relpath.clone(),
+            source_known: true,
+            audio_fingerprint: entry.audio_fingerprint.clone(),
+            // MetadataOnly preserves the iPod-side file body verbatim, so the
+            // encoder identity is unchanged. Copy from the existing entry.
+            encoder: entry.encoder.clone(),
+            encoder_version: entry.encoder_version.clone(),
+            source_format: entry.source_format.clone(),
+        },
+        art_outcome,
+    ))
 }
 
 /// Result of the worker-safe transcode half (`transcode_one`) for one source.
@@ -1267,6 +1378,9 @@ pub(crate) struct Transcoded {
     pub source_format: String,
     pub fingerprint: String,
     pub audio_fingerprint: String,
+    /// Task 13: this source's cover-art extraction outcome, for
+    /// `ArtworkSummary` accounting. Derived alongside `art` below.
+    pub art_outcome: ArtOutcome,
 }
 
 /// Worker-safe half of the old `add_one`: probe → classify → branch on
@@ -1349,7 +1463,8 @@ pub(crate) fn transcode_one(
     // Extract source art once; normalize to a small baseline JPEG that feeds
     // BOTH libgpod's Apple thumbnails AND (when rockbox_compat) the embedded
     // covr atom. Non-fatal: on any art failure, fall back to no art.
-    let art: Option<Vec<u8>> = if has_embedded_art(&probe) {
+    let has_art = has_embedded_art(&probe);
+    let art: Option<Vec<u8>> = if has_art {
         let art_path = transcode::temp_art_path();
         let raw = transcode::extract_cover_art(&src.path, &art_path, &config.ffmpeg)
             .and_then(|()| std::fs::read(&art_path).map_err(Into::into));
@@ -1370,6 +1485,10 @@ pub(crate) fn transcode_one(
     } else {
         None
     };
+    // Task 13: NoArt/Embedded/Failed for the run's ArtworkSummary. The
+    // `art extract failed` warn above already logs source path + reason —
+    // this just classifies that same outcome for counting, never silently.
+    let art_outcome = ArtOutcome::from_probe(has_art, art.is_some());
 
     // Rockbox: make the transcoded .m4a self-describing (tags + art). Only for
     // transcoded output — passthrough files keep their own metadata. Non-fatal.
@@ -1393,6 +1512,7 @@ pub(crate) fn transcode_one(
         source_format,
         fingerprint,
         audio_fingerprint,
+        art_outcome,
     })
 }
 
@@ -1460,6 +1580,7 @@ fn commit_pipelined(
     progress: &Progress,
     decision_rx: &Receiver<Decision>,
     bytes_written: &mut u64,
+    artwork_counts: &mut ArtworkCounts,
 ) -> Result<()> {
     let t = match transcoder.take(idx) {
         Ok(t) => t,
@@ -1484,6 +1605,10 @@ fn commit_pipelined(
         match commit_transcoded(db, manifest, src, &t) {
             Ok(()) => {
                 *bytes_written += size;
+                // Task 13: only count this source's art outcome once it's
+                // actually landed on the device — a track that never
+                // committed never got its art written either.
+                artwork_counts.record(t.art_outcome);
                 return Ok(());
             }
             Err(e) => match prompt_retry_skip_abort(progress, decision_rx, src, &e)? {
@@ -1836,6 +1961,119 @@ pub(crate) fn manifest_is_foreign(manifest: &Manifest, serial: &str) -> bool {
     matches!(&manifest.ipod_serial, Some(s) if s != serial)
 }
 
+/// Task 13: whether the end-of-run Apple ArtworkDB rebuild (`rebuild_apple_artwork`)
+/// should run.
+///
+/// `changed > 0` alone (no `unchanged` requirement) is the invariant fixed by
+/// 05d15ce: a bulk retag of the WHOLE library is all-MetadataOnly with
+/// `unchanged == 0`, yet `itdb_write` still drops existing tracks' F1069
+/// thumbnails, so it still needs the rebuild. `unchanged` is kept as a
+/// parameter (unused in the boolean below) because the truth table this is
+/// tested against is specified in terms of it, and it's cheap to keep for
+/// future logging/observability even though it doesn't gate the decision.
+///
+/// `marker_present` ORs in the case a previous pause/cancel/crash left a
+/// mid-loop checkpoint's thumbnails unrepaired (see the artwork-dirty marker
+/// lifecycle in `run`): this run's OWN diff can be entirely Unchanged
+/// (`changed == 0`) and it must still repair, because the outstanding damage
+/// predates this run's diff.
+pub(crate) fn should_rebuild_artwork(changed: usize, unchanged: usize, marker_present: bool) -> bool {
+    let _ = unchanged; // see doc comment: intentionally not part of the gate
+    changed > 0 || marker_present
+}
+
+/// Best-effort creation of the artwork-dirty marker at `path` (empty file),
+/// if it doesn't already exist. Called whenever a mid-loop checkpoint's
+/// `db.write()` runs, so a pause/cancel/crash between here and the next
+/// successful `rebuild_apple_artwork` leaves a durable flag that forces the
+/// *next* run's `should_rebuild_artwork` gate open even if that run's own
+/// diff is all-Unchanged. I/O failures are logged and swallowed — the marker
+/// is a best-effort repair hint, never a reason to fail a sync.
+pub(crate) fn touch_marker(path: &Path) {
+    if path.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::write(path, b"") {
+        tracing::warn!("artwork-dirty marker: failed to create {}: {e:#}", path.display());
+    }
+}
+
+/// Best-effort removal of the artwork-dirty marker at `path`, once
+/// `rebuild_apple_artwork` has actually repaired the device (or nothing
+/// needed repairing this run). I/O failures are logged and swallowed for the
+/// same reason as `touch_marker`.
+pub(crate) fn clear_marker(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_file(path) {
+        tracing::warn!("artwork-dirty marker: failed to remove {}: {e:#}", path.display());
+    }
+}
+
+/// Per-track cover-art outcome for one Add/Modify/MetadataOnly action,
+/// feeding `ArtworkCounts`/`ArtworkSummary`. Derived from whether the source
+/// probe reported embedded art and whether extraction/decode of it
+/// succeeded — never from whether the track itself made it onto the device
+/// (a whole-track commit failure is already surfaced via the existing
+/// Retry/Skip/Abort prompt + log lines, and isn't double-counted here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtOutcome {
+    /// Source had no embedded art — not counted as eligible.
+    NoArt,
+    /// Source had embedded art and it was extracted/decoded successfully.
+    Embedded,
+    /// Source had embedded art but extraction/decode failed.
+    Failed,
+}
+
+impl ArtOutcome {
+    pub fn from_probe(has_art: bool, extracted_ok: bool) -> Self {
+        match (has_art, extracted_ok) {
+            (false, _) => ArtOutcome::NoArt,
+            (true, true) => ArtOutcome::Embedded,
+            (true, false) => ArtOutcome::Failed,
+        }
+    }
+}
+
+/// Running tally of `ArtOutcome`s across a run's Add/Modify/MetadataOnly
+/// actions, converted to the wire `ArtworkSummary` at Finish. Pure
+/// accumulator — no I/O, easy to unit-test in isolation from the apply loop.
+/// `pub` (not `pub(crate)`) because `retry_deferred` is `pub` for the
+/// integration-test harness (`tests/fit_retry_integration.rs`,
+/// `tests/wipe_all_tracks_integration.rs`) and now takes `&mut ArtworkCounts`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ArtworkCounts {
+    pub eligible: usize,
+    pub embedded: usize,
+    pub failed_sources: usize,
+}
+
+impl ArtworkCounts {
+    pub fn record(&mut self, outcome: ArtOutcome) {
+        match outcome {
+            ArtOutcome::NoArt => {}
+            ArtOutcome::Embedded => {
+                self.eligible += 1;
+                self.embedded += 1;
+            }
+            ArtOutcome::Failed => {
+                self.eligible += 1;
+                self.failed_sources += 1;
+            }
+        }
+    }
+
+    pub fn to_summary(self) -> crate::ipc::ArtworkSummary {
+        crate::ipc::ArtworkSummary {
+            embedded: self.embedded,
+            eligible: self.eligible,
+            failed_sources: self.failed_sources,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2117,6 +2355,122 @@ mod tests {
         let msg = replace_library_confirm_message(0);
         assert!(msg.contains("all 0 tracks"), "got: {msg}");
     }
+
+    // -- Task 13: should_rebuild_artwork truth table ----------------------
+
+    #[test]
+    fn should_rebuild_artwork_false_when_nothing_changed_and_no_marker() {
+        assert!(!should_rebuild_artwork(0, 0, false));
+    }
+
+    #[test]
+    fn should_rebuild_artwork_true_when_changed_and_unchanged_both_positive() {
+        assert!(should_rebuild_artwork(3, 5, false));
+    }
+
+    #[test]
+    fn should_rebuild_artwork_true_when_changed_alone_is_positive() {
+        // Pins the 05d15ce fix: a bulk retag of the WHOLE library is all
+        // MetadataOnly with unchanged == 0 (every track got touched), yet
+        // itdb_write still drops existing tracks' F1069 thumbnails, so the
+        // rebuild must still run. Regressing to `changed>0 && unchanged>0`
+        // would silently reintroduce that bug for exactly this case.
+        assert!(should_rebuild_artwork(4, 0, false));
+    }
+
+    #[test]
+    fn should_rebuild_artwork_true_when_marker_present_despite_all_unchanged_diff() {
+        // Pause-then-noop-resume repair case: a previous run's mid-loop
+        // checkpoint left thumbnails unrepaired, then the resumed run's own
+        // diff is entirely Unchanged (changed == 0). The marker alone must
+        // still force the rebuild.
+        assert!(should_rebuild_artwork(0, 7, true));
+    }
+
+    #[test]
+    fn should_rebuild_artwork_false_when_marker_absent_and_nothing_changed() {
+        assert!(!should_rebuild_artwork(0, 0, false));
+    }
+
+    // -- Task 13: artwork-dirty marker create/delete round-trip -----------
+
+    fn marker_tempdir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
+            .join(format!("apply_loop-marker-{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn touch_marker_creates_empty_file_once() {
+        let root = marker_tempdir();
+        let path = device_state::artwork_dirty_marker_path_in(&root, "SER1").unwrap();
+        assert!(!path.exists());
+        touch_marker(&path);
+        assert!(path.exists());
+        // Idempotent: a second touch on an existing marker must not error or
+        // truncate/rewrite in a way that fails.
+        touch_marker(&path);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn clear_marker_removes_existing_marker() {
+        let root = marker_tempdir();
+        let path = device_state::artwork_dirty_marker_path_in(&root, "SER2").unwrap();
+        touch_marker(&path);
+        assert!(path.exists());
+        clear_marker(&path);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn clear_marker_on_absent_marker_is_a_harmless_no_op() {
+        let root = marker_tempdir();
+        let path = device_state::artwork_dirty_marker_path_in(&root, "SER3").unwrap();
+        assert!(!path.exists());
+        clear_marker(&path); // must not panic or create the file
+        assert!(!path.exists());
+    }
+
+    // -- Task 13: ArtworkCounts / ArtOutcome -------------------------------
+
+    #[test]
+    fn art_outcome_from_probe_classifies_no_art_embedded_and_failed() {
+        assert_eq!(ArtOutcome::from_probe(false, false), ArtOutcome::NoArt);
+        assert_eq!(ArtOutcome::from_probe(false, true), ArtOutcome::NoArt);
+        assert_eq!(ArtOutcome::from_probe(true, true), ArtOutcome::Embedded);
+        assert_eq!(ArtOutcome::from_probe(true, false), ArtOutcome::Failed);
+    }
+
+    #[test]
+    fn artwork_counts_tallies_across_outcomes() {
+        let mut counts = ArtworkCounts::default();
+        counts.record(ArtOutcome::NoArt);
+        counts.record(ArtOutcome::Embedded);
+        counts.record(ArtOutcome::Embedded);
+        counts.record(ArtOutcome::Failed);
+        assert_eq!(counts.eligible, 3, "NoArt is not eligible");
+        assert_eq!(counts.embedded, 2);
+        assert_eq!(counts.failed_sources, 1);
+    }
+
+    #[test]
+    fn artwork_counts_to_summary_maps_fields() {
+        let mut counts = ArtworkCounts::default();
+        counts.record(ArtOutcome::Embedded);
+        counts.record(ArtOutcome::Failed);
+        let summary = counts.to_summary();
+        assert_eq!(summary.eligible, 2);
+        assert_eq!(summary.embedded, 1);
+        assert_eq!(summary.failed_sources, 1);
+    }
 }
 
 #[cfg(test)]
@@ -2166,6 +2520,7 @@ mod split_tests {
             source_format: "flac".into(),
             fingerprint: "fp".into(),
             audio_fingerprint: "afp".into(),
+            art_outcome: super::ArtOutcome::NoArt,
         };
         assert_eq!(t.encoder, "ffmpeg");
         assert_eq!(t.source_format, "flac");

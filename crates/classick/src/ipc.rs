@@ -88,8 +88,10 @@ pub enum IpcEvent {
         /// than 1.3.0).
         #[serde(skip_serializing_if = "Option::is_none")]
         skipped_for_space: Option<SkippedForSpace>,
-        /// Artwork embed/refresh rollup. Always absent until Task 13 wires
-        /// artwork accounting into the apply loop.
+        /// Artwork embed/refresh rollup for this run's Add/Modify/MetadataOnly
+        /// actions (Task 13). Absent when the run never reached the apply
+        /// loop (dry-run, "nothing to do" with no pending artwork repair, or
+        /// an early abort), or when talking to a core older than this field.
         #[serde(skip_serializing_if = "Option::is_none")]
         artwork: Option<ArtworkSummary>,
         /// True when Task 4's auto-restore-from-backup path fired this run
@@ -154,8 +156,9 @@ pub(crate) fn format_bytes_human(bytes: u64) -> String {
     }
 }
 
-/// Artwork embed/refresh rollup attached to `finish`. Populated by Task 13;
-/// always `None` for now. See `docs/ipc-protocol.md` §4.11.
+/// Artwork embed/refresh rollup attached to `finish` (Task 13). Counted
+/// across a run's Add/Modify/MetadataOnly actions — see
+/// `apply_loop::ArtworkCounts`. See `docs/ipc-protocol.md` §4.11.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArtworkSummary {
     pub embedded: usize,

@@ -285,6 +285,15 @@ impl Progress {
         }
     }
 
+    /// Records this run's cover-art embed/refresh rollup (Task 13). Surfaced
+    /// as `finish.artwork`. Overwrites any previous value; callers are
+    /// expected to call this at most once, with the final tally.
+    pub fn note_artwork_summary(&self, summary: ArtworkSummary) {
+        if let Ok(mut d) = self.finish_details.lock() {
+            d.artwork = Some(summary);
+        }
+    }
+
     /// Drains the channel and joins the worker thread. Call once at the end.
     ///
     /// Returns `Err` if the worker thread panicked (e.g. crossterm setup

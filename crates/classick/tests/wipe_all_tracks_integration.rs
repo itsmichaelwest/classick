@@ -10,7 +10,7 @@
 //! post-wipe track count, that the on-disk audio files are gone, and that a
 //! fresh reparse from disk also shows zero tracks.
 
-use classick::apply_loop::retry_deferred;
+use classick::apply_loop::{retry_deferred, ArtworkCounts};
 use classick::cli::EncoderChoice;
 use classick::config::Config;
 use classick::ffi;
@@ -142,6 +142,7 @@ fn seed_tracks(db: &OwnedDb, source_root: &Path, track_count: usize) {
     let mut manifest = Manifest::empty();
     let (progress, decision_rx) = Progress::start(false, false).unwrap();
     let mut bytes_written: u64 = 0;
+    let mut artwork_counts = ArtworkCounts::default();
 
     let result = retry_deferred(
         &config,
@@ -155,6 +156,7 @@ fn seed_tracks(db: &OwnedDb, source_root: &Path, track_count: usize) {
         &progress,
         &decision_rx,
         &mut bytes_written,
+        &mut artwork_counts,
     )
     .expect("seed commit should succeed");
     assert!(result.is_empty(), "seed album should not be deferred: {result:?}");
