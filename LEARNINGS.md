@@ -498,3 +498,36 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   `git push origin main && git tag -f vX <bump-commit> && git push origin vX
   --force`. Better: bump + commit + push `main`, THEN
   `scripts/release-macos.sh`/`gh release create`. (Discovered shipping 0.3.0.)
+
+## Dock app + iTunes-style main window (2026-07-17)
+
+- **Hybrid Dock app lifetime:** `applicationShouldTerminateAfterLastWindowClosed
+  → false` keeps the daemon alive when the main window closes (Dock icon +
+  menu bar persist); `WindowGroup(id: "main")` + `openWindow`/
+  `applicationShouldHandleReopen` reopen it from the Dock icon or menu bar,
+  instead of relaunching the app.
+- **Library auto-refresh is a filesystem watcher, not a daemon-side reindex.**
+  A `notify`-crate (v8) watcher in the daemon debounces (~1.5s) and triggers
+  the *existing* crash-isolated scan subprocess — there is no in-daemon
+  `update_index` path, so a scan crash still can't take the daemon down. A
+  one-shot scan also runs at daemon startup so the library is populated before
+  the first filesystem event. Manual "Rescan Library" survives only in the
+  menu-bar extra (not the main window) since the watcher makes it redundant
+  there.
+- **Sync ETA is daemon-side, not client-computed.** `EtaEstimator`
+  (whole-run average) emits an optional `eta_secs` on the `track_start` sync
+  event; this bumped the inner sync-event protocol to 1.2.0.
+- **macOS daemon integration tests must NOT go in
+  `daemon_runtime_integration.rs`** — that file is `#![cfg(windows)]`-gated for
+  the named pipe. Cross-platform daemon tests (e.g. the library watcher) get
+  their own file using a per-test `$TMPDIR` Unix-socket pipe name; see
+  `tests/library_watcher_integration.rs` for the pattern.
+- **`Classick.xcodeproj` had drifted from `Sources/` before this wrap-up** —
+  `ChooseMusicWindow(Controller).swift` were long gone from disk (replaced by
+  `MainWindow`/`LibraryView`/`DeviceView`/`HistoryView`/`DeviceRow` across
+  Tasks 4-11) but the committed pbxproj still referenced them, because none of
+  those tasks re-ran `xcodegen generate`. `swift build`/`swift test` never
+  caught it (SPM auto-discovers `Sources/`), only `bundle.sh`'s `xcodebuild`
+  would have. Reinforces the existing "adding a Swift file needs `xcodegen
+  generate`" rule — worth checking `git status` on the pbxproj at the end of
+  any multi-task branch, not just after each individual file add.

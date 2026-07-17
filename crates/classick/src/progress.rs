@@ -14,6 +14,53 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// Whole-run-average sync ETA. Shared by the TUI and IPC progress backends so
+/// both surface an identical estimate. Deliberately simple: elapsed time since
+/// the first track divided by completed-track count, projected over the
+/// remaining tracks. A rolling window is a possible later refinement.
+pub struct EtaEstimator {
+    started_at: Instant,
+    done: usize,
+}
+
+impl Default for EtaEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EtaEstimator {
+    pub fn new() -> Self {
+        Self::new_at(Instant::now())
+    }
+
+    /// Test seam: inject the start instant so elapsed time is deterministic.
+    pub fn new_at(started_at: Instant) -> Self {
+        Self { started_at, done: 0 }
+    }
+
+    /// Call once per completed track (on `TrackDone`).
+    pub fn record_track_done(&mut self) {
+        self.done += 1;
+    }
+
+    /// Estimated seconds remaining given the 1-based `current` track and
+    /// `total`. `None` until at least one track has completed, or when nothing
+    /// remains — so the UI shows a plain "X of Y" early instead of a wild guess.
+    pub fn eta_secs(&self, current: usize, total: usize) -> Option<u64> {
+        let _ = current; // remaining is derived from done/total, not current
+        if self.done == 0 || total == 0 {
+            return None;
+        }
+        let remaining = total.saturating_sub(self.done);
+        if remaining == 0 {
+            return None;
+        }
+        let per_track = self.started_at.elapsed().as_secs_f64() / self.done as f64;
+        Some((per_track * remaining as f64).round() as u64)
+    }
+}
+
 /// Snapshot of the action plan sent to the TUI for the Review state.
 #[derive(Debug, Clone, Copy)]
 pub struct ActionPlanSummary {
@@ -367,12 +414,19 @@ fn run_ipc(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
     //    channel closes (sender dropped without sending either — should not
     //    happen in practice).
     tracing::info!("ipc: event loop entering");
+    let mut eta = EtaEstimator::new();
     for event in rx {
         let is_terminal = matches!(
             event,
             ProgressEvent::Finish { .. } | ProgressEvent::Paused
         );
-        if let Some(ipc_event) = IpcEvent::from_progress(&event) {
+        if matches!(event, ProgressEvent::TrackDone) {
+            eta.record_track_done();
+        }
+        if let Some(mut ipc_event) = IpcEvent::from_progress(&event) {
+            if let crate::ipc::IpcEvent::TrackStart { current, total, eta_secs, .. } = &mut ipc_event {
+                *eta_secs = eta.eta_secs(*current, *total);
+            }
             tracing::info!("ipc: emitting event: {ipc_event:?}");
             write_ipc_event(&ipc_event).context("ipc: event write failed")?;
         }
@@ -904,5 +958,35 @@ fn format_duration(d: Duration) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eta_estimator_none_until_a_track_completes() {
+        let e = EtaEstimator::new_at(std::time::Instant::now());
+        // No completed tracks yet → no estimate.
+        assert_eq!(e.eta_secs(1, 10), None);
+    }
+
+    #[test]
+    fn eta_estimator_projects_from_average_after_completions() {
+        let start = std::time::Instant::now() - std::time::Duration::from_secs(20);
+        let mut e = EtaEstimator::new_at(start);
+        // 4 tracks done over ~20s → ~5s/track. 6 remaining → ~30s.
+        for _ in 0..4 { e.record_track_done(); }
+        let eta = e.eta_secs(5, 10).expect("estimate after completions");
+        assert!((25..=35).contains(&eta), "eta {eta} not ~30s");
+    }
+
+    #[test]
+    fn eta_estimator_none_when_nothing_remains() {
+        let start = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        let mut e = EtaEstimator::new_at(start);
+        for _ in 0..10 { e.record_track_done(); }
+        assert_eq!(e.eta_secs(10, 10), None, "no remaining tracks → no eta");
     }
 }

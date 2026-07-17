@@ -1,21 +1,24 @@
 import SwiftUI
 
-/// The Choose Music browser: mode picker + Artists/Genres tabs + outline
-/// checkboxes + live impact footer. Edits a local SelectionDraft; nothing
-/// persists until Save. Layout per the approved design (spec §5).
-struct ChooseMusicWindow: View {
+/// The always-present Music Library browser: mode picker + Artists/Genres +
+/// checkbox outline. Edits a local `SelectionDraft` and auto-saves it
+/// (debounced) — there is no modal Save/Cancel here, unlike the old
+/// transient Choose Music window this view's browser guts were adapted
+/// from (retired in favor of this persistent view). The capacity bar and
+/// selection-impact readout live on the device row (Task 8) instead of here.
+struct LibraryView: View {
     var model: AppModel
-    var onAppear: () -> Void
     var onScan: () -> Void
     var onPreview: (SelectionMode, [SelectionRule]) -> Void
-    var onSave: (SelectionMode, [SelectionRule]) -> Void
-    var onClose: () -> Void
+    var onSaveSelection: (SelectionMode, [SelectionRule]) -> Void
 
     @State private var draft = SelectionDraft(mode: .all, rules: [])
     @State private var seededFromModel = false
+    @State private var userEdited = false
     @State private var tab: Tab = .artists
     @State private var search = ""
     @State private var previewTask: Task<Void, Never>?
+    @State private var saveTask: Task<Void, Never>?
 
     enum Tab: String, CaseIterable { case artists = "Artists", genres = "Genres" }
 
@@ -24,24 +27,28 @@ struct ChooseMusicWindow: View {
             header
             Divider()
             content
-            Divider()
-            footer
         }
         .onAppear {
-            // Seed from an already-known selection (the post-hello get_selection
-            // usually landed before this window opened, so .onChange below won't
-            // fire for it). The .onChange covers the arrives-after-open case.
+            // The post-hello get_selection reply usually lands before this
+            // view appears, so .onChange below won't fire for it; this
+            // covers that already-known case. .onChange covers arrives-after.
             seedDraftIfNeeded()
-            onAppear()  // sends get_library + get_selection
         }
         .onChange(of: model.selection) { _, _ in
             // Seed the draft ONCE from the persisted selection; later
-            // selection_update echoes (e.g. our own save) must not clobber
-            // in-progress edits.
+            // selection_update echoes (including our own auto-saves) must
+            // not clobber in-progress edits.
             seedDraftIfNeeded()
         }
         .onChange(of: draft) { _, d in
+            // Any draft change marks the draft as user-edited, which
+            // permanently blocks re-seeding (see seedDraftIfNeeded). The
+            // one-time seed also trips this, but seededFromModel already
+            // blocks re-seeds by then, so the resulting harmless re-save +
+            // correct preview is a cosmetic round-trip, not a clobber.
+            userEdited = true
             schedulePreview(d)
+            scheduleSave(d)
         }
     }
 
@@ -170,76 +177,11 @@ struct ChooseMusicWindow: View {
         }
     }
 
-    private var footer: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 12) {
-                if let p = model.selectionPreview, draft.mode != .all {
-                    Text("\(p.selectedTracks) of \(model.library?.totalTracks ?? 0) tracks · ~\(formatBytes(p.selectedBytes))")
-                    Text("next sync: +\(p.adds) / −\(p.removes)")
-                        .foregroundStyle(.secondary)
-                } else if let lib = model.library {
-                    Text("\(lib.totalTracks) tracks · \(formatBytes(lib.totalBytes))")
-                }
-                Spacer()
-                if let scanned = model.library?.scannedAtUnixSecs {
-                    Text("Scanned \(relativeDate(scanned))")
-                        .foregroundStyle(.secondary)
-                    Button("Rescan", action: onScan)
-                        .disabled(isBusy)
-                }
-            }
-            // Capacity bar vs the connected iPod (spec §5): warn — don't
-            // block Save — when the selection won't fit; sync handles
-            // disk-full anyway.
-            if let storage = model.deviceStorage {
-                let selected = selectedBytesForBar
-                let over = selected > UInt64(storage.total)
-                ProgressView(value: min(Double(selected), Double(storage.total)),
-                             total: Double(storage.total))
-                    .tint(over ? .red : .accentColor)
-                if over {
-                    Text("Selection (~\(formatBytes(selected))) exceeds this iPod's capacity (\(formatBytes(UInt64(storage.total)))).")
-                        .font(.caption).foregroundStyle(.red)
-                }
-            }
-            HStack {
-                Spacer()
-                Button("Cancel", action: onClose)
-                Button("Save") {
-                    onSave(draft.mode, draft.rules)
-                    onClose()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .font(.callout)
-        .padding(12)
-    }
-
-    /// Bytes driving the capacity bar: preview when a filter is active,
-    /// whole library otherwise. Source bytes — an estimate of on-iPod size.
-    private var selectedBytesForBar: UInt64 {
-        if draft.mode != .all, let p = model.selectionPreview { return p.selectedBytes }
-        return model.library?.totalBytes ?? 0
-    }
-
-    /// Busy = daemon is scanning or syncing (Rescan would be dropped anyway).
-    private var isBusy: Bool {
-        switch model.phase {
-        case .scanning, .syncing: return true
-        default: return false
-        }
-    }
-
-    private func relativeDate(_ unixSecs: UInt64) -> String {
-        let date = Date(timeIntervalSince1970: TimeInterval(unixSecs))
-        return date.formatted(.relative(presentation: .named))
-    }
-
-    /// Seed the local draft from the persisted selection exactly once, so
-    /// in-progress edits are never clobbered by later selection_update echoes.
+    /// Seed the local draft from the persisted selection exactly once, and
+    /// never after the user has started editing — so a late get_selection
+    /// reply can't overwrite an in-progress edit made before it arrived.
     private func seedDraftIfNeeded() {
-        guard !seededFromModel, let sel = model.selection else { return }
+        guard !seededFromModel, !userEdited, let sel = model.selection else { return }
         draft = SelectionDraft(mode: sel.mode, rules: sel.rules)
         seededFromModel = true
     }
@@ -251,6 +193,18 @@ struct ChooseMusicWindow: View {
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
             onPreview(d.mode, d.rules)
+        }
+    }
+
+    /// Auto-save the selection ~500ms after the last edit. No modal — the
+    /// daemon echoes selection_update; the seed latch (above) prevents that
+    /// echo from clobbering in-progress edits.
+    private func scheduleSave(_ d: SelectionDraft) {
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            onSaveSelection(d.mode, d.rules)
         }
     }
 

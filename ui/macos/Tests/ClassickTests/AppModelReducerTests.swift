@@ -26,7 +26,7 @@ final class AppModelReducerTests: XCTestCase {
         let m = AppModel()
         m.apply(.statusUpdate(.init(state: .syncing, configured: true, ipodConnected: true, lastSync: nil, storage: nil)))
         m.apply(.syncEvent(line: #"{"type":"track_start","current":34,"total":120,"label":"Karma Police"}"#))
-        guard case let .syncing(cur, total, label) = m.phase else { return XCTFail() }
+        guard case let .syncing(cur, total, label, _) = m.phase else { return XCTFail() }
         XCTAssertEqual(cur, 34); XCTAssertEqual(total, 120); XCTAssertEqual(label, "Karma Police")
         m.apply(.syncEvent(line: #"{"type":"finish","success":true}"#))
         XCTAssertEqual(m.phase, .idle)
@@ -191,5 +191,27 @@ final class AppModelReducerTests: XCTestCase {
         }
         XCTAssertEqual(current, 5)
         XCTAssertEqual(total, 100)
+    }
+
+    @MainActor
+    func testSyncingPhaseCarriesEta() {
+        let m = AppModel()
+        m.apply(.deviceConnected(serial: "S", modelLabel: "iPod", drive: "/V", name: nil))
+        m.apply(.configUpdate(source: "/m", daemon: nil,
+                              ipod: IpodIdentity(serial: "S", modelLabel: "iPod", name: nil)))
+        m.apply(.syncEvent(line: #"{"type":"track_start","current":5,"total":10,"label":"X","eta_secs":42}"#))
+        if case let .syncing(current, total, _, eta) = m.phase {
+            XCTAssertEqual(current, 5); XCTAssertEqual(total, 10); XCTAssertEqual(eta, 42)
+        } else { XCTFail("expected syncing, got \(m.phase)") }
+    }
+
+    @MainActor
+    func testHistoryRetained() {
+        let m = AppModel()
+        let e = HistoryEntry(timestamp: "2026-07-14T10:00:00Z", durationSecs: 5,
+                             trigger: "manual", outcome: "ok")
+        m.apply(.historyUpdate(entries: [e]))
+        XCTAssertEqual(m.history.count, 1)
+        XCTAssertEqual(m.history.first?.trigger, "manual")
     }
 }

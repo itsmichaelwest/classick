@@ -9,7 +9,7 @@ enum Phase: Equatable, Sendable {
     case noDevice
     case notConfigured
     case idle
-    case syncing(current: Int, total: Int, label: String)
+    case syncing(current: Int, total: Int, label: String, etaSecs: UInt64?)
     case scanning(current: Int, total: Int)
     case paused(synced: Int, total: Int?)
     case error(String)
@@ -49,6 +49,7 @@ final class AppModel {
     private(set) var config: AppConfig?
     private(set) var syncedCount: Int = 0
     private(set) var libraryCount: Int?
+    private(set) var history: [HistoryEntry] = []
 
     struct SelectionState: Equatable, Sendable {
         var mode: SelectionMode
@@ -115,8 +116,11 @@ final class AppModel {
 
     func apply(_ ev: DaemonEvent) {
         switch ev {
-        case .hello, .historyUpdate, .unknown:
+        case .hello, .unknown:
             break
+
+        case let .historyUpdate(entries):
+            history = entries
 
         case let .libraryUpdate(info):
             library = info
@@ -213,18 +217,18 @@ final class AppModel {
             return .idle
         }
         if case .syncing = phase { return phase }
-        return .syncing(current: 0, total: 0, label: "")
+        return .syncing(current: 0, total: 0, label: "", etaSecs: nil)
     }
 
     private func applySyncEvent(_ line: String) {
         guard let data = line.data(using: .utf8),
               let event = try? decoder.decode(SyncEvent.self, from: data) else { return }
         switch event {
-        case let .trackStart(current, total, label):
+        case let .trackStart(current, total, label, etaSecs):
             if isScanning {
                 phase = .scanning(current: current, total: total)
             } else {
-                phase = .syncing(current: current, total: total, label: label)
+                phase = .syncing(current: current, total: total, label: label, etaSecs: etaSecs)
             }
         case .finish:
             if isScanning {

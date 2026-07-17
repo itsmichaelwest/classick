@@ -22,7 +22,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let daemonClient = DaemonClient()
     private let daemonProcess = DaemonProcess()
     private let setupWindowController = SetupWindowController()
-    private let chooseMusicController = ChooseMusicWindowController()
 
     /// First-run setup is auto-presented exactly once per launch, the moment
     /// the daemon confirms the user is unconfigured. This latches that so a
@@ -73,44 +72,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         setupWindowController.show(model: model, onDone: finishSetup)
     }
 
-    /// Opens the Choose Music browser. Pulls a fresh library + selection on
-    /// appear, and wires scan/preview/save to daemon commands.
-    func presentChooseMusic() {
-        chooseMusicController.show(
-            model: model,
-            onAppear: { [weak self] in
-                Task {
-                    await self?.daemonClient.send(.getLibrary)
-                    await self?.daemonClient.send(.getSelection)
-                }
-            },
-            onScan: { [weak self] in
-                Task { await self?.daemonClient.send(.scanLibrary) }
-            },
-            onPreview: { [weak self] mode, rules in
-                Task { await self?.daemonClient.send(.previewSelection(mode: mode, rules: rules)) }
-            },
-            onSave: { [weak self] mode, rules in
-                self?.saveSelection(mode: mode, rules: rules)
-            })
+    /// Requests a fresh library + selection + sync-history snapshot from the
+    /// daemon. Used by `MainWindow`'s `.task` on first appear so the persistent
+    /// `LibraryView` and History tab both have data on first view
+    /// (`AppModel.history` is otherwise only ever populated by an unsolicited
+    /// `history_update`).
+    func requestLibraryAndSelection() {
+        Task {
+            await daemonClient.send(.getLibrary)
+            await daemonClient.send(.getSelection)
+            await daemonClient.send(.getHistory(limit: 50))
+        }
     }
 
-    private func saveSelection(mode: SelectionMode, rules: [SelectionRule]) {
-        let preview = model.selectionPreview
+    /// "Rescan Library" action for the main window's `LibraryView`.
+    func rescan() {
+        Task { await daemonClient.send(.scanLibrary) }
+    }
+
+    /// Live preview of a candidate selection (mode + rules) as the user edits
+    /// it in the main window's `LibraryView`.
+    func previewSelection(mode: SelectionMode, rules: [SelectionRule]) {
+        Task { await daemonClient.send(.previewSelection(mode: mode, rules: rules)) }
+    }
+
+    /// Persist a selection. The persistent `LibraryView` auto-saves on every
+    /// debounced edit; the always-visible Sync Now button in the device row
+    /// (rather than a modal "Sync now?" prompt on every save) is the
+    /// affordance for applying a selection change to the connected iPod.
+    func saveSelectionDirect(mode: SelectionMode, rules: [SelectionRule]) {
         Task { await daemonClient.send(.saveSelection(mode: mode, rules: rules)) }
-        // Offer an immediate sync when the selection changes what's on the
-        // iPod and a device is present (spec §5 Save flow).
-        if let preview, preview.adds + preview.removes > 0, model.device != nil {
-            let alert = NSAlert()
-            alert.messageText = "Sync now?"
-            alert.informativeText =
-                "This selection will add \(preview.adds) and remove \(preview.removes) track(s) at the next sync."
-            alert.addButton(withTitle: "Sync Now")
-            alert.addButton(withTitle: "Later")
-            if alert.runModal() == .alertFirstButtonReturn {
-                syncNow()
-            }
-        }
     }
 
     /// Auto-presents setup the first time the daemon confirms (post-handshake)
@@ -256,6 +247,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.stop() }
         daemonProcess.stop()
     }
+
+    /// Hybrid app: closing the main window leaves the app running in the Dock
+    /// + menu bar so the daemon keeps syncing. Quit is explicit (⌘Q).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    /// Re-open the main window when the Dock icon is clicked with no window
+    /// visible. Returning `true` lets AppKit perform its default reopen
+    /// behavior (restoring the last-closed `WindowGroup` window once Task 5
+    /// adds one); `false` would suppress that and require reopening manually.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            NSApp.activate(ignoringOtherApps: true)
+            // The WindowGroup restores its window on activation; if none exists,
+            // openWindow (wired in Task 5) recreates it. AppKit reopens the
+            // last closed WindowGroup window automatically here.
+        }
+        return true
+    }
 }
 
 @main
@@ -267,16 +278,38 @@ struct ClassickApp: App {
     // `MenuBarExtra` action. (Setup is NOT a SwiftUI scene; it's an
     // AppKit-hosted window owned by the delegate — see `SetupWindowController`.)
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
+        Window("Classick", id: "main") {
+            MainWindow(
+                model: appDelegate.model,
+                onSyncNow: appDelegate.syncNow,
+                onPause: appDelegate.pause,
+                onCancelSync: appDelegate.cancelSync,
+                onResume: appDelegate.resume,
+                onRetry: appDelegate.retry,
+                onPreview: { mode, rules in appDelegate.previewSelection(mode: mode, rules: rules) },
+                onSaveSelection: { mode, rules in appDelegate.saveSelectionDirect(mode: mode, rules: rules) },
+                onScan: appDelegate.rescan,
+                onSaveSettings: appDelegate.saveSettings,
+                onForgetIpod: appDelegate.forgetIpod,
+                onBackfill: appDelegate.backfillRockbox,
+                onSetUp: appDelegate.presentSetup,
+                onAppearRequests: appDelegate.requestLibraryAndSelection
+            )
+        }
+        .windowResizability(.contentMinSize)
+
         MenuBarExtra("Classick", systemImage: menuBarSystemImage(for: appDelegate.model.phase)) {
             MenuContent(
                 model: appDelegate.model,
                 daemonFatalError: appDelegate.daemonFatalError,
                 onSetUp: appDelegate.presentSetup,
+                onOpenMain: openMainWindow,
                 onOpenSettings: openSettingsWindow,
                 onSyncNow: appDelegate.syncNow,
-                onChooseMusic: appDelegate.presentChooseMusic,
+                onRescan: appDelegate.rescan,
                 onCancelSync: appDelegate.cancelSync,
                 onPause: appDelegate.pause,
                 onResume: appDelegate.resume,
@@ -296,12 +329,18 @@ struct ClassickApp: App {
         }
     }
 
-    /// Opening the Settings window from this `LSUIElement` (accessory, no Dock
-    /// icon) app requires activating it first — otherwise the window can open
-    /// behind whatever app currently has focus.
+    /// Activate before opening Settings so the window comes to the front
+    /// rather than opening behind the current app.
     private func openSettingsWindow() {
         NSApp.activate(ignoringOtherApps: true)
         openSettings()
+    }
+
+    /// "Open Classick" menu action — brings the main singleton `Window` to
+    /// the front, (re)creating it via `openWindow` if it was closed.
+    private func openMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "main")
     }
 }
 

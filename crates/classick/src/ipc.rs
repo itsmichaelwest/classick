@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Current wire-protocol semver. Bumped per the rules in
 /// `docs/ipc-protocol.md` §1.
-pub const PROTOCOL_VERSION: &str = "1.1.0";
+pub const PROTOCOL_VERSION: &str = "1.2.0";
 
 /// Events emitted from the core to the UI on stdout.
 ///
@@ -62,6 +62,10 @@ pub enum IpcEvent {
         current: usize,
         total: usize,
         label: String,
+        /// Estimated seconds remaining (whole-run average). Omitted before the
+        /// first track completes. Added in protocol 1.2.0.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        eta_secs: Option<u64>,
     },
     /// Per-track done. No fields. See §4.8.
     TrackDone,
@@ -193,6 +197,7 @@ impl IpcEvent {
                 current: *current,
                 total: *total,
                 label: label.clone(),
+                eta_secs: None,
             },
             PE::TrackDone => IpcEvent::TrackDone,
             PE::Log(m) => IpcEvent::Log { message: m.clone() },
@@ -327,5 +332,36 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         // Internally tagged enum with no fields serializes as just {"type": "..."}.
         assert!(json.contains(r#""type":"track_done""#), "got: {json}");
+    }
+
+    #[test]
+    fn track_start_event_omits_eta_secs_when_none() {
+        // Compatibility guarantee (protocol 1.2.0 is additive): a `None` ETA
+        // must serialize identically to pre-1.2.0 — the `eta_secs` field is
+        // omitted entirely, not emitted as `null`. `skip_serializing_if`
+        // enforces this.
+        let event = IpcEvent::TrackStart {
+            current: 1,
+            total: 15,
+            label: "Aphex Twin - #ATC1".to_string(),
+            eta_secs: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("eta_secs"), "got: {json}");
+        assert!(json.contains(r#""current":1"#), "got: {json}");
+        assert!(json.contains(r#""total":15"#), "got: {json}");
+        assert!(json.contains(r#""label":"Aphex Twin - #ATC1""#), "got: {json}");
+    }
+
+    #[test]
+    fn track_start_event_includes_eta_secs_when_some() {
+        let event = IpcEvent::TrackStart {
+            current: 6,
+            total: 15,
+            label: "Aphex Twin - #ATC2".to_string(),
+            eta_secs: Some(42),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""eta_secs":42"#), "got: {json}");
     }
 }

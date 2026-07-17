@@ -216,6 +216,7 @@ enum DaemonCommand: Encodable, Sendable {
     case getSelection
     case saveSelection(mode: SelectionMode, rules: [SelectionRule])
     case previewSelection(mode: SelectionMode, rules: [SelectionRule])
+    case getHistory(limit: Int)
 
     enum Trigger: String, Encodable, Sendable {
         case manual, scheduled
@@ -231,6 +232,7 @@ enum DaemonCommand: Encodable, Sendable {
         case choice
         case mode
         case rules
+        case limit
     }
 
     func encode(to encoder: Encoder) throws {
@@ -276,6 +278,9 @@ enum DaemonCommand: Encodable, Sendable {
             try container.encode("preview_selection", forKey: .type)
             try container.encode(mode, forKey: .mode)
             try container.encode(rules, forKey: .rules)
+        case let .getHistory(limit):
+            try container.encode("get_history", forKey: .type)
+            try container.encode(limit, forKey: .limit)
         }
     }
 }
@@ -415,7 +420,7 @@ enum SyncEvent: Decodable, Sendable {
     case hello(protocolVersion: String, coreVersion: String)
     case header(source: String, ipod: String, manifest: String)
     case summary(add: Int, modify: Int, metadataOnly: Int, remove: Int, unchanged: Int, totalPlanned: Int)
-    case trackStart(current: Int, total: Int, label: String)
+    case trackStart(current: Int, total: Int, label: String, etaSecs: UInt64?)
     case trackDone
     case log(message: String)
     case prompt(id: UInt64, message: String, options: [String])
@@ -448,6 +453,7 @@ enum SyncEvent: Decodable, Sendable {
         case hint
         case recoveryHints = "recovery_hints"
         case success
+        case etaSecs = "eta_secs"
     }
 
     init(from decoder: Decoder) throws {
@@ -475,7 +481,8 @@ enum SyncEvent: Decodable, Sendable {
             let current = try container.decode(Int.self, forKey: .current)
             let total = try container.decode(Int.self, forKey: .total)
             let label = try container.decode(String.self, forKey: .label)
-            self = .trackStart(current: current, total: total, label: label)
+            let etaSecs = try container.decodeIfPresent(UInt64.self, forKey: .etaSecs)
+            self = .trackStart(current: current, total: total, label: label, etaSecs: etaSecs)
         case "track_done":
             self = .trackDone
         case "log":

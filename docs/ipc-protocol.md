@@ -1,4 +1,4 @@
-# ipod-sync IPC protocol v1.1.0
+# ipod-sync IPC protocol v1.2.0
 
 Newline-delimited JSON over stdin/stdout, UTF-8, custom typed-envelope.
 Every message is a single-line JSON object with a `type` discriminator
@@ -18,7 +18,7 @@ custom-envelope instead of JSON-RPC 2.0, why WinUI 3 — see
 
 ## 1. Versioning
 
-Protocol version follows **semver**. The current version is **`1.1.0`**.
+Protocol version follows **semver**. The current version is **`1.2.0`**.
 
 The core **MUST** emit a `hello` event (see §4.1) as its first line of
 stdout, carrying the protocol version it speaks. The UI **MUST** read
@@ -118,7 +118,7 @@ Rules:
 | `review`      | `summary` (object), `no_delete`                                                              | Request a review decision                 |
 | `prompt`      | `id`, `message`, `options`                                                                   | Modal multi-choice prompt                 |
 | `form`        | `id`, `label`, `initial`, `hint`                                                             | Modal text-input prompt                   |
-| `track_start` | `current`, `total`, `label`                                                                  | Begin a per-track operation               |
+| `track_start` | `current`, `total`, `label`, `eta_secs?`                                                     | Begin a per-track operation               |
 | `track_done`  | (none)                                                                                       | Increment completed count                 |
 | `log`         | `message`                                                                                    | Informational log line                    |
 | `error`       | `message`, `recovery_hints?`                                                                 | Non-fatal or fatal error                  |
@@ -137,7 +137,7 @@ then proceeds with the rest of the protocol.
 
 | Field              | Type     | Notes                                                       |
 |--------------------|----------|-------------------------------------------------------------|
-| `protocol_version` | `string` | Semver of the wire protocol the core speaks. Currently `1.1.0`. |
+| `protocol_version` | `string` | Semver of the wire protocol the core speaks. Currently `1.2.0`. |
 | `core_version`     | `string` | `CARGO_PKG_VERSION` of the core binary. Informational.       |
 
 ```json
@@ -246,14 +246,19 @@ Mirrors `ProgressEvent::Form` (and `FormRequest`).
 Emitted once per track at the start of its apply step. Mirrors
 `ProgressEvent::TrackStart`.
 
-| Field     | Type     | Notes                                              |
-|-----------|----------|----------------------------------------------------|
-| `current` | `number` | 1-based index of this track within the run.        |
-| `total`   | `number` | Total tracks planned (matches `summary.total_planned`). |
-| `label`   | `string` | Human-readable label, e.g. `"Aphex Twin - Selected Ambient Works II - #ATC1"`. |
+| Field       | Type               | Notes                                              |
+|-------------|--------------------|----------------------------------------------------|
+| `current`   | `number`           | 1-based index of this track within the run.        |
+| `total`     | `number`           | Total tracks planned (matches `summary.total_planned`). |
+| `label`     | `string`           | Human-readable label, e.g. `"Aphex Twin - Selected Ambient Works II - #ATC1"`. |
+| `eta_secs?` | `number` \| absent | Estimated seconds remaining, whole-run average (elapsed time since the first track divided by completed-track count, projected over remaining tracks). Omitted before the first track completes. Since **1.2.0**. |
 
 ```json
 {"type":"track_start","current":1,"total":15,"label":"Aphex Twin - Selected Ambient Works II - #ATC1"}
+```
+
+```json
+{"type":"track_start","current":6,"total":15,"label":"Aphex Twin - Selected Ambient Works II - #ATC2","eta_secs":47}
 ```
 
 ### 4.8 `track_done`
@@ -697,6 +702,7 @@ Deliberately **not** in v1 — listed so they don't accidentally creep in:
 |----------|--------------|------------|------------|----------------------------------------|
 | 1.0.0    | 0.1.x        | 0.1.x      | Initial M1 | Windows-only UI; cross-platform TUI fallback remains. |
 | 1.1.0    | 0.1.x        | 0.1.x      | Current    | Additive: `pause` command (§5.6) + terminal `paused` event (§4.12). Handshake still requires major version `1` on both sides. |
+| 1.2.0    | 0.1.x        | 0.1.x      | Current    | Additive: optional `eta_secs` field on `track_start` (§4.7), daemon-computed whole-run-average sync ETA. |
 
 Bumps will append rows here. Don't edit historical rows.
 

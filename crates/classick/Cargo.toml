@@ -31,6 +31,7 @@ image = "0.25"
 # and Windows/Linux (ffmpeg) transcode backends, so it must be an unconditional
 # dependency, not gated to cfg(target_os = "macos").
 lofty = "0.22"
+notify = { workspace = true }
 
 # Windows-only: SCSI INQUIRY pass-through to read SysInfoExtended XML directly
 # from the iPod firmware (the same mechanism iTunes uses). Lets us identify

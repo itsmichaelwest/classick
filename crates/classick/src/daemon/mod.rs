@@ -10,6 +10,7 @@ pub mod library;
 #[cfg(target_os = "macos")]
 pub mod iokit_watcher;
 pub mod ipc_server;
+pub mod library_watcher;
 pub mod runtime;
 pub mod scheduler;
 pub mod state;
@@ -44,6 +45,11 @@ pub const DEVICE_DEBOUNCE_WINDOW: std::time::Duration =
 /// window so each scan can be debounced if duplicate-fired by the OS.
 pub const DEVICE_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(1500);
+
+/// Quiet period after the last filesystem event before a watcher-triggered
+/// library scan fires. Bulk file operations (a Lidarr import, a big copy) emit
+/// many events; this coalesces them into one scan.
+pub const LIBRARY_DEBOUNCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Capacity of the mpsc channel `PollingDeviceWatcher` emits on. Events are
 /// drained by the runtime's `select!` on every iteration; 32 buffers the
