@@ -752,7 +752,7 @@ Bumps will append rows here. Don't edit historical rows.
 > `major.minor.patch` scheme and both currently sit on major `1`, but their
 > minor versions move on separate schedules and a matching number (e.g. both
 > once being `1.1.0`) is coincidence, not a shared release train. As of this
-> writing the daemon protocol is at **`1.5.0`** — see "Daemon v1.5.0" below;
+> writing the daemon protocol is at **`1.6.0`** — see "Daemon v1.6.0" below;
 > this section is kept as the historical record of the `1.1.0` daemon bump.
 
 When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows) or a
@@ -1086,3 +1086,84 @@ reply mechanism, so the UI always gets a definitive answer rather than a
 request that silently goes nowhere. The resulting history entry records
 `trigger: "manual"` — there is no dedicated `SyncTrigger` variant for a
 replace, matching how `backfill_rockbox` is recorded.
+
+---
+
+## Daemon v1.6.0 — Playlist CRUD, per-device config, device preview (2026-07-18)
+
+The daemon now emits `hello` with `protocol_version = "1.6.0"`. Purely
+additive over v1.5.0: seven new commands, three new events, and a
+deprecation note (no removed/changed fields) for `get_selection`/
+`save_selection`/`custom_selection`. See `crates/classick/src/playlist.rs`,
+`playlist_rules.rs`, `device_config.rs`, and `sync_set.rs` for the
+host-side types these wire shapes mirror.
+
+### New commands (UI → daemon)
+
+| Type | Fields | Behavior |
+|---|---|---|
+| `list_playlists` | (none) | Replies `playlists_update`: every playlist in the store. |
+| `get_playlist` | `slug` | Replies `playlists_update`, filtered to the one matching `slug` (an empty `playlists` list if no such playlist exists) — reuses the list event rather than introducing a single-playlist one. |
+| `save_playlist` | `playlist` (a `PlaylistPayload`, below) | Create (absent `playlist.slug`) or replace (present `playlist.slug`) a playlist; persists atomically. No direct reply; broadcasts a fresh `playlists_update` to every client. |
+| `delete_playlist` | `slug` | Delete a playlist by slug; no-op (still broadcasts) if the slug doesn't exist. No direct reply; broadcasts a fresh `playlists_update`. |
+| `get_device_config` | `serial` | Replies `device_config_update` for that device: its resolved selection + subscriptions + settings. Never fails — an unknown `serial` resolves to each part's default. |
+| `save_device_config` | `serial`, `selection?`, `subscriptions?`, `settings?` | Persists the provided parts (each field `None`/absent = "don't change", the same sentinel convention as `save_config`). No direct reply; broadcasts a fresh `device_config_update` to every client. If `serial` is the currently *configured* device, also broadcasts a refreshed `status_update` (a selection change may move "Y" in "X of Y synced"). |
+| `preview_device` | `serial` | Pure computation over the cached library index + that device's selection/subscriptions/playlist-store state — no filesystem walk, nothing persists. Replies `device_preview`. |
+
+`PlaylistPayload` (the `save_playlist` command's `playlist` field) is tagged
+by `kind`:
+
+```json
+{"kind":"manual","slug":null,"name":"Gym","tracks":["Artist/Album/01.flac","B/02.flac"]}
+{"kind":"smart","slug":"recent-idm","name":"Recent IDM","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0}}
+```
+
+`tracks` are source-relative paths (manual only); `rules` is a `SmartRules`
+object exactly as `playlist_rules::SmartRules` serializes it (smart only).
+An absent/`null` `slug` means "create a new playlist" — the daemon
+allocates one via `PlaylistStore::unique_slug(name)`; a present `slug`
+means "create-or-replace at exactly this slug" (the edit path). Track paths
+aren't validated on save — `playlist::resolve_manual`'s existence/safety
+check is the last line of defense at resolve time, by design (see its doc
+comment), so an unsafe or nonexistent entry can round-trip through
+`save_playlist` without failing the save; it's simply never resolved into a
+sync set or a `playlists_update` size.
+
+`selection`/`subscriptions`/`settings` on `save_device_config` (and
+`device_config_update`, below) each mirror their on-disk type's meaningful
+fields only — no `version` (a file-format implementation detail, not part
+of the wire contract):
+
+```json
+{"mode":"include","rules":[{"kind":"artist","name":"Boards of Canada"}]}
+{"playlists":["gym","chill"]}
+{"auto_sync":true,"rockbox_compat":false}
+```
+
+### New events (daemon → UI)
+
+| Type | Fields |
+|---|---|
+| `playlists_update` | `playlists[]` — `{slug, name, kind, tracks, bytes, error?}`. `kind` is `"manual"` \| `"smart"`. `tracks`/`bytes` are computed against the **cached library index** (never a walk): manual playlists resolve their source-relative tracks against the index (an entry the index doesn't know about is dropped, same "oracle" idea as `sync_set::compute` but index- instead of walk-backed); smart playlists evaluate their rules directly against the index. Sorted by `slug`. A playlist FILE the store failed to parse still surfaces here — named from its filename, `tracks`/`bytes` `0`, `error` set to the parse failure — instead of silently vanishing from the list. |
+| `device_config_update` | `serial`, `selection` (`{mode, rules}`), `subscriptions` (`{playlists}`), `settings` (`{auto_sync, rockbox_compat}`). |
+| `device_preview` | `selected_tracks`, `selected_bytes` (the scope-selection footprint, source-size estimate), `playlist_extra_tracks`, `playlist_extra_bytes` (subscribed-playlist members NOT already in the selection scope — the union's out-of-scope delta), `projected_free_bytes` (`u64 \| null`). `null` whenever the previewed `serial` isn't the device currently connected (no live `StorageInfo` to project from) — mirrors `library_update.scanned_at_unix_secs`'s "meaningful null" convention, not omission. When present, it's `current_free_bytes − (selected_bytes + playlist_extra_bytes)` — a conservative "as if syncing from empty" estimate, since this computation has no manifest/on-device knowledge of what's already synced. See `daemon::library::compute_device_preview` for the exact math and its unit tests. |
+
+### `get_selection`/`save_selection`/`custom_selection` deprecated
+
+As of v1.6.0, `get_selection`/`save_selection` (§"Daemon v1.4.0" above) read
+and write the **configured** device's own per-device selection —
+`selection::effective_device_selection_path(serial)`, seeded once from the
+shared `selection.json` the first time it's resolved — rather than the
+`custom_selection`-gated shared/per-device split
+`selection::effective_selection_path` used to implement (§"`IpodIdentity`
+gains `custom_selection`" above). Practically: `custom_selection`'s value no
+longer changes which file these two commands touch. `get_selection` with no
+device configured replies `mode: "all"`; `save_selection` in that state is
+a no-op (logged, not persisted — there's no per-device path to resolve
+without a serial). Both commands are kept only for UI clients that haven't
+migrated to `get_device_config`/`save_device_config` with an explicit
+`serial`, which is the supported way to read/write a *specific* device's
+selection (not just "the" configured one) going forward. `custom_selection`
+itself is unchanged on the wire (still rides `ipod` on `config_update`/
+`save_config`) but is now vestigial: it no longer gates which selection
+file `get_selection`/`save_selection` use.

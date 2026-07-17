@@ -1,14 +1,20 @@
 //! Daemon-side library services: aggregate the tag index for the Choose
-//! Music browser, evaluate selection previews, and derive the selected
-//! library count. All rule evaluation delegates to `crate::selection` —
-//! the ONE evaluator the sync filter also uses.
+//! Music browser, evaluate selection previews, derive the selected library
+//! count, summarize playlists against the cached index (v1.6.0), and
+//! compute the pure device-preview estimate (v1.6.0). All rule evaluation
+//! delegates to `crate::selection` / `crate::playlist_rules` — the same
+//! evaluators the sync filter and `sync_set::compute` use.
 
-use crate::ipc_daemon::{DaemonEvent, LibraryAlbum, LibraryArtist, LibraryGenre};
+use crate::device_config::Subscriptions;
+use crate::ipc_daemon::{
+    DaemonEvent, LibraryAlbum, LibraryArtist, LibraryGenre, PlaylistKind, PlaylistSummary,
+};
 use crate::library_index::{self, LibraryIndex};
 use crate::manifest::Manifest;
+use crate::playlist::{Playlist, PlaylistStore};
 use crate::selection::{self, Selection, SelectionMode, SelectionRule};
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 
 /// Aggregate the per-file index into the browser's artist→album + genre
 /// shape. Sorted case-insensitively. Empty tags stay empty strings on the
@@ -151,9 +157,18 @@ pub fn preview(
 /// The selected library count (Y in "X of Y synced"). None when the mode is
 /// All (caller keeps using its walk-based cache) or when no index/source is
 /// available.
+///
+/// Reads the configured device's per-device selection via
+/// `selection::effective_device_selection_path` (v1.6.0) rather than the
+/// deprecated `custom_selection`-gated `effective_selection_path`, so this
+/// stays consistent with what `get_selection`/`save_selection` and
+/// `get_device_config`/`save_device_config` now read and write. Falls back
+/// to `Selection::all()` (mode All, so `None`) when no device is configured
+/// — there's no "the" device to resolve a per-device path for.
 pub fn selected_library_count(config_path: &Path) -> Option<usize> {
     let cfg = crate::config_file::load(config_path).ok().flatten()?;
-    let sel_path = selection::effective_selection_path(cfg.ipod_identity.as_ref()).ok()?;
+    let serial = cfg.ipod_identity.as_ref()?.serial.clone();
+    let sel_path = selection::effective_device_selection_path(&serial).ok()?;
     let sel = selection::load_or_all(&sel_path);
     if sel.mode == SelectionMode::All {
         return None;
@@ -162,6 +177,145 @@ pub fn selected_library_count(config_path: &Path) -> Option<usize> {
     let idx_path = library_index::default_index_path().ok()?;
     let idx = library_index::load_or_empty(&idx_path, &source);
     Some(idx.files.values().filter(|rec| sel.wants(&rec.facts())).count())
+}
+
+/// Resolve one playlist's member tracks against the cached library index —
+/// no filesystem walk. Manual playlists join their source-relative tracks
+/// onto `index.source_root` and keep only entries the index already knows
+/// about, using `playlist::resolve_manual`'s injectable existence check
+/// with the cached index as the oracle instead of a live walk (mirrors
+/// `sync_set::compute`'s "the walk is the existence oracle" contract, one
+/// level more conservative since even the index may be stale). Smart
+/// playlists evaluate their rules directly against the index.
+pub(crate) fn resolve_playlist_against_index(playlist: &Playlist, index: &LibraryIndex) -> Vec<PathBuf> {
+    match playlist {
+        Playlist::Manual(m) => {
+            let (found, _missing) =
+                crate::playlist::resolve_manual(m, &index.source_root, &|p| index.files.contains_key(p));
+            found
+        }
+        Playlist::Smart(s) => crate::playlist_rules::evaluate(&s.rules, index),
+    }
+}
+
+/// Track count + summed byte size of a playlist's resolved members, per
+/// `resolve_playlist_against_index`.
+pub(crate) fn playlist_tracks_and_bytes(playlist: &Playlist, index: &LibraryIndex) -> (usize, u64) {
+    let paths = resolve_playlist_against_index(playlist, index);
+    let bytes = paths.iter().filter_map(|p| index.files.get(p)).map(|t| t.size).sum();
+    (paths.len(), bytes)
+}
+
+fn summarize_playlist(playlist: &Playlist, index: &LibraryIndex) -> PlaylistSummary {
+    let (tracks, bytes) = playlist_tracks_and_bytes(playlist, index);
+    let kind = match playlist {
+        Playlist::Manual(_) => PlaylistKind::Manual,
+        Playlist::Smart(_) => PlaylistKind::Smart,
+    };
+    PlaylistSummary { slug: playlist.slug().to_string(), name: playlist.name().to_string(), kind, tracks, bytes, error: None }
+}
+
+/// `(slug, kind)` inferred from a store file's name, for the
+/// `store.last_errors()` stub-summary path below. `None` for anything that
+/// isn't a recognized playlist file extension (e.g. the store root itself,
+/// on a `read_dir` failure).
+fn kind_from_error_path(path: &Path) -> Option<(String, PlaylistKind)> {
+    let name = path.file_name()?.to_str()?;
+    if let Some(slug) = name.strip_suffix(".m3u8") {
+        Some((slug.to_string(), PlaylistKind::Manual))
+    } else if let Some(slug) = name.strip_suffix(".rules.json") {
+        Some((slug.to_string(), PlaylistKind::Smart))
+    } else {
+        None
+    }
+}
+
+/// Every playlist in `store`, summarized against `index`, sorted by `slug`
+/// for deterministic wire ordering. A file the store failed to parse still
+/// surfaces as a stub summary (`tracks`/`bytes` zero, `error` set to the
+/// failure) instead of silently vanishing from the list — see
+/// `PlaylistStore::last_errors`.
+pub(crate) fn build_playlist_summaries(store: &PlaylistStore, index: &LibraryIndex) -> Vec<PlaylistSummary> {
+    let mut out: Vec<PlaylistSummary> = match store.list() {
+        Ok(playlists) => playlists.iter().map(|p| summarize_playlist(p, index)).collect(),
+        Err(e) => {
+            tracing::warn!("playlists: failed to list store ({e:#})");
+            Vec::new()
+        }
+    };
+    for (path, message) in store.last_errors() {
+        if let Some((slug, kind)) = kind_from_error_path(&path) {
+            out.push(PlaylistSummary { slug: slug.clone(), name: slug, kind, tracks: 0, bytes: 0, error: Some(message) });
+        }
+    }
+    out.sort_by(|a, b| a.slug.cmp(&b.slug));
+    out
+}
+
+/// Pure "what would this device sync" estimate for `preview_device`: no
+/// filesystem walk, only the cached library index plus this device's
+/// selection/subscriptions/playlist-store state.
+///
+/// `selected_*` mirrors `preview()`'s selection-scope math above.
+/// `playlist_extra_*` is subscribed-playlist members NOT already in that
+/// scope — the same union-delta idea as `sync_set::compute`, sized from the
+/// index rather than a live walk; an unresolvable subscription (unknown
+/// slug, store load error) is silently skipped here, matching
+/// `sync_set::compute`'s "never fatal to the caller" contract.
+///
+/// `current_free_bytes` is `Some` only when the target device is the one
+/// currently connected (its live `StorageInfo::free_bytes`); `store` is
+/// `Option` so a playlist-store-open failure degrades to "no playlist
+/// extras" rather than failing the whole preview. `projected_free_bytes`
+/// subtracts a "net-new" estimate — `selected_bytes + playlist_extra_bytes`
+/// — from `current_free_bytes`. This function has no manifest/on-device
+/// knowledge of what's already synced, so the estimate is conservative (as
+/// if syncing from empty), not an exact post-sync delta; `None` in,
+/// `None` out.
+pub(crate) fn compute_device_preview(
+    index: &LibraryIndex,
+    selection: &Selection,
+    subs: &Subscriptions,
+    store: Option<&PlaylistStore>,
+    current_free_bytes: Option<u64>,
+) -> DaemonEvent {
+    let mut selected_tracks = 0usize;
+    let mut selected_bytes = 0u64;
+    let mut selected_paths: HashSet<&Path> = HashSet::new();
+    for (path, rec) in &index.files {
+        if selection.wants(&rec.facts()) {
+            selected_tracks += 1;
+            selected_bytes += rec.size;
+            selected_paths.insert(path.as_path());
+        }
+    }
+
+    let mut extra_paths: HashSet<PathBuf> = HashSet::new();
+    if let Some(store) = store {
+        for slug in &subs.playlists {
+            if let Ok(Some(playlist)) = store.load(slug) {
+                for path in resolve_playlist_against_index(&playlist, index) {
+                    if !selected_paths.contains(path.as_path()) {
+                        extra_paths.insert(path);
+                    }
+                }
+            }
+        }
+    }
+    let playlist_extra_tracks = extra_paths.len();
+    let playlist_extra_bytes: u64 =
+        extra_paths.iter().filter_map(|p| index.files.get(p)).map(|t| t.size).sum();
+
+    let net_new = selected_bytes.saturating_add(playlist_extra_bytes);
+    let projected_free_bytes = current_free_bytes.map(|free| free.saturating_sub(net_new));
+
+    DaemonEvent::DevicePreview {
+        selected_tracks,
+        selected_bytes,
+        playlist_extra_tracks,
+        playlist_extra_bytes,
+        projected_free_bytes,
+    }
 }
 
 #[cfg(test)]
@@ -269,5 +423,157 @@ mod tests {
         assert_eq!(selected, 1);
         assert_eq!(adds, 1);
         assert_eq!(removes, 0);
+    }
+
+    // --- v1.6.0: playlist summaries + device preview --------------------
+
+    use crate::device_config::Subscriptions;
+    use crate::playlist::{ManualPlaylist, Playlist, PlaylistStore, SmartPlaylist};
+    use crate::playlist_rules::{Match, Order, RULES_VERSION, SmartRules};
+
+    fn tempdir_under_target(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
+            .join(format!("daemon-library-{label}-{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn empty_rules() -> SmartRules {
+        SmartRules { version: RULES_VERSION, matching: Match::All, rules: vec![], limit: None, order: Order::default(), seed: 0 }
+    }
+
+    #[test]
+    fn build_playlist_summaries_sorted_and_sizes_against_index() {
+        let root = tempdir_under_target("summaries");
+        let store = PlaylistStore::open(root.clone()).unwrap();
+        store
+            .save(&Playlist::Manual(ManualPlaylist {
+                slug: "gym".into(), name: "Gym".into(),
+                tracks: vec![PathBuf::from("a1.flac"), PathBuf::from("missing.flac")],
+                skipped_unsafe: 0,
+            }))
+            .unwrap();
+        let mut smart_rules = empty_rules();
+        smart_rules.rules = vec![crate::playlist_rules::Rule {
+            field: crate::playlist_rules::Field::Genre, op: crate::playlist_rules::Op::Is, value: "IDM".into(),
+        }];
+        store
+            .save(&Playlist::Smart(SmartPlaylist { slug: "chill".into(), name: "Chill".into(), rules: smart_rules }))
+            .unwrap();
+
+        let idx = index_with(vec![
+            ("/m/a1.flac", track("Aphex Twin", "", "Drukqs", "IDM", 100)),
+            ("/m/a2.flac", track("Aphex Twin", "", "Drukqs", "IDM", 50)),
+        ]);
+
+        let summaries = build_playlist_summaries(&store, &idx);
+        assert_eq!(summaries.len(), 2);
+        // sorted by slug: "chill" < "gym"
+        assert_eq!(summaries[0].slug, "chill");
+        assert_eq!(summaries[0].kind, PlaylistKind::Smart);
+        assert_eq!(summaries[0].tracks, 2, "both IDM tracks match the smart rule");
+        assert_eq!(summaries[0].bytes, 150);
+        assert!(summaries[0].error.is_none());
+
+        assert_eq!(summaries[1].slug, "gym");
+        assert_eq!(summaries[1].kind, PlaylistKind::Manual);
+        assert_eq!(summaries[1].tracks, 1, "missing.flac isn't in the index, so it's dropped");
+        assert_eq!(summaries[1].bytes, 100);
+    }
+
+    #[test]
+    fn build_playlist_summaries_surfaces_corrupt_file_as_error_stub() {
+        let root = tempdir_under_target("corrupt");
+        let store = PlaylistStore::open(root.clone()).unwrap();
+        std::fs::write(root.join("broken.rules.json"), b"{ not json").unwrap();
+
+        let idx = LibraryIndex::empty(PathBuf::from("/m"));
+        let summaries = build_playlist_summaries(&store, &idx);
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].slug, "broken");
+        assert_eq!(summaries[0].kind, PlaylistKind::Smart);
+        assert_eq!(summaries[0].tracks, 0);
+        assert_eq!(summaries[0].bytes, 0);
+        assert!(summaries[0].error.is_some(), "corrupt file surfaces with its parse error, not silently dropped");
+    }
+
+    #[test]
+    fn compute_device_preview_math_with_playlist_extra_and_projected_free() {
+        let root = tempdir_under_target("preview");
+        let store = PlaylistStore::open(root.clone()).unwrap();
+        // "extra" is entirely outside the selection scope below.
+        store
+            .save(&Playlist::Manual(ManualPlaylist {
+                slug: "extra".into(), name: "Extra".into(),
+                tracks: vec![PathBuf::from("out_of_scope.flac")],
+                skipped_unsafe: 0,
+            }))
+            .unwrap();
+
+        let idx = index_with(vec![
+            ("/m/in_scope.flac", track("Keep", "", "Album", "G", 1_000)),
+            ("/m/out_of_scope.flac", track("Drop", "", "Album2", "G", 500)),
+        ]);
+        let selection = Selection {
+            version: crate::selection::SELECTION_VERSION,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist { name: "Keep".into() }],
+        };
+        let subs = Subscriptions { version: 1, playlists: vec!["extra".into()] };
+
+        let event =
+            compute_device_preview(&idx, &selection, &subs, Some(&store), Some(10_000));
+        match event {
+            DaemonEvent::DevicePreview {
+                selected_tracks, selected_bytes, playlist_extra_tracks, playlist_extra_bytes, projected_free_bytes,
+            } => {
+                assert_eq!(selected_tracks, 1);
+                assert_eq!(selected_bytes, 1_000);
+                assert_eq!(playlist_extra_tracks, 1, "out_of_scope.flac is pulled in only by the subscription");
+                assert_eq!(playlist_extra_bytes, 500);
+                assert_eq!(projected_free_bytes, Some(10_000 - 1_000 - 500));
+            }
+            other => panic!("expected DevicePreview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_device_preview_no_current_free_projects_none() {
+        let idx = index_with(vec![("/m/a.flac", track("X", "", "A", "G", 10))]);
+        let selection = Selection::all();
+        let subs = Subscriptions::default();
+
+        let event = compute_device_preview(&idx, &selection, &subs, None, None);
+        match event {
+            DaemonEvent::DevicePreview { selected_tracks, projected_free_bytes, .. } => {
+                assert_eq!(selected_tracks, 1);
+                assert_eq!(projected_free_bytes, None, "no live StorageInfo baseline to project from");
+            }
+            other => panic!("expected DevicePreview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_device_preview_unresolvable_subscription_is_skipped_not_fatal() {
+        let root = tempdir_under_target("preview-unresolvable");
+        let store = PlaylistStore::open(root.clone()).unwrap(); // no playlists saved
+        let idx = index_with(vec![("/m/a.flac", track("X", "", "A", "G", 10))]);
+        let subs = Subscriptions { version: 1, playlists: vec!["does-not-exist".into()] };
+
+        let event = compute_device_preview(&idx, &Selection::all(), &subs, Some(&store), None);
+        match event {
+            DaemonEvent::DevicePreview { playlist_extra_tracks, playlist_extra_bytes, .. } => {
+                assert_eq!(playlist_extra_tracks, 0);
+                assert_eq!(playlist_extra_bytes, 0);
+            }
+            other => panic!("expected DevicePreview, got {other:?}"),
+        }
     }
 }

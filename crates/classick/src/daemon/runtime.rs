@@ -1421,20 +1421,34 @@ fn handle_client_command(
             );
         }
         DaemonCommand::GetSelection => {
+            // Deprecated as of v1.6.0 (see ipc_daemon.rs doc comment): reads
+            // the CONFIGURED device's own per-device selection via
+            // `effective_device_selection_path`, not the old
+            // `custom_selection`-gated shared/per-device split. No
+            // configured device -> mode All (nothing to resolve a
+            // per-device path for).
             let identity = config_file::load(config_path).ok().flatten().and_then(|c| c.ipod_identity);
-            let sel = crate::selection::effective_selection_path(identity.as_ref())
-                .map(|p| crate::selection::load_or_all(&p))
-                .unwrap_or_else(|_| crate::selection::Selection::all());
+            let sel = match identity {
+                Some(id) => crate::selection::effective_device_selection_path(&id.serial)
+                    .map(|p| crate::selection::load_or_all(&p))
+                    .unwrap_or_else(|_| crate::selection::Selection::all()),
+                None => crate::selection::Selection::all(),
+            };
             let _ = reply.send(DaemonEvent::SelectionUpdate { mode: sel.mode, rules: sel.rules });
         }
         DaemonCommand::SaveSelection { mode, rules } => {
+            // Deprecated as of v1.6.0: same per-device target as GetSelection.
             let sel = crate::selection::Selection {
                 version: crate::selection::SELECTION_VERSION,
                 mode,
                 rules,
             };
             let identity = config_file::load(config_path).ok().flatten().and_then(|c| c.ipod_identity);
-            match crate::selection::effective_selection_path(identity.as_ref()) {
+            let Some(identity) = identity else {
+                tracing::warn!("daemon: client {client_id} save_selection with no configured device; dropped");
+                return false;
+            };
+            match crate::selection::effective_device_selection_path(&identity.serial) {
                 Ok(path) => {
                     if let Err(e) = crate::selection::save_atomic(&path, &sel) {
                         tracing::error!("daemon: failed to save selection: {e:#}");
@@ -1465,6 +1479,133 @@ fn handle_client_command(
                 selected_tracks, selected_bytes, adds, removes,
             });
         }
+        DaemonCommand::ListPlaylists => {
+            let _ = reply.send(build_playlists_update(config_path));
+        }
+        DaemonCommand::GetPlaylist { slug } => {
+            let _ = reply.send(build_playlist_detail(config_path, &slug));
+        }
+        DaemonCommand::SavePlaylist { playlist } => {
+            let Ok(store) = open_playlist_store() else {
+                tracing::warn!("daemon: client {client_id} save_playlist: could not open playlist store");
+                return false;
+            };
+            let built = match playlist {
+                crate::ipc_daemon::PlaylistPayload::Manual { slug, name, tracks } => {
+                    let slug = match slug {
+                        Some(s) => s,
+                        None => match store.unique_slug(&name) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::error!(
+                                    "daemon: client {client_id} save_playlist: could not allocate a slug for {name:?}: {e:#}"
+                                );
+                                return false;
+                            }
+                        },
+                    };
+                    crate::playlist::Playlist::Manual(crate::playlist::ManualPlaylist {
+                        slug,
+                        name,
+                        tracks: tracks.into_iter().map(PathBuf::from).collect(),
+                        skipped_unsafe: 0,
+                    })
+                }
+                crate::ipc_daemon::PlaylistPayload::Smart { slug, name, rules } => {
+                    let slug = match slug {
+                        Some(s) => s,
+                        None => match store.unique_slug(&name) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::error!(
+                                    "daemon: client {client_id} save_playlist: could not allocate a slug for {name:?}: {e:#}"
+                                );
+                                return false;
+                            }
+                        },
+                    };
+                    crate::playlist::Playlist::Smart(crate::playlist::SmartPlaylist { slug, name, rules })
+                }
+            };
+            if let Err(e) = store.save(&built) {
+                tracing::error!("daemon: client {client_id} save_playlist failed: {e:#}");
+                return false;
+            }
+            let _ = event_tx.send(build_playlists_update(config_path));
+        }
+        DaemonCommand::DeletePlaylist { slug } => {
+            match open_playlist_store() {
+                Ok(store) => {
+                    if let Err(e) = store.delete(&slug) {
+                        tracing::error!("daemon: client {client_id} delete_playlist({slug}) failed: {e:#}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("daemon: client {client_id} delete_playlist: could not open playlist store ({e:#})");
+                }
+            }
+            let _ = event_tx.send(build_playlists_update(config_path));
+        }
+        DaemonCommand::GetDeviceConfig { serial } => {
+            let _ = reply.send(build_device_config_update(config_path, &serial));
+        }
+        DaemonCommand::SaveDeviceConfig { serial, selection, subscriptions, settings } => {
+            if let Some(sel) = selection {
+                match crate::selection::effective_device_selection_path(&serial) {
+                    Ok(path) => {
+                        let full = crate::selection::Selection {
+                            version: crate::selection::SELECTION_VERSION,
+                            mode: sel.mode,
+                            rules: sel.rules,
+                        };
+                        if let Err(e) = crate::selection::save_atomic(&path, &full) {
+                            tracing::error!("daemon: failed to save device selection for {serial}: {e:#}");
+                        }
+                    }
+                    Err(e) => tracing::error!("daemon: cannot resolve device selection path for {serial}: {e:#}"),
+                }
+            }
+            if let Some(subs) = subscriptions {
+                match crate::device_state::device_subscriptions_path(&serial) {
+                    Ok(path) => {
+                        let full = crate::device_config::Subscriptions {
+                            version: crate::device_config::SUBSCRIPTIONS_VERSION,
+                            playlists: subs.playlists,
+                        };
+                        if let Err(e) = crate::device_config::Subscriptions::save_atomic(&path, &full) {
+                            tracing::error!("daemon: failed to save subscriptions for {serial}: {e:#}");
+                        }
+                    }
+                    Err(e) => tracing::error!("daemon: cannot resolve subscriptions path for {serial}: {e:#}"),
+                }
+            }
+            if let Some(set) = settings {
+                match crate::device_state::device_settings_path(&serial) {
+                    Ok(path) => {
+                        let full = crate::device_config::DeviceSettings {
+                            version: crate::device_config::DEVICE_SETTINGS_VERSION,
+                            auto_sync: set.auto_sync,
+                            rockbox_compat: set.rockbox_compat,
+                        };
+                        if let Err(e) = crate::device_config::DeviceSettings::save_atomic(&path, &full) {
+                            tracing::error!("daemon: failed to save settings for {serial}: {e:#}");
+                        }
+                    }
+                    Err(e) => tracing::error!("daemon: cannot resolve settings path for {serial}: {e:#}"),
+                }
+            }
+            let _ = event_tx.send(build_device_config_update(config_path, &serial));
+            // Selection may have changed; refresh "X of Y" for everyone, but
+            // only when this save targets the CONFIGURED device — status
+            // reflects that one device, not every device this daemon has
+            // ever seen a config file for.
+            if configured_serial.as_deref() == Some(serial.as_str()) {
+                broadcast_status(event_tx, state, connected, config_path, history, *library_count_cache);
+            }
+        }
+        DaemonCommand::PreviewDevice { serial } => {
+            let _ = reply.send(build_device_preview(config_path, connected, &serial));
+        }
         DaemonCommand::Shutdown => {
             tracing::info!("daemon: shutdown requested by client {client_id}; exiting loop");
             return true;
@@ -1482,6 +1623,103 @@ fn build_config_update(cfg: Option<PersistedConfig>) -> DaemonEvent {
         },
         None => DaemonEvent::ConfigUpdate { source: None, daemon: None, ipod: None },
     }
+}
+
+/// The cached library index for the configured source, same pattern as the
+/// inline load in `PreviewSelection`'s arm — an empty index (root `""`)
+/// when there's no source configured yet or the cache file is missing.
+fn load_cached_index(config_path: &std::path::Path) -> crate::library_index::LibraryIndex {
+    let source = config_file::load(config_path).ok().flatten().and_then(|c| c.source);
+    match (source, crate::library_index::default_index_path()) {
+        (Some(root), Ok(p)) => crate::library_index::load_or_empty(&p, &root),
+        _ => crate::library_index::LibraryIndex::empty(PathBuf::new()),
+    }
+}
+
+/// Open (creating on demand) the one playlist store at its default root.
+fn open_playlist_store() -> Result<crate::playlist::PlaylistStore> {
+    crate::playlist::PlaylistStore::default_root().and_then(crate::playlist::PlaylistStore::open)
+}
+
+/// `list_playlists` reply / `save_playlist`+`delete_playlist` broadcast
+/// payload: every playlist in the store, summarized against the cached
+/// index. A store-open failure (e.g. an unwritable config dir) degrades to
+/// an empty list with a logged warning rather than failing the arm.
+fn build_playlists_update(config_path: &std::path::Path) -> DaemonEvent {
+    let index = load_cached_index(config_path);
+    match open_playlist_store() {
+        Ok(store) => {
+            DaemonEvent::PlaylistsUpdate { playlists: crate::daemon::library::build_playlist_summaries(&store, &index) }
+        }
+        Err(e) => {
+            tracing::warn!("daemon: playlists: failed to open store ({e:#}); replying with an empty list");
+            DaemonEvent::PlaylistsUpdate { playlists: Vec::new() }
+        }
+    }
+}
+
+/// `get_playlist` reply: reuses `build_playlists_update`'s full listing,
+/// filtered to the one matching `slug` (0 or 1 entries) — see the
+/// `GetPlaylist` doc comment in `ipc_daemon.rs` for why this doesn't
+/// introduce a separate single-playlist event.
+fn build_playlist_detail(config_path: &std::path::Path, slug: &str) -> DaemonEvent {
+    let DaemonEvent::PlaylistsUpdate { playlists } = build_playlists_update(config_path) else {
+        unreachable!("build_playlists_update always returns PlaylistsUpdate");
+    };
+    DaemonEvent::PlaylistsUpdate { playlists: playlists.into_iter().filter(|p| p.slug == slug).collect() }
+}
+
+/// `get_device_config` reply / `save_device_config` broadcast payload: one
+/// device's resolved selection + subscriptions + settings. Every part
+/// fails open to its type's default (see `selection::load_or_all`,
+/// `Subscriptions::load_or_default`, `DeviceSettings::load_or_migrate`) —
+/// this never fails the arm, even for a `serial` the daemon has never seen.
+fn build_device_config_update(config_path: &std::path::Path, serial: &str) -> DaemonEvent {
+    let selection = crate::selection::effective_device_selection_path(serial)
+        .map(|p| crate::selection::load_or_all(&p))
+        .unwrap_or_else(|_| crate::selection::Selection::all());
+    let subscriptions = crate::device_state::device_subscriptions_path(serial)
+        .map(|p| crate::device_config::Subscriptions::load_or_default(&p))
+        .unwrap_or_default();
+    let global = config_file::load(config_path).ok().flatten().unwrap_or_default();
+    let settings = crate::device_config::DeviceSettings::load_or_migrate(serial, &global);
+    DaemonEvent::DeviceConfigUpdate {
+        serial: serial.to_string(),
+        selection: crate::ipc_daemon::SelectionPayload { mode: selection.mode, rules: selection.rules },
+        subscriptions: crate::ipc_daemon::SubscriptionsPayload { playlists: subscriptions.playlists },
+        settings: crate::ipc_daemon::DeviceSettingsPayload {
+            auto_sync: settings.auto_sync,
+            rockbox_compat: settings.rockbox_compat,
+        },
+    }
+}
+
+/// `preview_device` reply: gathers this device's cached index + selection +
+/// subscriptions + playlist store, plus a live free-bytes baseline (only
+/// when `serial` is the device currently connected), and hands off to the
+/// pure `daemon::library::compute_device_preview`.
+fn build_device_preview(
+    config_path: &std::path::Path,
+    connected: &Option<DetectedIpod>,
+    serial: &str,
+) -> DaemonEvent {
+    let index = load_cached_index(config_path);
+    let selection = crate::selection::effective_device_selection_path(serial)
+        .map(|p| crate::selection::load_or_all(&p))
+        .unwrap_or_else(|_| crate::selection::Selection::all());
+    let subs = crate::device_state::device_subscriptions_path(serial)
+        .map(|p| crate::device_config::Subscriptions::load_or_default(&p))
+        .unwrap_or_default();
+    let store = open_playlist_store();
+    if let Err(e) = &store {
+        tracing::warn!("daemon: preview_device({serial}): failed to open playlist store ({e:#}); playlist subscriptions ignored");
+    }
+    let current_free_bytes = connected
+        .as_ref()
+        .filter(|d| d.serial == serial)
+        .and_then(|d| device_storage::query_storage(&d.drive))
+        .map(|s| s.free_bytes);
+    crate::daemon::library::compute_device_preview(&index, &selection, &subs, store.as_ref().ok(), current_free_bytes)
 }
 
 fn history_file_path() -> Result<PathBuf> {
