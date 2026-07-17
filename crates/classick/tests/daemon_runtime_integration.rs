@@ -106,7 +106,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
                         summary: None,
-                db_restored: false,
+                        db_restored: false,
                     })
                 })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
@@ -121,7 +121,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
                         summary: None,
-                db_restored: false,
+                        db_restored: false,
                     })
                 })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
@@ -136,7 +136,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
                         summary: None,
-                db_restored: false,
+                        db_restored: false,
                     })
                 })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
@@ -209,7 +209,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
                         summary: None,
-                db_restored: false,
+                        db_restored: false,
                     })
                 })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
@@ -224,7 +224,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
                         summary: None,
-                db_restored: false,
+                        db_restored: false,
                     })
                 })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
@@ -239,7 +239,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
                         summary: None,
-                db_restored: false,
+                        db_restored: false,
                     })
                 })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
@@ -319,7 +319,7 @@ async fn runtime_stays_responsive_during_long_sync() {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
                         summary: None,
-                db_restored: false,
+                        db_restored: false,
                     })
                 })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
@@ -334,7 +334,7 @@ async fn runtime_stays_responsive_during_long_sync() {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
                         summary: None,
-                db_restored: false,
+                        db_restored: false,
                     })
                 })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>
@@ -349,7 +349,7 @@ async fn runtime_stays_responsive_during_long_sync() {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
                         summary: None,
-                db_restored: false,
+                        db_restored: false,
                     })
                 })
                     as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<_>> + Send>>

@@ -381,6 +381,12 @@ the manifest left off, so there is no separate "resume" command (see §5.6).
 {"type":"paused"}
 ```
 
+In practice the core still emits a trailing `finish{success:true}` right
+after `paused` (§4.11) — `paused` itself carries no fields, but the run's
+rollup (`skipped_for_space`, `artwork`, `db_restored`) is only ever attached
+to `finish`, so the daemon's history entry for a paused run reads those
+fields off that trailing `finish`, not off `paused`.
+
 ---
 
 ## 5. Commands (UI → core)

@@ -63,7 +63,7 @@ libc = "0.2"
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
 io-kit-sys = "0.4"
-libc = "0.2"
+# libc comes from the cfg(unix) table above — macOS matches that cfg too.
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["test-util"] }

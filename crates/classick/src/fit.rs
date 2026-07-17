@@ -290,6 +290,29 @@ mod tests {
         );
     }
 
+    /// An empty (but present) album tag is treated the same as no tag at
+    /// all — `album_key` must fall back to the parent-dir key, not key on
+    /// the empty string, so e.g. two same-named albums under different
+    /// parents with blank tags don't collapse into one bucket.
+    #[test]
+    fn album_key_treats_empty_tag_as_absent_and_falls_back_to_parent_dir() {
+        assert_eq!(
+            album_key(Path::new("/m/Artist/Album X/01.flac"), Some("")),
+            "/m/Artist/Album X"
+        );
+    }
+
+    /// Exact-fit boundary: an album whose total size equals exactly what's
+    /// left in the budget (`bytes <= remaining`, not `<`) must be kept, not
+    /// deferred — off-by-one here would defer albums that fit perfectly.
+    #[test]
+    fn album_exactly_matching_remaining_budget_is_kept() {
+        let actions = vec![Action::Add(src("/m/Artist/Album/01.flac", 100))];
+        let outcome = plan_fit(actions, Some(100), no_tags);
+        assert!(outcome.deferred.is_empty(), "exact-fit album must not be deferred");
+        assert_eq!(outcome.kept.len(), 1);
+    }
+
     #[test]
     fn reserve_floor_and_fraction() {
         assert_eq!(

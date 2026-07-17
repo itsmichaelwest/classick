@@ -161,6 +161,14 @@ mod tests {
         assert_eq!(sanitize_serial(""), "UNKNOWN");
     }
 
+    /// `strip_prefix` is case-sensitive, so the uppercase `0X` spelling is
+    /// stripped via a separate `or_else` branch — cover it explicitly so a
+    /// future refactor collapsing the two branches gets caught.
+    #[test]
+    fn sanitize_serial_strips_uppercase_0x_prefix() {
+        assert_eq!(sanitize_serial("0X000A27002138B0A8"), "000A27002138B0A8");
+    }
+
     #[test]
     fn device_paths_nest_under_devices_dir() {
         let root = tempdir_under_target();
