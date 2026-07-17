@@ -45,6 +45,27 @@ pub struct ManualPlaylist {
     pub slug: String,
     pub name: String,
     pub tracks: Vec<PathBuf>,
+    /// Number of lines dropped by `parse_m3u8` for failing
+    /// `is_safe_relative` (absolute path or `..` component). Parse
+    /// metadata only — not persisted by `render_m3u8`.
+    pub skipped_unsafe: usize,
+}
+
+/// True if `p` is safe to join onto a trusted root: relative (no Windows
+/// prefix component, e.g. `C:\`), and free of `..` (`ParentDir`)
+/// components. `.` (`CurDir`) components are tolerated. Playlist track
+/// paths cross a trust boundary — they come from user-editable `.m3u8`
+/// files that also travel between machines via the device mirror — so
+/// this is checked before ever joining onto `source_root`.
+pub(crate) fn is_safe_relative(p: &Path) -> bool {
+    use std::path::Component;
+    for component in p.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => return false,
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    true
 }
 
 /// A smart playlist: declarative rules, evaluated host-side against the
@@ -90,6 +111,7 @@ pub fn parse_m3u8(text: &str, slug: &str) -> Result<ManualPlaylist> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut name: Option<String> = None;
     let mut tracks = Vec::new();
+    let mut skipped_unsafe = 0;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -102,9 +124,20 @@ pub fn parse_m3u8(text: &str, slug: &str) -> Result<ManualPlaylist> {
         if line.starts_with('#') {
             continue; // #EXTM3U, #EXTINF, or any other directive: ignored
         }
-        tracks.push(PathBuf::from(line.replace('\\', "/")));
+        let track = PathBuf::from(line.replace('\\', "/"));
+        if !is_safe_relative(&track) {
+            tracing::warn!("playlist {slug}: skipped unsafe path {line:?}");
+            skipped_unsafe += 1;
+            continue;
+        }
+        tracks.push(track);
     }
-    Ok(ManualPlaylist { slug: slug.to_string(), name: name.unwrap_or_else(|| slug.to_string()), tracks })
+    Ok(ManualPlaylist {
+        slug: slug.to_string(),
+        name: name.unwrap_or_else(|| slug.to_string()),
+        tracks,
+        skipped_unsafe,
+    })
 }
 
 /// Render a manual playlist back to `.m3u8` text: `#EXTM3U` + `#PLAYLIST:`
@@ -122,8 +155,12 @@ pub fn render_m3u8(p: &ManualPlaylist) -> String {
 /// keeping only tracks that still exist. `existing` is an injected
 /// existence check so tests don't need a real filesystem. Returns the
 /// resolved absolute paths (order preserved) plus a count of tracks skipped
-/// because they no longer exist — never an error; a stale playlist entry is
-/// expected steady-state, not a failure.
+/// because they no longer exist or because they failed `is_safe_relative` —
+/// never an error; a stale or hostile playlist entry is expected steady-
+/// state, not a failure. The safety check here is belt-and-braces: `parse_m3u8`
+/// already filters unsafe lines, but `ManualPlaylist` values can also be
+/// constructed directly (e.g. from a device mirror), so this is the last
+/// line of defense before `source_root.join(rel)`.
 pub fn resolve_manual(
     p: &ManualPlaylist,
     source_root: &Path,
@@ -132,6 +169,10 @@ pub fn resolve_manual(
     let mut found = Vec::with_capacity(p.tracks.len());
     let mut missing = 0;
     for rel in &p.tracks {
+        if !is_safe_relative(rel) {
+            missing += 1;
+            continue;
+        }
         let abs = source_root.join(rel);
         if existing(&abs) {
             found.push(abs);
@@ -348,10 +389,12 @@ mod tests {
             slug: "gym".into(),
             name: "Gym".into(),
             tracks: vec!["Artist/Album/01.flac".into(), "B/C/02.flac".into()],
+            skipped_unsafe: 0,
         };
         let parsed = parse_m3u8(&render_m3u8(&p), "gym").unwrap();
         assert_eq!(parsed.name, "Gym");
         assert_eq!(parsed.tracks, p.tracks);
+        assert_eq!(parsed.skipped_unsafe, 0);
     }
 
     #[test]
@@ -367,6 +410,33 @@ mod tests {
         let p = parse_m3u8("#EXTM3U\nA/1.flac\n", "no-header").unwrap();
         assert_eq!(p.name, "no-header");
         assert_eq!(p.tracks, vec![PathBuf::from("A/1.flac")]);
+        assert_eq!(p.skipped_unsafe, 0);
+    }
+
+    #[test]
+    fn is_safe_relative_rejects_absolute_and_parent_dir() {
+        // Load-bearing checks: absolute (`RootDir`/`Prefix`) and `..`
+        // (`ParentDir`) components are rejected outright.
+        assert!(is_safe_relative(Path::new("a/b.flac")));
+        assert!(is_safe_relative(Path::new("./a/b.flac")));
+        assert!(!is_safe_relative(Path::new("../x")));
+        assert!(!is_safe_relative(Path::new("a/../../x")));
+        assert!(!is_safe_relative(Path::new("/etc/passwd")));
+        // On Unix, `C:\x` isn't parsed as a Windows prefix — it's just a
+        // single weird-but-relative `Normal("C:\\x")` component, so this
+        // passes here. It's included as documentation of that platform
+        // difference, not as a security guarantee: the ParentDir/absolute
+        // checks above are what actually carries the load on Unix, and on
+        // Windows itself `Component::Prefix` would catch this case.
+        assert!(is_safe_relative(Path::new("C:\\x")));
+    }
+
+    #[test]
+    fn m3u8_parse_skips_unsafe_paths() {
+        let text = "#EXTM3U\n../evil.flac\n/etc/passwd\nok/1.flac\n";
+        let p = parse_m3u8(text, "hostile").unwrap();
+        assert_eq!(p.tracks, vec![PathBuf::from("ok/1.flac")]);
+        assert_eq!(p.skipped_unsafe, 2);
     }
 
     #[test]
@@ -375,6 +445,7 @@ mod tests {
             slug: "x".into(),
             name: "X".into(),
             tracks: vec!["a/1.flac".into(), "gone/2.flac".into()],
+            skipped_unsafe: 0,
         };
         let (found, missing) = resolve_manual(&p, Path::new("/src"), &|p| !p.starts_with("/src/gone"));
         assert_eq!(found, vec![PathBuf::from("/src/a/1.flac")]);
@@ -383,10 +454,38 @@ mod tests {
 
     #[test]
     fn resolve_manual_all_present_has_zero_missing() {
-        let p = ManualPlaylist { slug: "x".into(), name: "X".into(), tracks: vec!["a/1.flac".into()] };
+        let p = ManualPlaylist {
+            slug: "x".into(),
+            name: "X".into(),
+            tracks: vec!["a/1.flac".into()],
+            skipped_unsafe: 0,
+        };
         let (found, missing) = resolve_manual(&p, Path::new("/src"), &|_| true);
         assert_eq!(found, vec![PathBuf::from("/src/a/1.flac")]);
         assert_eq!(missing, 0);
+    }
+
+    #[test]
+    fn resolve_manual_never_escapes_source_root_for_hostile_tracks() {
+        // A ManualPlaylist constructed directly (not via parse_m3u8), as it
+        // would be if a hostile playlist arrived via the device mirror
+        // rather than a hand-edited .m3u8 file. `existing` always returns
+        // true so the only thing keeping paths inside source_root is
+        // resolve_manual's own is_safe_relative filter.
+        let p = ManualPlaylist {
+            slug: "hostile".into(),
+            name: "Hostile".into(),
+            tracks: vec![
+                PathBuf::from("../../etc/passwd"),
+                PathBuf::from("/etc/passwd"),
+                PathBuf::from("ok/1.flac"),
+            ],
+            skipped_unsafe: 0,
+        };
+        let (found, missing) = resolve_manual(&p, Path::new("/src"), &|_| true);
+        assert_eq!(found, vec![PathBuf::from("/src/ok/1.flac")]);
+        assert!(found.iter().all(|p| p.starts_with("/src")));
+        assert_eq!(missing, 2);
     }
 
     #[test]
@@ -397,7 +496,8 @@ mod tests {
         // Manual playlist takes the plain slug.
         let slug1 = store.unique_slug("Gym").unwrap();
         assert_eq!(slug1, "gym");
-        let manual = ManualPlaylist { slug: slug1, name: "Gym".into(), tracks: vec!["A/1.flac".into()] };
+        let manual =
+            ManualPlaylist { slug: slug1, name: "Gym".into(), tracks: vec!["A/1.flac".into()], skipped_unsafe: 0 };
         store.save(&Playlist::Manual(manual.clone())).unwrap();
 
         // A second playlist named "Gym" (this time smart) collides on slug
