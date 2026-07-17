@@ -14,7 +14,7 @@ use crate::cli::EncoderChoice;
 use crate::config::Config;
 use crate::config_file;
 use crate::device_state;
-use crate::ipod::db::{OwnedDb, TrackHandle};
+use crate::ipod::db::{open_with_auto_restore, OwnedDb, TrackHandle};
 use crate::ipod::device;
 use crate::manifest::{self, Action, Manifest, ManifestEntry};
 use crate::pipeline::OrderedTranscoder;
@@ -151,7 +151,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
 
     // 3. Load (or rebuild) manifest.
     let mut manifest = if config.rebuild_manifest {
-        let db = OwnedDb::open(Path::new(&mount))?;
+        let db = open_with_auto_restore(Path::new(&mount), || {
+            progress.log("Restored iPod database from backup after detecting corruption");
+        })?;
         let rebuilt = build_rebuild_manifest(&db, &serial);
         // Save eagerly so a crash after this point doesn't lose the rebuild.
         manifest::save_atomic(&manifest_path, &rebuilt)?;
@@ -381,7 +383,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 "SysInfoExtended provisioning failed (art may not display): {e:#}"
             ));
         }
-        let db = OwnedDb::open(Path::new(&mount))?;
+        let db = open_with_auto_restore(Path::new(&mount), || {
+            progress.log("Restored iPod database from backup after detecting corruption");
+        })?;
         unsafe {
             let device_ptr = (*db.as_ptr()).device;
             device::set_firewire_guid(device_ptr, &identity.firewire_guid)?;
