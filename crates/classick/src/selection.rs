@@ -261,22 +261,44 @@ pub fn apply_to_sources(
     serial: &str,
     progress_log: impl Fn(String),
 ) -> Vec<SourceEntry> {
-    let sel_path = match effective_device_selection_path(serial) {
+    let root = match dirs::config_dir() {
+        Some(dir) => dir.join(crate::PROJECT_DIR),
+        None => {
+            tracing::warn!("selection: cannot resolve config dir; syncing everything");
+            return sources;
+        }
+    };
+    apply_to_sources_in(sources, source_root, &root, serial,
+        crate::library_index::read_track_tags, progress_log)
+}
+
+/// Root-injected core of [`apply_to_sources`]: resolves BOTH the per-device
+/// selection path (via [`effective_device_selection_path_in`]) and the
+/// library index path under `root` (the `<config>/classick` directory),
+/// then filters. Unlike [`apply_with_paths`] (which takes an already-
+/// resolved `selection_path`), this exercises the SAME per-device resolver
+/// the production sync path uses — so a regression that reverted the caller
+/// to the deprecated `custom_selection`-gated `effective_selection_path`
+/// would change this function's result. `probe` is injectable so tests
+/// don't need real audio files. Fail-open on an unresolvable path: syncs
+/// everything rather than nothing.
+pub fn apply_to_sources_in(
+    sources: Vec<SourceEntry>,
+    source_root: &std::path::Path,
+    root: &std::path::Path,
+    serial: &str,
+    probe: impl FnMut(&std::path::Path) -> anyhow::Result<TrackTags>,
+    progress_log: impl Fn(String),
+) -> Vec<SourceEntry> {
+    let sel_path = match effective_device_selection_path_in(root, serial) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("selection: cannot resolve selection path ({e:#}); syncing everything");
             return sources;
         }
     };
-    let idx_path = match crate::library_index::default_index_path() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("selection: cannot resolve index path ({e:#}); syncing everything");
-            return sources;
-        }
-    };
-    apply_with_paths(sources, source_root, &sel_path, &idx_path,
-        crate::library_index::read_track_tags, progress_log)
+    let idx_path = root.join("library-index.json");
+    apply_with_paths(sources, source_root, &sel_path, &idx_path, probe, progress_log)
 }
 
 /// Path-injected core of `apply_to_sources` (testable without touching the
@@ -627,54 +649,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Regression for the CRITICAL sync-path bug (Fix 1): `apply_loop::run`
-    /// used to resolve selection via the deprecated `custom_selection`-gated
-    /// `effective_selection_path`, which for `custom_selection: false`
-    /// (the default) reads the *shared* root `selection.json` — silently
-    /// ignoring whatever the daemon/UI wrote to this device's own
-    /// `devices/<serial>/selection.json` via `save_device_config`. The sync
-    /// path now calls `effective_device_selection_path` (same as every
-    /// daemon read/write site) unconditionally, so it must resolve to the
-    /// per-device file even when an identity carrying
-    /// `custom_selection: false` exists — because the sync path no longer
-    /// consults that flag at all.
+    /// Regression for the CRITICAL sync-path bug (Fix 1), pinned at the
+    /// CALLER: `apply_loop::run` (via `apply_to_sources`) used to resolve
+    /// selection through the deprecated `custom_selection`-gated
+    /// `effective_selection_path`, which for `custom_selection: false` (the
+    /// default) reads the *shared* root `selection.json` — silently ignoring
+    /// whatever the daemon/UI wrote to this device's own
+    /// `devices/<serial>/selection.json`. This drives the actual sync-path
+    /// filter entry point (`apply_to_sources_in`, the root-injected core
+    /// `apply_to_sources` delegates to) with a per-device selection that
+    /// DIVERGES from the shared one, and asserts the RETURNED source list
+    /// reflects the per-device rules. It fails if the resolver is reverted
+    /// to the shared/`custom_selection`-gated path — the two selections keep
+    /// different tracks, so the output changes.
     #[test]
-    fn effective_device_selection_path_in_ignores_custom_selection_flag() {
+    fn apply_to_sources_in_filters_by_per_device_selection_not_shared() {
         let base = std::env::temp_dir()
-            .join(format!("classick-syncpath-sel-{}", std::process::id()));
+            .join(format!("classick-syncpath-apply-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
-
         let serial = "SYNCPATH-SER1";
-        // custom_selection=false is the scenario that broke: the deprecated
-        // resolver would treat this as "use the shared file".
-        let id = identity(serial, false);
+        let source_root = PathBuf::from("/lib");
 
-        // The daemon/UI already wrote a per-device selection (e.g. via
-        // save_device_config), independent of the shared file.
+        // Per-device selection (what the daemon/UI wrote): keep only the
+        // "Device Only" artist.
         let per_device_path = crate::device_state::device_selection_path_in(&base, serial).unwrap();
-        let per_device_sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "Only On This iPod".into() },
-        ]};
-        save_atomic(&per_device_path, &per_device_sel).unwrap();
+        save_atomic(&per_device_path, &Selection {
+            version: 1, mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist { name: "Device Only".into() }],
+        }).unwrap();
 
-        // The shared file represents a distinct (default, mode=All) state
-        // — if the sync path read this instead, `wants()` would diverge.
-        let shared_path = base.join("selection.json");
-        save_atomic(&shared_path, &Selection::all()).unwrap();
+        // Shared selection (the deprecated resolver's custom_selection=false
+        // target): keeps a DIFFERENT, disjoint artist. If the sync path read
+        // THIS, the kept set below would be `[shared.flac]`, not
+        // `[device.flac]`.
+        save_atomic(&base.join("selection.json"), &Selection {
+            version: 1, mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist { name: "Shared Only".into() }],
+        }).unwrap();
 
-        // Sanity check: this is genuinely the `custom_selection=false` case
-        // the deprecated resolver special-cased to "shared".
-        assert!(!id.custom_selection);
+        let device_track = src("/lib/device.flac");
+        let shared_track = src("/lib/shared.flac");
+        let probe = |p: &std::path::Path| -> anyhow::Result<TrackTags> {
+            let artist = if p == std::path::Path::new("/lib/device.flac") {
+                "Device Only"
+            } else {
+                "Shared Only"
+            };
+            Ok(TrackTags {
+                artist: artist.into(), album_artist: String::new(),
+                album: "Album".into(), genre: "G".into(),
+                title: String::new(), duration_ms: 0, year: None,
+            })
+        };
 
-        let resolved = effective_device_selection_path_in(&base, serial).unwrap();
-        assert_eq!(resolved, per_device_path,
-            "sync-path selection resolution must use the per-device file regardless of custom_selection");
-        assert_ne!(resolved, shared_path);
+        let kept = apply_to_sources_in(
+            vec![device_track.clone(), shared_track],
+            &source_root, &base, serial, probe, |_msg| {},
+        );
 
-        let loaded = load_or_all(&resolved);
-        assert_eq!(loaded, per_device_sel,
-            "sync-path resolution must load the per-device selection, not the shared default");
+        assert_eq!(kept, vec![device_track],
+            "sync path must filter by the PER-DEVICE selection, never the shared one");
 
         let _ = std::fs::remove_dir_all(&base);
     }
