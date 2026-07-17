@@ -122,8 +122,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let daemon = Self.setupDaemonSettings(
             autoSync: autoSync,
             preservingRockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
-        let ipod = model.device.map { IpodIdentity(serial: $0.serial, modelLabel: $0.model, name: $0.name) }
+        // Only preserve `customSelection` when the previously-persisted
+        // identity is for the SAME serial that's connected now — a freshly
+        // paired/swapped-in device has no prior per-device selection choice
+        // to carry over, so it correctly starts at the shared-selection
+        // default.
+        let existingIpod = model.config?.ipod
+        let preserveCustomSelection = existingIpod?.serial == model.device?.serial
+            ? (existingIpod?.customSelection ?? false)
+            : false
+        let ipod = Self.setupIpodIdentity(device: model.device, preservingCustomSelection: preserveCustomSelection)
         Task { await daemonClient.send(.saveConfig(source: source, daemon: daemon, ipod: ipod)) }
+    }
+
+    /// The `IpodIdentity` the first-run/re-run wizard persists. SaveConfig
+    /// replaces the whole `ipod` blob, so `customSelection` — like
+    /// `rockboxCompat` above — must be threaded through from the caller
+    /// rather than silently reset to `false`. Static + pure so the
+    /// preservation is unit-testable (mirrors `setupDaemonSettings`).
+    static func setupIpodIdentity(device: DeviceState?, preservingCustomSelection customSelection: Bool) -> IpodIdentity? {
+        guard let device else { return nil }
+        return IpodIdentity(serial: device.serial, modelLabel: device.model, name: device.name, customSelection: customSelection)
     }
 
     /// The `DaemonSettings` the first-run wizard persists. SaveConfig replaces
@@ -226,7 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             pendingSyncAddCount = 0
         case let .summary(add, _, _, _, _, _):
             pendingSyncAddCount = add
-        case let .finish(success):
+        case let .finish(success, _, _, _):
             // Honor the user's notification-level preference (notify_on):
             // "all" fires always, "errors_only" only on failure, "none" never.
             if Notifier.shouldPostSyncFinished(

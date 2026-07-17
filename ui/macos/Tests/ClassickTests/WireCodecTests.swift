@@ -153,4 +153,74 @@ final class WireCodecTests: XCTestCase {
         guard case let .statusUpdate(info) = event else { return XCTFail("must not throw") }
         XCTAssertEqual(info.state, .idle)
     }
+
+    // MARK: - Protocol 1.5.0 (subprocess 1.3.0 finish fields, daemon custom_selection/history/replace_library)
+
+    func testFinishDecodesWithoutNewFieldsStaysAbsentTolerant() throws {
+        let json = #"{"type":"finish","success":true}"#
+        let event = try JSONDecoder().decode(SyncEvent.self, from: Data(json.utf8))
+        guard case let .finish(success, skippedForSpace, artwork, dbRestored) = event else { return XCTFail() }
+        XCTAssertTrue(success)
+        XCTAssertNil(skippedForSpace)
+        XCTAssertNil(artwork)
+        XCTAssertFalse(dbRestored, "absent db_restored must default false, not nil-crash")
+    }
+
+    func testFinishDecodesSkippedForSpaceArtworkAndDbRestored() throws {
+        let json = #"{"type":"finish","success":true,"skipped_for_space":{"albums":14,"tracks":183,"bytes":9876543210},"artwork":{"embedded":40,"eligible":42,"failed_sources":2},"db_restored":true}"#
+        let event = try JSONDecoder().decode(SyncEvent.self, from: Data(json.utf8))
+        guard case let .finish(success, skippedForSpace, artwork, dbRestored) = event else { return XCTFail() }
+        XCTAssertTrue(success)
+        XCTAssertEqual(skippedForSpace, SkippedForSpace(albums: 14, tracks: 183, bytes: 9_876_543_210))
+        XCTAssertEqual(artwork, ArtworkSummary(embedded: 40, eligible: 42, failedSources: 2))
+        XCTAssertTrue(dbRestored)
+    }
+
+    func testIpodIdentityDecodesMissingCustomSelectionAsFalse() throws {
+        let json = #"{"serial":"0xABC","model_label":"iPod Classic (3rd gen)"}"#
+        let identity = try JSONDecoder().decode(IpodIdentity.self, from: Data(json.utf8))
+        XCTAssertFalse(identity.customSelection, "older core/daemon omitting the field must default to shared selection")
+    }
+
+    func testIpodIdentityRoundTripsCustomSelectionTrue() throws {
+        let identity = IpodIdentity(serial: "0xABC", modelLabel: "iPod Classic (3rd gen)", name: nil, customSelection: true)
+        let data = try JSONEncoder().encode(identity)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["custom_selection"] as? Bool, true)
+        let decoded = try JSONDecoder().decode(IpodIdentity.self, from: data)
+        XCTAssertTrue(decoded.customSelection)
+    }
+
+    func testEncodesReplaceLibrary() throws {
+        let data = try JSONEncoder().encode(DaemonCommand.replaceLibrary)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "replace_library")
+    }
+
+    func testHistoryEntryDecodesSummaryAndDbRestored() throws {
+        let json = #"{"timestamp":"2026-07-17T10:00:00Z","duration_secs":120,"trigger":"manual","outcome":"ok","summary":{"add":1,"modify":0,"remove":0,"unchanged":10,"skipped_for_space_tracks":183,"skipped_for_space_bytes":9876543210,"artwork_failed_sources":2},"db_restored":true}"#
+        let entry = try JSONDecoder().decode(HistoryEntry.self, from: Data(json.utf8))
+        XCTAssertEqual(entry.summary?.skippedForSpaceTracks, 183)
+        XCTAssertEqual(entry.summary?.skippedForSpaceBytes, 9_876_543_210)
+        XCTAssertEqual(entry.summary?.artworkFailedSources, 2)
+        XCTAssertTrue(entry.dbRestored)
+    }
+
+    func testHistoryEntryDecodesWithoutNewFieldsDefaultsCleanly() throws {
+        // Pre-1.5.0 history.json entries: no `summary`, no `db_restored`.
+        let json = #"{"timestamp":"2026-07-17T10:00:00Z","duration_secs":120,"trigger":"manual","outcome":"ok"}"#
+        let entry = try JSONDecoder().decode(HistoryEntry.self, from: Data(json.utf8))
+        XCTAssertNil(entry.summary)
+        XCTAssertFalse(entry.dbRestored)
+    }
+
+    func testHistoryEntrySummaryMissingNewSubfieldsDefaultsToZero() throws {
+        // A `summary` object from an older daemon build (pre-1.5.0) that has
+        // the original fields but not the three new ones.
+        let json = #"{"timestamp":"2026-07-17T10:00:00Z","duration_secs":120,"trigger":"manual","outcome":"ok","summary":{"add":1,"modify":0,"remove":0,"unchanged":10}}"#
+        let entry = try JSONDecoder().decode(HistoryEntry.self, from: Data(json.utf8))
+        XCTAssertEqual(entry.summary?.skippedForSpaceTracks, 0)
+        XCTAssertEqual(entry.summary?.skippedForSpaceBytes, 0)
+        XCTAssertEqual(entry.summary?.artworkFailedSources, 0)
+    }
 }

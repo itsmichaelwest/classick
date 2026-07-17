@@ -10,11 +10,36 @@ struct IpodIdentity: Codable, Equatable, Sendable {
     var serial: String
     var modelLabel: String
     var name: String?
+    /// **Since daemon protocol 1.5.0.** Default `false` (shared selection).
+    /// `true` routes this device's selection to its own per-device
+    /// `devices/<serial>/selection.json` instead of the shared file. Rides
+    /// the existing `ipod` field on `config_update`/`save_config` — see
+    /// docs/ipc-protocol.md "IpodIdentity gains custom_selection". Every
+    /// Swift construction site MUST thread through the existing value (never
+    /// a bare default) or a save silently resets it — see the 0.2.1
+    /// wizard-clobber lesson this mirrors for `rockboxCompat`.
+    var customSelection: Bool
 
     enum CodingKeys: String, CodingKey {
         case serial
         case modelLabel = "model_label"
         case name
+        case customSelection = "custom_selection"
+    }
+
+    init(serial: String, modelLabel: String, name: String? = nil, customSelection: Bool = false) {
+        self.serial = serial
+        self.modelLabel = modelLabel
+        self.name = name
+        self.customSelection = customSelection
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        serial = try container.decode(String.self, forKey: .serial)
+        modelLabel = try container.decode(String.self, forKey: .modelLabel)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        customSelection = try container.decodeIfPresent(Bool.self, forKey: .customSelection) ?? false
     }
 }
 
@@ -67,21 +92,81 @@ struct DaemonSettings: Codable, Equatable, Sendable {
     }
 }
 
+/// The subset of the daemon's `SyncSummary` (persisted `HistoryEntry.summary`)
+/// this app needs. `add`/`modify`/`remove`/`unchanged`/`skipped`/
+/// `metadata_only` are present on the wire but decoded leniently —
+/// JSONDecoder ignores unknown keys, and they aren't needed for display
+/// beyond `outcome`. **Since daemon protocol 1.5.0**: the three fields below,
+/// each `#[serde(default)]` on the Rust side so pre-1.5.0 `history.json`
+/// entries (or a `summary` object from an older daemon) deserialize to `0`.
+struct SyncSummaryInfo: Codable, Equatable, Sendable {
+    var skippedForSpaceTracks: Int
+    var skippedForSpaceBytes: UInt64
+    var artworkFailedSources: Int
+
+    enum CodingKeys: String, CodingKey {
+        case skippedForSpaceTracks = "skipped_for_space_tracks"
+        case skippedForSpaceBytes = "skipped_for_space_bytes"
+        case artworkFailedSources = "artwork_failed_sources"
+    }
+
+    init(skippedForSpaceTracks: Int = 0, skippedForSpaceBytes: UInt64 = 0, artworkFailedSources: Int = 0) {
+        self.skippedForSpaceTracks = skippedForSpaceTracks
+        self.skippedForSpaceBytes = skippedForSpaceBytes
+        self.artworkFailedSources = artworkFailedSources
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        skippedForSpaceTracks = try container.decodeIfPresent(Int.self, forKey: .skippedForSpaceTracks) ?? 0
+        skippedForSpaceBytes = try container.decodeIfPresent(UInt64.self, forKey: .skippedForSpaceBytes) ?? 0
+        artworkFailedSources = try container.decodeIfPresent(Int.self, forKey: .artworkFailedSources) ?? 0
+    }
+}
+
 struct HistoryEntry: Codable, Equatable, Sendable {
     var timestamp: String
     var durationSecs: UInt64
     var trigger: String
     var outcome: String
+    /// Absent on the wire when the run never reached a summarizable state
+    /// (e.g. aborted before planning). **Since 1.5.0** it also carries the
+    /// skipped-for-space + artwork-failure rollups — see `SyncSummaryInfo`.
+    var summary: SyncSummaryInfo?
+    /// **Since daemon protocol 1.5.0.** Mirrors the subprocess `finish`
+    /// event's `db_restored` (§4.11) for that run. Omitted on the wire (not
+    /// `false`) when it didn't fire, matching the subprocess field's own
+    /// old-client-compat convention — decode absence as `false`.
+    var dbRestored: Bool
 
     enum CodingKeys: String, CodingKey {
         case timestamp
         case durationSecs = "duration_secs"
         case trigger
         case outcome
+        case summary
+        case dbRestored = "db_restored"
     }
-    // `summary` ({add,modify,remove,unchanged,skipped}) is present on the
-    // wire but decoded leniently — JSONDecoder ignores unknown keys, and
-    // it isn't needed for v1 display beyond `outcome`.
+
+    init(timestamp: String, durationSecs: UInt64, trigger: String, outcome: String,
+         summary: SyncSummaryInfo? = nil, dbRestored: Bool = false) {
+        self.timestamp = timestamp
+        self.durationSecs = durationSecs
+        self.trigger = trigger
+        self.outcome = outcome
+        self.summary = summary
+        self.dbRestored = dbRestored
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        timestamp = try container.decode(String.self, forKey: .timestamp)
+        durationSecs = try container.decode(UInt64.self, forKey: .durationSecs)
+        trigger = try container.decode(String.self, forKey: .trigger)
+        outcome = try container.decode(String.self, forKey: .outcome)
+        summary = try container.decodeIfPresent(SyncSummaryInfo.self, forKey: .summary)
+        dbRestored = try container.decodeIfPresent(Bool.self, forKey: .dbRestored) ?? false
+    }
 }
 
 struct StatusInfo: Equatable, Sendable {
@@ -217,6 +302,12 @@ enum DaemonCommand: Encodable, Sendable {
     case saveSelection(mode: SelectionMode, rules: [SelectionRule])
     case previewSelection(mode: SelectionMode, rules: [SelectionRule])
     case getHistory(limit: Int)
+    /// **Since daemon protocol 1.5.0.** One-shot "erase and start over": wipes
+    /// every track on the iPod, then syncs the current selection. The UI must
+    /// obtain the user's explicit confirmation itself before sending this —
+    /// the daemon does not prompt. See docs/ipc-protocol.md "New command:
+    /// replace_library".
+    case replaceLibrary
 
     enum Trigger: String, Encodable, Sendable {
         case manual, scheduled
@@ -281,6 +372,8 @@ enum DaemonCommand: Encodable, Sendable {
         case let .getHistory(limit):
             try container.encode("get_history", forKey: .type)
             try container.encode(limit, forKey: .limit)
+        case .replaceLibrary:
+            try container.encode("replace_library", forKey: .type)
         }
     }
 }
@@ -414,7 +507,30 @@ enum DaemonEvent: Decodable, Sendable {
     }
 }
 
-// MARK: - SyncEvent (inner v1.0.0 `sync_event.line`)
+// MARK: - SyncEvent (inner v1.0.0 `sync_event.line`, `finish` extended in 1.3.0)
+
+/// `finish.skipped_for_space` — whole-album fit-pass deferral rollup. Absent
+/// when nothing was deferred this run.
+struct SkippedForSpace: Codable, Equatable, Sendable {
+    var albums: Int
+    var tracks: Int
+    var bytes: UInt64
+}
+
+/// `finish.artwork` — cover-art embed rollup across this run's
+/// Add/Modify/MetadataOnly actions. Absent when the run never reached the
+/// apply loop.
+struct ArtworkSummary: Codable, Equatable, Sendable {
+    var embedded: Int
+    var eligible: Int
+    var failedSources: Int
+
+    enum CodingKeys: String, CodingKey {
+        case embedded
+        case eligible
+        case failedSources = "failed_sources"
+    }
+}
 
 enum SyncEvent: Decodable, Sendable {
     case hello(protocolVersion: String, coreVersion: String)
@@ -426,7 +542,11 @@ enum SyncEvent: Decodable, Sendable {
     case prompt(id: UInt64, message: String, options: [String])
     case form(id: UInt64, label: String, initial: String?, hint: String?)
     case error(message: String, recoveryHints: [String]?)
-    case finish(success: Bool)
+    /// **Since subprocess protocol 1.3.0:** `skippedForSpace`/`artwork` are
+    /// `nil` when absent from the wire (nothing to report); `dbRestored`
+    /// defaults `false` when absent (mirroring the wire's own
+    /// absent-means-false convention) rather than being optional.
+    case finish(success: Bool, skippedForSpace: SkippedForSpace?, artwork: ArtworkSummary?, dbRestored: Bool)
     case paused
     case other            // forward-compat: unknown inner types (e.g. `review`)
 
@@ -454,6 +574,9 @@ enum SyncEvent: Decodable, Sendable {
         case recoveryHints = "recovery_hints"
         case success
         case etaSecs = "eta_secs"
+        case skippedForSpace = "skipped_for_space"
+        case artwork
+        case dbRestored = "db_restored"
     }
 
     init(from decoder: Decoder) throws {
@@ -505,7 +628,10 @@ enum SyncEvent: Decodable, Sendable {
             self = .error(message: message, recoveryHints: recoveryHints)
         case "finish":
             let success = try container.decode(Bool.self, forKey: .success)
-            self = .finish(success: success)
+            let skippedForSpace = try container.decodeIfPresent(SkippedForSpace.self, forKey: .skippedForSpace)
+            let artwork = try container.decodeIfPresent(ArtworkSummary.self, forKey: .artwork)
+            let dbRestored = try container.decodeIfPresent(Bool.self, forKey: .dbRestored) ?? false
+            self = .finish(success: success, skippedForSpace: skippedForSpace, artwork: artwork, dbRestored: dbRestored)
         case "paused":
             self = .paused
         default:

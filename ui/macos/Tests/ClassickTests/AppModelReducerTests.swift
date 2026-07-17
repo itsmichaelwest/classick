@@ -13,6 +13,28 @@ final class AppModelReducerTests: XCTestCase {
         XCTAssertFalse(off.rockboxCompat)
     }
 
+    /// Regression (protocol 1.5.0): finishing setup builds a fresh
+    /// `IpodIdentity` from the connected device, and SaveConfig replaces the
+    /// whole `ipod` blob — so re-running setup against the *same* paired
+    /// device must carry `custom_selection` through, mirroring
+    /// `testSetupWizardPreservesRockboxCompat` for `rockboxCompat`.
+    func testSetupWizardPreservesCustomSelection() {
+        let device = DeviceState(serial: "0xA", model: "iPod Classic (3rd gen)", name: "iPod", drive: "/Volumes/IPOD")
+        let preserved = AppDelegate.setupIpodIdentity(device: device, preservingCustomSelection: true)
+        XCTAssertEqual(preserved?.customSelection, true, "wizard must preserve an enabled custom-selection toggle")
+        let off = AppDelegate.setupIpodIdentity(device: device, preservingCustomSelection: false)
+        XCTAssertEqual(off?.customSelection, false)
+        XCTAssertNil(AppDelegate.setupIpodIdentity(device: nil, preservingCustomSelection: true), "no device -> no identity to save")
+    }
+
+    func testFinishSyncEventPopulatesSkippedForSpaceArtworkAndDbRestoredState() {
+        let m = AppModel()
+        m.apply(.syncEvent(line: #"{"type":"finish","success":true,"skipped_for_space":{"albums":14,"tracks":183,"bytes":9876543210},"artwork":{"embedded":40,"eligible":42,"failed_sources":2},"db_restored":true}"#))
+        XCTAssertEqual(m.lastRunSkippedForSpace, SkippedForSpace(albums: 14, tracks: 183, bytes: 9_876_543_210))
+        XCTAssertEqual(m.lastRunArtwork, ArtworkSummary(embedded: 40, eligible: 42, failedSources: 2))
+        XCTAssertTrue(m.lastRunDbRestored)
+    }
+
     func testDeviceConnectThenDisconnect() {
         let m = AppModel()
         m.apply(.deviceConnected(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "Michael’s iPod"))
