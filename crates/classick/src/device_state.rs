@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Uppercase, strip a leading `0x`, keep only `[A-Za-z0-9_-]`, map anything
-/// else to `_`. Empty input (or input that sanitizes to nothing meaningful)
+/// else to `_`. Empty input (or input that is empty after stripping `0x`)
 /// falls back to `"UNKNOWN"` so callers always get a non-empty, filesystem-
 /// safe directory name.
 pub fn sanitize_serial(serial: &str) -> String {
