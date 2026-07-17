@@ -161,8 +161,11 @@ auto-apply with no prompts or thresholds.
   (managed *and* foreign — the take-over-an-iTunes-iPod case), writes the DB,
   resets the device manifest, then runs a normal sync of the effective
   selection. Productizes the `examples/wipe-tracks.rs` machinery. The
-  session-start backup runs first — even Replace is undoable for one session
-  via `--restore-db-backup`.
+  session-start backup still runs first, but **Replace is genuinely
+  irreversible**: deleting tracks deletes their audio files, so restoring the
+  DB backup afterwards would only resurrect dangling references (which
+  `reconcile_with_disk` would then strip). This is why the confirmation is
+  typed, not clicked.
 - **Daemon:** new `replace_library` command; rejected while a sync is running;
   otherwise spawns the subprocess with the flag. Emits normal sync events.
 - **macOS UI:** "Replace Library…" in the Device view's device-scoped
@@ -191,7 +194,11 @@ normalize step can't decode. Both are hypotheses to verify, not conclusions.
    has device-displayable art. Any path that checkpoints the DB must either
    preserve artwork or guarantee the rebuild runs before the session ends
    (e.g. pause's drain performs the artwork rebuild as part of its final
-   checkpoint, or resume detects and repairs).
+   checkpoint, or resume detects and repairs). **Known tension:** the current
+   rebuild re-thumbnails the whole library, which conflicts with pause being
+   fast; the implementation may need incremental artwork preservation (or a
+   repair-on-resume marker) rather than a full rebuild inside the pause
+   drain. The diagnosis step decides which.
 3. **Fix what diagnosis finds** within this spec's implementation. The
    user's known-failing albums become test fixtures (to be collected at
    implementation start).
