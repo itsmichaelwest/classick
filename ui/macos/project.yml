@@ -50,6 +50,19 @@ targets:
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
         ENABLE_HARDENED_RUNTIME: NO
+        # Script phases write outside the sandbox (cargo target/, app bundle);
+        # pin the sandbox off so a future Xcode default flip can't break them.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    preBuildScripts:
+      - name: Build classick daemon (cargo)
+        basedOnDependencyAnalysis: false
+        script: |
+          set -e
+          # Xcode script phases get a minimal PATH; rustup installs live in
+          # ~/.cargo/bin (homebrew fallback for good measure).
+          export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          echo "cargo build --release (workspace root)"
+          cargo build --release --manifest-path "$SRCROOT/../../Cargo.toml"
     postBuildScripts:
       - name: Embed classick daemon
         basedOnDependencyAnalysis: false
