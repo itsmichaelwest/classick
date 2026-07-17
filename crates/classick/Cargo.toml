@@ -53,6 +53,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Ioctl",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Native IOKit/CoreFoundation FFI for device identity (mount->FirewireGuid via
 # statfs BSD name -> IORegistry) + event-driven hotplug. servo/core-foundation-rs
