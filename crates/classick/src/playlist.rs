@@ -504,7 +504,18 @@ mod tests {
         // with the manual one and must uniquify against it.
         let slug2 = store.unique_slug("Gym").unwrap();
         assert_eq!(slug2, "gym-2");
-        let smart = SmartPlaylist { slug: slug2, name: "Gym".into(), rules: SmartRules };
+        let smart = SmartPlaylist {
+            slug: slug2,
+            name: "Gym".into(),
+            rules: SmartRules {
+                version: crate::playlist_rules::RULES_VERSION,
+                matching: crate::playlist_rules::Match::All,
+                rules: vec![],
+                limit: None,
+                order: crate::playlist_rules::Order::Alpha,
+                seed: 0,
+            },
+        };
         store.save(&Playlist::Smart(smart.clone())).unwrap();
 
         let mut listed = store.list().unwrap();
