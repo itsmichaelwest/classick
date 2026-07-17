@@ -298,12 +298,25 @@ impl PlaylistStore {
 
     /// Save a playlist, atomically (tmp file + rename). Manual playlists
     /// write `<slug>.m3u8`; smart playlists write `<slug>.rules.json`.
+    ///
+    /// A playlist's kind can flip in place (edit "gym" from manual to smart,
+    /// or back) while keeping the same slug — the editor doesn't delete-then-
+    /// recreate. After the new-kind file lands, this deletes the OTHER
+    /// kind's file for the same slug (ignoring a not-found error, since
+    /// there usually isn't one) so `list()`/`load()` don't see two files —
+    /// and hence two playlists — for one slug. The delete happens only after
+    /// the write succeeds, so a failed save never destroys the prior kind's
+    /// file.
     pub fn save(&self, p: &Playlist) -> Result<()> {
         match p {
-            Playlist::Manual(m) => atomic_write(&self.manual_path(&m.slug), render_m3u8(m).as_bytes()),
+            Playlist::Manual(m) => {
+                atomic_write(&self.manual_path(&m.slug), render_m3u8(m).as_bytes())?;
+                remove_if_exists(&self.smart_path(&m.slug))
+            }
             Playlist::Smart(s) => {
                 let json = serde_json::to_string_pretty(s)?;
-                atomic_write(&self.smart_path(&s.slug), json.as_bytes())
+                atomic_write(&self.smart_path(&s.slug), json.as_bytes())?;
+                remove_if_exists(&self.manual_path(&s.slug))
             }
         }
     }
@@ -354,6 +367,18 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     std::fs::rename(&tmp, path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+/// Remove `path` if present; a `NotFound` error is the expected common case
+/// (there was no stale other-kind file) and is swallowed rather than
+/// propagated. Any other error (e.g. a permissions failure) still surfaces —
+/// `save` should fail loud rather than silently leave a stale file behind.
+fn remove_if_exists(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("delete stale {}", path.display())),
+    }
 }
 
 #[cfg(test)]
@@ -546,5 +571,84 @@ mod tests {
     fn default_root_is_under_config_dir_playlists() {
         let root = PlaylistStore::default_root().unwrap();
         assert!(root.ends_with(std::path::Path::new("classick").join("playlists")));
+    }
+
+    #[test]
+    fn save_clears_stale_file_of_the_other_kind_on_a_manual_to_smart_kind_flip() {
+        let root = tempdir_under_target("kind-flip-manual-to-smart");
+        let store = PlaylistStore::open(root.clone()).unwrap();
+
+        let manual = ManualPlaylist {
+            slug: "gym".into(), name: "Gym".into(),
+            tracks: vec!["A/1.flac".into()], skipped_unsafe: 0,
+        };
+        store.save(&Playlist::Manual(manual)).unwrap();
+        assert!(root.join("gym.m3u8").exists());
+
+        let smart = SmartPlaylist {
+            slug: "gym".into(), name: "Gym".into(),
+            rules: SmartRules {
+                version: crate::playlist_rules::RULES_VERSION,
+                matching: crate::playlist_rules::Match::All,
+                rules: vec![], limit: None, order: crate::playlist_rules::Order::Alpha, seed: 0,
+            },
+        };
+        store.save(&Playlist::Smart(smart.clone())).unwrap();
+
+        assert!(root.join("gym.rules.json").exists());
+        assert!(!root.join("gym.m3u8").exists(), "stale manual file must be cleared on kind flip");
+
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1, "one slug must yield exactly one playlist, not two");
+        assert_eq!(listed[0], Playlist::Smart(smart));
+        assert!(store.last_errors().is_empty());
+    }
+
+    #[test]
+    fn save_clears_stale_file_of_the_other_kind_on_a_smart_to_manual_kind_flip() {
+        let root = tempdir_under_target("kind-flip-smart-to-manual");
+        let store = PlaylistStore::open(root.clone()).unwrap();
+
+        let smart = SmartPlaylist {
+            slug: "gym".into(), name: "Gym".into(),
+            rules: SmartRules {
+                version: crate::playlist_rules::RULES_VERSION,
+                matching: crate::playlist_rules::Match::All,
+                rules: vec![], limit: None, order: crate::playlist_rules::Order::Alpha, seed: 0,
+            },
+        };
+        store.save(&Playlist::Smart(smart)).unwrap();
+        assert!(root.join("gym.rules.json").exists());
+
+        let manual = ManualPlaylist {
+            slug: "gym".into(), name: "Gym".into(),
+            tracks: vec!["A/1.flac".into()], skipped_unsafe: 0,
+        };
+        store.save(&Playlist::Manual(manual.clone())).unwrap();
+
+        assert!(root.join("gym.m3u8").exists());
+        assert!(!root.join("gym.rules.json").exists(), "stale smart file must be cleared on kind flip");
+
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1, "one slug must yield exactly one playlist, not two");
+        assert_eq!(listed[0], Playlist::Manual(manual));
+        assert!(store.last_errors().is_empty());
+    }
+
+    #[test]
+    fn save_same_kind_twice_is_a_no_op_on_the_other_kind_file() {
+        // Saving the same kind repeatedly must not error just because there
+        // was never an other-kind file to remove (remove_if_exists swallows
+        // NotFound).
+        let root = tempdir_under_target("kind-flip-same-kind-twice");
+        let store = PlaylistStore::open(root.clone()).unwrap();
+        let manual = ManualPlaylist {
+            slug: "gym".into(), name: "Gym".into(),
+            tracks: vec!["A/1.flac".into()], skipped_unsafe: 0,
+        };
+        store.save(&Playlist::Manual(manual.clone())).unwrap();
+        store.save(&Playlist::Manual(manual)).unwrap();
+        assert!(root.join("gym.m3u8").exists());
+        assert!(!root.join("gym.rules.json").exists());
     }
 }

@@ -167,6 +167,15 @@ pub enum DaemonEvent {
         playlist_extra_tracks: usize,
         playlist_extra_bytes: u64,
         projected_free_bytes: Option<u64>,
+        /// Slugs from this device's subscriptions that `compute_device_preview`
+        /// could not resolve against the cached index (unknown slug, or a
+        /// playlist-store load error) — the same set that's silently folded
+        /// into "no extra" in the `playlist_extra_*` totals above, surfaced so
+        /// the UI can flag a dangling subscription instead of just under-
+        /// counting bytes. Sorted for deterministic wire ordering. Omitted
+        /// entirely (not `[]`) when every subscription resolved.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        unresolved_subscriptions: Vec<String>,
     },
 }
 
@@ -914,6 +923,7 @@ mod tests {
             selected_tracks: 100, selected_bytes: 5_000_000_000,
             playlist_extra_tracks: 3, playlist_extra_bytes: 90_000_000,
             projected_free_bytes: Some(1_200_000_000),
+            unresolved_subscriptions: vec![],
         };
         let json = serde_json::to_string(&connected).unwrap();
         assert!(json.contains(r#""type":"device_preview""#));
@@ -923,9 +933,32 @@ mod tests {
             selected_tracks: 100, selected_bytes: 5_000_000_000,
             playlist_extra_tracks: 3, playlist_extra_bytes: 90_000_000,
             projected_free_bytes: None,
+            unresolved_subscriptions: vec![],
         };
         let json = serde_json::to_string(&disconnected).unwrap();
         assert!(json.contains(r#""projected_free_bytes":null"#),
             "null (not omitted) — mirrors library_update's never-scanned convention");
+    }
+
+    #[test]
+    fn device_preview_unresolved_subscriptions_present_or_omitted() {
+        let with_unresolved = DaemonEvent::DevicePreview {
+            selected_tracks: 1, selected_bytes: 1,
+            playlist_extra_tracks: 0, playlist_extra_bytes: 0,
+            projected_free_bytes: None,
+            unresolved_subscriptions: vec!["ghost".into(), "gym".into()],
+        };
+        let json = serde_json::to_string(&with_unresolved).unwrap();
+        assert!(json.contains(r#""unresolved_subscriptions":["ghost","gym"]"#));
+
+        let none_unresolved = DaemonEvent::DevicePreview {
+            selected_tracks: 1, selected_bytes: 1,
+            playlist_extra_tracks: 0, playlist_extra_bytes: 0,
+            projected_free_bytes: None,
+            unresolved_subscriptions: vec![],
+        };
+        let json = serde_json::to_string(&none_unresolved).unwrap();
+        assert!(!json.contains("unresolved_subscriptions"),
+            "omitted entirely when empty, not serialized as []");
     }
 }

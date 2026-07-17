@@ -260,8 +260,11 @@ pub(crate) fn build_playlist_summaries(store: &PlaylistStore, index: &LibraryInd
 /// `playlist_extra_*` is subscribed-playlist members NOT already in that
 /// scope — the same union-delta idea as `sync_set::compute`, sized from the
 /// index rather than a live walk; an unresolvable subscription (unknown
-/// slug, store load error) is silently skipped here, matching
-/// `sync_set::compute`'s "never fatal to the caller" contract.
+/// slug, store load error, or no store at all) is skipped from the
+/// `playlist_extra_*` totals — matching `sync_set::compute`'s "never fatal
+/// to the caller" contract — but its slug is collected into
+/// `unresolved_subscriptions` (sorted) so the caller can still surface the
+/// dangling subscription instead of it disappearing silently.
 ///
 /// `current_free_bytes` is `Some` only when the target device is the one
 /// currently connected (its live `StorageInfo::free_bytes`); `store` is
@@ -291,17 +294,27 @@ pub(crate) fn compute_device_preview(
     }
 
     let mut extra_paths: HashSet<PathBuf> = HashSet::new();
-    if let Some(store) = store {
-        for slug in &subs.playlists {
-            if let Ok(Some(playlist)) = store.load(slug) {
-                for path in resolve_playlist_against_index(&playlist, index) {
-                    if !selected_paths.contains(path.as_path()) {
-                        extra_paths.insert(path);
+    let mut unresolved_subscriptions: Vec<String> = Vec::new();
+    for slug in &subs.playlists {
+        let resolved = match store {
+            Some(store) => match store.load(slug) {
+                Ok(Some(playlist)) => {
+                    for path in resolve_playlist_against_index(&playlist, index) {
+                        if !selected_paths.contains(path.as_path()) {
+                            extra_paths.insert(path);
+                        }
                     }
+                    true
                 }
-            }
+                Ok(None) | Err(_) => false,
+            },
+            None => false,
+        };
+        if !resolved {
+            unresolved_subscriptions.push(slug.clone());
         }
     }
+    unresolved_subscriptions.sort();
     let playlist_extra_tracks = extra_paths.len();
     let playlist_extra_bytes: u64 =
         extra_paths.iter().filter_map(|p| index.files.get(p)).map(|t| t.size).sum();
@@ -315,6 +328,7 @@ pub(crate) fn compute_device_preview(
         playlist_extra_tracks,
         playlist_extra_bytes,
         projected_free_bytes,
+        unresolved_subscriptions,
     }
 }
 
@@ -533,12 +547,14 @@ mod tests {
         match event {
             DaemonEvent::DevicePreview {
                 selected_tracks, selected_bytes, playlist_extra_tracks, playlist_extra_bytes, projected_free_bytes,
+                unresolved_subscriptions,
             } => {
                 assert_eq!(selected_tracks, 1);
                 assert_eq!(selected_bytes, 1_000);
                 assert_eq!(playlist_extra_tracks, 1, "out_of_scope.flac is pulled in only by the subscription");
                 assert_eq!(playlist_extra_bytes, 500);
                 assert_eq!(projected_free_bytes, Some(10_000 - 1_000 - 500));
+                assert!(unresolved_subscriptions.is_empty(), "the one subscription resolved cleanly");
             }
             other => panic!("expected DevicePreview, got {other:?}"),
         }
@@ -569,9 +585,54 @@ mod tests {
 
         let event = compute_device_preview(&idx, &Selection::all(), &subs, Some(&store), None);
         match event {
-            DaemonEvent::DevicePreview { playlist_extra_tracks, playlist_extra_bytes, .. } => {
+            DaemonEvent::DevicePreview { playlist_extra_tracks, playlist_extra_bytes, unresolved_subscriptions, .. } => {
                 assert_eq!(playlist_extra_tracks, 0);
                 assert_eq!(playlist_extra_bytes, 0);
+                assert_eq!(
+                    unresolved_subscriptions,
+                    vec!["does-not-exist".to_string()],
+                    "the unknown slug surfaces instead of vanishing silently"
+                );
+            }
+            other => panic!("expected DevicePreview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_device_preview_unresolved_subscriptions_sorted_and_skips_resolved() {
+        let root = tempdir_under_target("preview-unresolved-mixed");
+        let store = PlaylistStore::open(root.clone()).unwrap();
+        store
+            .save(&Playlist::Manual(ManualPlaylist {
+                slug: "gym".into(), name: "Gym".into(),
+                tracks: vec![PathBuf::from("a.flac")],
+                skipped_unsafe: 0,
+            }))
+            .unwrap();
+        let idx = index_with(vec![("/m/a.flac", track("X", "", "A", "G", 10))]);
+        // "zzz" and "aaa" are both unresolvable; "gym" resolves. Insertion
+        // order here is deliberately not alphabetical to prove the output
+        // is sorted, not just insertion-order.
+        let subs = Subscriptions { version: 1, playlists: vec!["zzz".into(), "gym".into(), "aaa".into()] };
+
+        let event = compute_device_preview(&idx, &Selection::all(), &subs, Some(&store), None);
+        match event {
+            DaemonEvent::DevicePreview { unresolved_subscriptions, .. } => {
+                assert_eq!(unresolved_subscriptions, vec!["aaa".to_string(), "zzz".to_string()]);
+            }
+            other => panic!("expected DevicePreview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_device_preview_no_store_marks_all_subscriptions_unresolved() {
+        let idx = index_with(vec![("/m/a.flac", track("X", "", "A", "G", 10))]);
+        let subs = Subscriptions { version: 1, playlists: vec!["gym".into()] };
+
+        let event = compute_device_preview(&idx, &Selection::all(), &subs, None, None);
+        match event {
+            DaemonEvent::DevicePreview { unresolved_subscriptions, .. } => {
+                assert_eq!(unresolved_subscriptions, vec!["gym".to_string()]);
             }
             other => panic!("expected DevicePreview, got {other:?}"),
         }
