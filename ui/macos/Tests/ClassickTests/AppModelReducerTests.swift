@@ -494,6 +494,7 @@ final class AppModelReducerTests: XCTestCase {
 
   func testDeviceConfigUpdateUpsertsBySerial() {
     let m = AppModel()
+    seedDevices(["0xA", "0xB"], in: m)
     m.apply(
       .deviceConfigUpdate(
         serial: "0xA",
@@ -519,6 +520,7 @@ final class AppModelReducerTests: XCTestCase {
 
   func testDevicePreviewAttachesToTheRequestedSerial() {
     let m = AppModel()
+    seedDevices(["0xA"], in: m)
     m.willRequestDevicePreview(serial: "0xA")
     m.apply(
       .devicePreview(
@@ -534,6 +536,7 @@ final class AppModelReducerTests: XCTestCase {
 
   func testDevicePreviewUsesRequiredWireSerialWithoutPendingRequest() {
     let m = AppModel()
+    seedDevices(["0xA"], in: m)
     m.apply(
       .devicePreview(
         DevicePreview(
@@ -555,6 +558,7 @@ final class AppModelReducerTests: XCTestCase {
   /// — even when two requests are interleaved before either reply shows up.
   func testDevicePreviewQueueAttachesInterleavedRepliesInRequestOrder() {
     let m = AppModel()
+    seedDevices(["0xA", "0xB"], in: m)
     m.willRequestDevicePreview(serial: "0xA")
     m.willRequestDevicePreview(serial: "0xB")
 
@@ -794,5 +798,27 @@ final class AppModelReducerTests: XCTestCase {
   func testShouldConsumeResolvedTracksRejectsMismatchedSlug() {
     let reply = ResolvedTracksReply(slug: "gym", tracks: ["a.flac"])
     XCTAssertFalse(ManualPlaylistLogic.shouldConsumeResolvedTracks(reply: reply, forSlug: "chill"))
+  }
+
+  private func seedDevices(_ serials: [String], in model: AppModel) {
+    let devices = serials.map { serial in
+      DeviceSnapshotWire(
+        identity: DeviceIdentityWire(serial: serial, modelLabel: "iPod Classic", name: nil),
+        configured: true,
+        connected: true,
+        mount: "/Volumes/\(serial)",
+        phase: .idle,
+        sessionID: nil,
+        storage: nil,
+        syncedCount: 0,
+        libraryCount: nil,
+        latestSuccessfulSync: nil,
+        latestAttempt: nil,
+        lastTerminalError: nil,
+        selectionRevision: 0,
+        settingsRevision: 0,
+        subscriptionsRevision: 0)
+    }
+    model.apply(.deviceInventorySnapshot(.init(revision: 1, devices: devices)))
   }
 }

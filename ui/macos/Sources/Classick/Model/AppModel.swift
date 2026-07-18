@@ -106,7 +106,10 @@ final class AppModel {
   /// (Task 7). Not scoped by slug: like `selectionPreview`, there's only
   /// ever one in-flight editor request at a time.
   private(set) var playlistDetail: PlaylistDetail?
-  private(set) var deviceConfigs: [String: DeviceConfigState] = [:]
+  private(set) var devices: [DeviceSerial: DeviceViewState] = [:]
+  var deviceConfigs: [String: DeviceConfigState] {
+    devices.compactMapValues(\.config)
+  }
   /// Sidebar navigation selection. Plain (not `private(set)`) — the
   /// sidebar view binds to this directly.
   var selectedDestination: SidebarDestination?
@@ -255,20 +258,26 @@ final class AppModel {
       playlistDetail = detail
 
     case .deviceConfigUpdate(let serial, let selection, let subscriptions, let settings, _):
-      var state = deviceConfigs[serial] ?? .defaultState
-      state.selection = selection
-      state.subscriptions = subscriptions
-      state.settings = settings
-      deviceConfigs[serial] = state
+      guard var deviceState = devices[serial] else { break }
+      var config = deviceState.config ?? .defaultState
+      config.selection = selection
+      config.subscriptions = subscriptions
+      config.settings = settings
+      deviceState.config = config
+      devices[serial] = deviceState
 
     case .devicePreview(let preview):
       let serial = preview.serial
       if pendingPreviewSerials.first == serial {
         pendingPreviewSerials.removeFirst()
       }
-      var state = deviceConfigs[serial] ?? .defaultState
-      state.preview = preview
-      deviceConfigs[serial] = state
+      guard var deviceState = devices[serial] else { break }
+      deviceState.preview = preview
+      if deviceState.config == nil {
+        deviceState.config = .defaultState
+      }
+      deviceState.config?.preview = preview
+      devices[serial] = deviceState
 
     case .configUpdate(let source, let daemon, let ipod, _, _):
       config = AppConfig(source: source, daemon: daemon, ipod: ipod)
@@ -317,8 +326,8 @@ final class AppModel {
         phase = computePhase(targetSyncing: targetSyncing)
       }
 
-    case .syncEvent(let line, _, _):
-      applySyncEvent(line)
+    case .syncEvent(let line, let serial, let sessionID):
+      applySyncEvent(line, serial: serial, sessionID: sessionID)
 
     case .syncRejected(let reason, _, _):
       phase = .error(Self.humanReadable(rejection: reason))
@@ -329,8 +338,9 @@ final class AppModel {
       latestResolvedTracks = ResolvedTracksReply(slug: slug, tracks: tracks)
       resolvedTracksRevision += 1
 
-    case .deviceInventorySnapshot:
-      break
+    case .deviceInventorySnapshot(let snapshot):
+      devices = DeviceReducer.reduce(snapshot: snapshot, previous: devices)
+      refreshFocusedDeviceProjection()
     }
   }
 
@@ -383,10 +393,34 @@ final class AppModel {
     return .syncing(current: 0, total: 0, label: "", etaSecs: nil)
   }
 
-  private func applySyncEvent(_ line: String) {
+  private func applySyncEvent(_ line: String, serial: String?, sessionID: UInt64) {
     guard let data = line.data(using: .utf8),
       let event = try? decoder.decode(SyncEvent.self, from: data)
     else { return }
+
+    if let serial, !devices.isEmpty {
+      guard var state = devices[serial], state.sessionID == sessionID else { return }
+      state = DeviceReducer.reduce(syncEvent: event, into: state)
+      devices[serial] = state
+
+      switch event {
+      case .prompt(let id, let message, let options):
+        pendingPrompt = PendingPrompt(id: id, message: message, options: options)
+      case .form(let id, let label, let initial, let hint):
+        pendingPrompt = PendingPrompt(
+          id: id, message: hint ?? label, options: initial.map { [$0] } ?? [])
+      default:
+        break
+      }
+
+      refreshFocusedDeviceProjection()
+      return
+    }
+
+    applyLegacySyncEvent(event)
+  }
+
+  private func applyLegacySyncEvent(_ event: SyncEvent) {
     switch event {
     case .trackStart(let current, let total, let label, let etaSecs):
       if isScanning {
@@ -413,9 +447,10 @@ final class AppModel {
           let storage = storageFor(drive: device.drive)
           deviceStorage = storage
           storageText = Self.formatStorage(storage)
-          if var state = deviceConfigs[device.serial] {
+          if var state = devices[device.serial] {
             state.preview?.projectedFreeBytes = nil
-            deviceConfigs[device.serial] = state
+            state.config?.preview?.projectedFreeBytes = nil
+            devices[device.serial] = state
           }
         }
       }
@@ -430,6 +465,61 @@ final class AppModel {
       phase = .paused(synced: syncedCount, total: libraryCount)
     case .hello, .header, .summary, .trackDone, .log, .other:
       break
+    }
+  }
+
+  private func refreshFocusedDeviceProjection() {
+    guard let serial = focusedDeviceSerial, let state = devices[serial] else {
+      device = nil
+      phase = .noDevice
+      storageText = nil
+      deviceStorage = nil
+      return
+    }
+
+    device = DeviceState(
+      serial: serial,
+      model: state.identity.modelLabel,
+      name: state.identity.name,
+      drive: state.mountPath ?? "")
+    syncedCount = state.syncedCount
+    libraryCount = state.libraryCount
+    lastSync = state.latestSuccessfulSync
+    if let storage = state.storage {
+      deviceStorage = (
+        free: Int64(clamping: storage.free),
+        total: Int64(clamping: storage.total)
+      )
+      storageText = Self.formatStorage(deviceStorage)
+    } else {
+      deviceStorage = nil
+      storageText = nil
+    }
+
+    switch state.phase {
+    case .disconnected:
+      phase = .noDevice
+    case .unconfigured:
+      phase = .notConfigured
+    case .idle:
+      phase = .idle
+    case .syncing:
+      let progress = state.syncProgress
+      phase = .syncing(
+        current: progress?.current ?? 0,
+        total: progress?.total ?? 0,
+        label: progress?.label ?? "",
+        etaSecs: progress?.etaSecs)
+    case .paused:
+      phase = .paused(synced: state.syncedCount, total: state.libraryCount)
+    case .error(let message):
+      phase = .error(message)
+    }
+
+    if let rollup = state.lastRun {
+      lastRunSkippedForSpace = rollup.skippedForSpace
+      lastRunArtwork = rollup.artwork
+      lastRunDbRestored = rollup.dbRestored
     }
   }
 
