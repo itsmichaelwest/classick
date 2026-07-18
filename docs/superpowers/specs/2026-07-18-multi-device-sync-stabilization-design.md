@@ -156,14 +156,16 @@ At every successful checkpoint:
 
 1. publish the iTunesDB and ArtworkDB coherently;
 2. atomically write the device manifest;
-3. refresh the host manifest cache best-effort;
-4. update playlist/subscription mirrors best-effort;
-5. remove the pending-session journal and obsolete orphan files.
+3. prepare and atomically publish device-authoritative playlist ownership;
+4. durably publish or remove every recorded Rockbox projection;
+5. refresh non-authoritative host manifest/playlist caches best-effort;
+6. remove the pending-session journal and obsolete orphan files.
 
 A DB/artwork failure does not advance either manifest. A device-manifest
-failure fails finalization and leaves the pending journal for recovery. A host
-cache or playlist-mirror failure is warning-only because the device remains the
-authority.
+failure fails finalization and leaves the pending journal for recovery. Device
+playlist-ownership and Rockbox-projection failures are also incomplete
+finalization: they retain the journal and cannot report success. Only a host
+cache refresh is warning-only because it is not mutation authority.
 
 ## 5. Artwork-safe sync transaction
 
@@ -273,9 +275,11 @@ The macOS app and daemon have one explicit ownership protocol:
 ## 8. Ordered state delivery and macOS model
 
 `DaemonClient` has one sequential read/decode/yield loop. It does not create an
-unstructured task per line. Writes return success/failure; durable intents are
-coalesced by logical key and removed only after a complete successful write.
-Reconnect resends current intent, not every intermediate UI draft.
+unstructured task per line. Durable intents are coalesced by logical key, remain
+in flight after a successful socket write, and are removed only by the matching
+persisted request-ID/revision acknowledgement. Failed or disconnected writes
+stay queued, and reconnect resends the exact current in-flight intent rather
+than every intermediate UI draft.
 
 `AppModel` stores `[Serial: DeviceViewState]`. Each device owns identity,
 connection, counts, storage, latest successful sync, latest attempt, phase,
@@ -377,7 +381,14 @@ Implementation is split into independently reviewable plans, in this order:
 3. artwork-safe transaction, cancellation finalization, and stronger audit;
 4. daemon lifecycle and ordered/durable IPC hardening;
 5. playlist cleanup, draft reconciliation, device-row consolidation, and full
-   integration/visual verification.
+   integration/visual verification;
+6. iPod playlist integrity and firmware-system normalization;
+7. transactional Rockbox playlist projection from the verified membership;
+8. native macOS Library drag-and-drop using acknowledged additive mutations.
+
+Plans 6–8 are specified in
+`docs/superpowers/specs/2026-07-18-playlist-delivery-drag-drop-design.md` and
+execute as Plans 6A–6C after the dependencies named in the execution index.
 
 The wire changes remain additive within the daemon protocol while old commands
 are retained during the Windows compatibility window. Old unscoped mutating

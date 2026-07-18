@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement these plans task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver the approved multi-device, portable-state, artwork-safe, lifecycle, and macOS UI stabilization as five independently reviewable plans.
+**Goal:** Deliver the approved multi-device, portable-state, artwork-safe, lifecycle, playlist-delivery, and macOS UI stabilization as eight independently reviewable plans.
 
-**Architecture:** Device identity is serial-keyed end to end. `DeviceRegistry` owns remembered identity, `SessionAdmission` owns the current capacity-one sync policy, `ManifestStore` owns portable device truth, and `CheckpointCoordinator` publishes DB/art/manifest coherently. The Swift app consumes authoritative snapshots into `[DeviceSerial: DeviceViewState]`.
+**Architecture:** Device identity is serial-keyed end to end. `DeviceRegistry` owns remembered identity, `SessionAdmission` owns the current capacity-one sync policy, `ManifestStore` owns portable device truth, and `CheckpointCoordinator` publishes DB/art/manifest/playlist ownership coherently. Apple and Rockbox playlist representations derive from one verified membership, while the Swift app consumes authoritative snapshots and acknowledged additive mutations into `[DeviceSerial: DeviceViewState]`.
 
-**Tech Stack:** Rust stable, Tokio, serde, libgpod, Swift 6 strict concurrency, SwiftUI/AppKit, macOS 15 deployment floor, NetFS on macOS.
+**Tech Stack:** Rust stable, Tokio, serde, libgpod, UTF-8 M3U8, Swift 6 strict concurrency, SwiftUI/Core Transferable/AppKit, macOS 15 deployment floor, NetFS on macOS.
 
 ## Global Constraints
 
@@ -26,6 +26,9 @@
 - [ ] [Plan 3 — Artwork-safe sync and cancellation](2026-07-18-artwork-safe-sync-cancellation.md), after Plans 1–2
 - [ ] [Plan 4 — Daemon lifecycle and ordered IPC](2026-07-18-daemon-lifecycle-ordered-ipc.md), after Plan 1; integrate after Plan 3 for shutdown/finalization tests
 - [ ] [Plan 5 — macOS state and UI stabilization](2026-07-18-macos-state-ui-stabilization.md), after Plans 1–4
+- [ ] [Plan 6A — iPod playlist integrity](2026-07-18-ipod-playlist-integrity.md), after Plans 1–3
+- [ ] [Plan 6B — Rockbox playlist projection](2026-07-18-rockbox-playlist-projection.md), after Plan 6A
+- [ ] [Plan 6C — Native library drag-and-drop](2026-07-18-native-library-drag-drop.md), after Plans 4–6B
 
 ## Final Gate
 
@@ -38,3 +41,6 @@
 - [ ] On macOS 27, verify discovery of two iPods when two physical devices are available, serial-targeted commands, SMB remount behavior, quit-during-sync, menu-bar sizing, and every DeviceRow phase. If only one physical iPod is available, record that limitation and rely on the platform-neutral A+B integration gate.
 - [ ] When a macOS 15 VM is available, verify the availability-gated material fallback; the mandatory local gate is the deployment-target-15 build, and the unavailable VM must be recorded rather than falsely claimed.
 - [ ] On the mounted iPod, run a completed sync through the coordinated transaction, then a cancellation during an album, then rerun the read-only audit expecting the baseline failures to disappear; compare database/artwork hashes, eject/boot/playback, and confirm the six reported albums retain art.
+- [ ] Capture the exact playlist audit, run one coordinated Classick write, and inspect before booting firmware. Eject and boot Apple firmware once, remount and inspect before running Classick; repeat a second Apple-firmware boot without another Classick write. Record whether the exact `ipod-classic-video-kind-v1` record is created on every boot or only after a libgpod-authored write, then run Classick normalization and require at most one exact canonical record while every near-match/foreign playlist remains unchanged.
+- [ ] Sync one manual and one smart Classick playlist, verify membership order and playback in Apple firmware, boot Rockbox and verify the corresponding `/Playlists/Classick/*.m3u8` order/playback, then exercise rename and unsubscribe and prove foreign Apple and Rockbox playlists remain untouched.
+- [ ] On macOS 27, drag one Library artist/album/genre onto an explicit iPod and a manual playlist. Verify native copy cursor/preview, one-target accent highlight, sidebar scrolling, invalid-target snap-back, VoiceOver destination text, immediate-sync and next-sync settings, disconnected/busy deferral, authoritative completion feedback, and no stale-editor overwrite. If interaction permission is unavailable in this session, complete automated target/payload/reducer coverage and record the user-assisted interaction gate as outstanding rather than claiming it passed.

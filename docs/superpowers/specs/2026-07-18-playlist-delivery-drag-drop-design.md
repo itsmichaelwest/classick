@@ -1,6 +1,6 @@
 # Playlist Delivery and Native Drag-and-Drop Design
 
-**Status:** approved design, pending written-spec review
+**Status:** approved
 
 **Date:** 2026-07-18
 
