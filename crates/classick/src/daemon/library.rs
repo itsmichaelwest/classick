@@ -196,17 +196,14 @@ pub fn preview(
 /// All (caller keeps using its walk-based cache) or when no index/source is
 /// available.
 ///
-/// Reads the configured device's per-device selection via
+/// Reads the explicitly targeted device's per-device selection via
 /// `selection::effective_device_selection_path` (v1.6.0) rather than the
 /// deprecated `custom_selection`-gated `effective_selection_path`, so this
 /// stays consistent with what `get_device_config`/`save_device_config` now
-/// read and write. Falls back
-/// to `Selection::all()` (mode All, so `None`) when no device is configured
-/// — there's no "the" device to resolve a per-device path for.
-pub fn selected_library_count(config_path: &Path) -> Option<usize> {
+/// read and write.
+pub fn selected_library_count(config_path: &Path, serial: &str) -> Option<usize> {
     let cfg = crate::config_file::load(config_path).ok().flatten()?;
-    let serial = cfg.ipod_identity.as_ref()?.serial.clone();
-    let sel_path = selection::effective_device_selection_path(&serial).ok()?;
+    let sel_path = selection::effective_device_selection_path(serial).ok()?;
     let sel = selection::load_or_all(&sel_path);
     if sel.mode == SelectionMode::All {
         return None;

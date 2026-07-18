@@ -132,6 +132,10 @@ impl DeviceRegistry {
         self.records.values().cloned().collect()
     }
 
+    pub(crate) fn record(&self, serial: &str) -> Option<&DeviceRecord> {
+        self.records.get(&canonical_serial_key(serial))
+    }
+
     #[allow(dead_code)]
     pub(crate) fn observe(&mut self, identity: &DetectedIpod, now: u64) -> Result<()> {
         let key = Self::required_key(&identity.serial)?;
@@ -174,6 +178,48 @@ impl DeviceRegistry {
             return Err(anyhow!("cannot forget unknown device serial {serial:?}"));
         }
         self.replace_records(next)
+    }
+
+    pub(crate) fn advance_config_revisions(
+        &mut self,
+        serial: &str,
+        selection_changed: bool,
+        settings_changed: bool,
+        subscriptions_changed: bool,
+    ) -> Result<bool> {
+        let key = Self::required_key(serial)?;
+        let current = self
+            .records
+            .get(&key)
+            .ok_or_else(|| anyhow!("cannot update unknown device serial {serial:?}"))?;
+        if !selection_changed && !settings_changed && !subscriptions_changed {
+            return Ok(false);
+        }
+
+        let mut next = self.records.clone();
+        let record = next
+            .get_mut(&key)
+            .expect("record exists after canonical lookup");
+        if selection_changed {
+            record.selection_revision = current
+                .selection_revision
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("selection revision overflow for device {serial:?}"))?;
+        }
+        if settings_changed {
+            record.settings_revision = current
+                .settings_revision
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("settings revision overflow for device {serial:?}"))?;
+        }
+        if subscriptions_changed {
+            record.subscriptions_revision = current
+                .subscriptions_revision
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("subscriptions revision overflow for device {serial:?}"))?;
+        }
+        self.replace_records(next)?;
+        Ok(true)
     }
 
     fn required_key(serial: &str) -> Result<String> {
@@ -386,6 +432,90 @@ mod tests {
         assert!(record.configured);
         assert_eq!(record.settings_revision, 1);
         assert_eq!(record.selection_revision, 0);
+        assert_eq!(record.subscriptions_revision, 0);
+    }
+
+    #[test]
+    fn canonical_lookup_returns_the_record_with_raw_serial_unchanged() {
+        let path = temp_path("lookup");
+        let registry = DeviceRegistry::load_or_migrate(path, Some(&legacy(" 0xRAW-A "))).unwrap();
+
+        let record = registry.record("raw-a").expect("canonical record");
+
+        assert_eq!(record.serial, " 0xRAW-A ");
+        assert!(registry.record("RAW-B").is_none());
+    }
+
+    #[test]
+    fn config_revision_advance_is_component_selective_and_atomic() {
+        let path = temp_path("revision-advance");
+        let mut registry =
+            DeviceRegistry::load_or_migrate(path.clone(), Some(&legacy("A"))).unwrap();
+
+        registry
+            .advance_config_revisions("a", true, false, true)
+            .unwrap();
+
+        let reloaded = DeviceRegistry::load_or_migrate(path, None).unwrap();
+        let record = reloaded.record("A").unwrap();
+        assert_eq!(record.selection_revision, 1);
+        assert_eq!(record.settings_revision, 0);
+        assert_eq!(record.subscriptions_revision, 1);
+    }
+
+    #[test]
+    fn config_revision_advance_changes_only_the_target_device() {
+        let path = temp_path("revision-target");
+        let mut registry = DeviceRegistry::load_or_migrate(path, Some(&legacy("A"))).unwrap();
+        registry.observe(&detected("B"), 42).unwrap();
+        registry.configure("B").unwrap();
+
+        registry
+            .advance_config_revisions("B", true, true, true)
+            .unwrap();
+
+        let a = registry.record("A").unwrap();
+        assert_eq!(a.selection_revision, 0);
+        assert_eq!(a.settings_revision, 0);
+        assert_eq!(a.subscriptions_revision, 0);
+        let b = registry.record("B").unwrap();
+        assert_eq!(b.selection_revision, 1);
+        assert_eq!(b.settings_revision, 2, "configure plus settings save");
+        assert_eq!(b.subscriptions_revision, 1);
+    }
+
+    #[test]
+    fn config_revision_no_op_does_not_rewrite_the_registry() {
+        let path = temp_path("revision-no-op");
+        let mut registry =
+            DeviceRegistry::load_or_migrate(path.clone(), Some(&legacy("A"))).unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        registry
+            .advance_config_revisions("A", false, false, false)
+            .unwrap();
+
+        assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), before);
+        assert_eq!(registry.record("A").unwrap().settings_revision, 0);
+    }
+
+    #[test]
+    fn failed_config_revision_persist_keeps_in_memory_record_unchanged() {
+        let path = temp_path("revision-failure");
+        let mut registry =
+            DeviceRegistry::load_or_migrate(path.clone(), Some(&legacy("A"))).unwrap();
+        let unusable_path = path.parent().unwrap().join("registry-directory");
+        std::fs::create_dir_all(&unusable_path).unwrap();
+        registry.path = unusable_path;
+
+        let error = registry
+            .advance_config_revisions("A", true, true, true)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("rename"));
+        let record = registry.record("A").unwrap();
+        assert_eq!(record.selection_revision, 0);
+        assert_eq!(record.settings_revision, 0);
         assert_eq!(record.subscriptions_revision, 0);
     }
 }

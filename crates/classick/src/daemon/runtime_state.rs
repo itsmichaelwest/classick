@@ -1,7 +1,9 @@
+use crate::daemon::device_registry::canonical_serial_key;
 use crate::daemon::history::SyncTrigger;
 use crate::daemon::session_admission::{AdmissionRejection, SessionAdmission};
 use crate::daemon::state::SyncSession;
 use crate::ipc_device::SessionId;
+use crate::ipod::device::DetectedIpod;
 use std::collections::BTreeMap;
 use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
@@ -29,6 +31,7 @@ impl SessionControls {
 pub(crate) struct RuntimeState {
     admission: SessionAdmission,
     controls: BTreeMap<SessionId, SessionControls>,
+    connected: BTreeMap<String, DetectedIpod>,
 }
 
 impl RuntimeState {
@@ -36,6 +39,7 @@ impl RuntimeState {
         Self {
             admission: SessionAdmission::single(),
             controls: BTreeMap::new(),
+            connected: BTreeMap::new(),
         }
     }
 
@@ -86,6 +90,27 @@ impl RuntimeState {
 
     pub(crate) fn is_idle(&self) -> bool {
         self.admission.is_idle()
+    }
+
+    pub(crate) fn connect(&mut self, device: DetectedIpod) -> Option<DetectedIpod> {
+        self.connected
+            .insert(canonical_serial_key(&device.serial), device)
+    }
+
+    pub(crate) fn disconnect(&mut self, serial: &str) -> Option<DetectedIpod> {
+        self.connected.remove(&canonical_serial_key(serial))
+    }
+
+    pub(crate) fn connected_device(&self, serial: &str) -> Option<&DetectedIpod> {
+        self.connected.get(&canonical_serial_key(serial))
+    }
+
+    pub(crate) fn connected_device_mut(&mut self, serial: &str) -> Option<&mut DetectedIpod> {
+        self.connected.get_mut(&canonical_serial_key(serial))
+    }
+
+    pub(crate) fn connected_devices(&self) -> impl Iterator<Item = &DetectedIpod> {
+        self.connected.values()
     }
 
     pub(crate) fn take_cancel(&mut self, id: SessionId) -> Option<oneshot::Sender<()>> {

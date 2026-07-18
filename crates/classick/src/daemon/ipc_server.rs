@@ -44,7 +44,9 @@ fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
         return None;
     }
     let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
-    Some(std::path::PathBuf::from(cstr.to_string_lossy().into_owned()))
+    Some(std::path::PathBuf::from(
+        cstr.to_string_lossy().into_owned(),
+    ))
 }
 
 /// Resolve the platform-default IPC transport address. Derived from
@@ -104,8 +106,7 @@ pub async fn spawn_server() -> Result<(
 )> {
     let (event_tx, _) = broadcast::channel::<DaemonEvent>(256);
     let pipe = default_pipe_name();
-    let (sender, cmd_rx, _new_client_rx) =
-        spawn_server_full_with(event_tx.clone(), &pipe).await?;
+    let (sender, cmd_rx, _new_client_rx) = spawn_server_full_with(event_tx.clone(), &pipe).await?;
     Ok((sender, cmd_rx))
 }
 
@@ -224,8 +225,8 @@ fn spawn_accept_loop(
     // lock somewhere — the named-pipe `first_pipe_instance(true)`
     // analogue. For now: trust the operator to run only one daemon.
     let _ = std::fs::remove_file(&pipe_name);
-    let listener = UnixListener::bind(&pipe_name)
-        .with_context(|| format!("bind unix socket {pipe_name}"))?;
+    let listener =
+        UnixListener::bind(&pipe_name).with_context(|| format!("bind unix socket {pipe_name}"))?;
     tokio::spawn(async move {
         tracing::info!("ipc-server: listening on {pipe_name}");
         let mut next_client_id: u64 = 1;

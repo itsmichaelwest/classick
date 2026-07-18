@@ -23,7 +23,11 @@ impl LibraryWatcher {
     /// (the runtime does the time-based debounce / coalescing).
     pub fn spawn(source: Option<PathBuf>) -> (Self, UnboundedReceiver<()>) {
         let (tx, rx) = mpsc::unbounded_channel::<()>();
-        let mut me = Self { watcher: None, current: None, tx };
+        let mut me = Self {
+            watcher: None,
+            current: None,
+            tx,
+        };
         me.rewatch(source);
         (me, rx)
     }
@@ -44,24 +48,30 @@ impl LibraryWatcher {
         self.current = None;
         let Some(path) = source else { return }; // disarm request; stays None
         if !path.exists() {
-            tracing::warn!("library_watcher: source {} does not exist; not watching", path.display());
+            tracing::warn!(
+                "library_watcher: source {} does not exist; not watching",
+                path.display()
+            );
             return;
         }
         let tx = self.tx.clone();
-        let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            match res {
-                // Any event is just a "something changed" nudge — the scan
-                // itself diffs mtime/size, so we don't inspect the event kind.
-                Ok(_) => { let _ = tx.send(()); }
-                Err(e) => tracing::warn!("library_watcher: notify error: {e}"),
-            }
-        }) {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::warn!("library_watcher: failed to create watcher: {e}");
-                return;
-            }
-        };
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                match res {
+                    // Any event is just a "something changed" nudge — the scan
+                    // itself diffs mtime/size, so we don't inspect the event kind.
+                    Ok(_) => {
+                        let _ = tx.send(());
+                    }
+                    Err(e) => tracing::warn!("library_watcher: notify error: {e}"),
+                }
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("library_watcher: failed to create watcher: {e}");
+                    return;
+                }
+            };
         if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
             tracing::warn!("library_watcher: failed to watch {}: {e}", path.display());
             return;
@@ -88,7 +98,10 @@ mod tests {
         std::fs::write(dir.join("new.flac"), b"x").unwrap();
 
         let got = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
-        assert!(matches!(got, Ok(Some(()))), "expected a change tick, got {got:?}");
+        assert!(
+            matches!(got, Ok(Some(()))),
+            "expected a change tick, got {got:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -96,7 +109,10 @@ mod tests {
     async fn no_source_yields_no_ticks() {
         let (_watcher, mut rx) = LibraryWatcher::spawn(None);
         let got = tokio::time::timeout(Duration::from_millis(400), rx.recv()).await;
-        assert!(got.is_err(), "no watched path → no ticks (timeout expected)");
+        assert!(
+            got.is_err(),
+            "no watched path → no ticks (timeout expected)"
+        );
     }
 
     #[tokio::test]
@@ -108,7 +124,8 @@ mod tests {
         // never arms. This is exactly Task 3's scenario: rewatch is called
         // repeatedly with the same configured source while waiting for the
         // library path to appear (mount, first-run, etc.).
-        let base = std::env::temp_dir().join(format!("classick-watch-rearm-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("classick-watch-rearm-{}", std::process::id()));
         let p = base.join("music");
         let _ = std::fs::remove_dir_all(&base); // ensure p does NOT exist yet
 
@@ -123,7 +140,10 @@ mod tests {
         std::fs::write(p.join("new.flac"), b"x").unwrap();
 
         let got = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
-        assert!(matches!(got, Ok(Some(()))), "expected a change tick after same-path re-arm, got {got:?}");
+        assert!(
+            matches!(got, Ok(Some(()))),
+            "expected a change tick after same-path re-arm, got {got:?}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -29,9 +29,13 @@ impl SyncScheduler {
         Self { interval, minutes }
     }
 
-    pub fn minutes(&self) -> u32 { self.minutes }
+    pub fn minutes(&self) -> u32 {
+        self.minutes
+    }
 
-    pub fn is_disabled(&self) -> bool { self.interval.is_none() }
+    pub fn is_disabled(&self) -> bool {
+        self.interval.is_none()
+    }
 
     /// Re-arm with a new interval. Call when config changes live.
     pub fn rearm(&mut self, minutes: u32) {
@@ -42,7 +46,9 @@ impl SyncScheduler {
     /// future that never resolves.
     pub async fn tick(&mut self) {
         match &mut self.interval {
-            Some(i) => { i.tick().await; }
+            Some(i) => {
+                i.tick().await;
+            }
             None => std::future::pending::<()>().await,
         }
     }
@@ -67,7 +73,10 @@ mod tests {
         // First tick: under start_paused, the test runtime auto-advances
         // when no other work is pending.
         let r = tokio::time::timeout(Duration::from_secs(120), s.tick()).await;
-        assert!(r.is_ok(), "1-minute scheduler should tick within 2 minutes of simulated time");
+        assert!(
+            r.is_ok(),
+            "1-minute scheduler should tick within 2 minutes of simulated time"
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

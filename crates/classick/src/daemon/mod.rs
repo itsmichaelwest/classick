@@ -4,6 +4,7 @@
 
 pub mod command_handler;
 pub mod device_registry;
+pub mod device_snapshot;
 pub mod device_storage;
 pub mod device_watcher;
 pub mod format;
