@@ -92,11 +92,50 @@ public class DaemonEventRouterTests
 
         router.Start();
         // Wrapped sync subprocess event:
-        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""track_done""}"));
+        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""track_done""}", "A", 11));
         await Task.Delay(50);
 
         Assert.NotNull(routed);
         Assert.IsType<TrackDoneEvent>(routed);
+        router.Stop();
+    }
+
+    [Fact]
+    public async Task Routes_device_inventory_snapshot_to_typed_subscribers()
+    {
+        var channel = Channel.CreateUnbounded<object>();
+        DeviceInventorySnapshotEvent? received = null;
+        var router = new DaemonEventRouter(channel.Reader);
+        router.DeviceInventorySnapshotReceived += snapshot => received = snapshot;
+
+        router.Start();
+        await channel.Writer.WriteAsync(new DeviceInventorySnapshotEvent(
+            Revision: 3,
+            Devices:
+            [
+                new DeviceSnapshot(
+                    new DeviceIdentitySnapshot("A", "iPod 5G"),
+                    Configured: true,
+                    Connected: true,
+                    Mount: "G:\\",
+                    Phase: "idle",
+                    SessionId: null,
+                    Storage: null,
+                    SyncedCount: 1,
+                    LibraryCount: 2,
+                    LatestSuccessfulSync: null,
+                    LatestAttempt: null,
+                    LastTerminalError: null,
+                    SelectionRevision: 1,
+                    SettingsRevision: 1,
+                    SubscriptionsRevision: 1)
+            ]));
+        await Task.Delay(50);
+
+        Assert.NotNull(received);
+        Assert.Equal(3UL, received!.Revision);
+        Assert.Single(received.Devices);
+        Assert.Equal("A", received.Devices[0].Identity.Serial);
         router.Stop();
     }
 }

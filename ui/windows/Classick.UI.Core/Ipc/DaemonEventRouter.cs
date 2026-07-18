@@ -38,6 +38,7 @@ public sealed class DaemonEventRouter : IDisposable
     public event Action<DeviceConnectedEvent>? DeviceConnected;
     public event Action<DeviceDisconnectedEvent>? DeviceDisconnected;
     public event Action<SyncRejectedEvent>? SyncRejected;
+    public event Action<DeviceInventorySnapshotEvent>? DeviceInventorySnapshotReceived;
     public event Action<IpcEvent>? IpcEventReceived;
 
     public void Start()
@@ -98,6 +99,9 @@ public sealed class DaemonEventRouter : IDisposable
                 break;
             case SyncRejectedEvent sr:
                 SyncRejected?.Invoke(sr);
+                break;
+            case DeviceInventorySnapshotEvent snapshot:
+                DeviceInventorySnapshotReceived?.Invoke(snapshot);
                 break;
             case SyncEventEnvelope env:
                 // Re-parse the wrapped line as an M1 IpcEvent and

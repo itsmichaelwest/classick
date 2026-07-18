@@ -81,7 +81,7 @@ public sealed class DaemonClient : IAsyncDisposable
                     await client.DisposeAsync().ConfigureAwait(false);
                     throw new InvalidOperationException($"expected hello, got {first.GetType().Name}");
                 }
-                if (!hello.ProtocolVersion.StartsWith("1.", StringComparison.Ordinal))
+                if (!string.Equals(hello.ProtocolVersion, "2.0.0", StringComparison.Ordinal))
                 {
                     await client.DisposeAsync().ConfigureAwait(false);
                     throw new InvalidOperationException(
@@ -128,7 +128,7 @@ public sealed class DaemonClient : IAsyncDisposable
     {
         "status_update", "config_update", "history_update",
         "device_connected", "device_disconnected", "sync_rejected",
-        "sync_event",
+        "sync_event", "device_inventory_snapshot",
     };
 
     private static bool TryDeserialize(string line, out object? evt)

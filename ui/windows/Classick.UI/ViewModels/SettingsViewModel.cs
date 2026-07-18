@@ -80,7 +80,8 @@ public partial class SettingsViewModel : ObservableObject
         var cmd = new SaveConfigCommand(
             Source: General.IsSourceDirty ? General.SourcePath : null,
             Daemon: BuildDaemonSettings(),
-            Ipod: null);
+            Ipod: null,
+            RequestId: Guid.NewGuid().ToString("N"));
         try { await _daemon.SendAsync(cmd); }
         catch (Exception e) { System.Diagnostics.Debug.WriteLine($"settings: save failed: {e}"); }
     }
@@ -242,7 +243,7 @@ public partial class SettingsHistoryViewModel : ObservableObject
 
     private async Task LoadAsync()
     {
-        try { await _daemon.SendAsync(new GetHistoryCommand(Limit: 50)); }
+        try { await _daemon.SendAsync(new GetHistoryCommand(Limit: 50, RequestId: Guid.NewGuid().ToString("N"))); }
         catch (Exception e) { System.Diagnostics.Debug.WriteLine($"history: load failed: {e}"); }
     }
 
@@ -334,15 +335,15 @@ public partial class IpodChooserViewModel : ObservableObject
         // would still include the old identity.
         if (_daemon is not null)
         {
-            _ = SendForgetAsync(_daemon);
+            _ = SendForgetAsync(_daemon, item.Serial);
         }
         // Kick the wizard so the user can pair a new iPod.
         App.RequestPairNewIpod();
     }
 
-    private static async Task SendForgetAsync(DaemonClient daemon)
+    private static async Task SendForgetAsync(DaemonClient daemon, string serial)
     {
-        try { await daemon.SendAsync(new ForgetIpodCommand()); }
+        try { await daemon.SendAsync(new ForgetIpodCommand(serial, Guid.NewGuid().ToString("N"))); }
         catch (Exception e) { System.Diagnostics.Debug.WriteLine($"chooser: forget_ipod failed: {e}"); }
     }
 }

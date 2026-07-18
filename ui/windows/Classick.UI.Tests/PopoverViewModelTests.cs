@@ -45,7 +45,7 @@ public class PopoverViewModelTests
     {
         var vm = new PopoverViewModel();
         var failed = new HistoryEntry("2026-05-25T10:00:00Z", 5, "manual", "error",
-            "Source unreachable", null);
+            "Source unreachable", null, "SERIAL-A");
         vm.Update(Status("idle", ipodConnected: true, last: failed));
         Assert.Contains("Last sync failed", vm.StatusText);
     }

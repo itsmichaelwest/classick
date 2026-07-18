@@ -18,20 +18,9 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(DeviceDisconnectedEvent), "device_disconnected")]
 [JsonDerivedType(typeof(SyncRejectedEvent), "sync_rejected")]
 [JsonDerivedType(typeof(SyncEventEnvelope), "sync_event")]
+[JsonDerivedType(typeof(DeviceInventorySnapshotEvent), "device_inventory_snapshot")]
 public abstract record DaemonEvent;
 
-// TODO(windows): pause/resume + X-of-Y not yet wired on Windows.
-// Daemon protocol bumped to 1.2.0: `status_update` gained a required
-// `synced_count` (usize) and an optional `library_count` (usize, omitted
-// when unknown) — see docs/ipc-protocol.md "Daemon v1.2.0". StatusUpdateEvent
-// below doesn't decode either field yet, so "X of Y synced" can't be
-// rendered on Windows. There's also no terminal `paused` SyncEvent case to
-// distinguish a graceful pause from a normal completion or abort. Mirror
-// the Rust daemon (crates/classick/src/ipc_daemon.rs::DaemonEvent::StatusUpdate)
-// and the macOS client (ui/macos/Sources/Classick/Ipc/WireModels.swift,
-// `StatusInfo.syncedCount`/`libraryCount`, `SyncEvent.paused`) plus a
-// Pause/Resume affordance in the tray UI. Can't build/verify Windows in
-// this environment — see docs/ipc-protocol.md.
 public sealed record StatusUpdateEvent(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("configured")] bool Configured,
@@ -49,11 +38,14 @@ public sealed record StorageInfo(
 public sealed record ConfigUpdateEvent(
     [property: JsonPropertyName("source")] string? Source,
     [property: JsonPropertyName("daemon")] DaemonSettings? Daemon,
-    [property: JsonPropertyName("ipod")] IpodIdentity? Ipod
+    [property: JsonPropertyName("ipod")] IpodIdentity? Ipod,
+    [property: JsonRequired, JsonPropertyName("config_revision")] ulong ConfigRevision,
+    [property: JsonPropertyName("acknowledged_request_id")] string? AcknowledgedRequestId = null
 ) : DaemonEvent;
 
 public sealed record HistoryUpdateEvent(
-    [property: JsonPropertyName("entries")] IReadOnlyList<HistoryEntry> Entries
+    [property: JsonPropertyName("entries")] IReadOnlyList<HistoryEntry> Entries,
+    [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId
 ) : DaemonEvent;
 
 public sealed record DeviceConnectedEvent(
@@ -68,12 +60,45 @@ public sealed record DeviceDisconnectedEvent(
 ) : DaemonEvent;
 
 public sealed record SyncRejectedEvent(
-    [property: JsonPropertyName("reason")] string Reason
+    [property: JsonPropertyName("reason")] string Reason,
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId
 ) : DaemonEvent;
 
 public sealed record SyncEventEnvelope(
-    [property: JsonPropertyName("line")] string Line
+    [property: JsonPropertyName("line")] string Line,
+    [property: JsonPropertyName("serial")] string? Serial,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId
 ) : DaemonEvent;
+
+public sealed record DeviceInventorySnapshotEvent(
+    [property: JsonRequired, JsonPropertyName("revision")] ulong Revision,
+    [property: JsonRequired, JsonPropertyName("devices")] IReadOnlyList<DeviceSnapshot> Devices
+) : DaemonEvent;
+
+public sealed record DeviceSnapshot(
+    [property: JsonRequired, JsonPropertyName("identity")] DeviceIdentitySnapshot Identity,
+    [property: JsonRequired, JsonPropertyName("configured")] bool Configured,
+    [property: JsonRequired, JsonPropertyName("connected")] bool Connected,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("mount")] string? Mount,
+    [property: JsonRequired, JsonPropertyName("phase")] string Phase,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("session_id")] ulong? SessionId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("storage")] StorageInfo? Storage,
+    [property: JsonRequired, JsonPropertyName("synced_count")] int SyncedCount,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("library_count")] int? LibraryCount,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("latest_successful_sync")] HistoryEntry? LatestSuccessfulSync,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("latest_attempt")] HistoryEntry? LatestAttempt,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("last_terminal_error")] string? LastTerminalError,
+    [property: JsonRequired, JsonPropertyName("selection_revision")] ulong SelectionRevision,
+    [property: JsonRequired, JsonPropertyName("settings_revision")] ulong SettingsRevision,
+    [property: JsonRequired, JsonPropertyName("subscriptions_revision")] ulong SubscriptionsRevision
+);
+
+public sealed record DeviceIdentitySnapshot(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("model_label")] string ModelLabel,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("name")] string? Name = null
+);
 
 public sealed record DaemonSettings(
     [property: JsonPropertyName("enabled")] bool Enabled,
@@ -96,7 +121,9 @@ public sealed record HistoryEntry(
     [property: JsonPropertyName("trigger")] string Trigger,
     [property: JsonPropertyName("outcome")] string Outcome,
     [property: JsonPropertyName("error_message")] string? ErrorMessage,
-    [property: JsonPropertyName("summary")] SyncSummary? Summary
+    [property: JsonPropertyName("summary")] SyncSummary? Summary,
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonPropertyName("session_id")] ulong? SessionId = null
 );
 
 public sealed record SyncSummary(

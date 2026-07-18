@@ -2,19 +2,6 @@ using System.Text.Json.Serialization;
 
 namespace Classick_UI.Ipc;
 
-// TODO(windows): pause/resume + X-of-Y not yet wired on Windows.
-// Daemon protocol bumped to 1.2.0 with a new `DaemonCommand::Pause`
-// ({"type":"pause"}, no payload, no-op if idle) that forwards a graceful
-// pause to the running sync subprocess — see docs/ipc-protocol.md "Daemon
-// v1.2.0". This DaemonCommand hierarchy has no PauseCommand yet. There is
-// no separate resume command by design: resuming is an ordinary
-// TriggerSyncCommand (the sync is diff-based and continues from the last
-// checkpoint). Mirror the Rust daemon
-// (crates/classick/src/ipc_daemon.rs::DaemonCommand::Pause) and the macOS
-// client (ui/macos/Sources/Classick/Ipc/WireModels.swift,
-// `DaemonCommand.pause`) plus a Pause/Resume affordance in the tray UI.
-// Can't build/verify Windows in this environment — see docs/ipc-protocol.md.
-
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(GetStatusCommand), "get_status")]
 [JsonDerivedType(typeof(GetConfigCommand), "get_config")]
@@ -25,35 +12,56 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(SubscribeDeviceEventsCommand), "subscribe_device_events")]
 [JsonDerivedType(typeof(UnsubscribeDeviceEventsCommand), "unsubscribe_device_events")]
 [JsonDerivedType(typeof(CancelSyncCommand), "cancel_sync")]
+[JsonDerivedType(typeof(PauseCommand), "pause")]
 [JsonDerivedType(typeof(DecidePromptCommand), "decide_prompt")]
 [JsonDerivedType(typeof(ShutdownCommand), "shutdown")]
 public abstract record DaemonCommand;
 
-public sealed record GetStatusCommand : DaemonCommand;
-public sealed record GetConfigCommand : DaemonCommand;
+public sealed record GetStatusCommand(
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record GetConfigCommand(
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
 
 public sealed record SaveConfigCommand(
-    [property: JsonPropertyName("source")] string? Source = null,
-    [property: JsonPropertyName("daemon")] DaemonSettings? Daemon = null,
-    [property: JsonPropertyName("ipod")] IpodIdentity? Ipod = null
+    [property: JsonPropertyName("source")] string? Source,
+    [property: JsonPropertyName("daemon")] DaemonSettings? Daemon,
+    [property: JsonPropertyName("ipod")] IpodIdentity? Ipod,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
 ) : DaemonCommand;
 
 /// <summary>Clear the persisted iPod identity. SaveConfig can't
 /// express this because its <c>Ipod</c> field treats null as "leave
 /// alone".</summary>
-public sealed record ForgetIpodCommand : DaemonCommand;
+public sealed record ForgetIpodCommand(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
 
 public sealed record TriggerSyncCommand(
-    [property: JsonPropertyName("source")] string Source  // "manual" | "scheduled" | "plug_in"
+    [property: JsonPropertyName("source")] string Source,
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
 ) : DaemonCommand;
 
 public sealed record GetHistoryCommand(
-    [property: JsonPropertyName("limit")] int Limit = 10
+    [property: JsonPropertyName("limit")] int Limit,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
 ) : DaemonCommand;
 
 public sealed record SubscribeDeviceEventsCommand : DaemonCommand;
 public sealed record UnsubscribeDeviceEventsCommand : DaemonCommand;
-public sealed record CancelSyncCommand : DaemonCommand;
+public sealed record CancelSyncCommand(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record PauseCommand(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
 
 /// <summary>
 /// Reply to a <see cref="PromptEvent"/> the daemon ferried from the
@@ -67,7 +75,9 @@ public sealed record CancelSyncCommand : DaemonCommand;
 /// </summary>
 public sealed record DecidePromptCommand(
     [property: JsonPropertyName("id")] ulong Id,
-    [property: JsonPropertyName("choice")] int Choice
+    [property: JsonPropertyName("choice")] int Choice,
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
 ) : DaemonCommand;
 
 public sealed record ShutdownCommand : DaemonCommand;

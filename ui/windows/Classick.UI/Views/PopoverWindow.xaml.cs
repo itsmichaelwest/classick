@@ -189,13 +189,15 @@ public sealed partial class PopoverWindow : Window
 
     private async void OnSyncNow(object sender, RoutedEventArgs e)
     {
-        try { await _daemon.SendAsync(new TriggerSyncCommand("manual")); }
+        if (App.ConfiguredSerial is not { } serial) return;
+        try { await _daemon.SendAsync(new TriggerSyncCommand("manual", serial, Guid.NewGuid().ToString("N"))); }
         catch (Exception ex) { Debug.WriteLine($"popover: trigger_sync failed: {ex}"); }
     }
 
     private async void OnCancelSync(object sender, RoutedEventArgs e)
     {
-        try { await _daemon.SendAsync(new CancelSyncCommand()); }
+        if (App.ConfiguredSerial is not { } serial) return;
+        try { await _daemon.SendAsync(new CancelSyncCommand(serial, Guid.NewGuid().ToString("N"))); }
         catch (Exception ex) { Debug.WriteLine($"popover: cancel_sync failed: {ex}"); }
     }
 
@@ -231,6 +233,7 @@ public sealed partial class PopoverWindow : Window
         }
 
         var id = ViewModel.PromptId;
+        if (App.ConfiguredSerial is not { } serial) return;
         // Optimistic dismiss — the daemon's response is fire-and-
         // forward; keeping the overlay up until a TrackStart arrives
         // would leave the user staring at the prompt while the
@@ -238,7 +241,7 @@ public sealed partial class PopoverWindow : Window
         ViewModel.ClearPrompt();
         try
         {
-            await _daemon.SendAsync(new DecidePromptCommand(id, index));
+            await _daemon.SendAsync(new DecidePromptCommand(id, index, serial, Guid.NewGuid().ToString("N")));
         }
         catch (Exception ex)
         {

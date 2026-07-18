@@ -137,6 +137,7 @@ public sealed partial class WizardWindow : Window
         await daemon.SendAsync(new SaveConfigCommand(
             Source: payload.Source,
             Daemon: daemonSettings,
-            Ipod: new IpodIdentity(payload.IpodSerial, payload.IpodModelLabel, payload.IpodName)));
+            Ipod: new IpodIdentity(payload.IpodSerial, payload.IpodModelLabel, payload.IpodName),
+            RequestId: Guid.NewGuid().ToString("N")));
     }
 }

@@ -256,15 +256,19 @@ public class IpcWireFormatTests
         // turn forwards a PromptDecisionCommand to the subprocess
         // stdin. They share field names + values but live on
         // different transports.
-        var cmd = new DecidePromptCommand(Id: 17, Choice: 1);
+        var cmd = new DecidePromptCommand(Id: 17, Choice: 1, Serial: "SERIAL-A", RequestId: "request-prompt");
         var json = JsonSerializer.Serialize<DaemonCommand>(cmd);
         Assert.Contains("\"type\":\"decide_prompt\"", json);
         Assert.Contains("\"id\":17", json);
         Assert.Contains("\"choice\":1", json);
+        Assert.Contains("\"serial\":\"SERIAL-A\"", json);
+        Assert.Contains("\"request_id\":\"request-prompt\"", json);
 
         var back = JsonSerializer.Deserialize<DaemonCommand>(json);
         var decide = Assert.IsType<DecidePromptCommand>(back);
         Assert.Equal(17UL, decide.Id);
         Assert.Equal(1, decide.Choice);
+        Assert.Equal("SERIAL-A", decide.Serial);
+        Assert.Equal("request-prompt", decide.RequestId);
     }
 }

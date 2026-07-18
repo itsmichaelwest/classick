@@ -24,6 +24,7 @@ public partial class App : Application
 
     /// <summary>Last ConfigUpdate seen from the daemon. Popover + settings read from this.</summary>
     public static ConfigUpdateEvent? LatestConfig { get; private set; }
+    public static string? ConfiguredSerial => LatestConfig?.Ipod?.Serial;
     /// <summary>Latest StatusUpdate. Used to drive popover initial state.</summary>
     public static StatusUpdateEvent? LatestStatus { get; private set; }
     /// <summary>Latest HistoryUpdate. Used to seed popover activity feed.</summary>
@@ -136,9 +137,9 @@ public partial class App : Application
         Router.ConfigUpdated += OneShotConfig;
 
         // Ask for the initial config + status + history.
-        await Daemon.SendAsync(new GetConfigCommand());
-        await Daemon.SendAsync(new GetStatusCommand());
-        await Daemon.SendAsync(new GetHistoryCommand(Limit: 10));
+        await Daemon.SendAsync(new GetConfigCommand(Guid.NewGuid().ToString("N")));
+        await Daemon.SendAsync(new GetStatusCommand(Guid.NewGuid().ToString("N")));
+        await Daemon.SendAsync(new GetHistoryCommand(Limit: 10, RequestId: Guid.NewGuid().ToString("N")));
 
         // Wait for the actual ConfigUpdate, capped at 2s so a dead daemon
         // doesn't wedge startup forever. Either outcome: we make the wizard
@@ -442,8 +443,8 @@ public partial class App : Application
     {
         DispatcherQueue.TryEnqueue(async () =>
         {
-            if (Daemon is null) return;
-            try { await Daemon.SendAsync(new TriggerSyncCommand("manual")); }
+            if (Daemon is null || ConfiguredSerial is not { } serial) return;
+            try { await Daemon.SendAsync(new TriggerSyncCommand("manual", serial, Guid.NewGuid().ToString("N"))); }
             catch (Exception e) { Debug.WriteLine($"app: trigger_sync failed: {e}"); }
         });
     }
