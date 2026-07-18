@@ -5,11 +5,13 @@
 //!
 //! The CFRunLoop thread lives for the daemon's lifetime (the process exits on
 //! shutdown, taking the thread with it). A USB attach fires before the volume
-//! mounts, so the `Added` handler waits briefly for `scan_for_ipod` to see it.
+//! mounts, so the `Added` handler waits briefly for `scan_for_ipods` to see it.
 
-use crate::daemon::device_watcher::{DeviceEvent, DeviceWatcher};
+use crate::daemon::device_registry::canonical_serial_key;
+use crate::daemon::device_watcher::{diff_inventory, DeviceEvent, DeviceWatcher};
 use crate::ipod::device::{self, DetectedIpod};
 use crate::ipod::macos_iokit::{run_usb_notifications, UsbChange};
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -33,18 +35,30 @@ impl DeviceWatcher for IokitDeviceWatcher {
         let (raw_tx, raw_rx) = std::sync::mpsc::channel::<UsbChange>();
 
         std::thread::spawn(move || {
-            let mut last: Option<DetectedIpod> = None;
+            let mut devices = HashMap::<String, DetectedIpod>::new();
+
+            let rescan = |devices: &mut HashMap<String, DetectedIpod>| -> Option<bool> {
+                let current = device::scan_for_ipods();
+                let present = !current.is_empty();
+                let events = diff_inventory(devices, current.clone());
+                *devices = current.into_iter().fold(HashMap::new(), |mut inventory, ipod| {
+                    inventory.insert(canonical_serial_key(&ipod.serial), ipod);
+                    inventory
+                });
+                for event in events {
+                    if tx.blocking_send(event).is_err() {
+                        return None;
+                    }
+                }
+                Some(present)
+            };
 
             // One-shot startup scan (NOT a poll — runs exactly once). The IOKit
             // matched-notification arming reports already-connected devices, but
             // a daemon restart while the iPod is plugged in is common enough
             // that we don't want detection to hinge on arming-iterator timing.
-            if let Some(d) = device::scan_for_ipod() {
-                tracing::info!("device watcher: iPod {} already connected at startup", d.serial);
-                if tx.blocking_send(DeviceEvent::Connected(d.clone())).is_err() {
-                    return;
-                }
-                last = Some(d);
+            if rescan(&mut devices).is_none() {
+                return;
             }
 
             while let Ok(change) = raw_rx.recv() {
@@ -60,22 +74,13 @@ impl DeviceWatcher for IokitDeviceWatcher {
                         // fall back on, so giving up early leaves it stuck.
                         let mut found = false;
                         for _ in 0..120 {
-                            if let Some(d) = device::scan_for_ipod() {
-                                found = true;
-                                let is_new =
-                                    last.as_ref().map(|p| p.serial != d.serial).unwrap_or(true);
-                                if is_new {
-                                    tracing::info!(
-                                        "device watcher: iPod {} attached; sending Connected",
-                                        d.serial
-                                    );
-                                    if tx.blocking_send(DeviceEvent::Connected(d.clone())).is_err()
-                                    {
-                                        return;
-                                    }
-                                    last = Some(d);
+                            match rescan(&mut devices) {
+                                Some(true) => {
+                                    found = true;
+                                    break;
                                 }
-                                break;
+                                Some(false) => {}
+                                None => return,
                             }
                             std::thread::sleep(Duration::from_millis(250));
                         }
@@ -86,37 +91,27 @@ impl DeviceWatcher for IokitDeviceWatcher {
                         }
                     }
                     UsbChange::Removed => {
-                        // A per-device termination fired. It's for SOME Apple
-                        // USB device (keyboard, trackpad, hub, or the iPod), so
-                        // confirm the iPod itself is gone before reporting a
-                        // disconnect — an unrelated unplug leaves it detectable.
-                        if last.is_some() {
-                            let mut gone = false;
-                            for _ in 0..30 {
-                                if device::scan_for_ipod().is_none() {
-                                    gone = true;
+                        // A per-device termination can be an unrelated Apple
+                        // USB device. Rescanning the full inventory means that
+                        // only identities actually absent from the collection
+                        // emit a disconnect.
+                        let mut changed = false;
+                        for _ in 0..30 {
+                            let before = devices.clone();
+                            match rescan(&mut devices) {
+                                Some(_) if before != devices => {
+                                    changed = true;
                                     break;
                                 }
-                                std::thread::sleep(Duration::from_millis(100));
+                                Some(_) => {}
+                                None => return,
                             }
-                            if gone {
-                                if let Some(prev) = last.take() {
-                                    tracing::info!(
-                                        "device watcher: iPod {} gone; sending Disconnected",
-                                        prev.serial
-                                    );
-                                    if tx
-                                        .blocking_send(DeviceEvent::Disconnected { serial: prev.serial })
-                                        .is_err()
-                                    {
-                                        return;
-                                    }
-                                }
-                            } else {
-                                tracing::debug!(
-                                    "device watcher: USB removal but iPod still detectable; ignoring"
-                                );
-                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        if !changed {
+                            tracing::debug!(
+                                "device watcher: USB removal did not change iPod inventory; ignoring"
+                            );
                         }
                     }
                 }

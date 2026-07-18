@@ -1,7 +1,7 @@
 //! Device-watcher abstraction. `DeviceWatcher` is the trait the daemon
 //! runtime listens on for iPod plug-in / plug-out events. Production
 //! impl: `PollingDeviceWatcher` (1.5s scan loop reusing
-//! `ipod::device::scan_for_ipod`). The trait exists so M5 polish can
+//! `ipod::device::scan_for_ipods`). The trait exists so M5 polish can
 //! swap in a Windows-event-driven impl without touching the runtime.
 //!
 //! `Debouncer` coalesces multiple Connected events for the same serial
@@ -10,6 +10,7 @@
 //! pass straight through.
 
 use crate::ipod::device::DetectedIpod;
+use crate::daemon::device_registry::canonical_serial_key;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -64,11 +65,58 @@ impl Debouncer {
     }
 }
 
-type ScanFn = Box<dyn FnMut() -> Option<DetectedIpod> + Send>;
+type ScanFn = Box<dyn FnMut() -> Vec<DetectedIpod> + Send>;
+
+pub(crate) fn diff_inventory(
+    previous: &HashMap<String, DetectedIpod>,
+    current: Vec<DetectedIpod>,
+) -> Vec<DeviceEvent> {
+    let previous = previous
+        .values()
+        .cloned()
+        .fold(HashMap::new(), |mut inventory, ipod| {
+            inventory.insert(canonical_serial_key(&ipod.serial), ipod);
+            inventory
+        });
+    let current = current.into_iter().fold(HashMap::new(), |mut inventory, ipod| {
+        inventory.insert(canonical_serial_key(&ipod.serial), ipod);
+        inventory
+    });
+
+    let mut removed: Vec<_> = previous
+        .iter()
+        .filter(|(key, _)| !current.contains_key(*key))
+        .map(|(key, ipod)| (key.clone(), ipod.serial.clone()))
+        .collect();
+    removed.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut observed: Vec<_> = current
+        .iter()
+        .filter(|(key, ipod)| previous.get(*key) != Some(*ipod))
+        .collect();
+    observed.sort_by(|left, right| left.0.cmp(right.0));
+
+    removed
+        .into_iter()
+        .map(|(_, serial)| DeviceEvent::Disconnected { serial })
+        .chain(
+            observed
+                .into_iter()
+                .map(|(_, ipod)| DeviceEvent::Connected(ipod.clone())),
+        )
+        .collect()
+}
+
+fn inventory(current: Vec<DetectedIpod>) -> HashMap<String, DetectedIpod> {
+    current.into_iter().fold(HashMap::new(), |mut inventory, ipod| {
+        inventory.insert(canonical_serial_key(&ipod.serial), ipod);
+        inventory
+    })
+}
 
 /// Periodically polls a scan function and emits Connected /
 /// Disconnected events. Production wiring uses
-/// `ipod::device::scan_for_ipod`; tests inject a scripted closure.
+/// `ipod::device::scan_for_ipods`; tests inject a scripted closure.
 pub struct PollingDeviceWatcher {
     scan: ScanFn,
     interval: Duration,
@@ -76,46 +124,9 @@ pub struct PollingDeviceWatcher {
 
 impl PollingDeviceWatcher {
     /// Production constructor: scans every 1.5s using the real volume
-    /// enumeration. After the first observation, fast-paths via the
-    /// cached `\\?\Volume{GUID}\` identifier — one `GetVolumePathNamesForVolumeNameW`
-    /// call + the canonical iPod-files probe — instead of re-walking
-    /// every mountable volume and re-doing SCSI INQUIRY / USB descriptor
-    /// recovery. Falls back to a full scan on fast-path miss
-    /// (volume gone, files vanished mid-restore, no GUID cached yet).
+    /// enumeration.
     pub fn new_production() -> Self {
-        use crate::ipod::device::{self, DetectedIpod};
-
-        // Per-watcher cache of the last successful full scan, used to
-        // shortcut subsequent polls. Lives in the closure so the
-        // watcher's lifetime owns it; cleared on disconnect so a swap
-        // doesn't keep returning the old iPod's metadata.
-        let mut cached: Option<DetectedIpod> = None;
-
-        let scan: ScanFn = Box::new(move || {
-            // Fast path: previous observation gave us a volume GUID;
-            // try resolving it to a current mount + verifying iPod
-            // files. One Win32 call + two file-existence checks vs. a
-            // full enumeration.
-            if let Some(prev) = cached.as_ref() {
-                if let Some(guid) = prev.volume_guid.as_deref() {
-                    if let Some(fresh) = device::try_resolve_known_volume(guid, prev) {
-                        // Refresh cache so future polls reflect any
-                        // mount-path drift (drive-letter reassignment
-                        // mid-session).
-                        cached = Some(fresh.clone());
-                        return Some(fresh);
-                    }
-                }
-                // Fast-path miss: either no GUID (non-Windows, or
-                // permission-denied at scan time) or the volume is
-                // gone. Fall through to a cold scan; if that also
-                // returns None we'll naturally emit Disconnected.
-            }
-
-            let result = device::scan_for_ipod();
-            cached = result.clone();
-            result
-        });
+        let scan: ScanFn = Box::new(crate::ipod::device::scan_for_ipods);
 
         Self {
             scan,
@@ -134,30 +145,19 @@ impl DeviceWatcher for PollingDeviceWatcher {
         let (tx, rx) = mpsc::channel::<DeviceEvent>(crate::daemon::DEVICE_EVENT_CHANNEL_CAPACITY);
         let mut me = *self;
         tokio::spawn(async move {
-            let mut last: Option<DetectedIpod> = None;
+            let mut last = HashMap::new();
             let mut ticker = tokio::time::interval(me.interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
                 let current = (me.scan)();
-                match (&last, &current) {
-                    (None, Some(now)) => {
-                        if tx.send(DeviceEvent::Connected(now.clone())).await.is_err() { return; }
+                let events = diff_inventory(&last, current.clone());
+                last = inventory(current);
+                for event in events {
+                    if tx.send(event).await.is_err() {
+                        return;
                     }
-                    (Some(prev), None) => {
-                        if tx.send(DeviceEvent::Disconnected { serial: prev.serial.clone() }).await.is_err() {
-                            return;
-                        }
-                    }
-                    (Some(prev), Some(now)) if prev.serial != now.serial => {
-                        if tx.send(DeviceEvent::Disconnected { serial: prev.serial.clone() }).await.is_err() {
-                            return;
-                        }
-                        if tx.send(DeviceEvent::Connected(now.clone())).await.is_err() { return; }
-                    }
-                    _ => { /* steady state */ }
                 }
-                last = current;
             }
         });
         rx
@@ -232,18 +232,18 @@ mod tests {
     use std::time::Duration;
 
     /// Closure-driven scan func, so tests can step through observations.
-    fn scripted_scanner(observations: Vec<Option<DetectedIpod>>) -> impl FnMut() -> Option<DetectedIpod> {
+    fn scripted_scanner(observations: Vec<Vec<DetectedIpod>>) -> impl FnMut() -> Vec<DetectedIpod> {
         let queue = Arc::new(Mutex::new(observations));
         move || {
             let mut q = queue.lock().unwrap();
-            if q.is_empty() { None } else { q.remove(0) }
+            if q.is_empty() { Vec::new() } else { q.remove(0) }
         }
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn polling_emits_connected_on_first_appearance() {
         let scanner = scripted_scanner(vec![
-            Some(ipod("0xABC")),  // First poll
+            vec![ipod("0xABC")],  // First poll
         ]);
         let watcher = PollingDeviceWatcher::new_for_test(
             Box::new(scanner),
@@ -261,9 +261,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn polling_emits_disconnected_when_device_disappears() {
         let scanner = scripted_scanner(vec![
-            Some(ipod("0xABC")),
-            Some(ipod("0xABC")),
-            None,
+            vec![ipod("0xABC")],
+            vec![ipod("0xABC")],
+            vec![],
         ]);
         let watcher = PollingDeviceWatcher::new_for_test(
             Box::new(scanner),
@@ -283,24 +283,49 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn polling_emits_swap_as_disconnect_then_connect() {
-        let scanner = scripted_scanner(vec![
-            Some(ipod("0xABC")),
-            Some(ipod("0xDEF")),  // Different iPod plugged in
-        ]);
-        let watcher = PollingDeviceWatcher::new_for_test(
-            Box::new(scanner),
-            Duration::from_millis(100),
+    fn inventory(ipods: Vec<DetectedIpod>) -> HashMap<String, DetectedIpod> {
+        ipods
+            .into_iter()
+            .map(|ipod| (ipod.serial.clone(), ipod))
+            .collect()
+    }
+
+    #[test]
+    fn diff_inventory_connects_every_initial_device() {
+        let events = diff_inventory(&HashMap::new(), vec![ipod("0xA"), ipod("0xB")]);
+
+        assert_eq!(
+            events,
+            vec![DeviceEvent::Connected(ipod("0xA")), DeviceEvent::Connected(ipod("0xB"))]
         );
-        let mut rx = Box::new(watcher).start();
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let first = rx.recv().await.unwrap();
-        assert!(matches!(first, DeviceEvent::Connected(d) if d.serial == "0xABC"));
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let disc = rx.recv().await.unwrap();
-        assert!(matches!(disc, DeviceEvent::Disconnected { ref serial } if serial == "0xABC"));
-        let conn = rx.recv().await.unwrap();
-        assert!(matches!(conn, DeviceEvent::Connected(d) if d.serial == "0xDEF"));
+    }
+
+    #[test]
+    fn diff_inventory_disconnects_only_the_removed_device() {
+        let previous = inventory(vec![ipod("0xA"), ipod("0xB")]);
+
+        let events = diff_inventory(&previous, vec![ipod("0xB")]);
+
+        assert_eq!(events, vec![DeviceEvent::Disconnected { serial: "0xA".to_string() }]);
+    }
+
+    #[test]
+    fn diff_inventory_reconnects_a_device_when_its_metadata_changes() {
+        let previous = inventory(vec![ipod("0xA")]);
+        let mut updated = ipod("0xA");
+        updated.drive = "H:\\".to_string();
+
+        let events = diff_inventory(&previous, vec![updated.clone()]);
+
+        assert_eq!(events, vec![DeviceEvent::Connected(updated)]);
+    }
+
+    #[test]
+    fn diff_inventory_ignores_an_unrelated_usb_removal() {
+        let previous = inventory(vec![ipod("0xA"), ipod("0xB")]);
+
+        let events = diff_inventory(&previous, vec![ipod("0xA"), ipod("0xB")]);
+
+        assert!(events.is_empty());
     }
 }

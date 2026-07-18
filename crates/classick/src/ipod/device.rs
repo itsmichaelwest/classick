@@ -206,21 +206,31 @@ pub struct DetectedIpod {
     pub volume_guid: Option<String>,
 }
 
-/// Scan for a mounted iPod (presence of both `iPod_Control\Device\SysInfo`
-/// AND `iPod_Control\iTunes\iTunesDB` — see `is_ipod_mount`). Returns the
-/// first match.
+/// Scan for every mounted iPod (presence of both `iPod_Control\Device\SysInfo`
+/// AND `iPod_Control\iTunes\iTunesDB` — see `is_ipod_mount`).
 ///
 /// Uses [`candidate_mount_points`] for enumeration, which on Windows
 /// natively asks the OS which drive letters are present + removable/fixed
 /// (no per-letter `Path::exists()` probe, no walking through 26 missing
 /// letters every poll, no hanging on slow network mounts).
+pub fn scan_for_ipods() -> Vec<DetectedIpod> {
+    let mut detected: Vec<_> = candidate_mount_points()
+        .into_iter()
+        .filter_map(|mount| scan_drive_for_ipod(&mount))
+        .collect();
+    detected.sort_by(|left, right| {
+        left.serial
+            .cmp(&right.serial)
+            .then_with(|| left.drive.cmp(&right.drive))
+    });
+    detected
+}
+
+/// Compatibility wrapper for callers that can only work with one device.
+/// The returned device is deterministic because [`scan_for_ipods`] sorts its
+/// result by serial and mount path.
 pub fn scan_for_ipod() -> Option<DetectedIpod> {
-    for mount in candidate_mount_points() {
-        if let Some(detected) = scan_drive_for_ipod(&mount) {
-            return Some(detected);
-        }
-    }
-    None
+    scan_for_ipods().into_iter().next()
 }
 
 /// Test-friendly variant: check a specific drive (or any path) for the
