@@ -395,4 +395,42 @@ final class AppModelReducerTests: XCTestCase {
             SidebarDestination.destinationForDeviceRowClick(serial: "0xA"),
             .device(serial: "0xA", page: .music))
     }
+
+    // MARK: - Task 3: sidebar "+ New Playlist" selection flow
+
+    /// The "+" button's flow (plan Task 3): emit `.savePlaylist` for a
+    /// manual "New Playlist", snapshotting the slugs that existed before the
+    /// request, then once the next `playlists_update` contains a slug that
+    /// wasn't in that snapshot, selection moves to `.playlist(that slug)`.
+    func testDestinationForNewlyCreatedPlaylistSelectsTheNewSlug() {
+        let prior: Set<String> = ["gym", "chill"]
+        let updated = [
+            PlaylistSummary(slug: "gym", name: "Gym", kind: .manual, tracks: 12, bytes: 900, error: nil),
+            PlaylistSummary(slug: "chill", name: "Chill", kind: .smart, tracks: 5, bytes: 100, error: nil),
+            PlaylistSummary(slug: "new-playlist", name: "New Playlist", kind: .manual, tracks: 0, bytes: 0, error: nil),
+        ]
+        XCTAssertEqual(
+            SidebarDestination.destinationForNewlyCreatedPlaylist(priorSlugs: prior, updated: updated),
+            .playlist(slug: "new-playlist"))
+    }
+
+    /// An unrelated `playlists_update` (nothing new since the snapshot) must
+    /// not steal selection — the caller drops the snapshot only once a match
+    /// is found, so a `nil` result here means "keep waiting".
+    func testDestinationForNewlyCreatedPlaylistReturnsNilWhenNothingNew() {
+        let prior: Set<String> = ["gym"]
+        let updated = [
+            PlaylistSummary(slug: "gym", name: "Gym", kind: .manual, tracks: 12, bytes: 900, error: nil),
+        ]
+        XCTAssertNil(SidebarDestination.destinationForNewlyCreatedPlaylist(priorSlugs: prior, updated: updated))
+    }
+
+    func testDestinationForNewlyCreatedPlaylistOnEmptyPriorSnapshot() {
+        let updated = [
+            PlaylistSummary(slug: "first", name: "First", kind: .manual, tracks: 0, bytes: 0, error: nil),
+        ]
+        XCTAssertEqual(
+            SidebarDestination.destinationForNewlyCreatedPlaylist(priorSlugs: [], updated: updated),
+            .playlist(slug: "first"))
+    }
 }

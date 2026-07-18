@@ -34,6 +34,7 @@
 		BBF23B87AD78F97A074AA537 /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68140E99FECE65763E7B7F7F /* LibraryView.swift */; };
 		C1A0B0BDBF78B7069C08D271 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = CE8AC4C79C57BF031AF01FE8 /* Sparkle */; };
 		D015949C91329F4A587EC32D /* DeviceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDCC447E0CBF497B9A8E7713 /* DeviceView.swift */; };
+		F494F967B8292E5BA35C5D93 /* Sidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61399136244230AF19E9E26C /* Sidebar.swift */; };
 		F7AD8BE48FF289EEE5944BC0 /* NotifierPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9752BD44A7E2AEA57406B9EA /* NotifierPolicyTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -62,6 +63,7 @@
 		495FAA88EEF9E0F49604E450 /* MainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindow.swift; sourceTree = "<group>"; };
 		5EF66143092AD180B04081EF /* SelectionDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionDraft.swift; sourceTree = "<group>"; };
 		60A2D7EA38BF7099CA882E0C /* WireModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireModels.swift; sourceTree = "<group>"; };
+		61399136244230AF19E9E26C /* Sidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sidebar.swift; sourceTree = "<group>"; };
 		61DE80657A5644ED21E4873A /* Storage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Storage.swift; sourceTree = "<group>"; };
 		68140E99FECE65763E7B7F7F /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
 		692B715F0269A14C79855E96 /* DaemonClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClientTests.swift; sourceTree = "<group>"; };
@@ -167,6 +169,7 @@
 				1F6E6E19F0CC4A565F756B34 /* SettingsView.swift */,
 				82BC8C8CBF9B3ECE8C2C11DC /* SetupWindow.swift */,
 				9F16B859592192A81F64B75F /* SetupWindowController.swift */,
+				61399136244230AF19E9E26C /* Sidebar.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -380,6 +383,7 @@
 				323700F7CDAEA8A69F46AF4D /* SettingsView.swift in Sources */,
 				8C007C9F5695000CBA16E4F7 /* SetupWindow.swift in Sources */,
 				8668B10A8A87B7D6D9251FBB /* SetupWindowController.swift in Sources */,
+				F494F967B8292E5BA35C5D93 /* Sidebar.swift in Sources */,
 				1E4C3D87214845558F1D7C7D /* SidebarDestination.swift in Sources */,
 				34B045E46CB1FFA37A665FA4 /* Storage.swift in Sources */,
 				ADA05051A9898D63AB07DD45 /* Updater.swift in Sources */,

@@ -21,27 +21,16 @@ struct MainWindow: View {
     var onSaveIpodSelection: (Bool) -> Void = { _ in }
     var onReplaceLibrary: () -> Void = {}
     var onAppearRequests: () -> Void = {}
+    var onSavePlaylist: (PlaylistPayload) -> Void = { _ in }
 
-    enum SidebarItem: Hashable { case library, device, history }
-    @State private var selection: SidebarItem = .library
+    private var selection: Binding<SidebarDestination?> {
+        Binding(get: { model.selectedDestination }, set: { model.selectedDestination = $0 })
+    }
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selection) {
-                Section("Library") {
-                    Label("Music Library", systemImage: "music.note.list").tag(SidebarItem.library)
-                }
-                if model.device != nil {
-                    Section("Devices") {
-                        Label(model.device?.name ?? model.device?.model ?? "iPod",
-                              systemImage: "ipod").tag(SidebarItem.device)
-                    }
-                }
-                Section("History") {
-                    Label("Sync History", systemImage: "clock.arrow.circlepath").tag(SidebarItem.history)
-                }
-            }
-            .navigationSplitViewColumnWidth(min: 200, ideal: 210, max: 260)
+            Sidebar(model: model, selection: selection,
+                    onForgetIpod: onForgetIpod, onSavePlaylist: onSavePlaylist)
         } detail: {
             detail
                 .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -54,6 +43,15 @@ struct MainWindow: View {
         .navigationTitle("Classick")
         .frame(minWidth: 860, minHeight: 560)
         .task { onAppearRequests() }
+        .onAppear {
+            // Default to Library on first show — `selectedDestination` starts
+            // `nil` (AppModel has no opinion on initial navigation), and an
+            // empty NavigationSplitView selection would render a blank
+            // detail pane.
+            if model.selectedDestination == nil {
+                model.selectedDestination = .library
+            }
+        }
     }
 
     @ViewBuilder
@@ -61,14 +59,23 @@ struct MainWindow: View {
         if model.needsFirstRunSetup {
             SetupCallToActionView(onSetUp: onSetUp)
         } else {
-            switch selection {
-            case .library:
+            switch model.selectedDestination {
+            case .library, nil:
                 LibraryView(model: model, onScan: onScan,
                             onPreview: onPreview, onSaveSelection: onSaveSelection)
             case .device:
+                // Device Music/Settings pages are built out in Tasks 5-6; for
+                // now both pages of the disclosure route to the existing
+                // dashboard so navigation is exercisable end-to-end.
                 DeviceView(model: model, onSaveSettings: onSaveSettings,
                            onForgetIpod: onForgetIpod, onBackfill: onBackfill,
                            onSaveIpodSelection: onSaveIpodSelection, onReplaceLibrary: onReplaceLibrary)
+            case let .playlist(slug):
+                // Playlist editor pages are built in Task 7.
+                ContentUnavailableView(
+                    "Playlist Editor Coming Soon",
+                    systemImage: "music.note.list",
+                    description: Text(slug))
             case .history:
                 HistoryView(model: model)
             }

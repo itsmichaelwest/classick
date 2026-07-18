@@ -24,4 +24,22 @@ enum SidebarDestination: Hashable, Sendable {
     static func destinationForDeviceRowClick(serial: String) -> SidebarDestination {
         .device(serial: serial, page: .music)
     }
+
+    /// The sidebar's "+ New Playlist" flow (Task 3): the caller snapshots
+    /// the playlist slugs that existed right before sending
+    /// `.savePlaylist(.manual(slug: nil, name: "New Playlist", ...))`, then
+    /// calls this on every subsequent `playlists_update` until it returns
+    /// non-nil. Returns the destination for the first slug in `updated` that
+    /// wasn't in `priorSlugs` — the newly assigned slug for that request —
+    /// or `nil` if this update doesn't contain one yet (an unrelated update
+    /// arrived first, or the daemon hasn't replied yet).
+    static func destinationForNewlyCreatedPlaylist(
+        priorSlugs: Set<String>,
+        updated: [PlaylistSummary]
+    ) -> SidebarDestination? {
+        guard let newSlug = updated.map(\.slug).first(where: { !priorSlugs.contains($0) }) else {
+            return nil
+        }
+        return .playlist(slug: newSlug)
+    }
 }
