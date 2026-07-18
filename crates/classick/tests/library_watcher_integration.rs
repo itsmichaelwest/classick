@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use classick::config_file::{DaemonSettings, PersistedConfig, SyncMode};
 use classick::daemon::device_watcher::{DeviceEvent, DeviceWatcher};
+use classick::daemon::history::SyncOutcome;
 use classick::daemon::runtime::{run_daemon_with_deps, DaemonDeps};
 use classick::daemon::sync_orchestrator::OrchestratorOutcome;
-use classick::daemon::history::SyncOutcome;
 use tokio::sync::mpsc;
 
 // The daemon binds a single transport address per instance; serialise the
@@ -90,7 +90,11 @@ fn noop_spawn(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<OrchestratorOutcome>> + Send>>
 {
     Box::pin(async move {
-        Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary: None, db_restored: false })
+        Ok(OrchestratorOutcome::Completed {
+            outcome: SyncOutcome::Ok,
+            summary: None,
+            db_restored: false,
+        })
     })
 }
 
@@ -126,20 +130,28 @@ async fn sandbox_with_source() -> WatcherSandbox {
 
     let scan_spawns = Arc::new(AtomicUsize::new(0));
     let scan_spawns_for_closure = scan_spawns.clone();
-    let spawn_scan = move |_serial: String,
-                           _drive: String,
-                           _cancel_rx: tokio::sync::oneshot::Receiver<()>,
-                           _pause_rx: tokio::sync::oneshot::Receiver<()>,
-                           _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
-                           _event_context: classick::daemon::session_admission::EventContext| {
-        scan_spawns_for_closure.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async move {
-            Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary: None, db_restored: false })
-        })
-            as std::pin::Pin<
-                Box<dyn std::future::Future<Output = anyhow::Result<OrchestratorOutcome>> + Send>,
-            >
-    };
+    let spawn_scan =
+        move |_serial: String,
+              _drive: String,
+              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
+              _pause_rx: tokio::sync::oneshot::Receiver<()>,
+              _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+              _event_context: classick::daemon::session_admission::EventContext| {
+            scan_spawns_for_closure.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(OrchestratorOutcome::Completed {
+                    outcome: SyncOutcome::Ok,
+                    summary: None,
+                    db_restored: false,
+                })
+            })
+                as std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<Output = anyhow::Result<OrchestratorOutcome>>
+                            + Send,
+                    >,
+                >
+        };
 
     let pipe_name = unique_pipe_name();
     let deps = DaemonDeps {
@@ -199,7 +211,8 @@ async fn watcher_change_triggers_one_scan_after_debounce() {
     std::fs::write(sb.source.join("added.flac"), b"x").unwrap();
 
     // Wait past the debounce window; exactly one scan should have spawned.
-    tokio::time::sleep(classick::daemon::LIBRARY_DEBOUNCE_WINDOW + Duration::from_millis(500)).await;
+    tokio::time::sleep(classick::daemon::LIBRARY_DEBOUNCE_WINDOW + Duration::from_millis(500))
+        .await;
     assert_eq!(
         sb.scan_spawns.load(Ordering::SeqCst),
         1,
