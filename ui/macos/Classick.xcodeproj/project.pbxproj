@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0A3FEB815A326868D819E58B /* SmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FDB10A10012288F988FE32C /* SmokeTests.swift */; };
 		1048844EE6A3198321594B2A /* MainWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495FAA88EEF9E0F49604E450 /* MainWindow.swift */; };
+		1E4C3D87214845558F1D7C7D /* SidebarDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3331333DE93E329157E37562 /* SidebarDestination.swift */; };
 		1EF2D88BD28C5DBB1C00A0EF /* AppModelReducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41284FF3EF16C964A6FDCCEF /* AppModelReducerTests.swift */; };
 		205413F237D7FB0ED719FD80 /* DaemonClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 692B715F0269A14C79855E96 /* DaemonClientTests.swift */; };
 		21C4AD8118E2A87AC6B16D8B /* DaemonProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD34388BC51EFD2420DCC244 /* DaemonProcess.swift */; };
@@ -54,6 +55,7 @@
 		1F6E6E19F0CC4A565F756B34 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		202553602D0B6CF9B75237B8 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		2FDB10A10012288F988FE32C /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
+		3331333DE93E329157E37562 /* SidebarDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarDestination.swift; sourceTree = "<group>"; };
 		39CCC1F780C5FA6F22AD6FA7 /* DaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClient.swift; sourceTree = "<group>"; };
 		3F08940741D874678EDEC6A1 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		41284FF3EF16C964A6FDCCEF /* AppModelReducerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelReducerTests.swift; sourceTree = "<group>"; };
@@ -138,6 +140,7 @@
 			children = (
 				3F08940741D874678EDEC6A1 /* AppModel.swift */,
 				5EF66143092AD180B04081EF /* SelectionDraft.swift */,
+				3331333DE93E329157E37562 /* SidebarDestination.swift */,
 				61DE80657A5644ED21E4873A /* Storage.swift */,
 			);
 			path = Model;
@@ -377,6 +380,7 @@
 				323700F7CDAEA8A69F46AF4D /* SettingsView.swift in Sources */,
 				8C007C9F5695000CBA16E4F7 /* SetupWindow.swift in Sources */,
 				8668B10A8A87B7D6D9251FBB /* SetupWindowController.swift in Sources */,
+				1E4C3D87214845558F1D7C7D /* SidebarDestination.swift in Sources */,
 				34B045E46CB1FFA37A665FA4 /* Storage.swift in Sources */,
 				ADA05051A9898D63AB07DD45 /* Updater.swift in Sources */,
 				3BE072B94276C28F1575F44A /* WireModels.swift in Sources */,

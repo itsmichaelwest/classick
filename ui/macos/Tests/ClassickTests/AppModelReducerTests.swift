@@ -326,4 +326,73 @@ final class AppModelReducerTests: XCTestCase {
         XCTAssertEqual(m.history.count, 1)
         XCTAssertEqual(m.history.first?.trigger, "manual")
     }
+
+    // MARK: - Protocol 1.6.0: playlists, per-device config, device preview
+
+    func testPlaylistsUpdateReplacesList() {
+        let m = AppModel()
+        m.apply(.playlistsUpdate([
+            PlaylistSummary(slug: "gym", name: "Gym", kind: .manual, tracks: 12, bytes: 900, error: nil),
+        ]))
+        XCTAssertEqual(m.playlists.map(\.slug), ["gym"])
+
+        m.apply(.playlistsUpdate([
+            PlaylistSummary(slug: "chill", name: "Chill", kind: .smart, tracks: 5, bytes: 100, error: nil),
+        ]))
+        XCTAssertEqual(m.playlists.map(\.slug), ["chill"], "playlists_update must replace the list, not append")
+    }
+
+    func testPlaylistDetailStoresMostRecentReply() {
+        let m = AppModel()
+        m.apply(.playlistDetail(PlaylistDetail(slug: "gym", name: "Gym", kind: .manual, tracks: ["a.flac"], rules: nil, error: nil)))
+        XCTAssertEqual(m.playlistDetail?.slug, "gym")
+        XCTAssertEqual(m.playlistDetail?.tracks, ["a.flac"])
+    }
+
+    func testDeviceConfigUpdateUpsertsBySerial() {
+        let m = AppModel()
+        m.apply(.deviceConfigUpdate(
+            serial: "0xA",
+            selection: SelectionState(mode: .include, rules: [.artist(name: "Boards of Canada")]),
+            subscriptions: SubscriptionsWire(playlists: ["gym"]),
+            settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false)))
+        XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.mode, .include)
+        XCTAssertEqual(m.deviceConfigs["0xA"]?.subscriptions.playlists, ["gym"])
+
+        // A config update for a second serial must upsert, not clobber the first.
+        m.apply(.deviceConfigUpdate(
+            serial: "0xB",
+            selection: SelectionState(mode: .all, rules: []),
+            subscriptions: SubscriptionsWire(playlists: []),
+            settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false)))
+        XCTAssertEqual(m.deviceConfigs.count, 2)
+        XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.mode, .include, "upsert must not disturb other serials")
+    }
+
+    func testDevicePreviewAttachesToTheRequestedSerial() {
+        let m = AppModel()
+        m.willRequestDevicePreview(serial: "0xA")
+        m.apply(.devicePreview(DevicePreview(
+            selectedTracks: 412, selectedBytes: 5_123_456_789,
+            playlistExtraTracks: 3, playlistExtraBytes: 90_000_000,
+            projectedFreeBytes: 1_200_000_000, unresolvedSubscriptions: nil)))
+        XCTAssertEqual(m.deviceConfigs["0xA"]?.preview?.selectedTracks, 412)
+        XCTAssertEqual(m.deviceConfigs["0xA"]?.preview?.projectedFreeBytes, 1_200_000_000)
+    }
+
+    /// `device_preview` carries no correlation id — without a pending
+    /// request to attach it to, the app must drop it rather than guess.
+    func testDevicePreviewWithNoPendingRequestIsDropped() {
+        let m = AppModel()
+        m.apply(.devicePreview(DevicePreview(
+            selectedTracks: 1, selectedBytes: 1, playlistExtraTracks: 0, playlistExtraBytes: 0,
+            projectedFreeBytes: nil, unresolvedSubscriptions: nil)))
+        XCTAssertTrue(m.deviceConfigs.isEmpty)
+    }
+
+    func testDestinationForDeviceRowClickSelectsMusicPage() {
+        XCTAssertEqual(
+            SidebarDestination.destinationForDeviceRowClick(serial: "0xA"),
+            .device(serial: "0xA", page: .music))
+    }
 }

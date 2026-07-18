@@ -38,6 +38,23 @@ struct AppConfig: Equatable, Sendable {
     var ipod: IpodIdentity?
 }
 
+/// One device's resolved config (protocol v1.6.0's `device_config_update`),
+/// plus its most recently requested `device_preview` (if any). Keyed by
+/// serial in `AppModel.deviceConfigs` so the app can hold config for more
+/// than one iPod this daemon has ever seen, not just the connected one.
+struct DeviceConfigState: Equatable, Sendable {
+    var selection: SelectionState
+    var subscriptions: SubscriptionsWire
+    var settings: DeviceSettingsWire
+    var preview: DevicePreview?
+
+    static let defaultState = DeviceConfigState(
+        selection: SelectionState(mode: .all, rules: []),
+        subscriptions: SubscriptionsWire(playlists: []),
+        settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        preview: nil)
+}
+
 @Observable
 @MainActor
 final class AppModel {
@@ -61,13 +78,27 @@ final class AppModel {
     private(set) var lastRunArtwork: ArtworkSummary?
     private(set) var lastRunDbRestored = false
 
-    struct SelectionState: Equatable, Sendable {
-        var mode: SelectionMode
-        var rules: [SelectionRule]
-    }
     private(set) var library: LibraryInfo?
     private(set) var selection: SelectionState?
     private(set) var selectionPreview: SelectionPreviewInfo?
+
+    // MARK: - Protocol 1.6.0: playlists, per-device config, device preview
+
+    private(set) var playlists: [PlaylistSummary] = []
+    /// Reply to the most recent `get_playlist` — for the playlist editor
+    /// (Task 7). Not scoped by slug: like `selectionPreview`, there's only
+    /// ever one in-flight editor request at a time.
+    private(set) var playlistDetail: PlaylistDetail?
+    private(set) var deviceConfigs: [String: DeviceConfigState] = [:]
+    /// Sidebar navigation selection. Plain (not `private(set)`) — the
+    /// sidebar view binds to this directly.
+    var selectedDestination: SidebarDestination?
+    /// `device_preview` carries no serial/correlation id on the wire (see
+    /// `DevicePreview`'s doc comment) — set immediately before sending
+    /// `.previewDevice(serial:)` so the next `devicePreview` event lands on
+    /// the right `deviceConfigs` entry.
+    private var pendingPreviewSerial: String?
+
     private var isScanning = false
     /// Raw device capacity for the Choose Music footer's capacity bar
     /// (storageText is display-only). Set beside storageText in the
@@ -141,10 +172,27 @@ final class AppModel {
         case let .selectionPreview(info):
             selectionPreview = info
 
-        // Protocol 1.6.0 events (playlists, per-device config, device
-        // preview): wired into AppModel state in a follow-up change.
-        case .playlistsUpdate, .playlistDetail, .deviceConfigUpdate, .devicePreview:
-            break
+        case let .playlistsUpdate(list):
+            playlists = list
+
+        case let .playlistDetail(detail):
+            playlistDetail = detail
+
+        case let .deviceConfigUpdate(serial, selection, subscriptions, settings):
+            var state = deviceConfigs[serial] ?? .defaultState
+            state.selection = selection
+            state.subscriptions = subscriptions
+            state.settings = settings
+            deviceConfigs[serial] = state
+
+        case let .devicePreview(preview):
+            // No serial on the wire (see DevicePreview's doc comment) — a
+            // preview that arrives with no pending request has nothing to
+            // attach to and is dropped rather than guessed at.
+            guard let serial = pendingPreviewSerial else { break }
+            var state = deviceConfigs[serial] ?? .defaultState
+            state.preview = preview
+            deviceConfigs[serial] = state
 
         case let .configUpdate(source, daemon, ipod):
             config = AppConfig(source: source, daemon: daemon, ipod: ipod)
@@ -205,6 +253,13 @@ final class AppModel {
     /// `decide_prompt` sent) so the same prompt isn't re-presented.
     func clearPendingPrompt() {
         pendingPrompt = nil
+    }
+
+    /// Call immediately before sending `.previewDevice(serial:)` — see
+    /// `pendingPreviewSerial`'s doc comment for why this bookkeeping is
+    /// necessary.
+    func willRequestDevicePreview(serial: String) {
+        pendingPreviewSerial = serial
     }
 
     private var phaseIsSyncing: Bool {
