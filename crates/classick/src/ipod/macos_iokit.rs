@@ -201,11 +201,11 @@ const KIO_GENERAL_INTEREST: &[u8] = b"IOGeneralInterest\0";
 /// tears down), which is why earlier unplugs went unnoticed.
 const KIO_MESSAGE_SERVICE_IS_TERMINATED: u32 = 0xE000_0010;
 
-/// Run a `CFRunLoop` that invokes `on_event` whenever an Apple (`0x05AC`) USB
-/// device is added or removed. Blocks the calling thread indefinitely (the
-/// notification source keeps the run loop alive) — intended to run on a
+/// Run a `CFRunLoop` that invokes `on_event` whenever a validated, supported
+/// iPod USB device is added or removed. Blocks the calling thread indefinitely
+/// (the notification source keeps the run loop alive) — intended to run on a
 /// dedicated `std::thread` owned by the device watcher. `on_event(Added)` also
-/// fires once at startup for each already-connected Apple device.
+/// fires once at startup for each already-connected supported iPod.
 ///
 /// Removal is detected the canonical Apple way: for every matched device we
 /// register a per-device `IOServiceAddInterestNotification(kIOGeneralInterest)`
