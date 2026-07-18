@@ -103,10 +103,22 @@ final class AppModel {
     /// sidebar view binds to this directly.
     var selectedDestination: SidebarDestination?
     /// `device_preview` carries no serial/correlation id on the wire (see
-    /// `DevicePreview`'s doc comment) — set immediately before sending
-    /// `.previewDevice(serial:)` so the next `devicePreview` event lands on
-    /// the right `deviceConfigs` entry.
-    private var pendingPreviewSerial: String?
+    /// `DevicePreview`'s doc comment) — appended immediately before sending
+    /// `.previewDevice(serial:)` so each `devicePreview` reply can be
+    /// attached to the right `deviceConfigs` entry.
+    ///
+    /// A FIFO **queue**, not a single slot: navigating from one device's
+    /// page to another's inside the first page's 400ms debounce window
+    /// leaves that page's stale `saveTask` free to fire its own
+    /// `previewDevice(serial:)` after the new page has already sent its own
+    /// request. A single slot would let whichever request fires last win,
+    /// so the reply for the OTHER serial attaches to the wrong device. This
+    /// is safe as a queue only because the daemon services commands from
+    /// one connection strictly in the order they were sent, so its
+    /// `device_preview` replies arrive in the same order the requests were
+    /// sent — the reply at the front of the queue always belongs to the
+    /// oldest still-pending request.
+    private var pendingPreviewSerials: [String] = []
 
     private var isScanning = false
     /// Raw device capacity for the Choose Music footer's capacity bar
@@ -198,8 +210,12 @@ final class AppModel {
         case let .devicePreview(preview):
             // No serial on the wire (see DevicePreview's doc comment) — a
             // preview that arrives with no pending request has nothing to
-            // attach to and is dropped rather than guessed at.
-            guard let serial = pendingPreviewSerial else { break }
+            // attach to and is dropped rather than guessed at. Otherwise,
+            // dequeue the front of `pendingPreviewSerials` — see that
+            // property's doc comment for why FIFO order is the right
+            // attachment rule.
+            guard !pendingPreviewSerials.isEmpty else { break }
+            let serial = pendingPreviewSerials.removeFirst()
             var state = deviceConfigs[serial] ?? .defaultState
             state.preview = preview
             deviceConfigs[serial] = state
@@ -266,10 +282,10 @@ final class AppModel {
     }
 
     /// Call immediately before sending `.previewDevice(serial:)` — see
-    /// `pendingPreviewSerial`'s doc comment for why this bookkeeping is
+    /// `pendingPreviewSerials`'s doc comment for why this bookkeeping is
     /// necessary.
     func willRequestDevicePreview(serial: String) {
-        pendingPreviewSerial = serial
+        pendingPreviewSerials.append(serial)
     }
 
     private var phaseIsSyncing: Bool {

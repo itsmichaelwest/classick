@@ -160,23 +160,31 @@ final class DeviceMusicLogicTests: XCTestCase {
     // MARK: - Sync Now disabled predicate
 
     func testSyncNowDisabledWhileSyncing() {
-        XCTAssertTrue(DeviceMusicLogic.isSyncNowDisabled(phase: .syncing(current: 1, total: 10, label: "x", etaSecs: nil)))
+        XCTAssertTrue(DeviceMusicLogic.isSyncNowDisabled(phase: .syncing(current: 1, total: 10, label: "x", etaSecs: nil), isConnected: true))
     }
 
     func testSyncNowDisabledWhileScanning() {
-        XCTAssertTrue(DeviceMusicLogic.isSyncNowDisabled(phase: .scanning(current: 1, total: 10)))
+        XCTAssertTrue(DeviceMusicLogic.isSyncNowDisabled(phase: .scanning(current: 1, total: 10), isConnected: true))
     }
 
     func testSyncNowDisabledWhenDisconnected() {
-        XCTAssertTrue(DeviceMusicLogic.isSyncNowDisabled(phase: .noDevice))
+        XCTAssertTrue(DeviceMusicLogic.isSyncNowDisabled(phase: .noDevice, isConnected: false))
     }
 
     func testSyncNowEnabledWhenIdle() {
-        XCTAssertFalse(DeviceMusicLogic.isSyncNowDisabled(phase: .idle))
+        XCTAssertFalse(DeviceMusicLogic.isSyncNowDisabled(phase: .idle, isConnected: true))
     }
 
     func testSyncNowEnabledWhenPaused() {
-        XCTAssertFalse(DeviceMusicLogic.isSyncNowDisabled(phase: .paused(synced: 5, total: 10)))
+        XCTAssertFalse(DeviceMusicLogic.isSyncNowDisabled(phase: .paused(synced: 5, total: 10), isConnected: true))
+    }
+
+    /// Review finding #2: the phase-only predicate has no idea WHICH
+    /// device's page is showing. With some OTHER iPod connected (idle,
+    /// nothing blocking it) than the one this page represents, Sync Now
+    /// must stay disabled — otherwise clicking it syncs the wrong device.
+    func testSyncNowDisabledWhenPageDeviceIsNotTheConnectedDeviceEvenIfIdle() {
+        XCTAssertTrue(DeviceMusicLogic.isSyncNowDisabled(phase: .idle, isConnected: false))
     }
 
     // MARK: - Capacity bar (supporting formatting helper)

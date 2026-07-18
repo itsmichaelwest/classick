@@ -36,21 +36,30 @@ struct DeviceSettingsPage: View {
     private var config: DeviceConfigState? { model.deviceConfigs[serial] }
     private var isConnected: Bool { model.device?.serial == serial }
     private var deviceName: String {
-        model.device?.name ?? model.device?.model ?? model.config?.ipod?.name ?? model.config?.ipod?.modelLabel ?? "This iPod"
+        DeviceIdentityLogic.deviceName(serial: serial, isConnected: isConnected, connectedDevice: model.device, pairedIpod: model.config?.ipod)
     }
     private var syncedSummary: String {
-        if let total = model.libraryCount { return "\(model.syncedCount) of \(total)" }
-        return "\(model.syncedCount)"
+        DeviceIdentityLogic.syncedSummaryText(isConnected: isConnected, syncedCount: model.syncedCount, libraryCount: model.libraryCount)
     }
 
     var body: some View {
         Form {
             Section {
                 LabeledContent("Name", value: deviceName)
-                if let storage = model.storageText { LabeledContent("Capacity", value: storage) }
+                if let capacity = DeviceIdentityLogic.capacityText(isConnected: isConnected, storageText: model.storageText) {
+                    LabeledContent("Capacity", value: capacity)
+                }
                 LabeledContent("Synced", value: syncedSummary)
-                if let last = model.lastSync {
-                    LabeledContent("Last synced", value: shortDate(last.timestamp))
+                // `model.lastSync` is the CONNECTED device's last sync —
+                // showing it on a different device's page would
+                // misattribute it (finding #2), so it collapses to the
+                // shared placeholder there instead of the real timestamp.
+                if isConnected {
+                    if let last = model.lastSync {
+                        LabeledContent("Last synced", value: shortDate(last.timestamp))
+                    }
+                } else {
+                    LabeledContent("Last synced", value: DeviceIdentityLogic.placeholder)
                 }
                 if let caption = DeviceSettingsLogic.caption(isConnected: isConnected) {
                     Text(caption).font(.caption).foregroundStyle(.secondary)
@@ -65,7 +74,7 @@ struct DeviceSettingsPage: View {
             }
             Section {
                 Button("Replace Library…", role: .destructive) { showReplaceConfirm = true }
-                    .disabled(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: model.phase))
+                    .disabled(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: model.phase, isConnected: isConnected))
                 Text("Erase iPod and re-sync current selection")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -91,6 +100,10 @@ struct DeviceSettingsPage: View {
             userEdited = true
             scheduleSave(newDraft)
         }
+        // See `DeviceMusicPage`'s identical `.onDisappear` for the
+        // rationale — cancels an in-flight debounced save the instant this
+        // page is navigated away from.
+        .onDisappear { saveTask?.cancel() }
         .sheet(isPresented: $showReplaceConfirm) {
             ReplaceLibraryConfirmationSheet(
                 deviceName: deviceName,
@@ -146,12 +159,19 @@ enum DeviceSettingsLogic {
         .saveDeviceConfig(serial: serial, selection: nil, subscriptions: nil, settings: settings)
     }
 
-    /// Replace Library's disabled predicate: only guards against racing an
+    /// Replace Library's disabled predicate: guards against racing an
     /// in-flight sync/scan (mirrors the retired `DeviceView`'s
-    /// `isSyncOrScanRunning`) — the daemon itself rejects a disconnected
-    /// Replace with `sync_rejected`, so disconnected devices stay editable
-    /// per the Global Constraints rather than being disabled here too.
-    static func isReplaceLibraryDisabled(phase: Phase) -> Bool {
+    /// `isSyncOrScanRunning`) — AND (review finding #2) against targeting
+    /// the wrong device. `replace_library` carries no serial on the wire —
+    /// it wipes whichever iPod is physically connected right now, not
+    /// necessarily the one this page represents. Earlier this only checked
+    /// `phase`, on the theory that the daemon's `sync_rejected` would catch
+    /// a disconnected Replace; that reasoning doesn't hold for "the WRONG
+    /// device is connected", since the daemon has no way to know it's wrong
+    /// — it just wipes whatever's plugged in. So `isConnected` (this page's
+    /// serial == the connected device's serial) must hold too.
+    static func isReplaceLibraryDisabled(phase: Phase, isConnected: Bool) -> Bool {
+        guard isConnected else { return true }
         switch phase {
         case .syncing, .scanning: return true
         default: return false

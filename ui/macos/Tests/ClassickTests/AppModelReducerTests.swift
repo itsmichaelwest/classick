@@ -390,6 +390,33 @@ final class AppModelReducerTests: XCTestCase {
         XCTAssertTrue(m.deviceConfigs.isEmpty)
     }
 
+    /// Review finding #1: a single `String?` slot misattributes replies when
+    /// the user navigates to a second device's page inside the first page's
+    /// debounce window — both requests are in flight before either reply
+    /// lands, so the slot gets overwritten by the second request before the
+    /// first request's reply arrives. The fix is a FIFO queue: since the
+    /// daemon services one connection's commands strictly in order, replies
+    /// arrive in the same order the requests were sent, so dequeuing the
+    /// front of the queue on every reply always attaches to the right serial
+    /// — even when two requests are interleaved before either reply shows up.
+    func testDevicePreviewQueueAttachesInterleavedRepliesInRequestOrder() {
+        let m = AppModel()
+        m.willRequestDevicePreview(serial: "0xA")
+        m.willRequestDevicePreview(serial: "0xB")
+
+        m.apply(.devicePreview(DevicePreview(
+            selectedTracks: 111, selectedBytes: 1, playlistExtraTracks: 0, playlistExtraBytes: 0,
+            projectedFreeBytes: nil, unresolvedSubscriptions: nil)))
+        XCTAssertEqual(m.deviceConfigs["0xA"]?.preview?.selectedTracks, 111, "first reply must attach to the first (oldest) request")
+        XCTAssertNil(m.deviceConfigs["0xB"]?.preview, "second request's reply hasn't arrived yet")
+
+        m.apply(.devicePreview(DevicePreview(
+            selectedTracks: 222, selectedBytes: 2, playlistExtraTracks: 0, playlistExtraBytes: 0,
+            projectedFreeBytes: nil, unresolvedSubscriptions: nil)))
+        XCTAssertEqual(m.deviceConfigs["0xB"]?.preview?.selectedTracks, 222, "second reply must attach to the second request, not re-overwrite the first")
+        XCTAssertEqual(m.deviceConfigs["0xA"]?.preview?.selectedTracks, 111, "the first serial's attached preview must be undisturbed")
+    }
+
     func testDestinationForDeviceRowClickSelectsMusicPage() {
         XCTAssertEqual(
             SidebarDestination.destinationForDeviceRowClick(serial: "0xA"),

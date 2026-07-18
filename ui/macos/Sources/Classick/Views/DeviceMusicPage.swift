@@ -40,7 +40,7 @@ struct DeviceMusicPage: View {
     private var config: DeviceConfigState? { model.deviceConfigs[serial] }
     private var isConnected: Bool { model.device?.serial == serial }
     private var deviceName: String {
-        model.device?.name ?? model.device?.model ?? model.config?.ipod?.name ?? model.config?.ipod?.modelLabel ?? "This iPod"
+        DeviceIdentityLogic.deviceName(serial: serial, isConnected: isConnected, connectedDevice: model.device, pairedIpod: model.config?.ipod)
     }
 
     var body: some View {
@@ -68,6 +68,14 @@ struct DeviceMusicPage: View {
             userEdited = true
             scheduleSave(newDraft)
         }
+        // Belt-and-suspenders alongside the `pendingPreviewSerials` queue
+        // fix: cancels an in-flight debounce the instant this page is
+        // navigated away from, so a stale `saveTask` firing after teardown
+        // is minimized rather than merely tolerated. (A stale
+        // `save_device_config` itself is harmless — it's serial-keyed — it
+        // was only the paired `previewDevice` request that could
+        // misattribute without the queue fix.)
+        .onDisappear { saveTask?.cancel() }
     }
 
     // MARK: - Header: title, Sync Now, mode picker, facet, caption
@@ -82,7 +90,7 @@ struct DeviceMusicPage: View {
                 Spacer()
                 Button("Sync Now", action: onSyncNow)
                     .buttonStyle(.borderedProminent)
-                    .disabled(DeviceMusicLogic.isSyncNowDisabled(phase: model.phase))
+                    .disabled(DeviceMusicLogic.isSyncNowDisabled(phase: model.phase, isConnected: isConnected))
             }
             Picker("Sync", selection: Binding(get: { draft.mode }, set: setMode)) {
                 Text("Entire library").tag(SelectionMode.all)
@@ -114,6 +122,9 @@ struct DeviceMusicPage: View {
     }
 
     private var lastSyncedSubtitle: String {
+        // `model.lastSync` is the CONNECTED device's last sync — showing it
+        // on a different device's page would misattribute it (finding #2).
+        guard isConnected else { return DeviceIdentityLogic.placeholder }
         guard let last = model.lastSync else { return "Never synced" }
         return "Last synced \(shortDate(last.timestamp))"
     }
@@ -195,7 +206,13 @@ struct DeviceMusicPage: View {
 
     @ViewBuilder
     private var capacityBar: some View {
-        if let bar = DeviceMusicLogic.capacityBar(storage: model.deviceStorage, preview: config?.preview) {
+        // `model.deviceStorage` is the CONNECTED device's live capacity
+        // reading — on a different device's page it describes the wrong
+        // iPod entirely, so the bar simply doesn't render there (finding #2;
+        // the floating bar has no natural place for a text placeholder, so
+        // "omit" is the right call per the review, unlike the text fields
+        // above which use `DeviceIdentityLogic.placeholder`).
+        if isConnected, let bar = DeviceMusicLogic.capacityBar(storage: model.deviceStorage, preview: config?.preview) {
             VStack(alignment: .leading, spacing: 4) {
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
@@ -290,9 +307,15 @@ enum DeviceMusicLogic {
     }
 
     /// "prominent Sync Now (disabled while syncing/scanning/disconnected)"
-    /// — per the plan, only these three conditions disable it; idle,
-    /// paused, notConfigured, and error all leave it enabled.
-    static func isSyncNowDisabled(phase: Phase) -> Bool {
+    /// — per the plan, only these three phase conditions disable it; idle,
+    /// paused, notConfigured, and error all leave it enabled. On top of
+    /// that (review finding #2), `isConnected` — whether THIS page's device
+    /// is the one `phase` actually describes — must also hold: `phase` is
+    /// global connected-device state, so a page for some OTHER (or no)
+    /// connected device must stay disabled regardless of how idle that
+    /// phase looks, or Sync Now would sync the wrong iPod.
+    static func isSyncNowDisabled(phase: Phase, isConnected: Bool) -> Bool {
+        guard isConnected else { return true }
         switch phase {
         case .syncing, .scanning, .noDevice: return true
         default: return false

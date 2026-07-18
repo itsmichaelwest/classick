@@ -34,27 +34,44 @@ final class DeviceSettingsLogicTests: XCTestCase {
         XCTAssertEqual(settings["rockbox_compat"] as? Bool, false)
     }
 
-    // MARK: - Replace Library disabled predicate (syncing/scanning only)
+    // MARK: - Replace Library disabled predicate (syncing/scanning, or wrong device)
 
     func testReplaceDisabledWhileSyncing() {
         XCTAssertTrue(DeviceSettingsLogic.isReplaceLibraryDisabled(
-            phase: .syncing(current: 1, total: 10, label: "x", etaSecs: nil)))
+            phase: .syncing(current: 1, total: 10, label: "x", etaSecs: nil), isConnected: true))
     }
 
     func testReplaceDisabledWhileScanning() {
-        XCTAssertTrue(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: .scanning(current: 1, total: 10)))
+        XCTAssertTrue(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: .scanning(current: 1, total: 10), isConnected: true))
     }
 
     func testReplaceEnabledWhenIdle() {
-        XCTAssertFalse(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: .idle))
+        XCTAssertFalse(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: .idle, isConnected: true))
     }
 
-    func testReplaceEnabledWhenDisconnected() {
-        // Disconnected pages stay editable per the Global Constraints; Replace
-        // itself still requires a connected device at the daemon layer, but
-        // that's the daemon's `sync_rejected` to enforce, not this predicate's
-        // — it only guards against racing an in-flight sync/scan.
-        XCTAssertFalse(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: .noDevice))
+    /// Review finding #2: superseded — this used to stay enabled while
+    /// disconnected on the theory that the daemon's own `sync_rejected`
+    /// would catch a bad Replace. But `replace_library` carries no serial
+    /// on the wire: it wipes whichever device IS physically connected right
+    /// now, not the device this page represents. If this page's device
+    /// isn't the connected one — including "nothing is connected at all" —
+    /// Replace Library must be disabled here, not left to the daemon, or a
+    /// click can erase a DIFFERENT iPod than the one the user is looking at.
+    func testReplaceDisabledWhenDisconnected() {
+        XCTAssertTrue(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: .noDevice, isConnected: false))
+    }
+
+    /// The page's device IS connected and idle -> enabled (baseline case,
+    /// restated with the new parameter for clarity alongside the two above).
+    func testReplaceEnabledWhenIdleAndConnected() {
+        XCTAssertFalse(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: .idle, isConnected: true))
+    }
+
+    /// A DIFFERENT iPod is connected and idle (nothing syncing/scanning),
+    /// but it isn't the device this page represents -> must stay disabled,
+    /// since Replace Library would wipe that other, connected device.
+    func testReplaceDisabledWhenPageDeviceIsNotTheConnectedDeviceEvenIfIdle() {
+        XCTAssertTrue(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: .idle, isConnected: false))
     }
 
     // MARK: - Disconnected caption (Global Constraints exact string)
