@@ -12,7 +12,7 @@
 
 - Preserve the dirty worktree. Stage only files named by the task being committed; never revert or overwrite unrelated playlist/macOS work.
 - Keep `\\jupiter\data\media\music` read-only. Device writes are allowed only after Plan 3's coordinated transaction exists.
-- Keep old Windows/config/wire shapes readable during the compatibility window. New macOS commands always carry serial and request ID where defined.
+- Break the daemon wire protocol cleanly to 2.0.0. Update the macOS and Windows clients together; require `serial` and `request_id` wherever the command semantics require them, reject v1 daemon payloads at decode, and remove singleton `get_selection`/`save_selection`. This does not remove on-disk config, history, or device-data migrations.
 - Do not raise the deployment target above macOS 15. Gate newer visual APIs with availability checks.
 - Add regression coverage before each bug fix and observe the focused RED failure before implementing.
 - Keep new files below roughly 500 lines and split the existing oversized runtime, wire, and view files along the boundaries named in these plans.

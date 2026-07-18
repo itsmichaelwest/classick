@@ -6,7 +6,7 @@
 
 **Architecture:** Daemon writes are acknowledged with revisions/request IDs; generic `AcknowledgedDraft` reconciles local edits. Only Plan 1 authoritative device snapshots drive terminal UI state. `DeviceRowPresentation` and `MenuBarLabelPresentation` are pure tested values rendered by stable SwiftUI shells.
 
-**Tech Stack:** Rust daemon stores, additive JSON IPC, Swift 6 observable model, SwiftUI/AppKit, deterministic previews and XCTest.
+**Tech Stack:** Rust daemon stores, daemon JSON IPC protocol 2.0.0, Swift 6 observable model, SwiftUI/AppKit, deterministic previews and XCTest.
 
 ## Global Constraints
 

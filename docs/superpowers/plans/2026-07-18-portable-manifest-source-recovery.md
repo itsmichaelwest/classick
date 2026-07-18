@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Depends on Plan 1's registry/serial targeting. Preserve legacy config and Windows wire compatibility.
+- Depends on Plan 1's registry/serial targeting and its clean daemon protocol 2.0.0 cutover. Preserve legacy config and device-data migrations; update the Windows wire client together with macOS rather than retaining v1 daemon payload compatibility.
 - Never serialize a native `PathBuf` in manifest v2; keep absolute paths only in the runtime `Manifest`.
 - Never log/store SMB credentials or write to the source. Use the mountpoint returned by NetFS, not a guessed `/Volumes` name.
 - Plan 3 will consume `ManifestStore::publish`; do not duplicate checkpoint ordering here.

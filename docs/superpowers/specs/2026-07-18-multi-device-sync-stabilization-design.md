@@ -6,8 +6,8 @@
 
 **Scope:** Rust daemon, sync/apply pipeline, portable device state, macOS IPC
 and SwiftUI state, device-row presentation, SMB source recovery, and daemon
-lifecycle. The Windows UI remains wire-compatible but does not receive a
-visual redesign in this work.
+lifecycle. The macOS and Windows clients move together to daemon protocol
+2.0.0; the Windows UI does not receive a visual redesign in this work.
 
 ## 1. Problem statement
 
@@ -47,6 +47,11 @@ gives cancellation an explicit finalization phase.
   views, or the apply pipeline.
 - Every mutating or device-specific command names a serial. “Whichever iPod is
   connected” is not a valid command target.
+- Daemon IPC is a clean breaking protocol 2.0.0 release: v1 daemon payloads,
+  including singleton `get_selection` and `save_selection` commands, are
+  rejected at decode rather than routed through compatibility targeting. macOS
+  and Windows ship the v2 wire change together. This API decision does not
+  remove the separate migrations for persisted config, history, or device data.
 - A known disconnected device remains visible in the sidebar. Attaching an
   unconfigured device adds another row; it never replaces a known row.
 - “Last synced” means the latest successful sync for that device. Failed,
@@ -109,9 +114,12 @@ Each device snapshot includes:
 - last terminal error or cancellation summary;
 - per-device selection/settings/subscriptions revision.
 
-Commands for sync, preview, configuration, replace, backfill, eject, and forget
-carry `serial`; request/reply operations also carry a `request_id`. Replies echo
-both fields. This removes the Swift FIFO correlation queues.
+Commands for sync, preview, device configuration, replace, backfill, eject,
+and forget carry `serial`; request/reply operations also carry a `request_id`.
+Replies echo every semantically applicable field. Global operations do not
+invent a serial, and scan-session events may have no serial; neither exception
+weakens the requirement for a device-specific or correlated command. This
+removes the Swift FIFO correlation queues.
 
 ## 4. Portable device state
 
@@ -390,7 +398,8 @@ Plans 6–8 are specified in
 `docs/superpowers/specs/2026-07-18-playlist-delivery-drag-drop-design.md` and
 execute as Plans 6A–6C after the dependencies named in the execution index.
 
-The wire changes remain additive within the daemon protocol while old commands
-are retained during the Windows compatibility window. Old unscoped mutating
-commands are rejected when targeting would be ambiguous; they are removed only
-in a future major protocol release.
+The daemon wire changes are delivered as the clean breaking protocol 2.0.0
+release. Both clients implement the same v2 command/event shapes in this work;
+the daemon rejects old payloads during decoding, rather than inferring a legacy
+target. Persisted config, history, and device data retain their explicit
+migration paths.

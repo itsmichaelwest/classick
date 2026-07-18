@@ -366,9 +366,9 @@ Run: `cargo test -p classick --test daemon_multi_device_integration -- --test-th
 
 Expected: compile failure for the absent command helper.
 
-- [ ] **Step 3: Implement additive wire/runtime handling**
+- [ ] **Step 3: Implement additive v2 wire/runtime handling**
 
-Keep legacy command shapes readable, bump the daemon protocol minor version, and document these exact examples:
+Build on Plan 1's clean daemon protocol 2.0.0 cutover. Do not preserve legacy command shapes or add a compatibility decoder: these additive commands require their defined target and `request_id`, and old payloads are rejected at decode. Keep the device command serial-targeted; the playlist command is global and therefore has no serial. Document these exact examples:
 
 ```json
 {"type":"add_selection_to_device","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740","serial":"A","rules":[{"kind":"artist","name":"Birdy"}]}
@@ -380,7 +380,7 @@ Keep legacy command shapes readable, bump the daemon protocol minor version, and
 
 Run: `cargo test -p classick ipc_daemon`
 
-Expected: IPC tests pass with the additive protocol version.
+Expected: IPC tests pass with daemon protocol 2.0.0.
 
 Run: `cargo test -p classick --test daemon_runtime_integration -- --test-threads=1`
 

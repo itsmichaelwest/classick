@@ -12,7 +12,7 @@
 
 - Follow the execution-index constraints and preserve all dirty runtime/Swift changes.
 - `canonical_serial_key` is comparison-only; preserve the raw serial on disk and wire.
-- Legacy unscoped commands are accepted only with exactly one valid target; ambiguity is an explicit rejection.
+- Daemon IPC moves directly to protocol 2.0.0: device-specific commands require a serial, correlated operations require a request ID, and v1 daemon payloads are rejected at decode. Global operations remain serial-less and scan sessions may remain serial-less.
 - This plan attributes progress and completion but does not implement Plan 3's finalizing cancellation transaction or Plan 5's visual redesign.
 
 ---
@@ -63,7 +63,7 @@ Retain `scan_for_ipod()` as a compatibility wrapper. Sort scans deterministicall
 
 ### Task 3: Snapshot and targeted IPC contract
 
-**Files:** Create `crates/classick/src/ipc_device.rs`; modify `crates/classick/src/ipc_daemon.rs`, `crates/classick/src/lib.rs`, `docs/ipc-protocol.md`; split `ui/macos/Sources/Classick/Ipc/WireModels.swift` into `DaemonCommand.swift`, `DaemonEvent.swift`, and `SyncEvent.swift`; modify `ui/macos/Tests/ClassickTests/WireCodecTests.swift`.
+**Files:** Create `crates/classick/src/ipc_device.rs`; modify `crates/classick/src/ipc_daemon.rs`, `crates/classick/src/lib.rs`, `docs/ipc-protocol.md`, `ui/windows/Classick.UI.Core/Ipc/DaemonCommand.cs`, and `DaemonEvent.cs`; split `ui/macos/Sources/Classick/Ipc/WireModels.swift` into `DaemonCommand.swift`, `DaemonEvent.swift`, and `SyncEvent.swift`; modify the macOS wire-codec tests and the Windows IPC tests.
 
 ```rust
 pub struct DeviceInventorySnapshot {
@@ -81,11 +81,11 @@ pub struct DeviceSnapshot {
 }
 ```
 
-`DeviceSnapshot` contains identity, configured/connected/mount, phase/session, storage/counts, latest successful sync, latest attempt, retained terminal error, and three device-config revisions. Add `config_revision` plus `acknowledged_request_id` to global `config_update`/`save_config`. Add optional serial/request ID to old command shapes; new Swift always sends them. `SyncEvent` carries optional serial plus session ID. Replies echo serial/request ID.
+`DeviceSnapshot` contains identity, configured/connected/mount, phase/session, storage/counts, latest successful sync, latest attempt, retained terminal error, and three device-config revisions. Add `config_revision` plus `acknowledged_request_id` to global `config_update`/`save_config`. Protocol 2.0.0 requires serials on device-specific commands and request IDs on correlated operations; global commands have no serial, and scan-session events may have no serial. `SyncEvent` carries serial when it has device context plus session ID. Replies echo semantically applicable correlation fields. Remove singleton `get_selection`/`save_selection`; v1 daemon payloads fail decoding.
 
-- [ ] Add exact old/new JSON RED tests, A+B snapshot round-trip, serial on every new mutating command, and echoed correlation fields in Rust and Swift.
-- [ ] Run `cargo test -p classick ipc_daemon` and `cd ui/macos && swift test --filter WireCodecTests`.
-- [ ] Implement the additive protocol, bump its minor version, document ambiguity rejection, regenerate Xcode project if split files require it, and rerun GREEN.
+- [ ] Add RED codec tests for valid v2 JSON, missing required serial/request-ID rejection, v1 command/event and singleton-command decode rejection, A+B snapshot round-trip, and echoed correlation fields in Rust, Swift, and C#.
+- [ ] Run `cargo test -p classick ipc_daemon`, `cd ui/macos && swift test --filter WireCodecTests`, and `dotnet test ui/windows/Classick.UI.Tests/Classick.UI.Tests.csproj` on a host with .NET 10.
+- [ ] Implement protocol 2.0.0 in Rust and both clients, update the protocol document, remove singleton selection commands, regenerate the Xcode project if split files require it, and rerun GREEN.
 - [ ] Commit: `git commit -m "feat(ipc): add device inventory snapshots"`.
 
 ### Task 4: Isolated session admission and attributed progress
@@ -113,7 +113,7 @@ Store sessions and control channels keyed by session ID even at capacity one. Al
 
 **Files:** Modify `crates/classick/src/daemon/runtime.rs`, `runtime_state.rs`, `command_handler.rs`, `daemon/library.rs`; create `daemon/device_snapshot.rs`; create `crates/classick/tests/daemon_multi_device_integration.rs`.
 
-Replace `connected: Option<_>` with a canonical-key map. Build previews/counts/config for an explicit serial. Snapshot after handshake and every device/session/history/config mutation. Rejections cover unknown, disconnected, unconfigured, occupied, stale session, and ambiguous legacy targets. Completion updates only its serial.
+Replace `connected: Option<_>` with a canonical-key map. Build previews/counts/config for an explicit serial. Snapshot after handshake and every device/session/history/config mutation. Rejections cover unknown, disconnected, unconfigured, occupied, and stale session. Legacy target inference does not exist because v1 daemon payloads are rejected at decode. Completion updates only its serial.
 
 - [ ] Add platform-neutral RED integration tests for A+B, disconnect A preserving B, syncing B's drive, unknown B never targeting A, unconfigured B coexistence, rejection correlation, isolated completion, and full fresh-client snapshot.
 - [ ] Implement runtime routing and run `cargo test -p classick --test daemon_multi_device_integration` then full `cargo test -p classick` GREEN.
