@@ -20,8 +20,8 @@ pub fn extract_firewire_guid(sysinfo: &str) -> Result<String> {
 /// Resolve `<mount>\iPod_Control\Device\SysInfo`, read it, extract FirewireGuid.
 pub fn read_firewire_guid(ipod_mount: &Path) -> Result<String> {
     let path = crate::ipod::layout::sysinfo_path(ipod_mount);
-    let body = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
+    let body =
+        std::fs::read_to_string(&path).map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
     extract_firewire_guid(&body)
 }
 
@@ -33,16 +33,13 @@ pub fn read_firewire_guid(ipod_mount: &Path) -> Result<String> {
 /// # Safety
 /// `device` must be a valid `*mut Itdb_Device` obtained from libgpod
 /// (e.g. via `(*db.as_ptr()).device` after a successful `itdb_parse_file`).
-pub unsafe fn set_firewire_guid(
-    device: *mut ffi::Itdb_Device,
-    guid: &str,
-) -> Result<()> {
+pub unsafe fn set_firewire_guid(device: *mut ffi::Itdb_Device, guid: &str) -> Result<()> {
     if device.is_null() {
         return Err(anyhow!("Itdb_Device pointer is NULL"));
     }
     const KEY: &CStr = c"FirewireGuid";
-    let value = CString::new(guid)
-        .map_err(|_| anyhow!("FirewireGuid contains interior NUL byte"))?;
+    let value =
+        CString::new(guid).map_err(|_| anyhow!("FirewireGuid contains interior NUL byte"))?;
     ffi::itdb_device_set_sysinfo(device, KEY.as_ptr(), value.as_ptr());
     Ok(())
 }
@@ -59,16 +56,13 @@ pub unsafe fn set_firewire_guid(
 ///
 /// # Safety
 /// `device` must be a valid `*mut Itdb_Device` obtained from libgpod.
-pub unsafe fn set_model_num(
-    device: *mut ffi::Itdb_Device,
-    model_num: &str,
-) -> Result<()> {
+pub unsafe fn set_model_num(device: *mut ffi::Itdb_Device, model_num: &str) -> Result<()> {
     if device.is_null() {
         return Err(anyhow!("Itdb_Device pointer is NULL"));
     }
     const KEY: &CStr = c"ModelNumStr";
-    let value = CString::new(model_num)
-        .map_err(|_| anyhow!("ModelNumStr contains interior NUL byte"))?;
+    let value =
+        CString::new(model_num).map_err(|_| anyhow!("ModelNumStr contains interior NUL byte"))?;
     ffi::itdb_device_set_sysinfo(device, KEY.as_ptr(), value.as_ptr());
     Ok(())
 }
@@ -108,16 +102,17 @@ pub fn resolve_libgpod_identity(ipod_mount: &Path) -> Result<LibgpodIdentity> {
     // Path 1: on-disk SysInfo.
     let sysinfo_path = crate::ipod::layout::sysinfo_path(ipod_mount);
     let sysinfo_text = std::fs::read_to_string(&sysinfo_path).unwrap_or_default();
-    let disk_guid = parse_sysinfo_field(&sysinfo_text, "FirewireGuid")
-        .filter(|s| !s.is_empty());
-    let disk_model = parse_sysinfo_field(&sysinfo_text, "ModelNumStr")
-        .filter(|s| !s.is_empty());
+    let disk_guid = parse_sysinfo_field(&sysinfo_text, "FirewireGuid").filter(|s| !s.is_empty());
+    let disk_model = parse_sysinfo_field(&sysinfo_text, "ModelNumStr").filter(|s| !s.is_empty());
 
     // If on-disk SysInfo gives us BOTH, use it as-is and skip the
     // shell-out. Modern iTunes leaves SysInfo empty so this rarely
     // hits, but when it does (older iTunes, prior tool) we honour it.
     if let (Some(guid), Some(model_num_str)) = (disk_guid.clone(), disk_model.clone()) {
-        return Ok(LibgpodIdentity { firewire_guid: guid, model_num_str });
+        return Ok(LibgpodIdentity {
+            firewire_guid: guid,
+            model_num_str,
+        });
     }
 
     // Path 2+3: native USB descriptor enumeration (Windows: SetupAPI +
@@ -146,7 +141,10 @@ pub fn resolve_libgpod_identity(ipod_mount: &Path) -> Result<LibgpodIdentity> {
             )
         })?;
 
-    Ok(LibgpodIdentity { firewire_guid, model_num_str })
+    Ok(LibgpodIdentity {
+        firewire_guid,
+        model_num_str,
+    })
 }
 
 /// Non-Windows identity resolution. Layer 1: on-disk SysInfo (older
@@ -162,7 +160,10 @@ pub fn resolve_libgpod_identity(ipod_mount: &Path) -> Result<LibgpodIdentity> {
     let disk_model = parse_sysinfo_field(&sysinfo_text, "ModelNumStr").filter(|s| !s.is_empty());
 
     if let (Some(guid), Some(model_num_str)) = (disk_guid.clone(), disk_model.clone()) {
-        return Ok(LibgpodIdentity { firewire_guid: guid, model_num_str });
+        return Ok(LibgpodIdentity {
+            firewire_guid: guid,
+            model_num_str,
+        });
     }
 
     let recovered = recover_ipod_info_from_usb(ipod_mount)
@@ -180,7 +181,10 @@ pub fn resolve_libgpod_identity(ipod_mount: &Path) -> Result<LibgpodIdentity> {
                 recovered.capacity_bytes,
             )
         })?;
-    Ok(LibgpodIdentity { firewire_guid, model_num_str })
+    Ok(LibgpodIdentity {
+        firewire_guid,
+        model_num_str,
+    })
 }
 
 /// Detected iPod identity returned by drive-scan helpers.
@@ -292,7 +296,11 @@ pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
                 recovered.capacity_bytes,
                 recovered.disk_number,
                 recovered.identity,
-                recovered.sysinfo_extended_xml.as_deref().map(str::len).unwrap_or(0),
+                recovered
+                    .sysinfo_extended_xml
+                    .as_deref()
+                    .map(str::len)
+                    .unwrap_or(0),
                 recovered.sysinfo_extended_parsed.is_some(),
             );
             if need_serial_recovery {
@@ -332,7 +340,9 @@ pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
     }
 
     let serial = serial?;
-    if serial.is_empty() { return None; }
+    if serial.is_empty() {
+        return None;
+    }
     let model_label = model_label_override.unwrap_or_else(|| describe_model(&model_num));
     // Stash the volume GUID so the watcher can fast-path subsequent
     // polls (one Win32 resolve vs. re-walking every present volume).
@@ -433,7 +443,9 @@ pub fn mount_for_volume_guid(volume_guid: &str) -> Option<std::path::PathBuf> {
         if first_nul == 0 {
             return None;
         }
-        Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..first_nul])))
+        Some(std::path::PathBuf::from(String::from_utf16_lossy(
+            &buf[..first_nul],
+        )))
     }
     #[cfg(not(windows))]
     {
@@ -456,10 +468,7 @@ pub fn mount_for_volume_guid(volume_guid: &str) -> Option<std::path::PathBuf> {
 /// On hit, returns a fresh `DetectedIpod` with the current drive path
 /// (which may differ from the cached observation if Windows reassigned
 /// the letter) and the cached identity carried forward.
-pub fn try_resolve_known_volume(
-    volume_guid: &str,
-    prev: &DetectedIpod,
-) -> Option<DetectedIpod> {
+pub fn try_resolve_known_volume(volume_guid: &str, prev: &DetectedIpod) -> Option<DetectedIpod> {
     let mount = mount_for_volume_guid(volume_guid)?;
     if !crate::ipod::layout::is_ipod_mount(&mount) {
         return None;
@@ -478,7 +487,11 @@ pub fn try_resolve_known_volume(
 fn drive_letter(drive: &std::path::Path) -> Option<char> {
     let s = drive.to_str()?;
     let first = s.chars().next()?;
-    if first.is_ascii_alphabetic() { Some(first.to_ascii_uppercase()) } else { None }
+    if first.is_ascii_alphabetic() {
+        Some(first.to_ascii_uppercase())
+    } else {
+        None
+    }
 }
 
 /// Recovered identity for an iPod whose on-disk SysInfo file is empty
@@ -547,8 +560,9 @@ struct IpodIdentity {
 /// macro deps; mutex lock is sub-microsecond and the cache is read
 /// at most every few seconds.
 #[cfg(windows)]
-static SCSI_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Result<String, String>>>>
-    = std::sync::OnceLock::new();
+static SCSI_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, Result<String, String>>>,
+> = std::sync::OnceLock::new();
 
 /// Resolve `(xml, parsed)` for the SCSI INQUIRY result against the
 /// volume at `drive_letter`, consulting the per-FirewireGuid cache
@@ -558,7 +572,10 @@ static SCSI_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMa
 fn scsi_inquiry_cached(
     drive_letter: char,
     firewire_guid: &str,
-) -> (Option<String>, Option<crate::sysinfo_extended::ParsedSysInfo>) {
+) -> (
+    Option<String>,
+    Option<crate::sysinfo_extended::ParsedSysInfo>,
+) {
     let cache = SCSI_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
     // Hot path: cache hit — no IOCTL, no PowerShell, no log.
@@ -595,7 +612,9 @@ fn scsi_inquiry_cached(
             Err(format!("{e}"))
         }
     };
-    cache.lock().expect("SCSI cache mutex poisoned")
+    cache
+        .lock()
+        .expect("SCSI cache mutex poisoned")
         .insert(firewire_guid.to_string(), cache_value);
 
     match result {
@@ -1064,7 +1083,9 @@ fn linux_recover_ipod_info(mount: &std::path::Path) -> Option<UsbIpodInfo> {
     let block_dev = linux_block_device_for_mount(mount)?;
     let disk_name = linux_strip_partition_suffix(&block_dev)?;
     let usb_dir = linux_find_usb_parent(
-        &std::path::PathBuf::from("/sys/block").join(&disk_name).join("device"),
+        &std::path::PathBuf::from("/sys/block")
+            .join(&disk_name)
+            .join("device"),
     )?;
 
     // idVendor / idProduct are 4-digit lowercase hex (no 0x prefix).
@@ -1193,11 +1214,12 @@ fn linux_read_sysfs_hex_u16(path: &std::path::Path) -> Option<u16> {
     u16::from_str_radix(s.trim(), 16).ok()
 }
 
-
 #[cfg(target_os = "macos")]
 fn macos_recover_ipod_info(mount: &std::path::Path) -> Option<UsbIpodInfo> {
     let ident = crate::ipod::macos_iokit::identity_for_mount(mount)?;
-    let identity = ident.pid.and_then(|p| identify_ipod(p, ident.capacity_bytes));
+    let identity = ident
+        .pid
+        .and_then(|p| identify_ipod(p, ident.capacity_bytes));
     Some(UsbIpodInfo {
         firewire_guid: ident.firewire_guid,
         pid: ident.pid,
@@ -1220,9 +1242,13 @@ fn extract_pid_from_apple_usb_path(path: &str) -> Option<u16> {
     let needle = "PID_";
     let start = upper.find(needle)? + needle.len();
     let end = start + 4;
-    if end > upper.len() { return None; }
+    if end > upper.len() {
+        return None;
+    }
     let hex = &upper[start..end];
-    if !hex.chars().all(|c| c.is_ascii_hexdigit()) { return None; }
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
     u16::from_str_radix(hex, 16).ok()
 }
 
@@ -1290,20 +1316,20 @@ fn identify_ipod(pid: u16, capacity_bytes: Option<u64>) -> Option<IpodIdentity> 
         // reflects that.
         0x1261 => Some(match gb {
             Some(g) if g < 100 => IpodIdentity {
-                model_num: "MB029",  // CLASSIC_1 80GB silver
+                model_num: "MB029", // CLASSIC_1 80GB silver
                 label: "iPod Classic (1st gen, 80GB)",
             },
             Some(g) if g < 140 => IpodIdentity {
-                model_num: "MB562",  // CLASSIC_2 120GB silver
+                model_num: "MB562", // CLASSIC_2 120GB silver
                 label: "iPod Classic (2nd gen, 120GB)",
             },
             Some(_) => IpodIdentity {
-                model_num: "MC293",  // CLASSIC_3 160GB silver — hash-neutral
-                                     // pick (CLASSIC_1 thick 160GB also valid)
-                label: "iPod Classic (160GB)",  // no gen claim — ambiguous
+                model_num: "MC293", // CLASSIC_3 160GB silver — hash-neutral
+                // pick (CLASSIC_1 thick 160GB also valid)
+                label: "iPod Classic (160GB)", // no gen claim — ambiguous
             },
-            None => return None,  // No capacity → can't safely pick a
-                                  // SKU; fall back to legacy xPID marker
+            None => return None, // No capacity → can't safely pick a
+                                 // SKU; fall back to legacy xPID marker
         }),
 
         // === iPod Nano family ===
@@ -1317,12 +1343,30 @@ fn identify_ipod(pid: u16, capacity_bytes: Option<u64>) -> Option<IpodIdentity> 
         // sign these correctly — iTunes will reject the resulting DB
         // regardless of what we put in SysInfo, but we still set a
         // real ModelNumStr so the UI is honest).
-        0x1240 => Some(IpodIdentity { model_num: "A350", label: "iPod Nano (1st gen)" }),
-        0x1260 => Some(IpodIdentity { model_num: "A477", label: "iPod Nano (2nd gen)" }),
-        0x1262 => Some(IpodIdentity { model_num: "A978", label: "iPod Nano (3rd gen)" }),
-        0x1263 => Some(IpodIdentity { model_num: "B480", label: "iPod Nano (4th gen)" }),
-        0x1265 => Some(IpodIdentity { model_num: "C027", label: "iPod Nano (5th gen)" }),
-        0x1266 => Some(IpodIdentity { model_num: "C525", label: "iPod Nano (6th gen)" }),
+        0x1240 => Some(IpodIdentity {
+            model_num: "A350",
+            label: "iPod Nano (1st gen)",
+        }),
+        0x1260 => Some(IpodIdentity {
+            model_num: "A477",
+            label: "iPod Nano (2nd gen)",
+        }),
+        0x1262 => Some(IpodIdentity {
+            model_num: "A978",
+            label: "iPod Nano (3rd gen)",
+        }),
+        0x1263 => Some(IpodIdentity {
+            model_num: "B480",
+            label: "iPod Nano (4th gen)",
+        }),
+        0x1265 => Some(IpodIdentity {
+            model_num: "C027",
+            label: "iPod Nano (5th gen)",
+        }),
+        0x1266 => Some(IpodIdentity {
+            model_num: "C525",
+            label: "iPod Nano (6th gen)",
+        }),
         // Nano 7G (PID 0x1267, 2012-2017): Apple ModelNumStrs are
         // D376/D744/etc., NONE of which appear in libgpod's table.
         // Returning a fake ModelNumStr would be worse than returning
@@ -1341,18 +1385,18 @@ fn identify_ipod(pid: u16, capacity_bytes: Option<u64>) -> Option<IpodIdentity> 
         // safe.
         0x1205 => Some(IpodIdentity {
             model_num: "9160",  // MINI_1 4GB silver (PID also serves MINI_2)
-            label: "iPod Mini",  // no gen claim — PID shared 1G/2G
+            label: "iPod Mini", // no gen claim — PID shared 1G/2G
         }),
         0x1209 => Some(IpodIdentity {
-            model_num: "A002",  // VIDEO_1 30GB white
+            model_num: "A002", // VIDEO_1 30GB white
             label: "iPod Video (5th gen)",
         }),
         0x1206 => Some(IpodIdentity {
-            model_num: "A444",  // VIDEO_2 30GB white
+            model_num: "A444", // VIDEO_2 30GB white
             label: "iPod Video (5.5 gen)",
         }),
         0x1204 => Some(IpodIdentity {
-            model_num: "9829",  // PHOTO 30GB
+            model_num: "9829", // PHOTO 30GB
             label: "iPod Photo",
         }),
         // PID 0x1202 covers iPod 1G + 2G (no in-USB distinguisher).
@@ -1362,31 +1406,31 @@ fn identify_ipod(pid: u16, capacity_bytes: Option<u64>) -> Option<IpodIdentity> 
         // Caller's xPID fallback covers the rare case where we want
         // more precision later.
         0x1202 => Some(IpodIdentity {
-            model_num: "8513",  // FIRST 5GB (PID shared 1G/2G)
+            model_num: "8513", // FIRST 5GB (PID shared 1G/2G)
             label: "iPod (1st/2nd gen)",
         }),
         0x1201 => Some(IpodIdentity {
-            model_num: "8976",  // THIRD 10GB
+            model_num: "8976", // THIRD 10GB
             label: "iPod (3rd gen)",
         }),
         0x1203 => Some(IpodIdentity {
-            model_num: "9282",  // FOURTH 20GB
+            model_num: "9282", // FOURTH 20GB
             label: "iPod (4th gen)",
         }),
         0x1300 => Some(IpodIdentity {
-            model_num: "9724",  // SHUFFLE_1 512MB
+            model_num: "9724", // SHUFFLE_1 512MB
             label: "iPod Shuffle (1st gen)",
         }),
         0x1301 => Some(IpodIdentity {
-            model_num: "A546",  // SHUFFLE_2 1GB silver
+            model_num: "A546", // SHUFFLE_2 1GB silver
             label: "iPod Shuffle (2nd gen)",
         }),
         0x1302 => Some(IpodIdentity {
-            model_num: "C306",  // SHUFFLE_3 2GB silver
+            model_num: "C306", // SHUFFLE_3 2GB silver
             label: "iPod Shuffle (3rd gen)",
         }),
         0x1303 => Some(IpodIdentity {
-            model_num: "C584",  // SHUFFLE_4 2GB silver
+            model_num: "C584", // SHUFFLE_4 2GB silver
             label: "iPod Shuffle (4th gen)",
         }),
 
@@ -1403,12 +1447,20 @@ fn identify_ipod(pid: u16, capacity_bytes: Option<u64>) -> Option<IpodIdentity> 
 #[allow(dead_code)] // Windows-only consumer; kept platform-neutral for its tests.
 fn extract_firewire_guid_from_usb_path(path: &str) -> Option<String> {
     let bytes = path.as_bytes();
-    if bytes.len() < 16 { return None; }
+    if bytes.len() < 16 {
+        return None;
+    }
     for start in 0..=bytes.len() - 16 {
         let window = &bytes[start..start + 16];
-        if !window.iter().all(|b| b.is_ascii_hexdigit()) { continue; }
-        if start > 0 && bytes[start - 1].is_ascii_hexdigit() { continue; }
-        if start + 16 < bytes.len() && bytes[start + 16].is_ascii_hexdigit() { continue; }
+        if !window.iter().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        if start > 0 && bytes[start - 1].is_ascii_hexdigit() {
+            continue;
+        }
+        if start + 16 < bytes.len() && bytes[start + 16].is_ascii_hexdigit() {
+            continue;
+        }
         let hex = std::str::from_utf8(window).ok()?;
         return Some(format!("0x{}", hex.to_uppercase()));
     }
@@ -1423,7 +1475,9 @@ fn extract_firewire_guid_from_usb_path(path: &str) -> Option<String> {
 /// `ignores_lines_starting_with_firewire_guid_prefix_but_not_exact_key`.
 fn parse_sysinfo_field(text: &str, key: &str) -> Option<String> {
     for line in text.lines() {
-        let Some((k, v)) = line.split_once(':') else { continue };
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
         if k.trim() == key {
             return Some(v.trim().to_string());
         }
@@ -1724,10 +1778,14 @@ mod detection_tests {
     fn pick_mount_multiple_matches_errors() {
         let mounts = vec!["E:\\".to_string(), "G:\\".to_string()];
         let err = pick_mount(mounts).unwrap_err();
-        assert!(err.to_string().contains("E:") && err.to_string().contains("G:"),
-            "error message must enumerate the candidates");
-        assert!(err.to_string().contains("--ipod"),
-            "error must hint at --ipod flag");
+        assert!(
+            err.to_string().contains("E:") && err.to_string().contains("G:"),
+            "error message must enumerate the candidates"
+        );
+        assert!(
+            err.to_string().contains("--ipod"),
+            "error must hint at --ipod flag"
+        );
     }
 }
 
@@ -1742,9 +1800,16 @@ mod tests {
         let guid = extract_firewire_guid(SAMPLE).expect("extract");
         // Classic uses a 16-hex-digit ID with 0x prefix.
         assert!(guid.starts_with("0x"), "expected hex prefix, got: {guid}");
-        assert_eq!(guid.len(), 18, "expected 0x + 16 hex chars, got len {}: {guid}", guid.len());
-        assert!(guid[2..].chars().all(|c| c.is_ascii_hexdigit()),
-            "expected hex digits, got: {guid}");
+        assert_eq!(
+            guid.len(),
+            18,
+            "expected 0x + 16 hex chars, got len {}: {guid}",
+            guid.len()
+        );
+        assert!(
+            guid[2..].chars().all(|c| c.is_ascii_hexdigit()),
+            "expected hex digits, got: {guid}"
+        );
     }
 
     #[test]
@@ -1809,7 +1874,8 @@ mod tests {
         std::fs::write(
             sysinfo_dir.join("SysInfo"),
             "FirewireGuid: 0xEXAMPLE1234\nModelNumStr: xMB029\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(itunes_dir.join("iTunesDB"), b"").unwrap();
         let detected = scan_drive_for_ipod(&tmp).expect("should detect");
         assert_eq!(detected.serial, "0xEXAMPLE1234");
@@ -1828,7 +1894,9 @@ mod tests {
         let path = "ven_apple#000a27002138b0a8&0";
         let guid = extract_firewire_guid_from_usb_path(path).expect("should extract");
         assert!(guid.starts_with("0x"));
-        assert!(guid[2..].chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+        assert!(guid[2..]
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
     }
 
     #[test]
@@ -1879,10 +1947,14 @@ mod tests {
         assert_eq!(id_120.label, "iPod Classic (2nd gen, 120GB)");
 
         let id_160 = identify_ipod(0x1261, Some(160 * 1_000_000_000)).unwrap();
-        assert_eq!(id_160.model_num, "MC293",
-            "160GB defaults to 3G ModelNumStr (hash-neutral with 1G thick)");
-        assert_eq!(id_160.label, "iPod Classic (160GB)",
-            "label must NOT claim a specific generation — we genuinely can't tell");
+        assert_eq!(
+            id_160.model_num, "MC293",
+            "160GB defaults to 3G ModelNumStr (hash-neutral with 1G thick)"
+        );
+        assert_eq!(
+            id_160.label, "iPod Classic (160GB)",
+            "label must NOT claim a specific generation — we genuinely can't tell"
+        );
     }
 
     /// Classic PID without a capacity hint cannot safely pick a
@@ -1903,12 +1975,30 @@ mod tests {
     /// gets the right UI label).
     #[test]
     fn nano_pids_resolve_to_correct_family() {
-        assert_eq!(identify_ipod(0x1240, None).unwrap().label, "iPod Nano (1st gen)");
-        assert_eq!(identify_ipod(0x1260, None).unwrap().label, "iPod Nano (2nd gen)");
-        assert_eq!(identify_ipod(0x1262, None).unwrap().label, "iPod Nano (3rd gen)");
-        assert_eq!(identify_ipod(0x1263, None).unwrap().label, "iPod Nano (4th gen)");
-        assert_eq!(identify_ipod(0x1265, None).unwrap().label, "iPod Nano (5th gen)");
-        assert_eq!(identify_ipod(0x1266, None).unwrap().label, "iPod Nano (6th gen)");
+        assert_eq!(
+            identify_ipod(0x1240, None).unwrap().label,
+            "iPod Nano (1st gen)"
+        );
+        assert_eq!(
+            identify_ipod(0x1260, None).unwrap().label,
+            "iPod Nano (2nd gen)"
+        );
+        assert_eq!(
+            identify_ipod(0x1262, None).unwrap().label,
+            "iPod Nano (3rd gen)"
+        );
+        assert_eq!(
+            identify_ipod(0x1263, None).unwrap().label,
+            "iPod Nano (4th gen)"
+        );
+        assert_eq!(
+            identify_ipod(0x1265, None).unwrap().label,
+            "iPod Nano (5th gen)"
+        );
+        assert_eq!(
+            identify_ipod(0x1266, None).unwrap().label,
+            "iPod Nano (6th gen)"
+        );
     }
 
     /// Nano 7G (PID 0x1267, 2012) is intentionally absent from the
@@ -1962,15 +2052,19 @@ mod tests {
     fn scan_drive_for_ipod_rejects_sysinfo_without_itunes_db() {
         // F-09 regression: a half-restored device with SysInfo but no
         // iTunesDB must NOT be reported as a syncable iPod.
-        let tmp = std::env::temp_dir().join(format!("ipod-scan-partial-test-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("ipod-scan-partial-test-{}", std::process::id()));
         let sysinfo_dir = tmp.join("iPod_Control").join("Device");
         std::fs::create_dir_all(&sysinfo_dir).unwrap();
         std::fs::write(
             sysinfo_dir.join("SysInfo"),
             "FirewireGuid: 0xEXAMPLE1234\nModelNumStr: xMB029\n",
-        ).unwrap();
-        assert!(scan_drive_for_ipod(&tmp).is_none(),
-            "SysInfo without iTunesDB must not be classified as an iPod");
+        )
+        .unwrap();
+        assert!(
+            scan_drive_for_ipod(&tmp).is_none(),
+            "SysInfo without iTunesDB must not be classified as an iPod"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

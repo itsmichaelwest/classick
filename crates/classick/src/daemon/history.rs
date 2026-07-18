@@ -90,7 +90,12 @@ pub struct HistoryFile {
 }
 
 impl Default for HistoryFile {
-    fn default() -> Self { Self { version: 1, entries: Vec::new() } }
+    fn default() -> Self {
+        Self {
+            version: 1,
+            entries: Vec::new(),
+        }
+    }
 }
 
 const MAX_ENTRIES: usize = 50;
@@ -100,7 +105,9 @@ pub struct HistoryService {
 }
 
 impl HistoryService {
-    pub fn new(path: PathBuf) -> Self { Self { path } }
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
 
     pub fn read(&self) -> Vec<HistoryEntry> {
         match std::fs::read_to_string(&self.path) {
@@ -158,7 +165,10 @@ impl HistoryService {
     fn write_entries(&self, existing: Vec<HistoryEntry>) -> Result<()> {
         let start = existing.len().saturating_sub(MAX_ENTRIES);
         let trimmed: Vec<_> = existing.into_iter().skip(start).collect();
-        let file = HistoryFile { version: 1, entries: trimmed };
+        let file = HistoryFile {
+            version: 1,
+            entries: trimmed,
+        };
 
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -197,8 +207,11 @@ mod tests {
     use super::*;
 
     fn tmp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("classick-history-test-{}-{}.json",
-            name, std::process::id()))
+        std::env::temp_dir().join(format!(
+            "classick-history-test-{}-{}.json",
+            name,
+            std::process::id()
+        ))
     }
 
     fn make_entry(ts: &str, outcome: SyncOutcome) -> HistoryEntry {
@@ -211,8 +224,15 @@ mod tests {
             outcome,
             error_message: None,
             summary: Some(SyncSummary {
-                add: 1, modify: 0, remove: 0, unchanged: 0, skipped: 0, metadata_only: 0,
-                skipped_for_space_tracks: 0, skipped_for_space_bytes: 0, artwork_failed_sources: 0,
+                add: 1,
+                modify: 0,
+                remove: 0,
+                unchanged: 0,
+                skipped: 0,
+                metadata_only: 0,
+                skipped_for_space_tracks: 0,
+                skipped_for_space_bytes: 0,
+                artwork_failed_sources: 0,
             }),
             db_restored: false,
         }
@@ -231,7 +251,8 @@ mod tests {
         let p = tmp_path("append-read");
         let _ = std::fs::remove_file(&p);
         let svc = HistoryService::new(p.clone());
-        svc.append(make_entry("2026-05-24T10:00:00Z", SyncOutcome::Ok)).unwrap();
+        svc.append(make_entry("2026-05-24T10:00:00Z", SyncOutcome::Ok))
+            .unwrap();
         let entries = svc.read();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].timestamp, "2026-05-24T10:00:00Z");
@@ -289,8 +310,14 @@ mod tests {
     #[test]
     fn sync_summary_new_fields_round_trip() {
         let summary = SyncSummary {
-            add: 1, modify: 2, remove: 0, unchanged: 10, skipped: 0, metadata_only: 3,
-            skipped_for_space_tracks: 5, skipped_for_space_bytes: 123_456_789,
+            add: 1,
+            modify: 2,
+            remove: 0,
+            unchanged: 10,
+            skipped: 0,
+            metadata_only: 3,
+            skipped_for_space_tracks: 5,
+            skipped_for_space_bytes: 123_456_789,
             artwork_failed_sources: 2,
         };
         let json = serde_json::to_string(&summary).unwrap();
@@ -305,7 +332,8 @@ mod tests {
     fn sync_summary_without_new_fields_defaults_to_zero() {
         // Pre-existing history.json entries were written before the
         // skipped-for-space / artwork fields existed.
-        let json = r#"{"add":1,"modify":2,"remove":0,"unchanged":10,"skipped":0,"metadata_only":0}"#;
+        let json =
+            r#"{"add":1,"modify":2,"remove":0,"unchanged":10,"skipped":0,"metadata_only":0}"#;
         let summary: SyncSummary = serde_json::from_str(json).unwrap();
         assert_eq!(summary.skipped_for_space_tracks, 0);
         assert_eq!(summary.skipped_for_space_bytes, 0);
@@ -392,7 +420,10 @@ mod tests {
         let svc = HistoryService::new(p.clone());
         let entries = svc.read();
         assert!(entries.is_empty(), "corrupt file should read as empty");
-        assert!(!p.exists(), "corrupt original should have been renamed away");
+        assert!(
+            !p.exists(),
+            "corrupt original should have been renamed away"
+        );
         // Cleanup .bak files
         if let Some(dir) = p.parent() {
             for entry in std::fs::read_dir(dir).unwrap().flatten() {

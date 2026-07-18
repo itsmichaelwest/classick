@@ -78,11 +78,21 @@ pub struct IpodIdentity {
     pub custom_selection: bool,
 }
 
-fn default_true() -> bool { true }
-fn default_review_mode() -> SyncMode { SyncMode::Review }
-fn default_auto_apply_mode() -> SyncMode { SyncMode::AutoApply }
-fn default_schedule_minutes() -> u32 { 30 }
-fn default_daemon_settings() -> Option<DaemonSettings> { Some(DaemonSettings::default()) }
+fn default_true() -> bool {
+    true
+}
+fn default_review_mode() -> SyncMode {
+    SyncMode::Review
+}
+fn default_auto_apply_mode() -> SyncMode {
+    SyncMode::AutoApply
+}
+fn default_schedule_minutes() -> u32 {
+    30
+}
+fn default_daemon_settings() -> Option<DaemonSettings> {
+    Some(DaemonSettings::default())
+}
 
 /// Persistent config. Every field is optional so a partial / missing TOML
 /// deserializes cleanly — the precedence logic in `config::resolve` decides
@@ -107,7 +117,10 @@ pub struct PersistedConfig {
     pub refalac_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_reencode: Option<bool>,
-    #[serde(default = "default_daemon_settings", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "default_daemon_settings",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub daemon: Option<DaemonSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipod_identity: Option<IpodIdentity>,
@@ -126,7 +139,11 @@ pub fn default_path() -> Result<PathBuf> {
 /// Keeping it relative to the config path lets daemon tests sandbox every
 /// persisted device artifact under one temporary root.
 pub fn device_registry_path(config_path: &Path) -> PathBuf {
-    config_path.parent().unwrap_or_else(|| Path::new(".")).join("devices").join("registry.json")
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("devices")
+        .join("registry.json")
 }
 
 /// Load the persisted config from `path`. Returns `Ok(None)` if the file
@@ -158,7 +175,8 @@ pub fn save(path: &Path, cfg: &PersistedConfig) -> Result<()> {
         let mut writer = std::io::BufWriter::new(f);
         std::io::Write::write_all(&mut writer, s.as_bytes())?;
         let f = std::io::BufWriter::into_inner(writer)?;
-        f.sync_all().with_context(|| format!("fsync {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
     }
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
@@ -174,8 +192,10 @@ mod tests {
     #[test]
     fn parses_fixture() {
         let cfg: PersistedConfig = toml::from_str(SAMPLE).unwrap();
-        assert_eq!(cfg.source.as_deref().unwrap().to_string_lossy(),
-                   "\\\\<host>\\data\\media\\music");
+        assert_eq!(
+            cfg.source.as_deref().unwrap().to_string_lossy(),
+            "\\\\<host>\\data\\media\\music"
+        );
         assert_eq!(cfg.ipod.as_deref(), Some("G:"));
         assert_eq!(cfg.ffmpeg.as_deref().unwrap().to_string_lossy(), "ffmpeg");
         assert_eq!(cfg.no_delete, Some(false));
@@ -185,7 +205,10 @@ mod tests {
     #[test]
     fn device_registry_path_is_scoped_to_config_parent() {
         let config = Path::new("/tmp/classick/config.toml");
-        assert_eq!(device_registry_path(config), PathBuf::from("/tmp/classick/devices/registry.json"));
+        assert_eq!(
+            device_registry_path(config),
+            PathBuf::from("/tmp/classick/devices/registry.json")
+        );
     }
 
     #[test]
@@ -205,15 +228,20 @@ mod tests {
     #[test]
     fn partial_toml_deserializes_with_other_fields_none() {
         let cfg: PersistedConfig = toml::from_str(r#"source = "D:\\music""#).unwrap();
-        assert_eq!(cfg.source.as_deref().unwrap().to_string_lossy(), "D:\\music");
+        assert_eq!(
+            cfg.source.as_deref().unwrap().to_string_lossy(),
+            "D:\\music"
+        );
         assert!(cfg.ipod.is_none());
         assert!(cfg.no_delete.is_none());
     }
 
     #[test]
     fn load_missing_returns_none() {
-        let path = std::env::temp_dir()
-            .join(format!("classick-test-missing-config-{}.toml", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "classick-test-missing-config-{}.toml",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let result = load(&path).unwrap();
         assert!(result.is_none(), "missing config file must return Ok(None)");
@@ -221,8 +249,10 @@ mod tests {
 
     #[test]
     fn save_then_load_roundtrip() {
-        let path = std::env::temp_dir()
-            .join(format!("classick-test-rt-config-{}.toml", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "classick-test-rt-config-{}.toml",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let cfg = PersistedConfig {
             source: Some(PathBuf::from(r"D:\music")),
@@ -247,8 +277,8 @@ mod tests {
 
     #[test]
     fn save_skips_none_fields_in_toml_output() {
-        let path = std::env::temp_dir()
-            .join(format!("classick-test-skip-{}.toml", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("classick-test-skip-{}.toml", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let cfg = PersistedConfig {
             source: Some(PathBuf::from(r"D:\music")),
@@ -266,9 +296,15 @@ mod tests {
         save(&path, &cfg).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("source"));
-        assert!(!saved.contains("ipod"), "None fields must be skipped in TOML output:\n{saved}");
+        assert!(
+            !saved.contains("ipod"),
+            "None fields must be skipped in TOML output:\n{saved}"
+        );
         assert!(!saved.contains("no_delete"));
-        assert!(!saved.contains("encoder"), "None fields must be skipped:\n{saved}");
+        assert!(
+            !saved.contains("encoder"),
+            "None fields must be skipped:\n{saved}"
+        );
         assert!(!saved.contains("passthrough_wav"));
         assert!(!saved.contains("refalac_path"));
         assert!(!saved.contains("force_reencode"));
@@ -331,7 +367,10 @@ model_label = "iPod Classic 7G"
 "#;
         let cfg: PersistedConfig = toml::from_str(toml_text).expect("parse");
         let identity = cfg.ipod_identity.expect("ipod_identity present");
-        assert!(!identity.custom_selection, "absent field must default to false (shared)");
+        assert!(
+            !identity.custom_selection,
+            "absent field must default to false (shared)"
+        );
     }
 
     #[test]

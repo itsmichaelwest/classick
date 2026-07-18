@@ -9,8 +9,8 @@
 //! times during enumeration / drive-letter assignment). Disconnects
 //! pass straight through.
 
-use crate::ipod::device::DetectedIpod;
 use crate::daemon::device_registry::canonical_serial_key;
+use crate::ipod::device::DetectedIpod;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -40,7 +40,10 @@ pub struct Debouncer {
 
 impl Debouncer {
     pub fn new(window: Duration) -> Self {
-        Self { window, last_seen: HashMap::new() }
+        Self {
+            window,
+            last_seen: HashMap::new(),
+        }
     }
 
     /// Returns `Some(event)` if the event should be propagated, `None`
@@ -78,10 +81,12 @@ pub(crate) fn diff_inventory(
             inventory.insert(canonical_serial_key(&ipod.serial), ipod);
             inventory
         });
-    let current = current.into_iter().fold(HashMap::new(), |mut inventory, ipod| {
-        inventory.insert(canonical_serial_key(&ipod.serial), ipod);
-        inventory
-    });
+    let current = current
+        .into_iter()
+        .fold(HashMap::new(), |mut inventory, ipod| {
+            inventory.insert(canonical_serial_key(&ipod.serial), ipod);
+            inventory
+        });
 
     let mut removed: Vec<_> = previous
         .iter()
@@ -108,10 +113,12 @@ pub(crate) fn diff_inventory(
 }
 
 fn inventory(current: Vec<DetectedIpod>) -> HashMap<String, DetectedIpod> {
-    current.into_iter().fold(HashMap::new(), |mut inventory, ipod| {
-        inventory.insert(canonical_serial_key(&ipod.serial), ipod);
-        inventory
-    })
+    current
+        .into_iter()
+        .fold(HashMap::new(), |mut inventory, ipod| {
+            inventory.insert(canonical_serial_key(&ipod.serial), ipod);
+            inventory
+        })
 }
 
 /// Periodically polls a scan function and emits Connected /
@@ -190,7 +197,10 @@ mod tests {
         let mut d = Debouncer::new(Duration::from_millis(500));
         let _ = d.admit(DeviceEvent::Connected(ipod("0xABC")));
         let dup = d.admit(DeviceEvent::Connected(ipod("0xABC")));
-        assert!(dup.is_none(), "duplicate Connected inside window must be dropped");
+        assert!(
+            dup.is_none(),
+            "duplicate Connected inside window must be dropped"
+        );
     }
 
     #[test]
@@ -207,14 +217,19 @@ mod tests {
         let _ = d.admit(DeviceEvent::Connected(ipod("0xABC")));
         std::thread::sleep(Duration::from_millis(25));
         let again = d.admit(DeviceEvent::Connected(ipod("0xABC")));
-        assert!(again.is_some(), "after window, same serial must be admitted again");
+        assert!(
+            again.is_some(),
+            "after window, same serial must be admitted again"
+        );
     }
 
     #[test]
     fn debouncer_always_passes_disconnect() {
         let mut d = Debouncer::new(Duration::from_millis(500));
         let _ = d.admit(DeviceEvent::Connected(ipod("0xABC")));
-        let disc = d.admit(DeviceEvent::Disconnected { serial: "0xABC".to_string() });
+        let disc = d.admit(DeviceEvent::Disconnected {
+            serial: "0xABC".to_string(),
+        });
         assert!(disc.is_some(), "Disconnect events must never be debounced");
     }
 
@@ -222,9 +237,14 @@ mod tests {
     fn debouncer_disconnect_clears_state_so_reconnect_admits() {
         let mut d = Debouncer::new(Duration::from_secs(60));
         let _ = d.admit(DeviceEvent::Connected(ipod("0xABC")));
-        let _ = d.admit(DeviceEvent::Disconnected { serial: "0xABC".to_string() });
+        let _ = d.admit(DeviceEvent::Disconnected {
+            serial: "0xABC".to_string(),
+        });
         let reconnect = d.admit(DeviceEvent::Connected(ipod("0xABC")));
-        assert!(reconnect.is_some(), "after Disconnect, reconnect must admit even within window");
+        assert!(
+            reconnect.is_some(),
+            "after Disconnect, reconnect must admit even within window"
+        );
     }
 
     use crate::ipod::device::DetectedIpod;
@@ -236,19 +256,21 @@ mod tests {
         let queue = Arc::new(Mutex::new(observations));
         move || {
             let mut q = queue.lock().unwrap();
-            if q.is_empty() { Vec::new() } else { q.remove(0) }
+            if q.is_empty() {
+                Vec::new()
+            } else {
+                q.remove(0)
+            }
         }
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn polling_emits_connected_on_first_appearance() {
         let scanner = scripted_scanner(vec![
-            vec![ipod("0xABC")],  // First poll
+            vec![ipod("0xABC")], // First poll
         ]);
-        let watcher = PollingDeviceWatcher::new_for_test(
-            Box::new(scanner),
-            Duration::from_millis(100),
-        );
+        let watcher =
+            PollingDeviceWatcher::new_for_test(Box::new(scanner), Duration::from_millis(100));
         let mut rx = Box::new(watcher).start();
         tokio::time::sleep(Duration::from_millis(150)).await;
         let event = rx.recv().await.expect("event");
@@ -260,15 +282,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn polling_emits_disconnected_when_device_disappears() {
-        let scanner = scripted_scanner(vec![
-            vec![ipod("0xABC")],
-            vec![ipod("0xABC")],
-            vec![],
-        ]);
-        let watcher = PollingDeviceWatcher::new_for_test(
-            Box::new(scanner),
-            Duration::from_millis(100),
-        );
+        let scanner = scripted_scanner(vec![vec![ipod("0xABC")], vec![ipod("0xABC")], vec![]]);
+        let watcher =
+            PollingDeviceWatcher::new_for_test(Box::new(scanner), Duration::from_millis(100));
         let mut rx = Box::new(watcher).start();
         // Drain Connected
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -296,7 +312,10 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![DeviceEvent::Connected(ipod("0xA")), DeviceEvent::Connected(ipod("0xB"))]
+            vec![
+                DeviceEvent::Connected(ipod("0xA")),
+                DeviceEvent::Connected(ipod("0xB"))
+            ]
         );
     }
 
@@ -306,7 +325,12 @@ mod tests {
 
         let events = diff_inventory(&previous, vec![ipod("0xB")]);
 
-        assert_eq!(events, vec![DeviceEvent::Disconnected { serial: "0xA".to_string() }]);
+        assert_eq!(
+            events,
+            vec![DeviceEvent::Disconnected {
+                serial: "0xA".to_string()
+            }]
+        );
     }
 
     #[test]

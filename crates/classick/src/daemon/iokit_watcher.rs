@@ -28,10 +28,12 @@ fn replace_inventory(
     current: Vec<DetectedIpod>,
 ) -> Vec<DeviceEvent> {
     let events = diff_inventory(devices, current.clone());
-    *devices = current.into_iter().fold(HashMap::new(), |mut inventory, ipod| {
-        inventory.insert(canonical_serial_key(&ipod.serial), ipod);
-        inventory
-    });
+    *devices = current
+        .into_iter()
+        .fold(HashMap::new(), |mut inventory, ipod| {
+            inventory.insert(canonical_serial_key(&ipod.serial), ipod);
+            inventory
+        });
     events
 }
 
@@ -214,14 +216,7 @@ mod tests {
         };
         let mut wait = || waits += 1;
 
-        let settled = settle_added_serial(
-            &mut devices,
-            "0xA",
-            2,
-            &mut scan,
-            &mut emit,
-            &mut wait,
-        );
+        let settled = settle_added_serial(&mut devices, "0xA", 2, &mut scan, &mut emit, &mut wait);
 
         assert!(settled);
         assert_eq!(waits, 1, "unchanged B must not settle A's Added signal");
@@ -244,14 +239,8 @@ mod tests {
         };
         let mut wait = || waits += 1;
 
-        let settled = settle_added_serial(
-            &mut devices,
-            "0xB",
-            120,
-            &mut scan,
-            &mut emit,
-            &mut wait,
-        );
+        let settled =
+            settle_added_serial(&mut devices, "0xB", 120, &mut scan, &mut emit, &mut wait);
 
         assert!(settled);
         assert_eq!(scans, 0);

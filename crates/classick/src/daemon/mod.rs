@@ -4,14 +4,14 @@
 
 pub mod command_handler;
 pub mod device_registry;
-pub mod device_watcher;
 pub mod device_storage;
+pub mod device_watcher;
 pub mod format;
 pub mod history;
-pub mod library;
 #[cfg(target_os = "macos")]
 pub mod iokit_watcher;
 pub mod ipc_server;
+pub mod library;
 pub mod library_watcher;
 pub mod runtime;
 pub mod runtime_state;
@@ -42,13 +42,11 @@ pub const BROADCAST_CHANNEL_CAPACITY: usize = 1024;
 
 /// Debounce window for `Debouncer` — collapses duplicate Connected events
 /// for the same serial that fire during Windows' multi-step drive enumeration.
-pub const DEVICE_DEBOUNCE_WINDOW: std::time::Duration =
-    std::time::Duration::from_millis(500);
+pub const DEVICE_DEBOUNCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Polling interval for `PollingDeviceWatcher`. Must exceed the debounce
 /// window so each scan can be debounced if duplicate-fired by the OS.
-pub const DEVICE_POLL_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(1500);
+pub const DEVICE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Quiet period after the last filesystem event before a watcher-triggered
 /// library scan fires. Bulk file operations (a Lidarr import, a big copy) emit

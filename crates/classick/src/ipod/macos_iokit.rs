@@ -15,12 +15,11 @@ use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
-use io_kit_sys::{
-    kIOMasterPortDefault, IOBSDNameMatching, IOObjectRelease,
-    IORegistryEntryCreateCFProperty, IORegistryEntryGetParentEntry,
-    IOServiceGetMatchingService,
-};
 use io_kit_sys::types::io_registry_entry_t;
+use io_kit_sys::{
+    kIOMasterPortDefault, IOBSDNameMatching, IOObjectRelease, IORegistryEntryCreateCFProperty,
+    IORegistryEntryGetParentEntry, IOServiceGetMatchingService,
+};
 
 /// USB identity recovered from the IORegistry for a mounted iPod.
 #[derive(Debug, Clone)]
@@ -40,7 +39,9 @@ pub fn format_firewire_guid(usb_serial: &str) -> String {
 fn supported_ipod_added_identity(usb_serial: &str, pid: u16) -> Option<String> {
     let serial = usb_serial.trim();
     if serial.len() != 16
-        || !serial.chars().all(|character| character.is_ascii_hexdigit())
+        || !serial
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
         || !matches!(
             pid,
             0x1201
@@ -152,12 +153,8 @@ unsafe fn identity_for_bsd_name(bsd: &str) -> Option<IokitUsbIdentity> {
 /// Read an integer IORegistry property (CFNumber) as u64.
 unsafe fn read_u64_prop(entry: io_registry_entry_t, key: &str) -> Option<u64> {
     let cfkey = CFString::new(key);
-    let raw = IORegistryEntryCreateCFProperty(
-        entry,
-        cfkey.as_concrete_TypeRef(),
-        std::ptr::null(),
-        0,
-    );
+    let raw =
+        IORegistryEntryCreateCFProperty(entry, cfkey.as_concrete_TypeRef(), std::ptr::null(), 0);
     if raw.is_null() {
         return None;
     }
@@ -168,12 +165,8 @@ unsafe fn read_u64_prop(entry: io_registry_entry_t, key: &str) -> Option<u64> {
 /// Read a string IORegistry property (CFString).
 unsafe fn read_string_prop(entry: io_registry_entry_t, key: &str) -> Option<String> {
     let cfkey = CFString::new(key);
-    let raw = IORegistryEntryCreateCFProperty(
-        entry,
-        cfkey.as_concrete_TypeRef(),
-        std::ptr::null(),
-        0,
-    );
+    let raw =
+        IORegistryEntryCreateCFProperty(entry, cfkey.as_concrete_TypeRef(), std::ptr::null(), 0);
     if raw.is_null() {
         return None;
     }
@@ -222,9 +215,9 @@ pub fn run_usb_notifications(on_event: Box<dyn FnMut(UsbChange) + Send>) {
     };
     use io_kit_sys::types::{io_iterator_t, io_object_t, io_service_t};
     use io_kit_sys::{
-        kIOMasterPortDefault, IONotificationPortCreate, IONotificationPortGetRunLoopSource,
-        IONotificationPortRef, IOIteratorNext, IOObjectRelease, IOServiceAddInterestNotification,
-        IOServiceAddMatchingNotification, IOServiceMatching,
+        kIOMasterPortDefault, IOIteratorNext, IONotificationPortCreate,
+        IONotificationPortGetRunLoopSource, IONotificationPortRef, IOObjectRelease,
+        IOServiceAddInterestNotification, IOServiceAddMatchingNotification, IOServiceMatching,
     };
     use std::os::raw::{c_char, c_void};
 
@@ -359,7 +352,10 @@ mod tests {
 
     #[test]
     fn formats_serial_as_uppercase_hex_guid() {
-        assert_eq!(format_firewire_guid("000a27002138b0a8"), "0x000A27002138B0A8");
+        assert_eq!(
+            format_firewire_guid("000a27002138b0a8"),
+            "0x000A27002138B0A8"
+        );
     }
 
     #[test]
@@ -374,7 +370,10 @@ mod tests {
             Some("0x000A27002138B0A8".to_string())
         );
         assert_eq!(supported_ipod_added_identity("not-a-guid", 0x1261), None);
-        assert_eq!(supported_ipod_added_identity("000a27002138b0a8", 0x12AB), None);
+        assert_eq!(
+            supported_ipod_added_identity("000a27002138b0a8", 0x12AB),
+            None
+        );
     }
 
     // Regression: pin the IOKit notification/interest constants. The message
