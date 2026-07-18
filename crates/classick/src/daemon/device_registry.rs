@@ -87,7 +87,8 @@ pub(crate) struct DeviceRegistry {
 
 impl DeviceRegistry {
     pub(crate) fn load_or_migrate(path: PathBuf, legacy: Option<&IpodIdentity>) -> Result<Self> {
-        let records = match std::fs::read_to_string(&path) {
+        let mut should_persist = false;
+        let mut records = match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let file: RegistryFile = serde_json::from_str(&text)
                     .with_context(|| format!("parse device registry at {}", path.display()))?;
@@ -101,13 +102,8 @@ impl DeviceRegistry {
                 Self::index_records(file.records)?
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let mut records = BTreeMap::new();
-                if let Some(identity) = legacy {
-                    let record = DeviceRecord::from_legacy(identity);
-                    let key = Self::required_key(&record.serial)?;
-                    records.insert(key, record);
-                }
-                records
+                should_persist = true;
+                BTreeMap::new()
             }
             Err(error) => {
                 return Err(anyhow!(
@@ -116,9 +112,17 @@ impl DeviceRegistry {
                 ))
             }
         };
+        if records.is_empty() {
+            if let Some(identity) = legacy {
+                let record = DeviceRecord::from_legacy(identity);
+                let key = Self::required_key(&record.serial)?;
+                records.insert(key, record);
+                should_persist = true;
+            }
+        }
 
         let registry = Self { path, records };
-        if !registry.path.exists() {
+        if should_persist {
             registry.persist(&registry.records)?;
         }
         Ok(registry)
@@ -287,6 +291,34 @@ mod tests {
         assert_eq!(records[0].name.as_deref(), Some("Library A"));
         assert_eq!(records[0].last_seen_unix_secs, None);
         assert!(path.exists(), "migration must be durable");
+    }
+
+    #[test]
+    fn migrates_legacy_identity_after_empty_registry_was_persisted() {
+        let path = temp_path("migrate-after-empty");
+        let empty = DeviceRegistry::load_or_migrate(path.clone(), None).unwrap();
+        assert!(empty.records().is_empty());
+
+        let migrated =
+            DeviceRegistry::load_or_migrate(path.clone(), Some(&legacy(" A-002 "))).unwrap();
+        let records = migrated.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].serial, " A-002 ");
+        assert!(records[0].configured);
+
+        let reloaded = DeviceRegistry::load_or_migrate(path, None).unwrap();
+        assert_eq!(reloaded.records(), records);
+    }
+
+    #[test]
+    fn existing_non_empty_registry_remains_authoritative_over_legacy() {
+        let path = temp_path("existing-authoritative");
+        DeviceRegistry::load_or_migrate(path.clone(), Some(&legacy("A"))).unwrap();
+
+        let reloaded = DeviceRegistry::load_or_migrate(path, Some(&legacy("B"))).unwrap();
+        let records = reloaded.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].serial, "A");
     }
 
     #[test]
