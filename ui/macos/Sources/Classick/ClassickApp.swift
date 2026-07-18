@@ -82,6 +82,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             await daemonClient.send(.getLibrary)
             await daemonClient.send(.getSelection)
             await daemonClient.send(.getHistory(limit: 50))
+            // Protocol 1.6.0: the sidebar's Playlists section and the device
+            // Music page's subscriptions checklist both read `model.playlists`,
+            // populated only by a `playlists_update` reply/broadcast — nothing
+            // requests the initial list otherwise.
+            await daemonClient.send(.listPlaylists)
         }
     }
 
@@ -257,6 +262,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.send(.savePlaylist(payload)) }
     }
 
+    /// Device Music page (Task 5): fetches the device's current selection +
+    /// subscriptions + settings, plus a fresh capacity preview, the moment
+    /// the user navigates to its Music page. Device config isn't part of
+    /// `requestLibraryAndSelection`'s window-appear batch since it's scoped
+    /// to whichever device page is showing, not global app state.
+    func loadDeviceConfig(serial: String) {
+        Task { await daemonClient.send(.getDeviceConfig(serial: serial)) }
+        previewDevice(serial: serial)
+    }
+
+    /// Live capacity/skip preview for a candidate device selection/
+    /// subscription edit. `device_preview` carries no serial on the wire, so
+    /// `willRequestDevicePreview` bookkeeping (mirrors `previewSelection`
+    /// above) lets the reducer attach the reply to the right device.
+    func previewDevice(serial: String) {
+        model.willRequestDevicePreview(serial: serial)
+        Task { await daemonClient.send(.previewDevice(serial: serial)) }
+    }
+
+    /// Device Music page's debounced auto-save (Task 5). `settings` is
+    /// always omitted (nil = "don't change") — this page only ever edits
+    /// `selection`/`subscriptions`; per-device settings are the device
+    /// Settings page's job (Task 6).
+    func saveDeviceConfig(serial: String, selection: SelectionState?, subscriptions: SubscriptionsWire?) {
+        Task { await daemonClient.send(.saveDeviceConfig(serial: serial, selection: selection, subscriptions: subscriptions, settings: nil)) }
+    }
+
     /// No-op under `swift test` (see `Updater.swift`) — SPM's `Package.swift`
     /// graph doesn't carry the Sparkle dependency.
     func checkForUpdates() {
@@ -355,7 +387,12 @@ struct ClassickApp: App {
                 onSaveIpodSelection: { custom in appDelegate.saveIpodSelection(customSelection: custom) },
                 onReplaceLibrary: appDelegate.replaceLibrary,
                 onAppearRequests: appDelegate.requestLibraryAndSelection,
-                onSavePlaylist: { payload in appDelegate.savePlaylist(payload) }
+                onSavePlaylist: { payload in appDelegate.savePlaylist(payload) },
+                onLoadDeviceConfig: { serial in appDelegate.loadDeviceConfig(serial: serial) },
+                onPreviewDevice: { serial in appDelegate.previewDevice(serial: serial) },
+                onSaveDeviceConfig: { serial, selection, subscriptions in
+                    appDelegate.saveDeviceConfig(serial: serial, selection: selection, subscriptions: subscriptions)
+                }
             )
         }
         .windowResizability(.contentMinSize)

@@ -16,6 +16,7 @@
 		22C8CBC1F64EF320711A44B1 /* ClassickApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18857CE62529C7150D78B6EA /* ClassickApp.swift */; };
 		29C0992FEDBBA760E13C131F /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 202553602D0B6CF9B75237B8 /* AppIcon.icon */; };
 		2BD4832EC2BB0BEC5A2FFA9F /* SelectionDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0AEA0F898A570ADA7D30EB /* SelectionDraftTests.swift */; };
+		2C0AB6F4D69794C6AF0B69C7 /* DeviceMusicLogicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2027E7A77B12C98BEA1CB81 /* DeviceMusicLogicTests.swift */; };
 		3012B574C1CDDEF574BE97C9 /* WireCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 088D7817D297D30A5DEB28B4 /* WireCodecTests.swift */; };
 		323700F7CDAEA8A69F46AF4D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F6E6E19F0CC4A565F756B34 /* SettingsView.swift */; };
 		34B045E46CB1FFA37A665FA4 /* Storage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61DE80657A5644ED21E4873A /* Storage.swift */; };
@@ -27,6 +28,7 @@
 		7DB96D9B60B910D9CADBF471 /* PromptAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAB3C64FBA7F0070A69F92BD /* PromptAlert.swift */; };
 		8668B10A8A87B7D6D9251FBB /* SetupWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F16B859592192A81F64B75F /* SetupWindowController.swift */; };
 		8C007C9F5695000CBA16E4F7 /* SetupWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82BC8C8CBF9B3ECE8C2C11DC /* SetupWindow.swift */; };
+		8F39F1B258597665AC6A4DE5 /* DeviceMusicPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 026585EAEA306343196D6CC1 /* DeviceMusicPage.swift */; };
 		946F25B53E859840D136A76B /* DeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA35506FB0FA89D1354E4C9B /* DeviceRow.swift */; };
 		9F69DE55F112B10BBAE446BB /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1788052EC7FE9655A0767A10 /* HistoryView.swift */; };
 		A6E2CFE58A8D14C39D2AFBB8 /* MenuContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04854C70583BD2B3841B7139 /* MenuContent.swift */; };
@@ -51,6 +53,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		026585EAEA306343196D6CC1 /* DeviceMusicPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMusicPage.swift; sourceTree = "<group>"; };
 		04854C70583BD2B3841B7139 /* MenuContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuContent.swift; sourceTree = "<group>"; };
 		088D7817D297D30A5DEB28B4 /* WireCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireCodecTests.swift; sourceTree = "<group>"; };
 		0C05804D1D10803966E55427 /* LibraryBrowserLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryBrowserLogicTests.swift; sourceTree = "<group>"; };
@@ -80,6 +83,7 @@
 		9F16B859592192A81F64B75F /* SetupWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupWindowController.swift; sourceTree = "<group>"; };
 		AA0AEA0F898A570ADA7D30EB /* SelectionDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionDraftTests.swift; sourceTree = "<group>"; };
 		AA35506FB0FA89D1354E4C9B /* DeviceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceRow.swift; sourceTree = "<group>"; };
+		D2027E7A77B12C98BEA1CB81 /* DeviceMusicLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMusicLogicTests.swift; sourceTree = "<group>"; };
 		DAB3C64FBA7F0070A69F92BD /* PromptAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptAlert.swift; sourceTree = "<group>"; };
 		DD34388BC51EFD2420DCC244 /* DaemonProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonProcess.swift; sourceTree = "<group>"; };
 		EDCC447E0CBF497B9A8E7713 /* DeviceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceView.swift; sourceTree = "<group>"; };
@@ -163,6 +167,7 @@
 		99D4485C35D1081038D50B0D /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				026585EAEA306343196D6CC1 /* DeviceMusicPage.swift */,
 				AA35506FB0FA89D1354E4C9B /* DeviceRow.swift */,
 				EDCC447E0CBF497B9A8E7713 /* DeviceView.swift */,
 				1788052EC7FE9655A0767A10 /* HistoryView.swift */,
@@ -184,6 +189,7 @@
 			children = (
 				41284FF3EF16C964A6FDCCEF /* AppModelReducerTests.swift */,
 				692B715F0269A14C79855E96 /* DaemonClientTests.swift */,
+				D2027E7A77B12C98BEA1CB81 /* DeviceMusicLogicTests.swift */,
 				0C05804D1D10803966E55427 /* LibraryBrowserLogicTests.swift */,
 				9752BD44A7E2AEA57406B9EA /* NotifierPolicyTests.swift */,
 				AA0AEA0F898A570ADA7D30EB /* SelectionDraftTests.swift */,
@@ -362,6 +368,7 @@
 			files = (
 				1EF2D88BD28C5DBB1C00A0EF /* AppModelReducerTests.swift in Sources */,
 				205413F237D7FB0ED719FD80 /* DaemonClientTests.swift in Sources */,
+				2C0AB6F4D69794C6AF0B69C7 /* DeviceMusicLogicTests.swift in Sources */,
 				3EB8079679ACFE2DEF3894F7 /* LibraryBrowserLogicTests.swift in Sources */,
 				F7AD8BE48FF289EEE5944BC0 /* NotifierPolicyTests.swift in Sources */,
 				2BD4832EC2BB0BEC5A2FFA9F /* SelectionDraftTests.swift in Sources */,
@@ -378,6 +385,7 @@
 				22C8CBC1F64EF320711A44B1 /* ClassickApp.swift in Sources */,
 				ACB102D41EA59D9FCB5F58FE /* DaemonClient.swift in Sources */,
 				21C4AD8118E2A87AC6B16D8B /* DaemonProcess.swift in Sources */,
+				8F39F1B258597665AC6A4DE5 /* DeviceMusicPage.swift in Sources */,
 				946F25B53E859840D136A76B /* DeviceRow.swift in Sources */,
 				D015949C91329F4A587EC32D /* DeviceView.swift in Sources */,
 				9F69DE55F112B10BBAE446BB /* HistoryView.swift in Sources */,

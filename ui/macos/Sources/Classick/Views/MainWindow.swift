@@ -26,6 +26,10 @@ struct MainWindow: View {
     // — the call site can compile clean while never actually wiring the
     // daemon send path. See `ClassickApp`'s `MainWindow(...)` call site.
     var onSavePlaylist: (PlaylistPayload) -> Void
+    // Device Music page (Task 5).
+    var onLoadDeviceConfig: (String) -> Void = { _ in }
+    var onPreviewDevice: (String) -> Void = { _ in }
+    var onSaveDeviceConfig: (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> Void = { _, _, _ in }
 
     private var selection: Binding<SidebarDestination?> {
         Binding(get: { model.selectedDestination }, set: { model.selectedDestination = $0 })
@@ -66,10 +70,16 @@ struct MainWindow: View {
             switch model.selectedDestination {
             case .library, nil:
                 LibraryView(model: model, onScan: onScan)
-            case .device:
-                // Device Music/Settings pages are built out in Tasks 5-6; for
-                // now both pages of the disclosure route to the existing
-                // dashboard so navigation is exercisable end-to-end.
+            case let .device(serial, .music):
+                DeviceMusicPage(
+                    model: model, serial: serial, onSyncNow: onSyncNow,
+                    onLoadDeviceConfig: onLoadDeviceConfig, onPreviewDevice: onPreviewDevice,
+                    onSaveDeviceConfig: onSaveDeviceConfig)
+                    .id(serial)
+            case .device(_, .settings):
+                // Device Settings page is built out in Task 6; for now it
+                // routes to the existing dashboard so navigation is
+                // exercisable end-to-end.
                 DeviceView(model: model, onSaveSettings: onSaveSettings,
                            onForgetIpod: onForgetIpod, onBackfill: onBackfill,
                            onSaveIpodSelection: onSaveIpodSelection, onReplaceLibrary: onReplaceLibrary)
