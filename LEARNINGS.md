@@ -567,3 +567,17 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   the playlist's human-readable name (`"Mix"`). Any caller that wants the
   display name to show up on-device has to translate slug -> name itself
   before calling reconcile — `sync_set` doesn't do it.
+
+## Multi-device cleanup audit (2026-07-18)
+
+- **Status and capacity reads prefer a present per-device manifest, but fall
+  back to the legacy flat manifest only when the per-device file is absent.**
+  A corrupt per-device manifest remains authoritative and fails safe to empty;
+  silently falling back there could project or mutate from stale host state.
+- **Never delete or overwrite a playlist without positive Classick ownership.**
+  Empty smart playlists and same-named Rockbox `.m3u8` files may be foreign;
+  broad sweeps and name-based adoption violate the device-playlist invariant.
+- **Library drag-and-drop needs request-correlated, ordered, acknowledged IPC.**
+  FIFO reply inference plus fire-and-forget writes can misroute concurrent
+  drops or lose them across reconnects, so the macOS UI must not expose the
+  feature until the daemon protocol supplies those guarantees.
