@@ -11,7 +11,11 @@ see `docs/superpowers/specs/2026-07-12-macos-swiftui-app-design.md`.
 
 ## Requirements
 
-- macOS 15 (Sequoia) or later. Liquid Glass is adopted conditionally on macOS 26.
+- macOS 15 (Sequoia) or later. Liquid Glass: audited during the 2026-07 app
+  restructure — every surface uses standard `Form`/`List`/`NavigationSplitView`
+  controls, which adopt Liquid Glass automatically under macOS 26, so the app
+  ships **zero** `#available(macOS 26)` gates by design. Add one only if a
+  custom-drawn surface visibly diverges from the system look.
 - Xcode 26 / Swift 6.3 (Swift 6 strict concurrency).
 - A built `classick` daemon binary (the app spawns it). See the repo root
   `AGENTS.md` for the Rust build, and `crates/classick/vendor/libgpod/BUILD-NOTES.md`
