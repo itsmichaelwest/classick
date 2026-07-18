@@ -8,6 +8,7 @@
 //! a scripted device watcher and a fake spawn-fn.
 
 use crate::config_file::{self, PersistedConfig};
+use crate::daemon::device_registry::DeviceRegistry;
 use crate::daemon::device_storage::{self, StorageInfo};
 use crate::daemon::device_watcher::{Debouncer, DeviceEvent, DeviceWatcher};
 #[cfg(not(target_os = "macos"))]
@@ -242,6 +243,19 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
         Some(p) => p,
         None => config_file::default_path()?,
     };
+    let legacy_identity = config_file::load(&config_path)?.and_then(|config| config.ipod_identity);
+    let registry = DeviceRegistry::load_or_migrate(
+        config_file::device_registry_path(&config_path),
+        legacy_identity.as_ref(),
+    )?;
+    if let Some(serial) = registry
+        .records()
+        .into_iter()
+        .find(|record| record.configured)
+        .map(|record| record.serial)
+    {
+        history.migrate_legacy_entries(&serial)?;
+    }
     let mut state = StateMachine::new();
     let mut scheduler = SyncScheduler::new(deps.schedule_minutes);
     let mut debouncer = Debouncer::new(crate::daemon::DEVICE_DEBOUNCE_WINDOW);
@@ -633,7 +647,8 @@ fn handle_internal_event(
             }
 
             let entry = make_history_entry(
-                trigger, history_outcome, error_message, summary, started_at_unix_secs, db_restored,
+                serial.clone(), trigger, history_outcome, error_message, summary,
+                started_at_unix_secs, db_restored,
             );
             let last_sync = Some(entry.clone());
             let _ = history.append(entry);
@@ -787,6 +802,7 @@ fn handle_device_event(
             if let DaemonState::Syncing(s) = state.state() {
                 if s.serial.as_deref() == Some(&serial) {
                     let _ = history.append(make_history_entry(
+                        serial.clone(),
                         s.trigger.clone(),
                         SyncOutcome::Aborted,
                         Some("device_detached".to_string()),
@@ -914,6 +930,7 @@ fn start_scan_session(
 }
 
 fn make_history_entry(
+    serial: String,
     trigger: SyncTrigger,
     outcome: SyncOutcome,
     error_message: Option<String>,
@@ -927,6 +944,8 @@ fn make_history_entry(
         .unwrap_or(0);
     let duration = now.saturating_sub(started_at_unix_secs);
     HistoryEntry {
+        serial,
+        session_id: None,
         timestamp: crate::daemon::format::rfc3339(now),
         duration_secs: duration,
         trigger,
@@ -1841,6 +1860,22 @@ fn _silence_mpsc_warning(_: mpsc::Sender<DaemonEvent>) {}
 mod tests {
     use super::*;
     use crate::config_file::PersistedConfig;
+
+    #[test]
+    fn history_entries_keep_the_syncing_devices_raw_serial() {
+        let entry = make_history_entry(
+            " A ".to_string(),
+            SyncTrigger::Manual,
+            SyncOutcome::Ok,
+            None,
+            None,
+            0,
+            false,
+        );
+
+        assert_eq!(entry.serial, " A ");
+        assert_eq!(entry.session_id, None);
+    }
 
     fn manifest_with_track_count(count: usize) -> crate::manifest::Manifest {
         let tracks = (0..count)

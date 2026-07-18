@@ -122,6 +122,13 @@ pub fn default_path() -> Result<PathBuf> {
     Ok(appdata.join(crate::PROJECT_DIR).join("config.toml"))
 }
 
+/// Location of the durable device registry alongside per-device state.
+/// Keeping it relative to the config path lets daemon tests sandbox every
+/// persisted device artifact under one temporary root.
+pub fn device_registry_path(config_path: &Path) -> PathBuf {
+    config_path.parent().unwrap_or_else(|| Path::new(".")).join("devices").join("registry.json")
+}
+
 /// Load the persisted config from `path`. Returns `Ok(None)` if the file
 /// doesn't exist (a missing config is not an error — it just means "no
 /// overrides set yet"). Returns `Err` only on read or parse failure.
@@ -173,6 +180,12 @@ mod tests {
         assert_eq!(cfg.ffmpeg.as_deref().unwrap().to_string_lossy(), "ffmpeg");
         assert_eq!(cfg.no_delete, Some(false));
         assert_eq!(cfg.no_tui, Some(false));
+    }
+
+    #[test]
+    fn device_registry_path_is_scoped_to_config_parent() {
+        let config = Path::new("/tmp/classick/config.toml");
+        assert_eq!(device_registry_path(config), PathBuf::from("/tmp/classick/devices/registry.json"));
     }
 
     #[test]

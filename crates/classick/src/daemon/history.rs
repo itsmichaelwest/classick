@@ -60,6 +60,11 @@ pub struct SyncSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
+    /// Empty only for legacy entries written before per-device history.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub serial: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<u64>,
     pub timestamp: String,
     pub duration_secs: u64,
     pub trigger: SyncTrigger,
@@ -113,6 +118,44 @@ impl HistoryService {
     pub fn append(&self, entry: HistoryEntry) -> Result<()> {
         let mut existing = self.read();
         existing.push(entry);
+        self.write_entries(existing)
+    }
+
+    /// Attach pre-registry history to the single configured device created by
+    /// the legacy migration. Existing scoped entries are never rewritten.
+    pub fn migrate_legacy_entries(&self, serial: &str) -> Result<()> {
+        let mut entries = self.read();
+        let mut changed = false;
+        for entry in &mut entries {
+            if entry.serial.is_empty() {
+                entry.serial = serial.to_string();
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+        self.write_entries(entries)
+    }
+
+    pub fn latest_attempt(&self, serial: &str) -> Option<HistoryEntry> {
+        let key = crate::daemon::device_registry::canonical_serial_key(serial);
+        self.read().into_iter().rev().find(|entry| {
+            !entry.serial.is_empty()
+                && crate::daemon::device_registry::canonical_serial_key(&entry.serial) == key
+        })
+    }
+
+    pub fn latest_success(&self, serial: &str) -> Option<HistoryEntry> {
+        let key = crate::daemon::device_registry::canonical_serial_key(serial);
+        self.read().into_iter().rev().find(|entry| {
+            entry.outcome == SyncOutcome::Ok
+                && !entry.serial.is_empty()
+                && crate::daemon::device_registry::canonical_serial_key(&entry.serial) == key
+        })
+    }
+
+    fn write_entries(&self, existing: Vec<HistoryEntry>) -> Result<()> {
         let start = existing.len().saturating_sub(MAX_ENTRIES);
         let trimmed: Vec<_> = existing.into_iter().skip(start).collect();
         let file = HistoryFile { version: 1, entries: trimmed };
@@ -122,7 +165,18 @@ impl HistoryService {
         }
         let tmp = self.path.with_extension("json.tmp");
         let text = serde_json::to_string_pretty(&file).context("serialize history")?;
-        std::fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
+        {
+            let file =
+                std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+            let mut writer = std::io::BufWriter::new(file);
+            use std::io::Write;
+            writer
+                .write_all(text.as_bytes())
+                .with_context(|| format!("write {}", tmp.display()))?;
+            let file = writer.into_inner().context("flush history writer")?;
+            file.sync_all()
+                .with_context(|| format!("fsync {}", tmp.display()))?;
+        }
         std::fs::rename(&tmp, &self.path)
             .with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))?;
         Ok(())
@@ -149,6 +203,8 @@ mod tests {
 
     fn make_entry(ts: &str, outcome: SyncOutcome) -> HistoryEntry {
         HistoryEntry {
+            serial: String::new(),
+            session_id: None,
             timestamp: ts.to_string(),
             duration_secs: 5,
             trigger: SyncTrigger::Manual,
@@ -204,6 +260,8 @@ mod tests {
         let _ = std::fs::remove_file(&p);
         let svc = HistoryService::new(p.clone());
         let entry = HistoryEntry {
+            serial: String::new(),
+            session_id: None,
             timestamp: "2026-05-25T10:00:00Z".to_string(),
             duration_secs: 7,
             trigger: SyncTrigger::PlugIn,
@@ -281,6 +339,50 @@ mod tests {
         let entry = make_entry("2026-07-17T10:00:00Z", SyncOutcome::Ok);
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("db_restored"));
+    }
+
+    #[test]
+    fn migrates_unscoped_legacy_history_to_configured_serial() {
+        let p = tmp_path("migrate-legacy-serial");
+        let _ = std::fs::remove_file(&p);
+        let svc = HistoryService::new(p.clone());
+        svc.append(make_entry("2026-07-18T10:00:00Z", SyncOutcome::Ok))
+            .unwrap();
+        svc.append(make_entry("2026-07-18T10:01:00Z", SyncOutcome::Error))
+            .unwrap();
+
+        svc.migrate_legacy_entries(" A ").unwrap();
+
+        let entries = svc.read();
+        assert!(entries.iter().all(|entry| entry.serial == " A "));
+        assert!(entries.iter().all(|entry| entry.session_id.is_none()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn latest_success_ignores_newer_failed_or_cancelled_attempts() {
+        let p = tmp_path("latest-success");
+        let _ = std::fs::remove_file(&p);
+        let svc = HistoryService::new(p.clone());
+        for (timestamp, outcome) in [
+            ("2026-07-18T10:00:00Z", SyncOutcome::Ok),
+            ("2026-07-18T10:01:00Z", SyncOutcome::Error),
+            ("2026-07-18T10:02:00Z", SyncOutcome::Aborted),
+        ] {
+            let mut entry = make_entry(timestamp, outcome);
+            entry.serial = "A".to_string();
+            svc.append(entry).unwrap();
+        }
+
+        assert_eq!(
+            svc.latest_attempt(" a ").unwrap().timestamp,
+            "2026-07-18T10:02:00Z"
+        );
+        assert_eq!(
+            svc.latest_success("A").unwrap().timestamp,
+            "2026-07-18T10:00:00Z"
+        );
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
