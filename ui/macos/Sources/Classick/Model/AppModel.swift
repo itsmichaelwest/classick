@@ -85,6 +85,15 @@ final class AppModel {
     // MARK: - Protocol 1.6.0: playlists, per-device config, device preview
 
     private(set) var playlists: [PlaylistSummary] = []
+    /// Bumped on every `playlists_update` event, regardless of whether
+    /// `playlists`'s content actually changed. The sidebar's "+" in-flight
+    /// guard (review finding #2) needs to observe EVERY reply — including
+    /// one that's content-identical to the prior list, e.g. the daemon's
+    /// error path re-sending the unchanged list — so it can clear pending
+    /// state and re-enable the button. A plain `onChange(of: playlists)`
+    /// wouldn't fire for a content-identical reply since SwiftUI's
+    /// `onChange` only fires when the Equatable value differs.
+    private(set) var playlistsUpdateRevision = 0
     /// Reply to the most recent `get_playlist` — for the playlist editor
     /// (Task 7). Not scoped by slug: like `selectionPreview`, there's only
     /// ever one in-flight editor request at a time.
@@ -174,6 +183,7 @@ final class AppModel {
 
         case let .playlistsUpdate(list):
             playlists = list
+            playlistsUpdateRevision += 1
 
         case let .playlistDetail(detail):
             playlistDetail = detail

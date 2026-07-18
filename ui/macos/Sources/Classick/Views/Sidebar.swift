@@ -53,6 +53,13 @@ struct Sidebar: View {
                     }
                     .buttonStyle(.plain)
                     .help("New Playlist")
+                    // Review finding #2: without this guard, two quick taps
+                    // send two `save_playlist` commands — the daemon's
+                    // unique_slug disambiguates the second to
+                    // "new-playlist-2", which is silently orphaned (never
+                    // selected, easy to lose track of). Disabled for the
+                    // whole time a creation is in flight.
+                    .disabled(priorSlugsAwaitingNewPlaylist != nil)
                 }
             }
 
@@ -62,19 +69,26 @@ struct Sidebar: View {
             }
         }
         .navigationSplitViewColumnWidth(min: 200, ideal: 210, max: 260)
-        .onChange(of: model.playlists) { _, updated in
-            guard let priorSlugs = priorSlugsAwaitingNewPlaylist,
-                  let destination = SidebarDestination.destinationForNewlyCreatedPlaylist(
-                      priorSlugs: priorSlugs, updated: updated)
-            else { return }
-            selection = destination
+        // Watches the revision counter (not `model.playlists` directly) so
+        // this fires on EVERY `playlists_update` reply while a creation is
+        // pending — including one that's content-identical to the prior
+        // list (e.g. the daemon's error path) — otherwise a plain
+        // `onChange(of: playlists)` wouldn't fire and the "+" button would
+        // wedge disabled forever (review finding #2).
+        .onChange(of: model.playlistsUpdateRevision) { _, _ in
+            guard let priorSlugs = priorSlugsAwaitingNewPlaylist else { return }
+            if let destination = SidebarDestination.destinationForNewlyCreatedPlaylist(
+                priorSlugs: priorSlugs, updated: model.playlists)
+            {
+                selection = destination
+            }
             priorSlugsAwaitingNewPlaylist = nil
         }
     }
 
     private func createPlaylist() {
         priorSlugsAwaitingNewPlaylist = Set(model.playlists.map(\.slug))
-        onSavePlaylist(.manual(slug: nil, name: "New Playlist", tracks: []))
+        onSavePlaylist(.manual(slug: nil, name: SidebarDestination.newPlaylistDefaultName, tracks: []))
     }
 
     /// The one paired device's sidebar identity, derived from either the
@@ -106,30 +120,33 @@ struct Sidebar: View {
                 .tag(SidebarDestination.device(serial: device.serial, page: .settings))
                 .padding(.leading, 12)
         } label: {
-            // The label content is wrapped in a plain-style Button so taps
-            // on it are consumed here (selecting the Music page) rather than
-            // falling through to DisclosureGroup's own label-tap-to-toggle
-            // gesture; the disclosure triangle DisclosureGroup renders
-            // outside this closure is unaffected and remains the only way
-            // to expand/collapse — see the Global Constraints rule this
-            // implements.
-            Button {
-                selection = SidebarDestination.destinationForDeviceRowClick(serial: device.serial)
-            } label: {
-                HStack {
-                    Image(systemName: "ipod")
-                    Text(device.name)
-                    Spacer()
-                    if device.isConnected {
-                        Button(action: onForgetIpod) {
-                            Image(systemName: "eject")
-                        }
-                        .buttonStyle(.plain)
-                        .help("Remove this iPod")
+            // Review finding #4: this used to be a Button wrapping the whole
+            // label (including the eject Button below), which nests a Button
+            // inside another Button's label — undefined hit-testing for a
+            // destructive control. `.onTapGesture` + `.contentShape` gets the
+            // same tap-consuming effect (taps on the row select the Music
+            // page rather than falling through to DisclosureGroup's own
+            // label-tap-to-toggle gesture; the disclosure triangle
+            // DisclosureGroup renders outside this closure is unaffected and
+            // remains the only way to expand/collapse — see the Global
+            // Constraints rule this implements) while leaving the eject
+            // Button as a real, non-nested, top-level control.
+            HStack {
+                Image(systemName: "ipod")
+                Text(device.name)
+                Spacer()
+                if device.isConnected {
+                    Button(action: onForgetIpod) {
+                        Image(systemName: "eject")
                     }
+                    .buttonStyle(.plain)
+                    .help("Remove this iPod")
                 }
             }
-            .buttonStyle(.plain)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                selection = SidebarDestination.destinationForDeviceRowClick(serial: device.serial)
+            }
         }
         .foregroundStyle(device.isConnected ? .primary : .secondary)
     }

@@ -433,4 +433,56 @@ final class AppModelReducerTests: XCTestCase {
             SidebarDestination.destinationForNewlyCreatedPlaylist(priorSlugs: [], updated: updated),
             .playlist(slug: "first"))
     }
+
+    /// Review finding #3: the daemon broadcasts `playlists_update` to every
+    /// client and sorts alphabetically by slug, so a concurrently-created
+    /// playlist from ANOTHER client with an alphabetically-earlier slug must
+    /// not steal this client's selection. Among the new slugs, one that
+    /// starts with the expected "new-playlist" prefix must win even if it
+    /// sorts later than an unrelated new slug.
+    func testDestinationForNewlyCreatedPlaylistPrefersExpectedPrefixOverEarlierSortingSlug() {
+        let prior: Set<String> = ["gym"]
+        let updated = [
+            PlaylistSummary(slug: "another-clients-mix", name: "Another Client's Mix", kind: .manual, tracks: 0, bytes: 0, error: nil),
+            PlaylistSummary(slug: "gym", name: "Gym", kind: .manual, tracks: 12, bytes: 900, error: nil),
+            PlaylistSummary(slug: "new-playlist", name: "New Playlist", kind: .manual, tracks: 0, bytes: 0, error: nil),
+        ]
+        XCTAssertEqual(
+            SidebarDestination.destinationForNewlyCreatedPlaylist(priorSlugs: prior, updated: updated),
+            .playlist(slug: "new-playlist"),
+            "the expected-prefix slug must win even though 'another-clients-mix' sorts first")
+    }
+
+    /// When neither new slug carries the expected prefix (e.g. this
+    /// heuristic can't disambiguate at all), fall back to the first new slug
+    /// in `updated`'s order — a best-effort default, not a guarantee.
+    func testDestinationForNewlyCreatedPlaylistFallsBackToFirstNewWhenNeitherIsPrefixed() {
+        let prior: Set<String> = ["gym"]
+        let updated = [
+            PlaylistSummary(slug: "alpha-mix", name: "Alpha Mix", kind: .manual, tracks: 0, bytes: 0, error: nil),
+            PlaylistSummary(slug: "beta-mix", name: "Beta Mix", kind: .manual, tracks: 0, bytes: 0, error: nil),
+            PlaylistSummary(slug: "gym", name: "Gym", kind: .manual, tracks: 12, bytes: 900, error: nil),
+        ]
+        XCTAssertEqual(
+            SidebarDestination.destinationForNewlyCreatedPlaylist(priorSlugs: prior, updated: updated),
+            .playlist(slug: "alpha-mix"))
+    }
+
+    // MARK: - Task 3 review fix: playlists_update revision (finding #2)
+
+    /// The sidebar's in-flight "+" guard must clear even when a
+    /// `playlists_update` reply is content-identical to the prior one (e.g.
+    /// the daemon's error path, which re-sends the unchanged list) — a plain
+    /// `onChange(of: playlists)` wouldn't fire in that case since the
+    /// Equatable value hasn't changed. `playlistsUpdateRevision` increments
+    /// on every `playlists_update` event regardless of content so the
+    /// sidebar has something to observe that always fires.
+    func testPlaylistsUpdateRevisionIncrementsOnEveryEventEvenWhenContentIsUnchanged() {
+        let m = AppModel()
+        let list = [PlaylistSummary(slug: "gym", name: "Gym", kind: .manual, tracks: 12, bytes: 900, error: nil)]
+        m.apply(.playlistsUpdate(list))
+        XCTAssertEqual(m.playlistsUpdateRevision, 1)
+        m.apply(.playlistsUpdate(list))
+        XCTAssertEqual(m.playlistsUpdateRevision, 2, "revision must bump even when the list content is identical")
+    }
 }

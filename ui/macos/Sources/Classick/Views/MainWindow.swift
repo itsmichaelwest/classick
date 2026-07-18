@@ -21,7 +21,11 @@ struct MainWindow: View {
     var onSaveIpodSelection: (Bool) -> Void = { _ in }
     var onReplaceLibrary: () -> Void = {}
     var onAppearRequests: () -> Void = {}
-    var onSavePlaylist: (PlaylistPayload) -> Void = { _ in }
+    // Required (no no-op default): a defaulted `{ _ in }` here is exactly how
+    // the "+" New Playlist button shipped silently dead (review finding #1)
+    // — the call site can compile clean while never actually wiring the
+    // daemon send path. See `ClassickApp`'s `MainWindow(...)` call site.
+    var onSavePlaylist: (PlaylistPayload) -> Void
 
     private var selection: Binding<SidebarDestination?> {
         Binding(get: { model.selectedDestination }, set: { model.selectedDestination = $0 })

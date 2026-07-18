@@ -249,6 +249,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.send(.getStatus) }
     }
 
+    /// Sidebar's "+ New Playlist" flow (Task 3). The daemon replies with an
+    /// unsolicited `playlists_update` (not a direct reply to this command),
+    /// which is what `Sidebar`'s `destinationForNewlyCreatedPlaylist` flow
+    /// watches for to pick up the newly assigned slug.
+    func savePlaylist(_ payload: PlaylistPayload) {
+        Task { await daemonClient.send(.savePlaylist(payload)) }
+    }
+
     /// No-op under `swift test` (see `Updater.swift`) — SPM's `Package.swift`
     /// graph doesn't carry the Sparkle dependency.
     func checkForUpdates() {
@@ -346,7 +354,8 @@ struct ClassickApp: App {
                 onSetUp: appDelegate.presentSetup,
                 onSaveIpodSelection: { custom in appDelegate.saveIpodSelection(customSelection: custom) },
                 onReplaceLibrary: appDelegate.replaceLibrary,
-                onAppearRequests: appDelegate.requestLibraryAndSelection
+                onAppearRequests: appDelegate.requestLibraryAndSelection,
+                onSavePlaylist: { payload in appDelegate.savePlaylist(payload) }
             )
         }
         .windowResizability(.contentMinSize)

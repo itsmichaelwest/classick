@@ -25,21 +25,68 @@ enum SidebarDestination: Hashable, Sendable {
         .device(serial: serial, page: .music)
     }
 
+    /// The name the sidebar's "+" button always sends as a new playlist's
+    /// initial name (see `Sidebar.createPlaylist`). Slugified, this is the
+    /// prefix `destinationForNewlyCreatedPlaylist` looks for among new slugs.
+    static let newPlaylistDefaultName = "New Playlist"
+
     /// The sidebar's "+ New Playlist" flow (Task 3): the caller snapshots
     /// the playlist slugs that existed right before sending
-    /// `.savePlaylist(.manual(slug: nil, name: "New Playlist", ...))`, then
-    /// calls this on every subsequent `playlists_update` until it returns
-    /// non-nil. Returns the destination for the first slug in `updated` that
-    /// wasn't in `priorSlugs` — the newly assigned slug for that request —
-    /// or `nil` if this update doesn't contain one yet (an unrelated update
-    /// arrived first, or the daemon hasn't replied yet).
+    /// `.savePlaylist(.manual(slug: nil, name: newPlaylistDefaultName, ...))`,
+    /// then calls this on every subsequent `playlists_update` until it
+    /// returns non-nil.
+    ///
+    /// The daemon broadcasts `playlists_update` to every connected client and
+    /// sorts it alphabetically by slug — there is no per-request correlation
+    /// id on the wire (adding one is out of scope for this fix). That means
+    /// `updated` can legitimately contain more than one slug absent from
+    /// `priorSlugs`: this client's own new playlist AND/OR another client's
+    /// concurrently-created one, in alphabetical (NOT arrival) order. Picking
+    /// "the first new slug" naively would let an alphabetically-earlier
+    /// concurrent creation from another client steal this client's selection.
+    ///
+    /// This is mitigated, not solved: among the new slugs, one that starts
+    /// with the slugified `newPlaylistDefaultName` ("new-playlist") is
+    /// preferred, since that's what THIS client's request would produce
+    /// (modulo the daemon's own `-2`/`-3` disambiguation suffix). If no new
+    /// slug carries that prefix, this falls back to the first new slug in
+    /// `updated`'s order. Best-effort by design — a genuine fix needs a wire
+    /// change (a correlation id on `save_playlist`/`playlists_update`).
+    ///
+    /// Returns `nil` if this update doesn't contain any new slug yet (an
+    /// unrelated update arrived first, or the daemon hasn't replied yet).
     static func destinationForNewlyCreatedPlaylist(
         priorSlugs: Set<String>,
         updated: [PlaylistSummary]
     ) -> SidebarDestination? {
-        guard let newSlug = updated.map(\.slug).first(where: { !priorSlugs.contains($0) }) else {
-            return nil
+        let newSlugs = updated.map(\.slug).filter { !priorSlugs.contains($0) }
+        guard !newSlugs.isEmpty else { return nil }
+        let expectedPrefix = Self.slugify(newPlaylistDefaultName)
+        let chosen = newSlugs.first(where: { $0.hasPrefix(expectedPrefix) }) ?? newSlugs[0]
+        return .playlist(slug: chosen)
+    }
+
+    /// Mirrors the daemon's `PlaylistStore::slugify` (`crates/classick/src/
+    /// playlist.rs`): lowercase, alphanumerics kept, runs of anything else
+    /// collapse to a single `-`, leading/trailing `-` trimmed. Only used here
+    /// to compute the expected-name prefix for the new-playlist selection
+    /// heuristic above — NOT a general-purpose slug generator for the app
+    /// (the daemon remains the sole source of truth for actual slugs).
+    private static func slugify(_ name: String) -> String {
+        var out = ""
+        var lastWasSeparator = true
+        for char in name {
+            if char.isASCII, char.isLetter || char.isNumber {
+                out += char.lowercased()
+                lastWasSeparator = false
+            } else if !lastWasSeparator {
+                out.append("-")
+                lastWasSeparator = true
+            }
         }
-        return .playlist(slug: newSlug)
+        while out.hasSuffix("-") {
+            out.removeLast()
+        }
+        return out.isEmpty ? "playlist" : out
     }
 }
