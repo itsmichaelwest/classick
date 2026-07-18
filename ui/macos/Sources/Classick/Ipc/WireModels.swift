@@ -381,8 +381,9 @@ enum SmartLimitWire: Codable, Equatable, Sendable {
 /// explicit `null` (not omitted) when absent — unlike most optional fields
 /// elsewhere on this wire, the Rust struct's fields carry no
 /// `skip_serializing_if`. `version`/`matching`/`order`/`seed` decode
-/// leniently (mirroring the Rust struct's own `#[serde(default)]`
-/// attributes) even though the daemon always sends them today.
+/// leniently even though the daemon always sends them today — deliberately
+/// broader than the Rust struct, where only `limit`/`order`/`seed` carry
+/// `#[serde(default)]`.
 struct SmartRulesWire: Codable, Equatable, Sendable {
     var version: Int
     var matching: SmartMatching
