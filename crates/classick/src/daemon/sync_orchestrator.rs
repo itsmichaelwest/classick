@@ -36,7 +36,10 @@ pub enum OrchestratorOutcome {
         /// line is read, so there's nothing to parse it from.
         db_restored: bool,
     },
-    Aborted { reason: String, summary: Option<SyncSummary> },
+    Aborted {
+        reason: String,
+        summary: Option<SyncSummary>,
+    },
     /// The subprocess emitted `{"type":"paused"}` (graceful drain +
     /// checkpoint) and then exited on its own. Distinct from `Aborted`:
     /// nothing failed, the user asked to stop, and a later `TriggerSync`
@@ -120,7 +123,8 @@ pub struct FailureTracker {
 
 impl FailureTracker {
     pub fn should_bail(&self) -> bool {
-        self.total_planned > 0 && self.tracks_errored > 0
+        self.total_planned > 0
+            && self.tracks_errored > 0
             && self.tracks_errored * 2 > self.total_planned
     }
 }
@@ -225,7 +229,9 @@ async fn drive_child(
     mut prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
 ) -> Result<OrchestratorOutcome> {
-    let mut child = cmd.spawn().with_context(|| format!("spawn {}", exe.display()))?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("spawn {}", exe.display()))?;
     let stdout = child.stdout.take().context("child stdout missing")?;
     let mut stdin = child.stdin.take().context("child stdin missing")?;
     let mut reader = BufReader::new(stdout).lines();
@@ -258,7 +264,11 @@ async fn drive_child(
                 // so UI clients see live sync progress. Wrapping the raw line in
                 // a SyncEvent envelope keeps the daemon protocol independent
                 // from M1 stdio-IPC semver.
-                let _ = event_tx.send(DaemonEvent::SyncEvent { line: line.clone() });
+                let _ = event_tx.send(DaemonEvent::SyncEvent {
+                    line: line.clone(),
+                    serial: None,
+                    session_id: 0,
+                });
 
                 let Some(value) = serde_json::from_str::<Value>(&line).ok() else { continue };
                 let ty = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -380,7 +390,9 @@ async fn drive_child(
     let _ = child.wait().await;
 
     if paused {
-        return Ok(OrchestratorOutcome::Paused { summary: last_summary });
+        return Ok(OrchestratorOutcome::Paused {
+            summary: last_summary,
+        });
     }
 
     let outcome = match finish_success {
@@ -421,7 +433,9 @@ fn summary_from_value(v: &Value) -> SyncSummary {
 /// absent, matching the wire's old-client-compat convention (the field is
 /// omitted rather than sent as `false`).
 fn db_restored_from_finish_value(v: &Value) -> bool {
-    v.get("db_restored").and_then(|x| x.as_bool()).unwrap_or(false)
+    v.get("db_restored")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
 }
 
 /// Merges the `skipped_for_space`/`artwork` rollups from a raw `finish`
@@ -432,11 +446,18 @@ fn db_restored_from_finish_value(v: &Value) -> bool {
 fn merge_finish_fields_into_summary(summary: &mut SyncSummary, v: &Value) {
     let skipped_for_space = v.get("skipped_for_space");
     summary.skipped_for_space_tracks = skipped_for_space
-        .and_then(|s| s.get("tracks")).and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        .and_then(|s| s.get("tracks"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as usize;
     summary.skipped_for_space_bytes = skipped_for_space
-        .and_then(|s| s.get("bytes")).and_then(|x| x.as_u64()).unwrap_or(0);
-    summary.artwork_failed_sources = v.get("artwork")
-        .and_then(|a| a.get("failed_sources")).and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        .and_then(|s| s.get("bytes"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    summary.artwork_failed_sources = v
+        .get("artwork")
+        .and_then(|a| a.get("failed_sources"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as usize;
 }
 
 /// Resolves at `deadline` if one is armed; otherwise never resolves. Lets
@@ -453,7 +474,9 @@ async fn pause_drain_deadline(deadline: Option<Instant>) {
 async fn bounded_kill(child: &mut Child, timeout: Duration) {
     match tokio::time::timeout(timeout, child.wait()).await {
         Ok(_) => {}
-        Err(_) => { let _ = child.kill().await; }
+        Err(_) => {
+            let _ = child.kill().await;
+        }
     }
 }
 
@@ -481,7 +504,10 @@ mod tests {
     async fn pause_drain_deadline_resolves_once_armed_deadline_elapses() {
         let deadline = Instant::now() + Duration::from_secs(15);
         pause_drain_deadline(Some(deadline)).await;
-        assert!(Instant::now() >= deadline, "must not resolve before the armed deadline");
+        assert!(
+            Instant::now() >= deadline,
+            "must not resolve before the armed deadline"
+        );
     }
 
     #[tokio::test]
@@ -547,25 +573,44 @@ mod tests {
 
     #[test]
     fn tracker_does_not_bail_below_threshold() {
-        let t = FailureTracker { total_planned: 10, tracks_completed: 5, tracks_errored: 4 };
+        let t = FailureTracker {
+            total_planned: 10,
+            tracks_completed: 5,
+            tracks_errored: 4,
+        };
         assert!(!t.should_bail(), "4/10 (40%) must not bail");
     }
 
     #[test]
     fn tracker_bails_above_50_percent() {
-        let t = FailureTracker { total_planned: 10, tracks_completed: 3, tracks_errored: 6 };
+        let t = FailureTracker {
+            total_planned: 10,
+            tracks_completed: 3,
+            tracks_errored: 6,
+        };
         assert!(t.should_bail(), "6/10 (60%) must bail");
     }
 
     #[test]
     fn tracker_does_not_bail_when_no_plan() {
-        let t = FailureTracker { total_planned: 0, tracks_completed: 0, tracks_errored: 3 };
-        assert!(!t.should_bail(), "no plan => no bail (avoids div-by-zero edge case)");
+        let t = FailureTracker {
+            total_planned: 0,
+            tracks_completed: 0,
+            tracks_errored: 3,
+        };
+        assert!(
+            !t.should_bail(),
+            "no plan => no bail (avoids div-by-zero edge case)"
+        );
     }
 
     #[test]
     fn tracker_does_not_bail_at_exactly_50_percent() {
-        let t = FailureTracker { total_planned: 10, tracks_completed: 5, tracks_errored: 5 };
+        let t = FailureTracker {
+            total_planned: 10,
+            tracks_completed: 5,
+            tracks_errored: 5,
+        };
         assert!(!t.should_bail(), "exactly 50% must not bail (strict >50%)");
     }
 

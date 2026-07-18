@@ -1,26 +1,22 @@
 //! Daemon-side IPC wire types for the UI ↔ daemon channel (named pipe
 //! / Unix socket). Distinct from `src/ipc.rs` (which is the daemon ↔
 //! sync-subprocess channel). Same envelope shape: newline-delimited
-//! JSON, snake_case "type" discriminator, additive.
+//! JSON with a snake_case `type` discriminator.
 //!
 //! Spec §7. Protocol semver: daemon emits hello with
-//! `protocol_version = "1.7.0"` since this extends M1's "1.0.0". v1.6.0
-//! adds playlist CRUD (`list_playlists`/`get_playlist`/`save_playlist`/
-//! `delete_playlist` + `playlists_update`), per-device config
-//! (`get_device_config`/`save_device_config` + `device_config_update`),
-//! and a pure device-sync-footprint estimate (`preview_device` +
-//! `device_preview`); v1.7.0 adds `resolve_tracks` + `resolved_tracks`
-//! (expand artist/album/genre selection rules into concrete source-
-//! relative track paths against the cached library index) — see
-//! `docs/ipc-protocol.md` "Daemon v1.7.0".
+//! `protocol_version = "2.0.0"`. Version 2 makes command correlation and
+//! device targeting explicit, adds serial-keyed inventory snapshots, and
+//! removes the deprecated singleton selection commands. See
+//! `docs/ipc-protocol.md` "Daemon v2.0.0".
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
 use crate::daemon::device_storage::StorageInfo;
 use crate::daemon::history::HistoryEntry;
+use crate::ipc_device::DeviceInventorySnapshot;
 use crate::selection::{SelectionMode, SelectionRule};
 use serde::{Deserialize, Serialize};
 
-pub const DAEMON_PROTOCOL_VERSION: &str = "1.7.0";
+pub const DAEMON_PROTOCOL_VERSION: &str = "2.0.0";
 
 /// Events from daemon → UI clients (in addition to forwarded sync-
 /// subprocess events from `src/ipc.rs`).
@@ -54,14 +50,20 @@ pub enum DaemonEvent {
         /// already walks the source) and cached from there.
         #[serde(skip_serializing_if = "Option::is_none")]
         library_count: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acknowledged_request_id: Option<String>,
     },
     ConfigUpdate {
         source: Option<String>,
         daemon: Option<DaemonSettings>,
         ipod: Option<IpodIdentity>,
+        config_revision: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acknowledged_request_id: Option<String>,
     },
     HistoryUpdate {
         entries: Vec<HistoryEntry>,
+        acknowledged_request_id: String,
     },
     DeviceConnected {
         serial: String,
@@ -78,6 +80,8 @@ pub enum DaemonEvent {
     },
     SyncRejected {
         reason: SyncRejectReason,
+        serial: String,
+        acknowledged_request_id: String,
     },
     /// Forwarded sync-subprocess event. `line` is the raw JSON line
     /// the subprocess emitted on its stdout, unparsed. UI clients
@@ -87,7 +91,12 @@ pub enum DaemonEvent {
     /// semver.
     SyncEvent {
         line: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        serial: Option<String>,
+        session_id: crate::ipc_device::SessionId,
     },
+    #[serde(rename = "device_inventory_snapshot")]
+    DeviceInventorySnapshot(DeviceInventorySnapshot),
     /// Aggregated library index for the Choose Music browser. Never
     /// per-track. `scanned_at_unix_secs: None` (serialized null) = never
     /// scanned — the UI shows its scan-prompt empty state.
@@ -98,10 +107,16 @@ pub enum DaemonEvent {
         genres: Vec<LibraryGenre>,
         total_tracks: usize,
         total_bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acknowledged_request_id: Option<String>,
     },
     SelectionUpdate {
         mode: SelectionMode,
         rules: Vec<SelectionRule>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        serial: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acknowledged_request_id: Option<String>,
     },
     /// Reply to preview_selection: hypothetical impact vs the manifest.
     /// bytes are SOURCE sizes (an estimate of on-iPod size — label it "~").
@@ -110,6 +125,8 @@ pub enum DaemonEvent {
         selected_bytes: u64,
         adds: usize,
         removes: usize,
+        serial: String,
+        acknowledged_request_id: String,
     },
     /// Reply to `list_playlists`/`get_playlist`, and broadcast to all
     /// clients after `save_playlist`/`delete_playlist`. Every playlist in
@@ -119,6 +136,8 @@ pub enum DaemonEvent {
     /// introducing a separate single-playlist event type.
     PlaylistsUpdate {
         playlists: Vec<PlaylistSummary>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acknowledged_request_id: Option<String>,
     },
     /// Reply to `get_playlist`: the one playlist's full content — unlike
     /// `PlaylistsUpdate`'s per-list summary (track count only), this is
@@ -145,6 +164,7 @@ pub enum DaemonEvent {
         rules: Option<crate::playlist_rules::SmartRules>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        acknowledged_request_id: String,
     },
     /// Reply to `get_device_config`, and broadcast to all clients after
     /// `save_device_config`. One device's resolved selection +
@@ -154,6 +174,7 @@ pub enum DaemonEvent {
         selection: SelectionPayload,
         subscriptions: SubscriptionsPayload,
         settings: DeviceSettingsPayload,
+        acknowledged_request_id: String,
     },
     /// Reply to `preview_device`: a pure, index-based estimate of what this
     /// device's sync would look like — no filesystem walk. `selected_*` is
@@ -165,6 +186,7 @@ pub enum DaemonEvent {
     /// to project from) — see `daemon::library::compute_device_preview`
     /// for exactly what "projected" assumes.
     DevicePreview {
+        serial: String,
         selected_tracks: usize,
         selected_bytes: u64,
         playlist_extra_tracks: usize,
@@ -179,6 +201,7 @@ pub enum DaemonEvent {
         /// entirely (not `[]`) when every subscription resolved.
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         unresolved_subscriptions: Vec<String>,
+        acknowledged_request_id: String,
     },
     /// Reply to `resolve_tracks` (v1.7.0): concrete source-relative track
     /// paths matched by the given selection rules, expanded against the
@@ -188,7 +211,47 @@ pub enum DaemonEvent {
     /// never an error. Sorted lexicographically for deterministic ordering.
     ResolvedTracks {
         tracks: Vec<String>,
+        acknowledged_request_id: String,
     },
+}
+
+impl DaemonEvent {
+    pub fn with_acknowledged_request_id(mut self, request_id: Option<String>) -> Self {
+        match &mut self {
+            Self::StatusUpdate {
+                acknowledged_request_id,
+                ..
+            }
+            | Self::ConfigUpdate {
+                acknowledged_request_id,
+                ..
+            }
+            | Self::LibraryUpdate {
+                acknowledged_request_id,
+                ..
+            }
+            | Self::SelectionUpdate {
+                acknowledged_request_id,
+                ..
+            }
+            | Self::PlaylistsUpdate {
+                acknowledged_request_id,
+                ..
+            } => {
+                *acknowledged_request_id = request_id;
+            }
+            _ => {}
+        }
+        self
+    }
+
+    pub fn with_target_serial(mut self, target_serial: Option<String>) -> Self {
+        match &mut self {
+            Self::SelectionUpdate { serial, .. } => *serial = target_serial,
+            _ => {}
+        }
+        self
+    }
 }
 
 /// `manual` or `smart`, mirroring `Playlist`'s two variants on the wire.
@@ -221,8 +284,8 @@ pub struct PlaylistSummary {
 /// `device_config_update` — `mode` + `rules` only. Deliberately distinct
 /// from the on-disk `selection::Selection` type: that type's `version`
 /// field is a file-format implementation detail, not part of the wire
-/// contract (mirrors how `selection_update`/`save_selection` already
-/// flatten to just `mode`+`rules`).
+/// contract (mirrors how `device_config_update` flattens to just
+/// `mode`+`rules`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelectionPayload {
     #[serde(default)]
@@ -323,8 +386,12 @@ pub enum SyncRejectReason {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonCommand {
-    GetStatus,
-    GetConfig,
+    GetStatus {
+        request_id: String,
+    },
+    GetConfig {
+        request_id: String,
+    },
     SaveConfig {
         #[serde(default)]
         source: Option<String>,
@@ -332,18 +399,25 @@ pub enum DaemonCommand {
         daemon: Option<DaemonSettings>,
         #[serde(default)]
         ipod: Option<IpodIdentity>,
+        request_id: String,
     },
     /// Clear the persisted iPod identity. Used when the user picks
     /// "Remove this iPod" from settings or the chooser. SaveConfig
     /// can't express "unset" because `ipod: None` is the wire-level
     /// "don't change" sentinel.
-    ForgetIpod,
+    ForgetIpod {
+        serial: String,
+        request_id: String,
+    },
     TriggerSync {
         source: TriggerSource,
+        serial: String,
+        request_id: String,
     },
     GetHistory {
         #[serde(default = "default_history_limit")]
         limit: usize,
+        request_id: String,
     },
     SubscribeDeviceEvents,
     UnsubscribeDeviceEvents,
@@ -352,10 +426,16 @@ pub enum DaemonCommand {
     /// to the subprocess stdin and force-kills after a 5s grace.
     /// History entry records outcome=Aborted with reason "user_cancelled".
     /// No-op if no sync is in progress.
-    CancelSync,
+    CancelSync {
+        serial: String,
+        request_id: String,
+    },
     /// Gracefully pause the running sync — drains in-flight, checkpoints,
     /// → Paused. No-op if idle.
-    Pause,
+    Pause {
+        serial: String,
+        request_id: String,
+    },
     /// Forward a user's reply to a `PromptEvent` from the sync
     /// subprocess. The daemon writes `{"type":"prompt_decision",
     /// "id":<id>,"choice":<choice>}` to the subprocess stdin. Without
@@ -366,53 +446,49 @@ pub enum DaemonCommand {
     DecidePrompt {
         id: u64,
         choice: i32,
+        serial: String,
+        request_id: String,
     },
     /// Embed tags + cover art into the existing on-iPod library in place so
     /// Rockbox can read it. Spawns a `--backfill-rockbox` subprocess; reports
     /// sync-style progress. No-op if a sync is already running.
-    BackfillRockbox,
+    BackfillRockbox {
+        serial: String,
+        request_id: String,
+    },
     /// Erase every track on the iPod, then sync the current selection from
     /// scratch. Spawns a `--replace-library --apply` subprocess; reports
     /// sync-style progress. `--apply` skips the core's interactive
     /// confirmation prompt — the UI does its own typed confirmation before
     /// ever sending this command. No-op if a sync is already running.
-    ReplaceLibrary,
+    ReplaceLibrary {
+        serial: String,
+        request_id: String,
+    },
     /// Reply: library_update from the cached index (may be never-scanned).
-    GetLibrary,
+    GetLibrary {
+        request_id: String,
+    },
     /// Spawn a --scan-library subprocess under the shared sync guard.
     /// No-op (log + drop) if busy or no source configured.
-    ScanLibrary,
-    /// **Deprecated as of v1.6.0**: replies `selection_update` for the
-    /// *configured* device's own per-device selection (resolved via
-    /// `selection::effective_device_selection_path`, seeded from the
-    /// shared `selection.json` the first time it's read) — no longer the
-    /// `custom_selection`-gated shared/per-device split
-    /// `selection::effective_selection_path` implements. Kept for older UI
-    /// clients that don't yet target a device explicitly; prefer
-    /// `get_device_config` with an explicit `serial`. If no device is
-    /// configured, replies with `mode: "all"`.
-    GetSelection,
-    /// **Deprecated as of v1.6.0**: same per-device target as
-    /// `GetSelection`, and same deprecation rationale — prefer
-    /// `save_device_config` with an explicit `serial`. No-op (log + drop,
-    /// no reply) if no device is currently configured — unlike the old
-    /// shared-file fallback, there's no per-device path to resolve without
-    /// a serial.
-    SaveSelection {
-        mode: crate::selection::SelectionMode,
-        rules: Vec<crate::selection::SelectionRule>,
+    ScanLibrary {
+        request_id: String,
     },
     /// Pure computation; nothing persists. Reply: selection_preview.
     PreviewSelection {
         mode: crate::selection::SelectionMode,
         rules: Vec<crate::selection::SelectionRule>,
+        serial: String,
+        request_id: String,
     },
     /// Reply: `playlists_update`, every playlist in the store. Never fails
     /// the arm: a playlist file the store can't parse surfaces as an
     /// `error`-annotated stub entry (see `PlaylistSummary`) rather than
     /// aborting the reply, and a store-open failure (e.g. an unwritable
     /// config dir) degrades to an empty `playlists` list (logged).
-    ListPlaylists,
+    ListPlaylists {
+        request_id: String,
+    },
     /// Reply: `playlist_detail` for the one matching `slug` — full content
     /// (the manual track list or the smart rule set), for the playlist
     /// editor. Unlike `ListPlaylists`'s fail-open posture, a missing slug,
@@ -422,6 +498,7 @@ pub enum DaemonCommand {
     /// from "found, empty".
     GetPlaylist {
         slug: String,
+        request_id: String,
     },
     /// Create (absent `playlist.slug`) or replace (present) a playlist.
     /// Persists atomically; broadcasts a fresh `playlists_update` to every
@@ -431,6 +508,7 @@ pub enum DaemonCommand {
     /// nothing changed only by the absence of a `playlists_update`.
     SavePlaylist {
         playlist: PlaylistPayload,
+        request_id: String,
     },
     /// Delete a playlist by slug. No-op (still broadcasts) if the slug
     /// doesn't exist. Broadcasts a fresh `playlists_update` to every
@@ -439,6 +517,7 @@ pub enum DaemonCommand {
     /// No direct reply.
     DeletePlaylist {
         slug: String,
+        request_id: String,
     },
     /// Reply: `device_config_update` for the given device's serial — its
     /// resolved selection, subscriptions, and settings. Never fails the
@@ -449,6 +528,7 @@ pub enum DaemonCommand {
     /// never seen before gets a well-formed all-defaults reply.
     GetDeviceConfig {
         serial: String,
+        request_id: String,
     },
     /// Persist the provided parts (each field `None` = "don't change",
     /// same sentinel convention as `save_config`) for the given device's
@@ -467,6 +547,7 @@ pub enum DaemonCommand {
         subscriptions: Option<SubscriptionsPayload>,
         #[serde(default)]
         settings: Option<DeviceSettingsPayload>,
+        request_id: String,
     },
     /// Pure computation over the cached library index + this device's
     /// config — no filesystem walk, nothing persists. Reply:
@@ -475,6 +556,7 @@ pub enum DaemonCommand {
     /// posture as `GetDeviceConfig`.
     PreviewDevice {
         serial: String,
+        request_id: String,
     },
     /// v1.7.0: expand artist/album/genre selection rules — the SAME `rules`
     /// wire shape `save_device_config`'s `selection.rules` uses
@@ -490,8 +572,56 @@ pub enum DaemonCommand {
     /// empty `tracks` list rather than an error.
     ResolveTracks {
         rules: Vec<crate::selection::SelectionRule>,
+        request_id: String,
     },
     Shutdown,
+}
+
+impl DaemonCommand {
+    pub fn target_serial(&self) -> Option<&str> {
+        match self {
+            Self::ForgetIpod { serial, .. }
+            | Self::TriggerSync { serial, .. }
+            | Self::CancelSync { serial, .. }
+            | Self::Pause { serial, .. }
+            | Self::DecidePrompt { serial, .. }
+            | Self::BackfillRockbox { serial, .. }
+            | Self::ReplaceLibrary { serial, .. }
+            | Self::PreviewSelection { serial, .. }
+            | Self::GetDeviceConfig { serial, .. }
+            | Self::SaveDeviceConfig { serial, .. }
+            | Self::PreviewDevice { serial, .. } => Some(serial),
+            _ => None,
+        }
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::GetStatus { request_id }
+            | Self::GetConfig { request_id }
+            | Self::SaveConfig { request_id, .. }
+            | Self::ForgetIpod { request_id, .. }
+            | Self::TriggerSync { request_id, .. }
+            | Self::GetHistory { request_id, .. }
+            | Self::CancelSync { request_id, .. }
+            | Self::Pause { request_id, .. }
+            | Self::DecidePrompt { request_id, .. }
+            | Self::BackfillRockbox { request_id, .. }
+            | Self::ReplaceLibrary { request_id, .. }
+            | Self::GetLibrary { request_id }
+            | Self::ScanLibrary { request_id }
+            | Self::PreviewSelection { request_id, .. }
+            | Self::ListPlaylists { request_id }
+            | Self::GetPlaylist { request_id, .. }
+            | Self::SavePlaylist { request_id, .. }
+            | Self::DeletePlaylist { request_id, .. }
+            | Self::GetDeviceConfig { request_id, .. }
+            | Self::SaveDeviceConfig { request_id, .. }
+            | Self::PreviewDevice { request_id, .. }
+            | Self::ResolveTracks { request_id, .. } => Some(request_id.as_str()),
+            Self::SubscribeDeviceEvents | Self::UnsubscribeDeviceEvents | Self::Shutdown => None,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -506,7 +636,9 @@ pub enum TriggerSource {
     PlugIn,
 }
 
-fn default_history_limit() -> usize { 10 }
+fn default_history_limit() -> usize {
+    10
+}
 
 #[cfg(test)]
 mod tests {
@@ -520,41 +652,20 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"hello""#));
-        assert!(json.contains(r#""protocol_version":"1.7.0""#));
+        assert!(json.contains(r#""protocol_version":"2.0.0""#));
     }
 
     #[test]
-    fn protocol_version_is_1_7_0() {
-        assert_eq!(DAEMON_PROTOCOL_VERSION, "1.7.0");
+    fn protocol_version_is_2_0_0_constant() {
+        assert_eq!(DAEMON_PROTOCOL_VERSION, "2.0.0");
     }
 
     #[test]
-    fn new_selection_commands_deserialize() {
-        assert!(matches!(
-            serde_json::from_str::<DaemonCommand>(r#"{"type":"get_library"}"#).unwrap(),
-            DaemonCommand::GetLibrary));
-        assert!(matches!(
-            serde_json::from_str::<DaemonCommand>(r#"{"type":"scan_library"}"#).unwrap(),
-            DaemonCommand::ScanLibrary));
-        assert!(matches!(
-            serde_json::from_str::<DaemonCommand>(r#"{"type":"get_selection"}"#).unwrap(),
-            DaemonCommand::GetSelection));
-
-        let save: DaemonCommand = serde_json::from_str(
-            r#"{"type":"save_selection","mode":"include","rules":[
-                {"kind":"artist","name":"Boards of Canada"},
-                {"kind":"album","artist":"Aphex Twin","album":"Drukqs"},
-                {"kind":"genre","name":"Ambient"}]}"#).unwrap();
-        match save {
-            DaemonCommand::SaveSelection { mode, rules } => {
-                assert_eq!(mode, crate::selection::SelectionMode::Include);
-                assert_eq!(rules.len(), 3);
-            }
-            _ => panic!("expected SaveSelection"),
-        }
-
+    fn v2_library_and_preview_commands_require_correlation() {
+        assert!(serde_json::from_str::<DaemonCommand>(r#"{"type":"get_library"}"#).is_err());
+        assert!(serde_json::from_str::<DaemonCommand>(r#"{"type":"scan_library"}"#).is_err());
         let preview: DaemonCommand = serde_json::from_str(
-            r#"{"type":"preview_selection","mode":"exclude","rules":[]}"#).unwrap();
+            r#"{"type":"preview_selection","mode":"exclude","rules":[],"serial":"A","request_id":"req"}"#).unwrap();
         assert!(matches!(preview, DaemonCommand::PreviewSelection { .. }));
     }
 
@@ -566,12 +677,20 @@ mod tests {
             artists: vec![LibraryArtist {
                 name: "Aphex Twin".into(),
                 albums: vec![LibraryAlbum {
-                    name: "Drukqs".into(), genre: Some("IDM".into()), tracks: 30, bytes: 900,
+                    name: "Drukqs".into(),
+                    genre: Some("IDM".into()),
+                    tracks: 30,
+                    bytes: 900,
                 }],
             }],
-            genres: vec![LibraryGenre { name: "IDM".into(), tracks: 30, bytes: 900 }],
+            genres: vec![LibraryGenre {
+                name: "IDM".into(),
+                tracks: 30,
+                bytes: 900,
+            }],
             total_tracks: 30,
             total_bytes: 900,
+            acknowledged_request_id: None,
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(json.contains(r#""type":"library_update""#));
@@ -582,27 +701,42 @@ mod tests {
     #[test]
     fn library_update_never_scanned_serializes_null_timestamp() {
         let evt = DaemonEvent::LibraryUpdate {
-            source_root: None, scanned_at_unix_secs: None,
-            artists: vec![], genres: vec![], total_tracks: 0, total_bytes: 0,
+            source_root: None,
+            scanned_at_unix_secs: None,
+            artists: vec![],
+            genres: vec![],
+            total_tracks: 0,
+            total_bytes: 0,
+            acknowledged_request_id: None,
         };
         let json = serde_json::to_string(&evt).unwrap();
-        assert!(json.contains(r#""scanned_at_unix_secs":null"#),
-            "null (not omitted) — the UI branches on it for the never-scanned state");
+        assert!(
+            json.contains(r#""scanned_at_unix_secs":null"#),
+            "null (not omitted) — the UI branches on it for the never-scanned state"
+        );
     }
 
     #[test]
     fn selection_update_and_preview_serialize() {
         let upd = DaemonEvent::SelectionUpdate {
             mode: crate::selection::SelectionMode::Exclude,
-            rules: vec![crate::selection::SelectionRule::Genre { name: "Podcast".into() }],
+            rules: vec![crate::selection::SelectionRule::Genre {
+                name: "Podcast".into(),
+            }],
+            serial: None,
+            acknowledged_request_id: None,
         };
         let json = serde_json::to_string(&upd).unwrap();
         assert!(json.contains(r#""type":"selection_update""#));
         assert!(json.contains(r#""mode":"exclude""#));
 
         let prev = DaemonEvent::SelectionPreview {
-            selected_tracks: 2340, selected_bytes: 14_200_000_000,
-            adds: 120, removes: 214,
+            selected_tracks: 2340,
+            selected_bytes: 14_200_000_000,
+            adds: 120,
+            removes: 214,
+            serial: "serial-a".into(),
+            acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&prev).unwrap();
         assert!(json.contains(r#""type":"selection_preview""#));
@@ -618,22 +752,30 @@ mod tests {
     #[test]
     fn get_status_deserializes() {
         let cmd: DaemonCommand =
-            serde_json::from_str(r#"{"type":"get_status"}"#).unwrap();
-        assert!(matches!(cmd, DaemonCommand::GetStatus));
+            serde_json::from_str(r#"{"type":"get_status","request_id":"request-a"}"#).unwrap();
+        assert!(matches!(cmd, DaemonCommand::GetStatus { .. }));
     }
 
     #[test]
     fn decodes_pause_command() {
-        let cmd: DaemonCommand = serde_json::from_str(r#"{"type":"pause"}"#).unwrap();
-        assert!(matches!(cmd, DaemonCommand::Pause));
+        let cmd: DaemonCommand = serde_json::from_str(
+            r#"{"type":"pause","serial":"serial-a","request_id":"request-a"}"#,
+        )
+        .unwrap();
+        assert!(matches!(cmd, DaemonCommand::Pause { .. }));
     }
 
     #[test]
     fn save_config_with_partial_payload_deserializes() {
-        let json = r#"{"type":"save_config","ipod":{"serial":"X","model_label":"iPod 7G"}}"#;
+        let json = r#"{"type":"save_config","ipod":{"serial":"X","model_label":"iPod 7G"},"request_id":"request-a"}"#;
         let cmd: DaemonCommand = serde_json::from_str(json).unwrap();
         match cmd {
-            DaemonCommand::SaveConfig { source, daemon, ipod } => {
+            DaemonCommand::SaveConfig {
+                source,
+                daemon,
+                ipod,
+                ..
+            } => {
                 assert!(source.is_none());
                 assert!(daemon.is_none());
                 let ipod = ipod.expect("ipod present");
@@ -646,19 +788,19 @@ mod tests {
 
     #[test]
     fn backfill_rockbox_deserializes() {
-        let json = r#"{"type":"backfill_rockbox"}"#;
+        let json = r#"{"type":"backfill_rockbox","serial":"serial-a","request_id":"request-a"}"#;
         assert!(matches!(
             serde_json::from_str::<DaemonCommand>(json).unwrap(),
-            DaemonCommand::BackfillRockbox
+            DaemonCommand::BackfillRockbox { .. }
         ));
     }
 
     #[test]
     fn replace_library_deserializes() {
-        let json = r#"{"type":"replace_library"}"#;
+        let json = r#"{"type":"replace_library","serial":"serial-a","request_id":"request-a"}"#;
         assert!(matches!(
             serde_json::from_str::<DaemonCommand>(json).unwrap(),
-            DaemonCommand::ReplaceLibrary
+            DaemonCommand::ReplaceLibrary { .. }
         ));
     }
 
@@ -668,32 +810,53 @@ mod tests {
     /// shape those replies depend on.
     #[test]
     fn sync_rejected_serializes_already_syncing_and_no_ipod() {
-        let already_syncing = DaemonEvent::SyncRejected { reason: SyncRejectReason::AlreadySyncing };
+        let already_syncing = DaemonEvent::SyncRejected {
+            reason: SyncRejectReason::AlreadySyncing,
+            serial: "serial-a".into(),
+            acknowledged_request_id: "request-a".into(),
+        };
         let json = serde_json::to_string(&already_syncing).unwrap();
         assert!(json.contains(r#""type":"sync_rejected""#));
-        assert!(json.contains(r#""reason":"already_syncing""#), "got: {json}");
+        assert!(
+            json.contains(r#""reason":"already_syncing""#),
+            "got: {json}"
+        );
 
-        let no_ipod = DaemonEvent::SyncRejected { reason: SyncRejectReason::NoIpod };
+        let no_ipod = DaemonEvent::SyncRejected {
+            reason: SyncRejectReason::NoIpod,
+            serial: "serial-a".into(),
+            acknowledged_request_id: "request-a".into(),
+        };
         let json = serde_json::to_string(&no_ipod).unwrap();
         assert!(json.contains(r#""reason":"no_ipod""#), "got: {json}");
     }
 
     #[test]
     fn trigger_sync_round_trips() {
-        let json = r#"{"type":"trigger_sync","source":"manual"}"#;
+        let json = r#"{"type":"trigger_sync","source":"manual","serial":"serial-a","request_id":"request-a"}"#;
         let cmd: DaemonCommand = serde_json::from_str(json).unwrap();
-        assert!(matches!(cmd, DaemonCommand::TriggerSync { source: TriggerSource::Manual }));
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TriggerSync {
+                source: TriggerSource::Manual,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn sync_event_serializes_with_line_field() {
         let evt = DaemonEvent::SyncEvent {
             line: r#"{"type":"track_done"}"#.to_string(),
+            serial: None,
+            session_id: 1,
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(json.contains(r#""type":"sync_event""#));
-        assert!(json.contains(r#""line":"{\"type\":\"track_done\"}""#),
-                "got: {json}");
+        assert!(
+            json.contains(r#""line":"{\"type\":\"track_done\"}""#),
+            "got: {json}"
+        );
     }
 
     #[test]
@@ -714,22 +877,26 @@ mod tests {
     #[test]
     fn list_playlists_deserializes() {
         let cmd: DaemonCommand =
-            serde_json::from_str(r#"{"type":"list_playlists"}"#).unwrap();
-        assert!(matches!(cmd, DaemonCommand::ListPlaylists));
+            serde_json::from_str(r#"{"type":"list_playlists","request_id":"request-a"}"#).unwrap();
+        assert!(matches!(cmd, DaemonCommand::ListPlaylists { .. }));
     }
 
     #[test]
     fn get_playlist_deserializes() {
-        let cmd: DaemonCommand =
-            serde_json::from_str(r#"{"type":"get_playlist","slug":"gym"}"#).unwrap();
-        assert!(matches!(cmd, DaemonCommand::GetPlaylist { slug } if slug == "gym"));
+        let cmd: DaemonCommand = serde_json::from_str(
+            r#"{"type":"get_playlist","slug":"gym","request_id":"request-a"}"#,
+        )
+        .unwrap();
+        assert!(matches!(cmd, DaemonCommand::GetPlaylist { slug, .. } if slug == "gym"));
     }
 
     #[test]
     fn delete_playlist_deserializes() {
-        let cmd: DaemonCommand =
-            serde_json::from_str(r#"{"type":"delete_playlist","slug":"gym"}"#).unwrap();
-        assert!(matches!(cmd, DaemonCommand::DeletePlaylist { slug } if slug == "gym"));
+        let cmd: DaemonCommand = serde_json::from_str(
+            r#"{"type":"delete_playlist","slug":"gym","request_id":"request-a"}"#,
+        )
+        .unwrap();
+        assert!(matches!(cmd, DaemonCommand::DeletePlaylist { slug, .. } if slug == "gym"));
     }
 
     #[test]
@@ -741,11 +908,12 @@ mod tests {
             tracks: Some(vec!["Artist/Album/01.flac".into(), "B/02.flac".into()]),
             rules: None,
             error: None,
+            acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":["Artist/Album/01.flac","B/02.flac"]}"#,
+            r#"{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":["Artist/Album/01.flac","B/02.flac"],"acknowledged_request_id":"request-a"}"#,
             "got: {json}"
         );
     }
@@ -770,11 +938,12 @@ mod tests {
                 seed: 0,
             }),
             error: None,
+            acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"playlist_detail","slug":"recent-idm","name":"Recent IDM","kind":"smart","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0}}"#,
+            r#"{"type":"playlist_detail","slug":"recent-idm","name":"Recent IDM","kind":"smart","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0},"acknowledged_request_id":"request-a"}"#,
             "got: {json}"
         );
     }
@@ -788,11 +957,12 @@ mod tests {
             tracks: None,
             rules: None,
             error: Some("no such playlist".into()),
+            acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"playlist_detail","slug":"ghost","error":"no such playlist"}"#,
+            r#"{"type":"playlist_detail","slug":"ghost","error":"no such playlist","acknowledged_request_id":"request-a"}"#,
             "got: {json}"
         );
     }
@@ -800,13 +970,19 @@ mod tests {
     #[test]
     fn save_playlist_manual_without_slug_deserializes_as_create() {
         let json = r#"{"type":"save_playlist","playlist":
-            {"kind":"manual","name":"Gym","tracks":["Artist/Album/01.flac","B/02.flac"]}}"#;
+            {"kind":"manual","name":"Gym","tracks":["Artist/Album/01.flac","B/02.flac"]},"request_id":"request-a"}"#;
         let cmd: DaemonCommand = serde_json::from_str(json).unwrap();
         match cmd {
-            DaemonCommand::SavePlaylist { playlist: PlaylistPayload::Manual { slug, name, tracks } } => {
+            DaemonCommand::SavePlaylist {
+                playlist: PlaylistPayload::Manual { slug, name, tracks },
+                ..
+            } => {
                 assert_eq!(slug, None, "absent slug means create");
                 assert_eq!(name, "Gym");
-                assert_eq!(tracks, vec!["Artist/Album/01.flac".to_string(), "B/02.flac".to_string()]);
+                assert_eq!(
+                    tracks,
+                    vec!["Artist/Album/01.flac".to_string(), "B/02.flac".to_string()]
+                );
             }
             _ => panic!("expected SavePlaylist(Manual)"),
         }
@@ -815,10 +991,13 @@ mod tests {
     #[test]
     fn save_playlist_manual_with_slug_deserializes_as_edit() {
         let json = r#"{"type":"save_playlist","playlist":
-            {"kind":"manual","slug":"gym","name":"Gym Mix","tracks":[]}}"#;
+            {"kind":"manual","slug":"gym","name":"Gym Mix","tracks":[]},"request_id":"request-a"}"#;
         let cmd: DaemonCommand = serde_json::from_str(json).unwrap();
         match cmd {
-            DaemonCommand::SavePlaylist { playlist: PlaylistPayload::Manual { slug, name, tracks } } => {
+            DaemonCommand::SavePlaylist {
+                playlist: PlaylistPayload::Manual { slug, name, tracks },
+                ..
+            } => {
                 assert_eq!(slug.as_deref(), Some("gym"));
                 assert_eq!(name, "Gym Mix");
                 assert!(tracks.is_empty());
@@ -832,10 +1011,13 @@ mod tests {
         let json = r#"{"type":"save_playlist","playlist":
             {"kind":"smart","name":"Recent IDM","rules":
                 {"version":1,"matching":"all","rules":[
-                    {"field":"genre","op":"is","value":"IDM"}]}}}"#;
+                    {"field":"genre","op":"is","value":"IDM"}]}},"request_id":"request-a"}"#;
         let cmd: DaemonCommand = serde_json::from_str(json).unwrap();
         match cmd {
-            DaemonCommand::SavePlaylist { playlist: PlaylistPayload::Smart { slug, name, rules } } => {
+            DaemonCommand::SavePlaylist {
+                playlist: PlaylistPayload::Smart { slug, name, rules },
+                ..
+            } => {
                 assert_eq!(slug, None);
                 assert_eq!(name, "Recent IDM");
                 assert_eq!(rules.rules.len(), 1);
@@ -849,31 +1031,46 @@ mod tests {
         let evt = DaemonEvent::PlaylistsUpdate {
             playlists: vec![
                 PlaylistSummary {
-                    slug: "gym".into(), name: "Gym".into(), kind: PlaylistKind::Manual,
-                    tracks: 12, bytes: 900, error: None,
+                    slug: "gym".into(),
+                    name: "Gym".into(),
+                    kind: PlaylistKind::Manual,
+                    tracks: 12,
+                    bytes: 900,
+                    error: None,
                 },
                 PlaylistSummary {
-                    slug: "broken".into(), name: "broken".into(), kind: PlaylistKind::Smart,
-                    tracks: 0, bytes: 0, error: Some("parse failed".into()),
+                    slug: "broken".into(),
+                    name: "broken".into(),
+                    kind: PlaylistKind::Smart,
+                    tracks: 0,
+                    bytes: 0,
+                    error: Some("parse failed".into()),
                 },
             ],
+            acknowledged_request_id: Some("request-a".into()),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(json.contains(r#""type":"playlists_update""#));
         assert!(json.contains(r#""kind":"manual""#));
         assert!(json.contains(r#""kind":"smart""#));
         assert!(json.contains(r#""error":"parse failed""#));
-        assert!(!json.contains(r#""slug":"gym","name":"Gym","kind":"manual","tracks":12,"bytes":900,"error""#),
-            "error must be omitted (not null) when absent");
+        assert!(
+            !json.contains(
+                r#""slug":"gym","name":"Gym","kind":"manual","tracks":12,"bytes":900,"error""#
+            ),
+            "error must be omitted (not null) when absent"
+        );
     }
 
     // --- v1.6.0: per-device config -----------------------------------
 
     #[test]
     fn get_device_config_deserializes() {
-        let cmd: DaemonCommand =
-            serde_json::from_str(r#"{"type":"get_device_config","serial":"0xABC"}"#).unwrap();
-        assert!(matches!(cmd, DaemonCommand::GetDeviceConfig { serial } if serial == "0xABC"));
+        let cmd: DaemonCommand = serde_json::from_str(
+            r#"{"type":"get_device_config","serial":"0xABC","request_id":"request-a"}"#,
+        )
+        .unwrap();
+        assert!(matches!(cmd, DaemonCommand::GetDeviceConfig { serial, .. } if serial == "0xABC"));
     }
 
     #[test]
@@ -881,10 +1078,16 @@ mod tests {
         // Only `settings` provided — `selection`/`subscriptions` are the
         // wire-level "don't change" sentinel, same convention as `save_config`.
         let json = r#"{"type":"save_device_config","serial":"0xABC",
-            "settings":{"auto_sync":false,"rockbox_compat":true}}"#;
+            "settings":{"auto_sync":false,"rockbox_compat":true},"request_id":"request-a"}"#;
         let cmd: DaemonCommand = serde_json::from_str(json).unwrap();
         match cmd {
-            DaemonCommand::SaveDeviceConfig { serial, selection, subscriptions, settings } => {
+            DaemonCommand::SaveDeviceConfig {
+                serial,
+                selection,
+                subscriptions,
+                settings,
+                ..
+            } => {
                 assert_eq!(serial, "0xABC");
                 assert!(selection.is_none());
                 assert!(subscriptions.is_none());
@@ -901,15 +1104,24 @@ mod tests {
         let json = r#"{"type":"save_device_config","serial":"0xABC",
             "selection":{"mode":"include","rules":[{"kind":"artist","name":"Boards of Canada"}]},
             "subscriptions":{"playlists":["gym","chill"]},
-            "settings":{"auto_sync":true,"rockbox_compat":false}}"#;
+            "settings":{"auto_sync":true,"rockbox_compat":false},"request_id":"request-a"}"#;
         let cmd: DaemonCommand = serde_json::from_str(json).unwrap();
         match cmd {
-            DaemonCommand::SaveDeviceConfig { serial, selection, subscriptions, settings } => {
+            DaemonCommand::SaveDeviceConfig {
+                serial,
+                selection,
+                subscriptions,
+                settings,
+                ..
+            } => {
                 assert_eq!(serial, "0xABC");
                 let selection = selection.expect("selection present");
                 assert_eq!(selection.mode, crate::selection::SelectionMode::Include);
                 assert_eq!(selection.rules.len(), 1);
-                assert_eq!(subscriptions.expect("subscriptions present").playlists, vec!["gym", "chill"]);
+                assert_eq!(
+                    subscriptions.expect("subscriptions present").playlists,
+                    vec!["gym", "chill"]
+                );
                 assert!(settings.expect("settings present").auto_sync);
             }
             _ => panic!("expected SaveDeviceConfig"),
@@ -924,8 +1136,14 @@ mod tests {
                 mode: crate::selection::SelectionMode::Include,
                 rules: vec![],
             },
-            subscriptions: SubscriptionsPayload { playlists: vec!["gym".into()] },
-            settings: DeviceSettingsPayload { auto_sync: true, rockbox_compat: false },
+            subscriptions: SubscriptionsPayload {
+                playlists: vec!["gym".into()],
+            },
+            settings: DeviceSettingsPayload {
+                auto_sync: true,
+                rockbox_compat: false,
+            },
+            acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(json.contains(r#""type":"device_config_update""#));
@@ -939,54 +1157,76 @@ mod tests {
 
     #[test]
     fn preview_device_deserializes() {
-        let cmd: DaemonCommand =
-            serde_json::from_str(r#"{"type":"preview_device","serial":"0xABC"}"#).unwrap();
-        assert!(matches!(cmd, DaemonCommand::PreviewDevice { serial } if serial == "0xABC"));
+        let cmd: DaemonCommand = serde_json::from_str(
+            r#"{"type":"preview_device","serial":"0xABC","request_id":"request-a"}"#,
+        )
+        .unwrap();
+        assert!(matches!(cmd, DaemonCommand::PreviewDevice { serial, .. } if serial == "0xABC"));
     }
 
     #[test]
     fn device_preview_serializes_projected_free_as_value_or_null() {
         let connected = DaemonEvent::DevicePreview {
-            selected_tracks: 100, selected_bytes: 5_000_000_000,
-            playlist_extra_tracks: 3, playlist_extra_bytes: 90_000_000,
+            serial: "serial-a".into(),
+            selected_tracks: 100,
+            selected_bytes: 5_000_000_000,
+            playlist_extra_tracks: 3,
+            playlist_extra_bytes: 90_000_000,
             projected_free_bytes: Some(1_200_000_000),
             unresolved_subscriptions: vec![],
+            acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&connected).unwrap();
         assert!(json.contains(r#""type":"device_preview""#));
         assert!(json.contains(r#""projected_free_bytes":1200000000"#));
 
         let disconnected = DaemonEvent::DevicePreview {
-            selected_tracks: 100, selected_bytes: 5_000_000_000,
-            playlist_extra_tracks: 3, playlist_extra_bytes: 90_000_000,
+            serial: "serial-a".into(),
+            selected_tracks: 100,
+            selected_bytes: 5_000_000_000,
+            playlist_extra_tracks: 3,
+            playlist_extra_bytes: 90_000_000,
             projected_free_bytes: None,
             unresolved_subscriptions: vec![],
+            acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&disconnected).unwrap();
-        assert!(json.contains(r#""projected_free_bytes":null"#),
-            "null (not omitted) — mirrors library_update's never-scanned convention");
+        assert!(
+            json.contains(r#""projected_free_bytes":null"#),
+            "null (not omitted) — mirrors library_update's never-scanned convention"
+        );
     }
 
     #[test]
     fn device_preview_unresolved_subscriptions_present_or_omitted() {
         let with_unresolved = DaemonEvent::DevicePreview {
-            selected_tracks: 1, selected_bytes: 1,
-            playlist_extra_tracks: 0, playlist_extra_bytes: 0,
+            serial: "serial-a".into(),
+            selected_tracks: 1,
+            selected_bytes: 1,
+            playlist_extra_tracks: 0,
+            playlist_extra_bytes: 0,
             projected_free_bytes: None,
             unresolved_subscriptions: vec!["ghost".into(), "gym".into()],
+            acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&with_unresolved).unwrap();
         assert!(json.contains(r#""unresolved_subscriptions":["ghost","gym"]"#));
 
         let none_unresolved = DaemonEvent::DevicePreview {
-            selected_tracks: 1, selected_bytes: 1,
-            playlist_extra_tracks: 0, playlist_extra_bytes: 0,
+            serial: "serial-a".into(),
+            selected_tracks: 1,
+            selected_bytes: 1,
+            playlist_extra_tracks: 0,
+            playlist_extra_bytes: 0,
             projected_free_bytes: None,
             unresolved_subscriptions: vec![],
+            acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&none_unresolved).unwrap();
-        assert!(!json.contains("unresolved_subscriptions"),
-            "omitted entirely when empty, not serialized as []");
+        assert!(
+            !json.contains("unresolved_subscriptions"),
+            "omitted entirely when empty, not serialized as []"
+        );
     }
 
     // --- v1.7.0: resolve_tracks -----------------------------------------
@@ -999,16 +1239,30 @@ mod tests {
         let json = r#"{"type":"resolve_tracks","rules":[
             {"kind":"artist","name":"Boards of Canada"},
             {"kind":"album","artist":"Aphex Twin","album":"Drukqs"},
-            {"kind":"genre","name":"Ambient"}]}"#;
+            {"kind":"genre","name":"Ambient"}],"request_id":"request-a"}"#;
         let cmd: DaemonCommand = serde_json::from_str(json).unwrap();
         match cmd {
-            DaemonCommand::ResolveTracks { rules } => {
+            DaemonCommand::ResolveTracks { rules, .. } => {
                 assert_eq!(rules.len(), 3);
-                assert_eq!(rules[0], SelectionRule::Artist { name: "Boards of Canada".into() });
-                assert_eq!(rules[1], SelectionRule::Album {
-                    artist: "Aphex Twin".into(), album: "Drukqs".into(),
-                });
-                assert_eq!(rules[2], SelectionRule::Genre { name: "Ambient".into() });
+                assert_eq!(
+                    rules[0],
+                    SelectionRule::Artist {
+                        name: "Boards of Canada".into()
+                    }
+                );
+                assert_eq!(
+                    rules[1],
+                    SelectionRule::Album {
+                        artist: "Aphex Twin".into(),
+                        album: "Drukqs".into(),
+                    }
+                );
+                assert_eq!(
+                    rules[2],
+                    SelectionRule::Genre {
+                        name: "Ambient".into()
+                    }
+                );
             }
             _ => panic!("expected ResolveTracks"),
         }
@@ -1016,28 +1270,188 @@ mod tests {
 
     #[test]
     fn resolve_tracks_command_with_empty_rules_deserializes() {
-        let cmd: DaemonCommand =
-            serde_json::from_str(r#"{"type":"resolve_tracks","rules":[]}"#).unwrap();
-        assert!(matches!(cmd, DaemonCommand::ResolveTracks { rules } if rules.is_empty()));
+        let cmd: DaemonCommand = serde_json::from_str(
+            r#"{"type":"resolve_tracks","rules":[],"request_id":"request-a"}"#,
+        )
+        .unwrap();
+        assert!(matches!(cmd, DaemonCommand::ResolveTracks { rules, .. } if rules.is_empty()));
     }
 
     #[test]
     fn resolved_tracks_event_serializes_doc_literal_shape() {
         let evt = DaemonEvent::ResolvedTracks {
             tracks: vec!["Artist/Album/01.flac".into(), "Artist/Album/02.flac".into()],
+            acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"resolved_tracks","tracks":["Artist/Album/01.flac","Artist/Album/02.flac"]}"#,
+            r#"{"type":"resolved_tracks","tracks":["Artist/Album/01.flac","Artist/Album/02.flac"],"acknowledged_request_id":"request-a"}"#,
             "got: {json}"
         );
     }
 
     #[test]
     fn resolved_tracks_event_empty_tracks_is_a_valid_reply_not_an_error() {
-        let evt = DaemonEvent::ResolvedTracks { tracks: vec![] };
+        let evt = DaemonEvent::ResolvedTracks {
+            tracks: vec![],
+            acknowledged_request_id: "request-a".into(),
+        };
         let json = serde_json::to_string(&evt).unwrap();
-        assert_eq!(json, r#"{"type":"resolved_tracks","tracks":[]}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"resolved_tracks","tracks":[],"acknowledged_request_id":"request-a"}"#
+        );
+    }
+
+    // --- v2.0.0: serial-keyed inventory + request correlation ---------
+
+    #[test]
+    fn protocol_version_is_2_0_0() {
+        assert_eq!(DAEMON_PROTOCOL_VERSION, "2.0.0");
+    }
+
+    #[test]
+    fn save_config_rejects_legacy_and_accepts_exact_v2_json() {
+        let legacy = r#"{"type":"save_config","source":"/music"}"#;
+        assert!(serde_json::from_str::<DaemonCommand>(legacy).is_err());
+
+        let correlated = r#"{"type":"save_config","request_id":"req-config","source":"/music"}"#;
+        match serde_json::from_str::<DaemonCommand>(correlated).unwrap() {
+            DaemonCommand::SaveConfig {
+                source, request_id, ..
+            } => {
+                assert_eq!(source.as_deref(), Some("/music"));
+                assert_eq!(request_id, "req-config");
+            }
+            _ => panic!("expected SaveConfig"),
+        }
+    }
+
+    #[test]
+    fn targeted_commands_reject_legacy_and_accept_exact_v2_json() {
+        let legacy = r#"{"type":"trigger_sync","source":"manual"}"#;
+        assert!(serde_json::from_str::<DaemonCommand>(legacy).is_err());
+
+        let new =
+            r#"{"type":"trigger_sync","source":"manual","serial":"RAW-A","request_id":"req-sync"}"#;
+        match serde_json::from_str::<DaemonCommand>(new).unwrap() {
+            DaemonCommand::TriggerSync {
+                serial, request_id, ..
+            } => {
+                assert_eq!(serial, "RAW-A");
+                assert_eq!(request_id, "req-sync");
+            }
+            _ => panic!("expected TriggerSync"),
+        }
+    }
+
+    #[test]
+    fn every_device_mutation_deserializes_with_serial_and_request_id() {
+        let fixtures = [
+            r#"{"type":"forget_ipod","serial":"RAW-A","request_id":"req-1"}"#,
+            r#"{"type":"trigger_sync","source":"manual","serial":"RAW-A","request_id":"req-2"}"#,
+            r#"{"type":"cancel_sync","serial":"RAW-A","request_id":"req-3"}"#,
+            r#"{"type":"pause","serial":"RAW-A","request_id":"req-4"}"#,
+            r#"{"type":"decide_prompt","id":7,"choice":1,"serial":"RAW-A","request_id":"req-5"}"#,
+            r#"{"type":"backfill_rockbox","serial":"RAW-A","request_id":"req-6"}"#,
+            r#"{"type":"replace_library","serial":"RAW-A","request_id":"req-7"}"#,
+            r#"{"type":"save_device_config","serial":"RAW-A","request_id":"req-8","settings":{"auto_sync":true,"rockbox_compat":false}}"#,
+        ];
+
+        for fixture in fixtures {
+            let command: DaemonCommand = serde_json::from_str(fixture).unwrap();
+            assert_eq!(command.target_serial(), Some("RAW-A"), "fixture: {fixture}");
+            assert!(command.request_id().is_some(), "fixture: {fixture}");
+        }
+    }
+
+    #[test]
+    fn deprecated_singleton_selection_commands_are_rejected() {
+        assert!(serde_json::from_str::<DaemonCommand>(r#"{"type":"get_selection"}"#).is_err());
+        assert!(serde_json::from_str::<DaemonCommand>(
+            r#"{"type":"save_selection","mode":"all","rules":[]}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn device_inventory_snapshot_round_trips_two_devices() {
+        use crate::ipc_device::{
+            DeviceIdentitySnapshot, DeviceInventorySnapshot, DevicePhaseLabel, DeviceSnapshot,
+        };
+
+        let device = |serial: &str, configured: bool, connected: bool, phase| DeviceSnapshot {
+            identity: DeviceIdentitySnapshot {
+                serial: serial.into(),
+                model_label: "iPod Classic".into(),
+                name: Some(format!("Device {serial}")),
+            },
+            configured,
+            connected,
+            mount: connected.then(|| format!("/Volumes/{serial}")),
+            phase,
+            session_id: None,
+            storage: None,
+            synced_count: 12,
+            library_count: Some(20),
+            latest_successful_sync: None,
+            latest_attempt: None,
+            last_terminal_error: None,
+            selection_revision: 3,
+            settings_revision: 4,
+            subscriptions_revision: 5,
+        };
+        let snapshot = DeviceInventorySnapshot {
+            revision: 9,
+            devices: vec![
+                device("RAW-A", true, true, DevicePhaseLabel::Idle),
+                device("raw-B", false, true, DevicePhaseLabel::Unconfigured),
+            ],
+        };
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let decoded: DeviceInventorySnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, snapshot);
+        assert!(json.contains(r#""serial":"RAW-A""#));
+        assert!(
+            json.contains(r#""serial":"raw-B""#),
+            "raw wire identity must be preserved"
+        );
+    }
+
+    #[test]
+    fn correlated_replies_echo_request_serial_and_session() {
+        let config = DaemonEvent::ConfigUpdate {
+            source: Some("/music".into()),
+            daemon: None,
+            ipod: None,
+            config_revision: 4,
+            acknowledged_request_id: Some("req-config".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&config).unwrap(),
+            r#"{"type":"config_update","source":"/music","daemon":null,"ipod":null,"config_revision":4,"acknowledged_request_id":"req-config"}"#,
+        );
+
+        let sync = DaemonEvent::SyncEvent {
+            line: r#"{"type":"track_done"}"#.into(),
+            serial: Some("RAW-A".into()),
+            session_id: 42,
+        };
+        assert_eq!(
+            serde_json::to_string(&sync).unwrap(),
+            r#"{"type":"sync_event","line":"{\"type\":\"track_done\"}","serial":"RAW-A","session_id":42}"#,
+        );
+
+        let rejected = DaemonEvent::SyncRejected {
+            reason: SyncRejectReason::AlreadySyncing,
+            serial: "RAW-A".into(),
+            acknowledged_request_id: "req-sync".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&rejected).unwrap(),
+            r#"{"type":"sync_rejected","reason":"already_syncing","serial":"RAW-A","acknowledged_request_id":"req-sync"}"#,
+        );
     }
 }

@@ -10,9 +10,9 @@
 use crate::config_file::{self, PersistedConfig};
 use crate::daemon::device_registry::DeviceRegistry;
 use crate::daemon::device_storage::{self, StorageInfo};
-use crate::daemon::device_watcher::{Debouncer, DeviceEvent, DeviceWatcher};
 #[cfg(not(target_os = "macos"))]
 use crate::daemon::device_watcher::PollingDeviceWatcher;
+use crate::daemon::device_watcher::{Debouncer, DeviceEvent, DeviceWatcher};
 use crate::daemon::history::{HistoryEntry, HistoryService, SyncOutcome, SyncSummary, SyncTrigger};
 use crate::daemon::ipc_server::ClientCommand;
 use crate::daemon::scheduler::SyncScheduler;
@@ -48,7 +48,8 @@ pub async fn run_daemon() -> Result<()> {
     // Build the broadcast event_tx FIRST so the spawn_sync closure can
     // capture a clone — that way orchestrator events flow through the
     // same channel UI clients are subscribed to.
-    let (event_tx, _) = broadcast::channel::<DaemonEvent>(crate::daemon::BROADCAST_CHANNEL_CAPACITY);
+    let (event_tx, _) =
+        broadcast::channel::<DaemonEvent>(crate::daemon::BROADCAST_CHANNEL_CAPACITY);
     let exe = std::env::current_exe()?;
     let event_tx_for_spawn = event_tx.clone();
     // The spawn closure re-reads the persisted (global) config AND the
@@ -59,32 +60,51 @@ pub async fn run_daemon() -> Result<()> {
     // restart. The device settings win over the global value once seeded;
     // see `device_config::DeviceSettings::load_or_migrate`.
     let config_path_for_spawn = config_path.clone();
-    let spawn_sync: SpawnFn = Arc::new(move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
-        let exe = exe.clone();
-        let event_tx = event_tx_for_spawn.clone();
-        let global = config_file::load(&config_path_for_spawn).ok().flatten().unwrap_or_default();
-        let rockbox_compat =
-            crate::device_config::DeviceSettings::load_or_migrate(&serial, &global).rockbox_compat;
-        Box::pin(async move {
-            sync_orchestrator::run(exe, drive, rockbox_compat, cancel_rx, pause_rx, prompt_rx, event_tx).await
-        })
-    });
+    let spawn_sync: SpawnFn = Arc::new(
+        move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
+            let exe = exe.clone();
+            let event_tx = event_tx_for_spawn.clone();
+            let global = config_file::load(&config_path_for_spawn)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let rockbox_compat =
+                crate::device_config::DeviceSettings::load_or_migrate(&serial, &global)
+                    .rockbox_compat;
+            Box::pin(async move {
+                sync_orchestrator::run(
+                    exe,
+                    drive,
+                    rockbox_compat,
+                    cancel_rx,
+                    pause_rx,
+                    prompt_rx,
+                    event_tx,
+                )
+                .await
+            })
+        },
+    );
 
     let exe_for_backfill = std::env::current_exe()?;
     let event_tx_for_backfill = event_tx.clone();
-    let spawn_backfill: SpawnFn =
-        Arc::new(move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
+    let spawn_backfill: SpawnFn = Arc::new(
+        move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
             let exe = exe_for_backfill.clone();
             let event_tx = event_tx_for_backfill.clone();
             Box::pin(async move {
-                sync_orchestrator::run_backfill(exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx).await
+                sync_orchestrator::run_backfill(
+                    exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx,
+                )
+                .await
             })
-        });
+        },
+    );
 
     let exe_for_replace = std::env::current_exe()?;
     let event_tx_for_replace = event_tx.clone();
-    let spawn_replace_library: SpawnFn =
-        Arc::new(move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
+    let spawn_replace_library: SpawnFn = Arc::new(
+        move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
             let exe = exe_for_replace.clone();
             let event_tx = event_tx_for_replace.clone();
             Box::pin(async move {
@@ -93,18 +113,20 @@ pub async fn run_daemon() -> Result<()> {
                 )
                 .await
             })
-        });
+        },
+    );
 
     let exe_for_scan = std::env::current_exe()?;
     let event_tx_for_scan = event_tx.clone();
-    let spawn_scan: SpawnFn =
-        Arc::new(move |_serial: String, _drive: String, cancel_rx, pause_rx, prompt_rx| {
+    let spawn_scan: SpawnFn = Arc::new(
+        move |_serial: String, _drive: String, cancel_rx, pause_rx, prompt_rx| {
             let exe = exe_for_scan.clone();
             let event_tx = event_tx_for_scan.clone();
             Box::pin(async move {
                 sync_orchestrator::run_scan(exe, cancel_rx, pause_rx, prompt_rx, event_tx).await
             })
-        });
+        },
+    );
 
     let deps = DaemonDeps {
         configured_serial,
@@ -143,7 +165,8 @@ pub type SpawnFn = Arc<
             oneshot::Receiver<()>,
             oneshot::Receiver<()>,
             tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
-        ) -> Pin<Box<dyn std::future::Future<Output = Result<OrchestratorOutcome>> + Send>>
+        )
+            -> Pin<Box<dyn std::future::Future<Output = Result<OrchestratorOutcome>> + Send>>
         + Send
         + Sync,
 >;
@@ -222,9 +245,7 @@ enum InternalEvent {
     /// Result of an off-thread source-library walk (see `spawn_library_count`).
     /// Populates the cached `library_count` (Y in "X of Y synced") so the menu
     /// can show a total on a cold start, before any sync has run.
-    LibraryCountComputed {
-        count: usize,
-    },
+    LibraryCountComputed { count: usize },
     /// A --scan-library subprocess finished. No history entry — a scan is
     /// cache maintenance, not a sync.
     ScanCompleted {
@@ -327,11 +348,24 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
 
     // Refresh the library index once at startup so the browser is current
     // without a user action. Guarded/incremental like any scan.
-    if config_file::load(&config_path).ok().flatten().and_then(|c| c.source).is_some() {
+    if config_file::load(&config_path)
+        .ok()
+        .flatten()
+        .and_then(|c| c.source)
+        .is_some()
+    {
         start_scan_session(
-            &mut state, &event_tx, &spawn_scan, &internal_tx,
-            &mut cancel_tx_holder, &mut prompt_tx_holder, &mut pause_tx_holder,
-            &connected, &config_path, &history, library_count_cache,
+            &mut state,
+            &event_tx,
+            &spawn_scan,
+            &internal_tx,
+            &mut cancel_tx_holder,
+            &mut prompt_tx_holder,
+            &mut pause_tx_holder,
+            &connected,
+            &config_path,
+            &history,
+            library_count_cache,
         );
     }
 
@@ -516,16 +550,14 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     let _ = tx.send(());
                     tracing::info!("daemon: signalled in-flight sync to cancel before exit");
                 }
-                let drain = tokio::time::timeout(
-                    crate::daemon::SHUTDOWN_DRAIN_BUDGET,
-                    async {
-                        while let Some(internal) = internal_rx.recv().await {
-                            if matches!(internal, InternalEvent::SyncCompleted { .. }) {
-                                return;
-                            }
+                let drain = tokio::time::timeout(crate::daemon::SHUTDOWN_DRAIN_BUDGET, async {
+                    while let Some(internal) = internal_rx.recv().await {
+                        if matches!(internal, InternalEvent::SyncCompleted { .. }) {
+                            return;
                         }
-                    },
-                ).await;
+                    }
+                })
+                .await;
                 match drain {
                     Ok(()) => tracing::info!("daemon: in-flight sync drained cleanly"),
                     Err(_) => tracing::warn!(
@@ -562,15 +594,26 @@ fn handle_internal_event(
     match event {
         InternalEvent::LibraryCountComputed { count } => {
             *library_count_cache = Some(count);
-            broadcast_status(event_tx, state, connected, config_path, history, *library_count_cache);
+            broadcast_status(
+                event_tx,
+                state,
+                connected,
+                config_path,
+                history,
+                *library_count_cache,
+            );
         }
         InternalEvent::IpodNameResolved { serial, name } => {
             // Apply only if the resolved-name's serial still matches
             // the currently-connected device. (Device could've been
             // detached during the iTunesDB parse.)
             let Some(c) = connected.as_mut() else { return };
-            if c.serial != serial { return }
-            if c.name == name { return }
+            if c.serial != serial {
+                return;
+            }
+            if c.name == name {
+                return;
+            }
             c.name = name.clone();
 
             // Persist the name into the user's IpodIdentity so it
@@ -597,10 +640,15 @@ fn handle_internal_event(
                 name: c.name.clone(),
             });
             let cfg = config_file::load(config_path).ok().flatten();
-            let _ = event_tx.send(build_config_update(cfg));
+            let _ = event_tx.send(build_config_update(cfg, None));
             return;
         }
-        InternalEvent::SyncCompleted { trigger, serial, started_at_unix_secs, outcome } => {
+        InternalEvent::SyncCompleted {
+            trigger,
+            serial,
+            started_at_unix_secs,
+            outcome,
+        } => {
             // If the device was detached mid-sync, the Disconnected handler
             // already wrote an Aborted history entry and called finish_sync.
             // In that case state is Idle and serial != this sync's serial —
@@ -611,12 +659,21 @@ fn handle_internal_event(
             }
 
             let (history_outcome, error_message, summary, db_restored) = match outcome {
-                Ok(OrchestratorOutcome::Completed { outcome: SyncOutcome::Ok, summary, db_restored }) => {
-                    (SyncOutcome::Ok, None, summary, db_restored)
-                }
-                Ok(OrchestratorOutcome::Completed { outcome, summary, db_restored }) => {
-                    (outcome, Some("sync subprocess reported failure".to_string()), summary, db_restored)
-                }
+                Ok(OrchestratorOutcome::Completed {
+                    outcome: SyncOutcome::Ok,
+                    summary,
+                    db_restored,
+                }) => (SyncOutcome::Ok, None, summary, db_restored),
+                Ok(OrchestratorOutcome::Completed {
+                    outcome,
+                    summary,
+                    db_restored,
+                }) => (
+                    outcome,
+                    Some("sync subprocess reported failure".to_string()),
+                    summary,
+                    db_restored,
+                ),
                 Ok(OrchestratorOutcome::Aborted { reason, summary }) => {
                     (SyncOutcome::Aborted, Some(reason), summary, false)
                 }
@@ -625,12 +682,18 @@ fn handle_internal_event(
                 // so history still reflects "didn't fully complete", while
                 // the live "paused" signal itself rode the raw SyncEvent
                 // stream the UI's Phase.paused reducer watches directly.
-                Ok(OrchestratorOutcome::Paused { summary }) => {
-                    (SyncOutcome::Aborted, Some("paused".to_string()), summary, false)
-                }
-                Err(e) => {
-                    (SyncOutcome::Error, Some(format!("orchestrator: {e:#}")), None, false)
-                }
+                Ok(OrchestratorOutcome::Paused { summary }) => (
+                    SyncOutcome::Aborted,
+                    Some("paused".to_string()),
+                    summary,
+                    false,
+                ),
+                Err(e) => (
+                    SyncOutcome::Error,
+                    Some(format!("orchestrator: {e:#}")),
+                    None,
+                    false,
+                ),
             };
 
             // Refresh the library-count cache from this sync's diff — free,
@@ -647,8 +710,13 @@ fn handle_internal_event(
             }
 
             let entry = make_history_entry(
-                serial.clone(), trigger, history_outcome, error_message, summary,
-                started_at_unix_secs, db_restored,
+                serial.clone(),
+                trigger,
+                history_outcome,
+                error_message,
+                summary,
+                started_at_unix_secs,
+                db_restored,
             );
             let last_sync = Some(entry.clone());
             let _ = history.append(entry);
@@ -663,6 +731,7 @@ fn handle_internal_event(
                 storage: current_storage(connected),
                 synced_count: synced_track_count(Some(&serial)),
                 library_count: *library_count_cache,
+                acknowledged_request_id: None,
             });
         }
         InternalEvent::ScanCompleted { outcome } => {
@@ -673,7 +742,14 @@ fn handle_internal_event(
             // Fresh index on disk: rebroadcast the library and a status
             // update (selection-aware count may have changed).
             let _ = event_tx.send(crate::daemon::library::build_library_update(config_path));
-            broadcast_status(event_tx, state, connected, config_path, history, *library_count_cache);
+            broadcast_status(
+                event_tx,
+                state,
+                connected,
+                config_path,
+                history,
+                *library_count_cache,
+            );
         }
     }
 }
@@ -696,7 +772,10 @@ fn handle_internal_event(
 /// still holds under per-device settings: `enabled` is only the seed value
 /// the first time a device is seen (see `DeviceSettings::load_or_migrate`).
 fn auto_sync_enabled(config_path: &std::path::Path, serial: &str) -> bool {
-    let global = config_file::load(config_path).ok().flatten().unwrap_or_default();
+    let global = config_file::load(config_path)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let device = crate::device_config::DeviceSettings::load_or_migrate(serial, &global);
     should_auto_sync(&device)
 }
@@ -730,7 +809,9 @@ fn handle_device_event(
             if ipod.name.is_none() {
                 if let Ok(Some(cfg)) = config_file::load(config_path) {
                     if let Some(id) = cfg.ipod_identity.as_ref() {
-                        if id.serial == ipod.serial { ipod.name = id.name.clone(); }
+                        if id.serial == ipod.serial {
+                            ipod.name = id.name.clone();
+                        }
                     }
                 }
             }
@@ -747,7 +828,10 @@ fn handle_device_event(
             // never re-broadcasts) leaves a subscriber that connected before
             // the attach without the persisted iPod identity — so it can't
             // match the connected serial and stays stuck on "Set Up".
-            let _ = event_tx.send(build_config_update(config_file::load(config_path).ok().flatten()));
+            let _ = event_tx.send(build_config_update(
+                config_file::load(config_path).ok().flatten(),
+                None,
+            ));
 
             // Off-thread iTunesDB read so the daemon loop stays
             // responsive. Result arrives via IpodNameResolved.
@@ -793,7 +877,9 @@ fn handle_device_event(
         }
         DeviceEvent::Disconnected { serial } => {
             *connected = None;
-            let _ = event_tx.send(DaemonEvent::DeviceDisconnected { serial: serial.clone() });
+            let _ = event_tx.send(DaemonEvent::DeviceDisconnected {
+                serial: serial.clone(),
+            });
             // If the device we were syncing disappeared, force-finish
             // the session with Aborted. The spawned orchestrator task
             // is still running — its SyncCompleted will arrive later and
@@ -853,6 +939,7 @@ fn start_sync_session(
         storage: device_storage::query_storage(&drive),
         synced_count: synced_track_count(Some(&serial)),
         library_count: library_count_cache,
+        acknowledged_request_id: None,
     });
 
     // Per-sync cancel channel. Sender held by the runtime so the
@@ -881,7 +968,14 @@ fn start_sync_session(
     let serial_for_task = serial.clone();
     let serial_for_spawn = serial;
     tokio::spawn(async move {
-        let outcome = (spawn_sync)(serial_for_spawn, drive_for_task, cancel_rx, pause_rx, prompt_rx).await;
+        let outcome = (spawn_sync)(
+            serial_for_spawn,
+            drive_for_task,
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+        )
+        .await;
         let _ = internal_tx.send(InternalEvent::SyncCompleted {
             trigger: trigger_for_task,
             serial: serial_for_task,
@@ -912,7 +1006,14 @@ fn start_scan_session(
     if state.try_start_scan() != TriggerOutcome::Accepted {
         return;
     }
-    broadcast_status(event_tx, state, connected, config_path, history, library_count_cache);
+    broadcast_status(
+        event_tx,
+        state,
+        connected,
+        config_path,
+        history,
+        library_count_cache,
+    );
 
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     *cancel_tx_holder = Some(cancel_tx);
@@ -924,7 +1025,8 @@ fn start_scan_session(
     let spawn_scan = spawn_scan.clone();
     let internal_tx = internal_tx.clone();
     tokio::spawn(async move {
-        let outcome = (spawn_scan)(String::new(), String::new(), cancel_rx, pause_rx, prompt_rx).await;
+        let outcome =
+            (spawn_scan)(String::new(), String::new(), cancel_rx, pause_rx, prompt_rx).await;
         let _ = internal_tx.send(InternalEvent::ScanCompleted { outcome });
     });
 }
@@ -988,8 +1090,8 @@ fn broadcast_status(
         .or(identity_serial);
     // Selection-aware Y: under a non-All selection this is the *selected*
     // track count; under mode=All it returns None and we keep the walk cache.
-    let library_count = crate::daemon::library::selected_library_count(config_path)
-        .or(library_count);
+    let library_count =
+        crate::daemon::library::selected_library_count(config_path).or(library_count);
     let entries = history.read();
     let _ = event_tx.send(DaemonEvent::StatusUpdate {
         state: state_label(state),
@@ -1000,6 +1102,7 @@ fn broadcast_status(
         storage: current_storage(connected),
         synced_count: synced_track_count(count_serial.as_deref()),
         library_count,
+        acknowledged_request_id: None,
     });
 }
 
@@ -1017,13 +1120,19 @@ fn broadcast_status(
 /// the configured (paired) one; the legacy path remains a pre-migration
 /// fallback until that serial has a per-device manifest.
 fn synced_track_count(serial: Option<&str>) -> usize {
-    let Ok(legacy_path) = crate::config::default_manifest_path() else { return 0 };
-    let Some(config_root) = legacy_path.parent() else { return 0 };
+    let Ok(legacy_path) = crate::config::default_manifest_path() else {
+        return 0;
+    };
+    let Some(config_root) = legacy_path.parent() else {
+        return 0;
+    };
     synced_track_count_in(config_root, &legacy_path, serial)
 }
 
 fn synced_track_count_in(config_root: &Path, legacy_path: &Path, serial: Option<&str>) -> usize {
-    load_manifest_for_device_in(config_root, legacy_path, serial).tracks.len()
+    load_manifest_for_device_in(config_root, legacy_path, serial)
+        .tracks
+        .len()
 }
 
 fn load_manifest_for_device(serial: Option<&str>) -> crate::manifest::Manifest {
@@ -1113,7 +1222,11 @@ fn current_storage(connected: &Option<DetectedIpod>) -> Option<StorageInfo> {
 /// outer loop then runs the graceful-drain sequence so the in-flight
 /// sync subprocess doesn't get yanked mid-write).
 fn handle_client_command(
-    ClientCommand { client_id, command, reply }: ClientCommand,
+    ClientCommand {
+        client_id,
+        command,
+        reply,
+    }: ClientCommand,
     history: &HistoryService,
     config_path: &std::path::Path,
     state: &mut StateMachine,
@@ -1133,7 +1246,7 @@ fn handle_client_command(
 ) -> bool {
     tracing::info!("daemon: client {client_id} command: {command:?}");
     match command {
-        DaemonCommand::GetStatus => {
+        DaemonCommand::GetStatus { request_id } => {
             let configured = configured_serial.is_some();
             let library_count = crate::daemon::library::selected_library_count(config_path)
                 .or(*library_count_cache);
@@ -1151,16 +1264,29 @@ fn handle_client_command(
                 storage: current_storage(connected),
                 synced_count: synced_track_count(count_serial.as_deref()),
                 library_count,
+                acknowledged_request_id: Some(request_id),
             });
         }
-        DaemonCommand::GetConfig => {
+        DaemonCommand::GetConfig { request_id } => {
             let cfg = config_file::load(config_path).ok().flatten();
-            let _ = reply.send(build_config_update(cfg));
+            let _ = reply.send(build_config_update(cfg, Some(request_id)));
         }
-        DaemonCommand::SaveConfig { source, daemon, ipod } => {
-            let mut current = config_file::load(config_path).ok().flatten().unwrap_or_default();
-            if let Some(s) = source { current.source = Some(PathBuf::from(s)); }
-            if let Some(d) = daemon { current.daemon = Some(d); }
+        DaemonCommand::SaveConfig {
+            source,
+            daemon,
+            ipod,
+            request_id,
+        } => {
+            let mut current = config_file::load(config_path)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if let Some(s) = source {
+                current.source = Some(PathBuf::from(s));
+            }
+            if let Some(d) = daemon {
+                current.daemon = Some(d);
+            }
             if let Some(mut i) = ipod {
                 // Wizard / settings clients don't know the iPod's
                 // firmware name — preserve it across saves so the user
@@ -1169,7 +1295,9 @@ fn handle_client_command(
                 // when serials match (different iPod = clean slate).
                 if i.name.is_none() {
                     if let Some(prev) = current.ipod_identity.as_ref() {
-                        if prev.serial == i.serial { i.name = prev.name.clone(); }
+                        if prev.serial == i.serial {
+                            i.name = prev.name.clone();
+                        }
                     }
                 }
                 // Seed the per-device selection.json from the shared one the
@@ -1184,7 +1312,9 @@ fn handle_client_command(
                 // already true is harmless. Seeded BEFORE the config save
                 // below so a crash in between never leaves the flag on
                 // with no per-device file backing it.
-                let was_custom = current.ipod_identity.as_ref()
+                let was_custom = current
+                    .ipod_identity
+                    .as_ref()
                     .filter(|prev| prev.serial == i.serial)
                     .map(|prev| prev.custom_selection)
                     .unwrap_or(false);
@@ -1230,7 +1360,11 @@ fn handle_client_command(
             // wouldn't take effect until the daemon restarted. Only re-arm on
             // an actual change — rearm() resets the countdown, so re-arming on
             // every save would let frequent edits perpetually postpone a tick.
-            let new_minutes = current.daemon.as_ref().map(|d| d.schedule_minutes).unwrap_or(0);
+            let new_minutes = current
+                .daemon
+                .as_ref()
+                .map(|d| d.schedule_minutes)
+                .unwrap_or(0);
             if new_minutes != scheduler.minutes() {
                 tracing::info!(
                     "daemon: schedule interval {} → {} min; re-arming scheduler",
@@ -1239,10 +1373,13 @@ fn handle_client_command(
                 );
                 scheduler.rearm(new_minutes);
             }
-            let _ = event_tx.send(build_config_update(Some(current)));
+            let _ = event_tx.send(build_config_update(Some(current), Some(request_id)));
         }
-        DaemonCommand::ForgetIpod => {
-            let mut current = config_file::load(config_path).ok().flatten().unwrap_or_default();
+        DaemonCommand::ForgetIpod { request_id, .. } => {
+            let mut current = config_file::load(config_path)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             current.ipod_identity = None;
             if let Err(e) = config_file::save(config_path, &current) {
                 tracing::error!("daemon: failed to save config after forget_ipod: {e}");
@@ -1250,7 +1387,7 @@ fn handle_client_command(
             }
             *configured_serial = None;
             tracing::info!("daemon: client {client_id} cleared the persisted iPod identity");
-            let _ = event_tx.send(build_config_update(Some(current)));
+            let _ = event_tx.send(build_config_update(Some(current), Some(request_id)));
             // Re-announce the currently-attached device (if any) so a
             // freshly-opened wizard sees it. Without this re-emit, the
             // device-watcher's polling loop is in steady-state — the
@@ -1266,26 +1403,41 @@ fn handle_client_command(
                 });
             }
         }
-        DaemonCommand::GetHistory { limit } => {
+        DaemonCommand::GetHistory { limit, request_id } => {
             let mut entries = history.read();
             let start = entries.len().saturating_sub(limit);
             entries.drain(..start);
-            let _ = reply.send(DaemonEvent::HistoryUpdate { entries });
+            let _ = reply.send(DaemonEvent::HistoryUpdate {
+                entries,
+                acknowledged_request_id: request_id,
+            });
         }
-        DaemonCommand::TriggerSync { source: trigger_source } => {
+        DaemonCommand::TriggerSync {
+            source: trigger_source,
+            serial,
+            request_id,
+        } => {
             if !state.is_idle() {
                 let _ = reply.send(DaemonEvent::SyncRejected {
                     reason: SyncRejectReason::AlreadySyncing,
+                    serial,
+                    acknowledged_request_id: request_id,
                 });
                 return false;
             }
             let Some(device) = connected.as_ref() else {
-                let _ = reply.send(DaemonEvent::SyncRejected { reason: SyncRejectReason::NoIpod });
+                let _ = reply.send(DaemonEvent::SyncRejected {
+                    reason: SyncRejectReason::NoIpod,
+                    serial,
+                    acknowledged_request_id: request_id,
+                });
                 return false;
             };
             if configured_serial.is_none() {
                 let _ = reply.send(DaemonEvent::SyncRejected {
                     reason: SyncRejectReason::NotConfigured,
+                    serial,
+                    acknowledged_request_id: request_id,
                 });
                 return false;
             }
@@ -1294,7 +1446,7 @@ fn handle_client_command(
                 TriggerSource::Scheduled => SyncTrigger::Scheduled,
                 TriggerSource::PlugIn => SyncTrigger::PlugIn,
             };
-            let _ = history;  // history mutations now happen in handle_internal_event
+            let _ = history; // history mutations now happen in handle_internal_event
             start_sync_session(
                 trigger,
                 device.serial.clone(),
@@ -1309,7 +1461,7 @@ fn handle_client_command(
                 *library_count_cache,
             );
         }
-        DaemonCommand::BackfillRockbox => {
+        DaemonCommand::BackfillRockbox { .. } => {
             // Mirrors TriggerSync's guard + spawn + relay path exactly,
             // just pointed at `spawn_backfill` (a `--backfill-rockbox`
             // subprocess) instead of `spawn_sync` (`--apply`).
@@ -1347,7 +1499,7 @@ fn handle_client_command(
                 *library_count_cache,
             );
         }
-        DaemonCommand::ReplaceLibrary => {
+        DaemonCommand::ReplaceLibrary { serial, request_id } => {
             // Mirrors BackfillRockbox's arm exactly, just pointed at
             // `spawn_replace_library` (a `--replace-library --apply`
             // subprocess) instead of `spawn_backfill`. `start_sync_session`'s
@@ -1364,6 +1516,8 @@ fn handle_client_command(
             if !state.is_idle() {
                 let _ = reply.send(DaemonEvent::SyncRejected {
                     reason: SyncRejectReason::AlreadySyncing,
+                    serial,
+                    acknowledged_request_id: request_id,
                 });
                 tracing::debug!(
                     "daemon: client {client_id} sent replace_library but a sync is already in progress"
@@ -1371,7 +1525,11 @@ fn handle_client_command(
                 return false;
             }
             let Some(device) = connected.as_ref() else {
-                let _ = reply.send(DaemonEvent::SyncRejected { reason: SyncRejectReason::NoIpod });
+                let _ = reply.send(DaemonEvent::SyncRejected {
+                    reason: SyncRejectReason::NoIpod,
+                    serial,
+                    acknowledged_request_id: request_id,
+                });
                 tracing::debug!(
                     "daemon: client {client_id} sent replace_library but no iPod is connected"
                 );
@@ -1395,7 +1553,7 @@ fn handle_client_command(
                 *library_count_cache,
             );
         }
-        DaemonCommand::CancelSync => {
+        DaemonCommand::CancelSync { .. } => {
             // Wake the orchestrator's cancel arm. The orchestrator
             // writes a Cancel command to subprocess stdin and force-kills
             // after 5s; the SyncCompleted internal event arrives shortly
@@ -1404,10 +1562,12 @@ fn handle_client_command(
                 let _ = tx.send(());
                 tracing::info!("daemon: client {client_id} cancelled the running sync");
             } else {
-                tracing::debug!("daemon: client {client_id} sent cancel_sync but no sync is in progress");
+                tracing::debug!(
+                    "daemon: client {client_id} sent cancel_sync but no sync is in progress"
+                );
             }
         }
-        DaemonCommand::Pause => {
+        DaemonCommand::Pause { .. } => {
             // Wake the orchestrator's pause arm. Unlike CancelSync, this
             // is graceful — no force-kill; the SyncCompleted internal
             // event arrives once the subprocess has drained, checkpointed,
@@ -1419,7 +1579,7 @@ fn handle_client_command(
                 tracing::debug!("daemon: client {client_id} sent pause but no sync is in progress");
             }
         }
-        DaemonCommand::DecidePrompt { id, choice } => {
+        DaemonCommand::DecidePrompt { id, choice, .. } => {
             // Forward the user's reply to the running sync subprocess.
             // The orchestrator writes the prompt_decision line to
             // stdin; the apply loop's await_prompt then returns the
@@ -1462,73 +1622,51 @@ fn handle_client_command(
             // Symmetric no-op — subscription is implicit, so there's
             // nothing to tear down.
         }
-        DaemonCommand::GetLibrary => {
-            let _ = reply.send(crate::daemon::library::build_library_update(config_path));
+        DaemonCommand::GetLibrary { request_id } => {
+            let _ = reply.send(
+                crate::daemon::library::build_library_update(config_path)
+                    .with_acknowledged_request_id(Some(request_id)),
+            );
         }
-        DaemonCommand::ScanLibrary => {
+        DaemonCommand::ScanLibrary { .. } => {
             if !state.is_idle() {
                 tracing::debug!("daemon: client {client_id} sent scan_library while busy; dropped");
                 return false;
             }
-            let has_source = config_file::load(config_path).ok().flatten()
-                .and_then(|c| c.source).is_some();
+            let has_source = config_file::load(config_path)
+                .ok()
+                .flatten()
+                .and_then(|c| c.source)
+                .is_some();
             if !has_source {
                 tracing::debug!("daemon: client {client_id} sent scan_library but no source configured; dropped");
                 return false;
             }
             tracing::info!("daemon: client {client_id} triggered a library scan");
             start_scan_session(
-                state, event_tx, spawn_scan, internal_tx,
-                cancel_tx_holder, prompt_tx_holder, pause_tx_holder,
-                connected, config_path, history, *library_count_cache,
+                state,
+                event_tx,
+                spawn_scan,
+                internal_tx,
+                cancel_tx_holder,
+                prompt_tx_holder,
+                pause_tx_holder,
+                connected,
+                config_path,
+                history,
+                *library_count_cache,
             );
         }
-        DaemonCommand::GetSelection => {
-            // Deprecated as of v1.6.0 (see ipc_daemon.rs doc comment): reads
-            // the CONFIGURED device's own per-device selection via
-            // `effective_device_selection_path`, not the old
-            // `custom_selection`-gated shared/per-device split. No
-            // configured device -> mode All (nothing to resolve a
-            // per-device path for).
-            let identity = config_file::load(config_path).ok().flatten().and_then(|c| c.ipod_identity);
-            let sel = match identity {
-                Some(id) => crate::selection::effective_device_selection_path(&id.serial)
-                    .map(|p| crate::selection::load_or_all(&p))
-                    .unwrap_or_else(|_| crate::selection::Selection::all()),
-                None => crate::selection::Selection::all(),
-            };
-            let _ = reply.send(DaemonEvent::SelectionUpdate { mode: sel.mode, rules: sel.rules });
-        }
-        DaemonCommand::SaveSelection { mode, rules } => {
-            // Deprecated as of v1.6.0: same per-device target as GetSelection.
-            let sel = crate::selection::Selection {
-                version: crate::selection::SELECTION_VERSION,
-                mode,
-                rules,
-            };
-            let identity = config_file::load(config_path).ok().flatten().and_then(|c| c.ipod_identity);
-            let Some(identity) = identity else {
-                tracing::warn!("daemon: client {client_id} save_selection with no configured device; dropped");
-                return false;
-            };
-            match crate::selection::effective_device_selection_path(&identity.serial) {
-                Ok(path) => {
-                    if let Err(e) = crate::selection::save_atomic(&path, &sel) {
-                        tracing::error!("daemon: failed to save selection: {e:#}");
-                        return false;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("daemon: cannot resolve selection path: {e:#}");
-                    return false;
-                }
-            }
-            let _ = reply.send(DaemonEvent::SelectionUpdate { mode: sel.mode, rules: sel.rules });
-            // Y in "X of Y" likely changed; push a fresh status to everyone.
-            broadcast_status(event_tx, state, connected, config_path, history, *library_count_cache);
-        }
-        DaemonCommand::PreviewSelection { mode, rules } => {
-            let source = config_file::load(config_path).ok().flatten().and_then(|c| c.source);
+        DaemonCommand::PreviewSelection {
+            mode,
+            rules,
+            serial,
+            request_id,
+        } => {
+            let source = config_file::load(config_path)
+                .ok()
+                .flatten()
+                .and_then(|c| c.source);
             let index = match (source, crate::library_index::default_index_path()) {
                 (Some(root), Ok(p)) => crate::library_index::load_or_empty(&p, &root),
                 _ => crate::library_index::LibraryIndex::empty(std::path::PathBuf::new()),
@@ -1539,18 +1677,30 @@ fn handle_client_command(
             let (selected_tracks, selected_bytes, adds, removes) =
                 crate::daemon::library::preview(&index, &manifest, mode, &rules);
             let _ = reply.send(DaemonEvent::SelectionPreview {
-                selected_tracks, selected_bytes, adds, removes,
+                selected_tracks,
+                selected_bytes,
+                adds,
+                removes,
+                serial,
+                acknowledged_request_id: request_id,
             });
         }
-        DaemonCommand::ListPlaylists => {
-            let _ = reply.send(build_playlists_update(config_path));
+        DaemonCommand::ListPlaylists { request_id } => {
+            let _ = reply.send(
+                build_playlists_update(config_path).with_acknowledged_request_id(Some(request_id)),
+            );
         }
-        DaemonCommand::GetPlaylist { slug } => {
-            let _ = reply.send(build_playlist_detail(&slug));
+        DaemonCommand::GetPlaylist { slug, request_id } => {
+            let _ = reply.send(build_playlist_detail(&slug, request_id));
         }
-        DaemonCommand::SavePlaylist { playlist } => {
+        DaemonCommand::SavePlaylist {
+            playlist,
+            request_id,
+        } => {
             let Ok(store) = open_playlist_store() else {
-                tracing::warn!("daemon: client {client_id} save_playlist: could not open playlist store");
+                tracing::warn!(
+                    "daemon: client {client_id} save_playlist: could not open playlist store"
+                );
                 return false;
             };
             let built = match playlist {
@@ -1587,32 +1737,48 @@ fn handle_client_command(
                             }
                         },
                     };
-                    crate::playlist::Playlist::Smart(crate::playlist::SmartPlaylist { slug, name, rules })
+                    crate::playlist::Playlist::Smart(crate::playlist::SmartPlaylist {
+                        slug,
+                        name,
+                        rules,
+                    })
                 }
             };
             if let Err(e) = store.save(&built) {
                 tracing::error!("daemon: client {client_id} save_playlist failed: {e:#}");
                 return false;
             }
-            let _ = event_tx.send(build_playlists_update(config_path));
+            let _ = event_tx.send(
+                build_playlists_update(config_path).with_acknowledged_request_id(Some(request_id)),
+            );
         }
-        DaemonCommand::DeletePlaylist { slug } => {
+        DaemonCommand::DeletePlaylist { slug, request_id } => {
             match open_playlist_store() {
                 Ok(store) => {
                     if let Err(e) = store.delete(&slug) {
-                        tracing::error!("daemon: client {client_id} delete_playlist({slug}) failed: {e:#}");
+                        tracing::error!(
+                            "daemon: client {client_id} delete_playlist({slug}) failed: {e:#}"
+                        );
                     }
                 }
                 Err(e) => {
                     tracing::warn!("daemon: client {client_id} delete_playlist: could not open playlist store ({e:#})");
                 }
             }
-            let _ = event_tx.send(build_playlists_update(config_path));
+            let _ = event_tx.send(
+                build_playlists_update(config_path).with_acknowledged_request_id(Some(request_id)),
+            );
         }
-        DaemonCommand::GetDeviceConfig { serial } => {
-            let _ = reply.send(build_device_config_update(config_path, &serial));
+        DaemonCommand::GetDeviceConfig { serial, request_id } => {
+            let _ = reply.send(build_device_config_update(config_path, &serial, request_id));
         }
-        DaemonCommand::SaveDeviceConfig { serial, selection, subscriptions, settings } => {
+        DaemonCommand::SaveDeviceConfig {
+            serial,
+            selection,
+            subscriptions,
+            settings,
+            request_id,
+        } => {
             if let Some(sel) = selection {
                 match crate::selection::effective_device_selection_path(&serial) {
                     Ok(path) => {
@@ -1622,10 +1788,14 @@ fn handle_client_command(
                             rules: sel.rules,
                         };
                         if let Err(e) = crate::selection::save_atomic(&path, &full) {
-                            tracing::error!("daemon: failed to save device selection for {serial}: {e:#}");
+                            tracing::error!(
+                                "daemon: failed to save device selection for {serial}: {e:#}"
+                            );
                         }
                     }
-                    Err(e) => tracing::error!("daemon: cannot resolve device selection path for {serial}: {e:#}"),
+                    Err(e) => tracing::error!(
+                        "daemon: cannot resolve device selection path for {serial}: {e:#}"
+                    ),
                 }
             }
             if let Some(subs) = subscriptions {
@@ -1635,11 +1805,17 @@ fn handle_client_command(
                             version: crate::device_config::SUBSCRIPTIONS_VERSION,
                             playlists: subs.playlists,
                         };
-                        if let Err(e) = crate::device_config::Subscriptions::save_atomic(&path, &full) {
-                            tracing::error!("daemon: failed to save subscriptions for {serial}: {e:#}");
+                        if let Err(e) =
+                            crate::device_config::Subscriptions::save_atomic(&path, &full)
+                        {
+                            tracing::error!(
+                                "daemon: failed to save subscriptions for {serial}: {e:#}"
+                            );
                         }
                     }
-                    Err(e) => tracing::error!("daemon: cannot resolve subscriptions path for {serial}: {e:#}"),
+                    Err(e) => tracing::error!(
+                        "daemon: cannot resolve subscriptions path for {serial}: {e:#}"
+                    ),
                 }
             }
             if let Some(set) = settings {
@@ -1650,32 +1826,51 @@ fn handle_client_command(
                             auto_sync: set.auto_sync,
                             rockbox_compat: set.rockbox_compat,
                         };
-                        if let Err(e) = crate::device_config::DeviceSettings::save_atomic(&path, &full) {
+                        if let Err(e) =
+                            crate::device_config::DeviceSettings::save_atomic(&path, &full)
+                        {
                             tracing::error!("daemon: failed to save settings for {serial}: {e:#}");
                         }
                     }
-                    Err(e) => tracing::error!("daemon: cannot resolve settings path for {serial}: {e:#}"),
+                    Err(e) => {
+                        tracing::error!("daemon: cannot resolve settings path for {serial}: {e:#}")
+                    }
                 }
             }
-            let _ = event_tx.send(build_device_config_update(config_path, &serial));
+            let _ = event_tx.send(build_device_config_update(config_path, &serial, request_id));
             // Selection may have changed; refresh "X of Y" for everyone, but
             // only when this save targets the CONFIGURED device — status
             // reflects that one device, not every device this daemon has
             // ever seen a config file for.
             if configured_serial.as_deref() == Some(serial.as_str()) {
-                broadcast_status(event_tx, state, connected, config_path, history, *library_count_cache);
+                broadcast_status(
+                    event_tx,
+                    state,
+                    connected,
+                    config_path,
+                    history,
+                    *library_count_cache,
+                );
             }
         }
-        DaemonCommand::PreviewDevice { serial } => {
-            let _ = reply.send(build_device_preview(config_path, connected, &serial));
+        DaemonCommand::PreviewDevice { serial, request_id } => {
+            let _ = reply.send(build_device_preview(
+                config_path,
+                connected,
+                &serial,
+                request_id,
+            ));
         }
-        DaemonCommand::ResolveTracks { rules } => {
+        DaemonCommand::ResolveTracks { rules, request_id } => {
             // Synchronous inline reply, same as PreviewDevice above — no
             // spawn/await before sending, so replies stay in request order
             // for the client's FIFO correlation.
             let index = load_cached_index(config_path);
             let tracks = crate::daemon::library::resolve_tracks(&index, &rules);
-            let _ = reply.send(DaemonEvent::ResolvedTracks { tracks });
+            let _ = reply.send(DaemonEvent::ResolvedTracks {
+                tracks,
+                acknowledged_request_id: request_id,
+            });
         }
         DaemonCommand::Shutdown => {
             tracing::info!("daemon: shutdown requested by client {client_id}; exiting loop");
@@ -1685,14 +1880,25 @@ fn handle_client_command(
     false
 }
 
-fn build_config_update(cfg: Option<PersistedConfig>) -> DaemonEvent {
+fn build_config_update(
+    cfg: Option<PersistedConfig>,
+    acknowledged_request_id: Option<String>,
+) -> DaemonEvent {
     match cfg {
         Some(c) => DaemonEvent::ConfigUpdate {
             source: c.source.map(|p| p.display().to_string()),
             daemon: c.daemon,
             ipod: c.ipod_identity,
+            config_revision: 0,
+            acknowledged_request_id,
         },
-        None => DaemonEvent::ConfigUpdate { source: None, daemon: None, ipod: None },
+        None => DaemonEvent::ConfigUpdate {
+            source: None,
+            daemon: None,
+            ipod: None,
+            config_revision: 0,
+            acknowledged_request_id,
+        },
     }
 }
 
@@ -1700,7 +1906,10 @@ fn build_config_update(cfg: Option<PersistedConfig>) -> DaemonEvent {
 /// inline load in `PreviewSelection`'s arm — an empty index (root `""`)
 /// when there's no source configured yet or the cache file is missing.
 fn load_cached_index(config_path: &std::path::Path) -> crate::library_index::LibraryIndex {
-    let source = config_file::load(config_path).ok().flatten().and_then(|c| c.source);
+    let source = config_file::load(config_path)
+        .ok()
+        .flatten()
+        .and_then(|c| c.source);
     match (source, crate::library_index::default_index_path()) {
         (Some(root), Ok(p)) => crate::library_index::load_or_empty(&p, &root),
         _ => crate::library_index::LibraryIndex::empty(PathBuf::new()),
@@ -1719,12 +1928,18 @@ fn open_playlist_store() -> Result<crate::playlist::PlaylistStore> {
 fn build_playlists_update(config_path: &std::path::Path) -> DaemonEvent {
     let index = load_cached_index(config_path);
     match open_playlist_store() {
-        Ok(store) => {
-            DaemonEvent::PlaylistsUpdate { playlists: crate::daemon::library::build_playlist_summaries(&store, &index) }
-        }
+        Ok(store) => DaemonEvent::PlaylistsUpdate {
+            playlists: crate::daemon::library::build_playlist_summaries(&store, &index),
+            acknowledged_request_id: None,
+        },
         Err(e) => {
-            tracing::warn!("daemon: playlists: failed to open store ({e:#}); replying with an empty list");
-            DaemonEvent::PlaylistsUpdate { playlists: Vec::new() }
+            tracing::warn!(
+                "daemon: playlists: failed to open store ({e:#}); replying with an empty list"
+            );
+            DaemonEvent::PlaylistsUpdate {
+                playlists: Vec::new(),
+                acknowledged_request_id: None,
+            }
         }
     }
 }
@@ -1736,14 +1951,19 @@ fn build_playlists_update(config_path: &std::path::Path) -> DaemonEvent {
 /// parse all reply with `error` set (and every content field `None`)
 /// rather than degrading to an empty result — see the `PlaylistDetail`
 /// and `GetPlaylist` doc comments in `ipc_daemon.rs`.
-fn build_playlist_detail(slug: &str) -> DaemonEvent {
+fn build_playlist_detail(slug: &str, acknowledged_request_id: String) -> DaemonEvent {
     let store = match open_playlist_store() {
         Ok(store) => store,
         Err(e) => {
             tracing::warn!("daemon: get_playlist({slug}): could not open playlist store ({e:#})");
             return DaemonEvent::PlaylistDetail {
-                slug: slug.to_string(), name: None, kind: None, tracks: None, rules: None,
+                slug: slug.to_string(),
+                name: None,
+                kind: None,
+                tracks: None,
+                rules: None,
                 error: Some(format!("could not open playlist store: {e:#}")),
+                acknowledged_request_id,
             };
         }
     };
@@ -1753,10 +1973,14 @@ fn build_playlist_detail(slug: &str) -> DaemonEvent {
             name: Some(m.name),
             kind: Some(PlaylistKind::Manual),
             tracks: Some(
-                m.tracks.into_iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect(),
+                m.tracks
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .collect(),
             ),
             rules: None,
             error: None,
+            acknowledged_request_id,
         },
         Ok(Some(crate::playlist::Playlist::Smart(s))) => DaemonEvent::PlaylistDetail {
             slug: s.slug,
@@ -1765,19 +1989,30 @@ fn build_playlist_detail(slug: &str) -> DaemonEvent {
             tracks: None,
             rules: Some(s.rules),
             error: None,
+            acknowledged_request_id,
         },
         Ok(None) => {
             tracing::warn!("daemon: get_playlist({slug}): no such playlist");
             DaemonEvent::PlaylistDetail {
-                slug: slug.to_string(), name: None, kind: None, tracks: None, rules: None,
+                slug: slug.to_string(),
+                name: None,
+                kind: None,
+                tracks: None,
+                rules: None,
                 error: Some("no such playlist".to_string()),
+                acknowledged_request_id,
             }
         }
         Err(e) => {
             tracing::warn!("daemon: get_playlist({slug}): failed to read ({e:#})");
             DaemonEvent::PlaylistDetail {
-                slug: slug.to_string(), name: None, kind: None, tracks: None, rules: None,
+                slug: slug.to_string(),
+                name: None,
+                kind: None,
+                tracks: None,
+                rules: None,
                 error: Some(format!("{e:#}")),
+                acknowledged_request_id,
             }
         }
     }
@@ -1788,23 +2023,36 @@ fn build_playlist_detail(slug: &str) -> DaemonEvent {
 /// fails open to its type's default (see `selection::load_or_all`,
 /// `Subscriptions::load_or_default`, `DeviceSettings::load_or_migrate`) —
 /// this never fails the arm, even for a `serial` the daemon has never seen.
-fn build_device_config_update(config_path: &std::path::Path, serial: &str) -> DaemonEvent {
+fn build_device_config_update(
+    config_path: &std::path::Path,
+    serial: &str,
+    acknowledged_request_id: String,
+) -> DaemonEvent {
     let selection = crate::selection::effective_device_selection_path(serial)
         .map(|p| crate::selection::load_or_all(&p))
         .unwrap_or_else(|_| crate::selection::Selection::all());
     let subscriptions = crate::device_state::device_subscriptions_path(serial)
         .map(|p| crate::device_config::Subscriptions::load_or_default(&p))
         .unwrap_or_default();
-    let global = config_file::load(config_path).ok().flatten().unwrap_or_default();
+    let global = config_file::load(config_path)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let settings = crate::device_config::DeviceSettings::load_or_migrate(serial, &global);
     DaemonEvent::DeviceConfigUpdate {
         serial: serial.to_string(),
-        selection: crate::ipc_daemon::SelectionPayload { mode: selection.mode, rules: selection.rules },
-        subscriptions: crate::ipc_daemon::SubscriptionsPayload { playlists: subscriptions.playlists },
+        selection: crate::ipc_daemon::SelectionPayload {
+            mode: selection.mode,
+            rules: selection.rules,
+        },
+        subscriptions: crate::ipc_daemon::SubscriptionsPayload {
+            playlists: subscriptions.playlists,
+        },
         settings: crate::ipc_daemon::DeviceSettingsPayload {
             auto_sync: settings.auto_sync,
             rockbox_compat: settings.rockbox_compat,
         },
+        acknowledged_request_id,
     }
 }
 
@@ -1816,6 +2064,7 @@ fn build_device_preview(
     config_path: &std::path::Path,
     connected: &Option<DetectedIpod>,
     serial: &str,
+    acknowledged_request_id: String,
 ) -> DaemonEvent {
     let index = load_cached_index(config_path);
     let selection = crate::selection::effective_device_selection_path(serial)
@@ -1842,7 +2091,15 @@ fn build_device_preview(
         .map(|track| track.source_path)
         .collect();
     crate::daemon::library::compute_device_preview(
-        &index, &selection, &subs, store.as_ref().ok(), current_free_bytes, &already_synced)
+        &index,
+        &selection,
+        &subs,
+        store.as_ref().ok(),
+        current_free_bytes,
+        &already_synced,
+        serial,
+        acknowledged_request_id,
+    )
 }
 
 fn history_file_path() -> Result<PathBuf> {
@@ -1917,7 +2174,10 @@ mod tests {
         let device_path = crate::device_state::device_manifest_path_in(&root, "SERIAL-1").unwrap();
         crate::manifest::save_atomic(&device_path, &manifest_with_track_count(3)).unwrap();
 
-        assert_eq!(synced_track_count_in(&root, &legacy_path, Some("SERIAL-1")), 3);
+        assert_eq!(
+            synced_track_count_in(&root, &legacy_path, Some("SERIAL-1")),
+            3
+        );
         assert_eq!(synced_track_count_in(&root, &legacy_path, None), 1);
 
         std::fs::remove_file(&device_path).unwrap();
@@ -1953,9 +2213,15 @@ mod tests {
     #[test]
     fn should_auto_sync_follows_device_setting() {
         use crate::device_config::DeviceSettings;
-        assert!(should_auto_sync(&DeviceSettings { auto_sync: true, ..DeviceSettings::default() }));
+        assert!(should_auto_sync(&DeviceSettings {
+            auto_sync: true,
+            ..DeviceSettings::default()
+        }));
         assert!(
-            !should_auto_sync(&DeviceSettings { auto_sync: false, ..DeviceSettings::default() }),
+            !should_auto_sync(&DeviceSettings {
+                auto_sync: false,
+                ..DeviceSettings::default()
+            }),
             "auto-sync must be off when the device setting is off"
         );
     }
@@ -1977,7 +2243,10 @@ mod tests {
         fs::write(src.join("_excluded/skip.flac"), b"x").unwrap(); // skipped dir → ignored
 
         let cfg_path = base.join("config.toml");
-        let cfg = PersistedConfig { source: Some(src.clone()), ..Default::default() };
+        let cfg = PersistedConfig {
+            source: Some(src.clone()),
+            ..Default::default()
+        };
         crate::config_file::save(&cfg_path, &cfg).unwrap();
         assert_eq!(count_source_library(&cfg_path), Some(3));
 

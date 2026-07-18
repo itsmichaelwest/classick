@@ -2,7 +2,7 @@
 
 > This title's version (`1.3.0`) is the **subprocess** protocol (stdin/stdout,
 > `--ipc-mode`) described below. The separate **daemon** protocol (named-pipe/
-> Unix-socket, UI ↔ daemon) is currently at **`1.7.0`** — see "Daemon v1.7.0"
+> Unix-socket, UI ↔ daemon) is currently at **`2.0.0`** — see "Daemon v2.0.0"
 > further down this document for its commands/events.
 
 Newline-delimited JSON over stdin/stdout, UTF-8, custom typed-envelope.
@@ -757,7 +757,7 @@ Bumps will append rows here. Don't edit historical rows.
 > `major.minor.patch` scheme and both currently sit on major `1`, but their
 > minor versions move on separate schedules and a matching number (e.g. both
 > once being `1.1.0`) is coincidence, not a shared release train. As of this
-> writing the daemon protocol is at **`1.7.0`** — see "Daemon v1.7.0" below;
+> writing the daemon protocol is at **`2.0.0`** — see "Daemon v2.0.0" below;
 > this section is kept as the historical record of the `1.1.0` daemon bump.
 
 When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows) or a
@@ -1170,7 +1170,7 @@ of the wire contract):
 {"type":"device_preview","selected_tracks":412,"selected_bytes":5123456789,"playlist_extra_tracks":0,"playlist_extra_bytes":0,"projected_free_bytes":null,"unresolved_subscriptions":["deleted-favorites"]}
 ```
 
-### `get_selection`/`save_selection`/`custom_selection` deprecated
+### `get_selection`/`save_selection`/`custom_selection` deprecated in v1.6
 
 As of v1.6.0, `get_selection`/`save_selection` (§"Daemon v1.4.0" above) read
 and write the **configured** device's own per-device selection —
@@ -1189,6 +1189,10 @@ selection (not just "the" configured one) going forward. `custom_selection`
 itself is unchanged on the wire (still rides `ipod` on `config_update`/
 `save_config`) but is now vestigial: it no longer gates which selection
 file `get_selection`/`save_selection` use.
+
+Both singleton selection commands are removed in daemon protocol v2.0.0.
+Clients must use the serial-keyed `get_device_config`, `save_device_config`,
+and `preview_selection` commands described below.
 
 ## Daemon v1.7.0 — `resolve_tracks`: expand selection rules to track paths (2026-07-18)
 
@@ -1249,3 +1253,124 @@ once in `tracks`. Results are sorted lexicographically by path for
 deterministic wire ordering. If the library index is absent (no source
 configured yet) or not yet scanned, the reply is `{"tracks":[]}` — an empty
 array is a valid reply, never an error.
+
+## Daemon v2.0.0 — explicit device identity and request correlation (2026-07-18)
+
+The daemon emits `hello` with `protocol_version = "2.0.0"`. This is a clean,
+breaking pre-release wire revision. Version 1 payloads are not accepted as a
+compatibility path: a missing required target or correlation field is a decode
+error, not an instruction to guess the configured or connected device.
+
+The daemon and UI continue to use newline-delimited JSON with the same
+snake_case `type` discriminator. The breaking changes are:
+
+- every request/reply command carries a required `request_id`;
+- every device-specific command carries a required raw `serial` in addition to
+  `request_id`;
+- correlated replies carry `acknowledged_request_id`;
+- device state is published as a serial-keyed inventory snapshot;
+- forwarded subprocess events carry a required `session_id` and carry `serial`
+  when the session belongs to a device;
+- `get_selection` and `save_selection` are removed.
+
+`subscribe_device_events`, `unsubscribe_device_events`, and `shutdown` remain
+fieldless global commands. On-disk config, history, selection, settings, and
+subscription migrations are independent of this wire break and remain intact.
+
+### Commands (UI → daemon)
+
+| Type | Required fields | Optional payload fields | Scope |
+|---|---|---|---|
+| `get_status` | `request_id` | — | Global |
+| `get_config` | `request_id` | — | Global |
+| `save_config` | `request_id` | `source`, `daemon`, `ipod` | Global |
+| `get_history` | `request_id` | `limit` (defaults to 10) | Global; each returned history entry identifies its device |
+| `get_library` | `request_id` | — | Global |
+| `scan_library` | `request_id` | — | Global scan session |
+| `list_playlists` | `request_id` | — | Global |
+| `get_playlist` | `slug`, `request_id` | — | Global |
+| `save_playlist` | `playlist`, `request_id` | — | Global |
+| `delete_playlist` | `slug`, `request_id` | — | Global |
+| `resolve_tracks` | `rules`, `request_id` | — | Global |
+| `forget_ipod` | `serial`, `request_id` | — | Device |
+| `trigger_sync` | `source`, `serial`, `request_id` | — | Device |
+| `cancel_sync` | `serial`, `request_id` | — | Active device sync |
+| `pause` | `serial`, `request_id` | — | Active device sync |
+| `decide_prompt` | `id`, `choice`, `serial`, `request_id` | — | Active device sync |
+| `backfill_rockbox` | `serial`, `request_id` | — | Device |
+| `replace_library` | `serial`, `request_id` | — | Device |
+| `preview_selection` | `mode`, `rules`, `serial`, `request_id` | — | Device |
+| `get_device_config` | `serial`, `request_id` | — | Device |
+| `save_device_config` | `serial`, `request_id` | `selection`, `subscriptions`, `settings` (absent means “do not change”) | Device |
+| `preview_device` | `serial`, `request_id` | — | Device |
+| `subscribe_device_events` | — | — | Global handshake |
+| `unsubscribe_device_events` | — | — | Global handshake |
+| `shutdown` | — | — | Global |
+
+Examples:
+
+```json
+{"type":"trigger_sync","source":"manual","serial":"RAW-A","request_id":"req-sync"}
+{"type":"get_history","limit":50,"request_id":"req-history"}
+{"type":"preview_selection","mode":"include","rules":[],"serial":"RAW-A","request_id":"req-preview"}
+```
+
+The following v1 payload is invalid in v2 because it has neither a target nor
+correlation id:
+
+```json
+{"type":"trigger_sync","source":"manual"}
+```
+
+### Events (daemon → UI)
+
+Fields described as required must be present even when their value is zero or
+an empty collection. Optional fields remain optional only when absence is a
+real domain state.
+
+| Type | Required fields | Domain-optional fields |
+|---|---|---|
+| `config_update` | `source`, `daemon`, `ipod`, `config_revision` | `acknowledged_request_id` (absent for an unsolicited broadcast) |
+| `history_update` | `entries`, `acknowledged_request_id` | —; there is no top-level `serial` |
+| `sync_rejected` | `reason`, `serial`, `acknowledged_request_id` | — |
+| `sync_event` | `line`, `session_id` | `serial` only for a global scan session |
+| `device_inventory_snapshot` | `revision`, `devices` | Snapshot fields listed below |
+| `selection_preview` | `selected_tracks`, `selected_bytes`, `adds`, `removes`, `serial`, `acknowledged_request_id` | — |
+| `playlist_detail` | existing detail fields, `acknowledged_request_id` | content/error fields retain their documented result semantics |
+| `device_config_update` | `serial`, `selection`, `subscriptions`, `settings`, `acknowledged_request_id` | — |
+| `device_preview` | `serial`, existing preview fields, `acknowledged_request_id` | `projected_free_bytes` may be `null`; `unresolved_subscriptions` is omitted when empty |
+| `resolved_tracks` | `tracks`, `acknowledged_request_id` | — |
+
+`status_update`, `library_update`, `selection_update`, and `playlists_update`
+may be either replies or broadcasts, so their `acknowledged_request_id` is
+optional. `HistoryEntry.serial` is required on the v2 wire;
+`HistoryEntry.session_id` remains optional because migrated historical records
+may predate session attribution.
+
+### Device inventory snapshot
+
+```json
+{"type":"device_inventory_snapshot","revision":9,"devices":[{"identity":{"serial":"RAW-A","model_label":"iPod Classic","name":"A"},"configured":true,"connected":true,"mount":"/Volumes/A","phase":"syncing","session_id":42,"storage":{"total_bytes":160000000000,"free_bytes":100000000000},"synced_count":12,"library_count":20,"latest_successful_sync":null,"latest_attempt":null,"last_terminal_error":null,"selection_revision":3,"settings_revision":4,"subscriptions_revision":5}]}
+```
+
+Each device contains:
+
+- required `identity.serial` and `identity.model_label`; optional
+  `identity.name`;
+- required `configured`, `connected`, and `phase` (`disconnected`,
+  `unconfigured`, `idle`, `syncing`, `paused`, or `error`);
+- optional `mount`, `session_id`, `storage`, `library_count`,
+  `latest_successful_sync`, `latest_attempt`, and `last_terminal_error`;
+- required `synced_count`, `selection_revision`, `settings_revision`, and
+  `subscriptions_revision`.
+
+Raw serial spelling is preserved on the wire. Canonicalization is an internal
+lookup concern and must not rewrite the identity shown to clients.
+
+### Correlated event examples
+
+```json
+{"type":"sync_event","line":"{\"type\":\"track_done\"}","serial":"RAW-A","session_id":42}
+{"type":"sync_rejected","reason":"already_syncing","serial":"RAW-A","acknowledged_request_id":"req-sync"}
+{"type":"device_preview","serial":"RAW-A","selected_tracks":412,"selected_bytes":5123456789,"playlist_extra_tracks":3,"playlist_extra_bytes":90000000,"projected_free_bytes":1200000000,"acknowledged_request_id":"req-preview"}
+```

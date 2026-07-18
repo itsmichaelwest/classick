@@ -51,7 +51,8 @@ pub fn aggregate(index: &LibraryIndex) -> (Vec<LibraryArtist>, Vec<LibraryGenre>
         agg.bytes += rec.size;
         *agg.genre_counts.entry(rec.genre.clone()).or_insert(0) += 1;
 
-        let g = genres.entry(rec.genre.to_lowercase())
+        let g = genres
+            .entry(rec.genre.to_lowercase())
             .or_insert_with(|| (rec.genre.clone(), 0, 0));
         g.1 += 1;
         g.2 += rec.size;
@@ -60,10 +61,12 @@ pub fn aggregate(index: &LibraryIndex) -> (Vec<LibraryArtist>, Vec<LibraryGenre>
     let mut by_artist: BTreeMap<String, LibraryArtist> = BTreeMap::new();
     for ((artist_key, _), agg) in albums {
         let display_genre = majority_genre(&agg.genre_counts);
-        let entry = by_artist.entry(artist_key).or_insert_with(|| LibraryArtist {
-            name: agg.artist.clone(),
-            albums: Vec::new(),
-        });
+        let entry = by_artist
+            .entry(artist_key)
+            .or_insert_with(|| LibraryArtist {
+                name: agg.artist.clone(),
+                albums: Vec::new(),
+            });
         entry.albums.push(LibraryAlbum {
             name: agg.album,
             genre: display_genre,
@@ -72,8 +75,13 @@ pub fn aggregate(index: &LibraryIndex) -> (Vec<LibraryArtist>, Vec<LibraryGenre>
         });
     }
     let artists: Vec<LibraryArtist> = by_artist.into_values().collect();
-    let genres: Vec<LibraryGenre> = genres.into_values()
-        .map(|(name, tracks, bytes)| LibraryGenre { name, tracks, bytes })
+    let genres: Vec<LibraryGenre> = genres
+        .into_values()
+        .map(|(name, tracks, bytes)| LibraryGenre {
+            name,
+            tracks,
+            bytes,
+        })
         .collect();
     (artists, genres, total_tracks, total_bytes)
 }
@@ -84,9 +92,16 @@ fn majority_genre(counts: &BTreeMap<String, usize>) -> Option<String> {
     let mut tied = false;
     for (g, &n) in counts {
         match best {
-            Some((_, bn)) if n > bn => { best = Some((g, n)); tied = false; }
-            Some((_, bn)) if n == bn => { tied = true; }
-            None => { best = Some((g, n)); }
+            Some((_, bn)) if n > bn => {
+                best = Some((g, n));
+                tied = false;
+            }
+            Some((_, bn)) if n == bn => {
+                tied = true;
+            }
+            None => {
+                best = Some((g, n));
+            }
             _ => {}
         }
     }
@@ -98,7 +113,10 @@ fn majority_genre(counts: &BTreeMap<String, usize>) -> Option<String> {
 
 /// Build the get_library / post-scan broadcast payload from disk state.
 pub fn build_library_update(config_path: &Path) -> DaemonEvent {
-    let source = crate::config_file::load(config_path).ok().flatten().and_then(|c| c.source);
+    let source = crate::config_file::load(config_path)
+        .ok()
+        .flatten()
+        .and_then(|c| c.source);
     let (index, scanned_at) = match (&source, library_index::default_index_path()) {
         (Some(root), Ok(idx_path)) => {
             let idx = library_index::load_or_empty(&idx_path, root);
@@ -113,13 +131,21 @@ pub fn build_library_update(config_path: &Path) -> DaemonEvent {
             DaemonEvent::LibraryUpdate {
                 source_root: source.map(|p| p.display().to_string()),
                 scanned_at_unix_secs: scanned_at,
-                artists, genres, total_tracks, total_bytes,
+                artists,
+                genres,
+                total_tracks,
+                total_bytes,
+                acknowledged_request_id: None,
             }
         }
         None => DaemonEvent::LibraryUpdate {
             source_root: source.map(|p| p.display().to_string()),
             scanned_at_unix_secs: None,
-            artists: Vec::new(), genres: Vec::new(), total_tracks: 0, total_bytes: 0,
+            artists: Vec::new(),
+            genres: Vec::new(),
+            total_tracks: 0,
+            total_bytes: 0,
+            acknowledged_request_id: None,
         },
     }
 }
@@ -134,7 +160,11 @@ pub fn preview(
     mode: SelectionMode,
     rules: &[SelectionRule],
 ) -> (usize, u64, usize, usize) {
-    let sel = Selection { version: selection::SELECTION_VERSION, mode, rules: rules.to_vec() };
+    let sel = Selection {
+        version: selection::SELECTION_VERSION,
+        mode,
+        rules: rules.to_vec(),
+    };
     let mut selected_tracks = 0usize;
     let mut selected_bytes = 0u64;
     let mut selected_paths = std::collections::HashSet::new();
@@ -145,12 +175,20 @@ pub fn preview(
             selected_paths.insert(path.clone());
         }
     }
-    let manifest_paths: std::collections::HashSet<_> = manifest.tracks.iter()
+    let manifest_paths: std::collections::HashSet<_> = manifest
+        .tracks
+        .iter()
         .filter(|e| e.source_known)
         .map(|e| e.source_path.clone())
         .collect();
-    let adds = selected_paths.iter().filter(|p| !manifest_paths.contains(*p)).count();
-    let removes = manifest_paths.iter().filter(|p| !selected_paths.contains(*p)).count();
+    let adds = selected_paths
+        .iter()
+        .filter(|p| !manifest_paths.contains(*p))
+        .count();
+    let removes = manifest_paths
+        .iter()
+        .filter(|p| !selected_paths.contains(*p))
+        .count();
     (selected_tracks, selected_bytes, adds, removes)
 }
 
@@ -161,8 +199,8 @@ pub fn preview(
 /// Reads the configured device's per-device selection via
 /// `selection::effective_device_selection_path` (v1.6.0) rather than the
 /// deprecated `custom_selection`-gated `effective_selection_path`, so this
-/// stays consistent with what `get_selection`/`save_selection` and
-/// `get_device_config`/`save_device_config` now read and write. Falls back
+/// stays consistent with what `get_device_config`/`save_device_config` now
+/// read and write. Falls back
 /// to `Selection::all()` (mode All, so `None`) when no device is configured
 /// — there's no "the" device to resolve a per-device path for.
 pub fn selected_library_count(config_path: &Path) -> Option<usize> {
@@ -176,7 +214,12 @@ pub fn selected_library_count(config_path: &Path) -> Option<usize> {
     let source = cfg.source?;
     let idx_path = library_index::default_index_path().ok()?;
     let idx = library_index::load_or_empty(&idx_path, &source);
-    Some(idx.files.values().filter(|rec| sel.wants(&rec.facts())).count())
+    Some(
+        idx.files
+            .values()
+            .filter(|rec| sel.wants(&rec.facts()))
+            .count(),
+    )
 }
 
 /// Resolve one playlist's member tracks against the cached library index —
@@ -187,11 +230,15 @@ pub fn selected_library_count(config_path: &Path) -> Option<usize> {
 /// `sync_set::compute`'s "the walk is the existence oracle" contract, one
 /// level more conservative since even the index may be stale). Smart
 /// playlists evaluate their rules directly against the index.
-pub(crate) fn resolve_playlist_against_index(playlist: &Playlist, index: &LibraryIndex) -> Vec<PathBuf> {
+pub(crate) fn resolve_playlist_against_index(
+    playlist: &Playlist,
+    index: &LibraryIndex,
+) -> Vec<PathBuf> {
     match playlist {
         Playlist::Manual(m) => {
-            let (found, _missing) =
-                crate::playlist::resolve_manual(m, &index.source_root, &|p| index.files.contains_key(p));
+            let (found, _missing) = crate::playlist::resolve_manual(m, &index.source_root, &|p| {
+                index.files.contains_key(p)
+            });
             found
         }
         Playlist::Smart(s) => crate::playlist_rules::evaluate(&s.rules, index),
@@ -202,7 +249,11 @@ pub(crate) fn resolve_playlist_against_index(playlist: &Playlist, index: &Librar
 /// `resolve_playlist_against_index`.
 pub(crate) fn playlist_tracks_and_bytes(playlist: &Playlist, index: &LibraryIndex) -> (usize, u64) {
     let paths = resolve_playlist_against_index(playlist, index);
-    let bytes = paths.iter().filter_map(|p| index.files.get(p)).map(|t| t.size).sum();
+    let bytes = paths
+        .iter()
+        .filter_map(|p| index.files.get(p))
+        .map(|t| t.size)
+        .sum();
     (paths.len(), bytes)
 }
 
@@ -212,7 +263,14 @@ fn summarize_playlist(playlist: &Playlist, index: &LibraryIndex) -> PlaylistSumm
         Playlist::Manual(_) => PlaylistKind::Manual,
         Playlist::Smart(_) => PlaylistKind::Smart,
     };
-    PlaylistSummary { slug: playlist.slug().to_string(), name: playlist.name().to_string(), kind, tracks, bytes, error: None }
+    PlaylistSummary {
+        slug: playlist.slug().to_string(),
+        name: playlist.name().to_string(),
+        kind,
+        tracks,
+        bytes,
+        error: None,
+    }
 }
 
 /// `(slug, kind)` inferred from a store file's name, for the
@@ -235,9 +293,15 @@ fn kind_from_error_path(path: &Path) -> Option<(String, PlaylistKind)> {
 /// surfaces as a stub summary (`tracks`/`bytes` zero, `error` set to the
 /// failure) instead of silently vanishing from the list — see
 /// `PlaylistStore::last_errors`.
-pub(crate) fn build_playlist_summaries(store: &PlaylistStore, index: &LibraryIndex) -> Vec<PlaylistSummary> {
+pub(crate) fn build_playlist_summaries(
+    store: &PlaylistStore,
+    index: &LibraryIndex,
+) -> Vec<PlaylistSummary> {
     let mut out: Vec<PlaylistSummary> = match store.list() {
-        Ok(playlists) => playlists.iter().map(|p| summarize_playlist(p, index)).collect(),
+        Ok(playlists) => playlists
+            .iter()
+            .map(|p| summarize_playlist(p, index))
+            .collect(),
         Err(e) => {
             tracing::warn!("playlists: failed to list store ({e:#})");
             Vec::new()
@@ -245,7 +309,14 @@ pub(crate) fn build_playlist_summaries(store: &PlaylistStore, index: &LibraryInd
     };
     for (path, message) in store.last_errors() {
         if let Some((slug, kind)) = kind_from_error_path(&path) {
-            out.push(PlaylistSummary { slug: slug.clone(), name: slug, kind, tracks: 0, bytes: 0, error: Some(message) });
+            out.push(PlaylistSummary {
+                slug: slug.clone(),
+                name: slug,
+                kind,
+                tracks: 0,
+                bytes: 0,
+                error: Some(message),
+            });
         }
     }
     out.sort_by(|a, b| a.slug.cmp(&b.slug));
@@ -284,6 +355,8 @@ pub(crate) fn compute_device_preview(
     store: Option<&PlaylistStore>,
     current_free_bytes: Option<u64>,
     already_synced: &HashSet<PathBuf>,
+    serial: &str,
+    acknowledged_request_id: String,
 ) -> DaemonEvent {
     let mut selected_tracks = 0usize;
     let mut selected_bytes = 0u64;
@@ -319,8 +392,11 @@ pub(crate) fn compute_device_preview(
     }
     unresolved_subscriptions.sort();
     let playlist_extra_tracks = extra_paths.len();
-    let playlist_extra_bytes: u64 =
-        extra_paths.iter().filter_map(|p| index.files.get(p)).map(|t| t.size).sum();
+    let playlist_extra_bytes: u64 = extra_paths
+        .iter()
+        .filter_map(|p| index.files.get(p))
+        .map(|t| t.size)
+        .sum();
 
     let net_new: u64 = selected_paths
         .iter()
@@ -339,12 +415,14 @@ pub(crate) fn compute_device_preview(
     let projected_free_bytes = current_free_bytes.map(|free| free.saturating_sub(net_new));
 
     DaemonEvent::DevicePreview {
+        serial: serial.to_string(),
         selected_tracks,
         selected_bytes,
         playlist_extra_tracks,
         playlist_extra_bytes,
         projected_free_bytes,
         unresolved_subscriptions,
+        acknowledged_request_id,
     }
 }
 
@@ -367,8 +445,14 @@ pub(crate) fn compute_device_preview(
 /// An empty/never-scanned `index` (no source configured yet) yields an
 /// empty result, not an error.
 pub fn resolve_tracks(index: &LibraryIndex, rules: &[SelectionRule]) -> Vec<String> {
-    let sel = Selection { version: selection::SELECTION_VERSION, mode: SelectionMode::Include, rules: rules.to_vec() };
-    let mut out: Vec<String> = index.files.iter()
+    let sel = Selection {
+        version: selection::SELECTION_VERSION,
+        mode: SelectionMode::Include,
+        rules: rules.to_vec(),
+    };
+    let mut out: Vec<String> = index
+        .files
+        .iter()
         .filter(|(_, rec)| sel.wants(&rec.facts()))
         .filter_map(|(path, _)| path.strip_prefix(&index.source_root).ok())
         .map(|rel| rel.to_string_lossy().replace('\\', "/"))
@@ -384,12 +468,23 @@ mod tests {
     use crate::selection::{SelectionMode, SelectionRule};
     use std::path::PathBuf;
 
-    fn track(artist: &str, album_artist: &str, album: &str, genre: &str, size: u64) -> IndexedTrack {
+    fn track(
+        artist: &str,
+        album_artist: &str,
+        album: &str,
+        genre: &str,
+        size: u64,
+    ) -> IndexedTrack {
         IndexedTrack {
-            mtime: 1, size,
-            artist: artist.into(), album_artist: album_artist.into(),
-            album: album.into(), genre: genre.into(),
-            title: String::new(), duration_ms: 0, year: None,
+            mtime: 1,
+            size,
+            artist: artist.into(),
+            album_artist: album_artist.into(),
+            album: album.into(),
+            genre: genre.into(),
+            title: String::new(),
+            duration_ms: 0,
+            year: None,
         }
     }
 
@@ -406,7 +501,10 @@ mod tests {
         let idx = index_with(vec![
             ("/m/a1.flac", track("Aphex Twin", "", "Drukqs", "IDM", 10)),
             ("/m/a2.flac", track("Aphex Twin", "", "Drukqs", "IDM", 20)),
-            ("/m/c1.flac", track("Track Artist", "Various Artists", "Comp", "Pop", 5)),
+            (
+                "/m/c1.flac",
+                track("Track Artist", "Various Artists", "Comp", "Pop", 5),
+            ),
         ]);
         let (artists, genres, total_tracks, total_bytes) = aggregate(&idx);
         assert_eq!(total_tracks, 3);
@@ -417,7 +515,10 @@ mod tests {
         assert_eq!(artists[0].albums.len(), 1);
         assert_eq!(artists[0].albums[0].tracks, 2);
         assert_eq!(artists[0].albums[0].bytes, 30);
-        assert_eq!(artists[1].name, "Various Artists", "album_artist wins grouping");
+        assert_eq!(
+            artists[1].name, "Various Artists",
+            "album_artist wins grouping"
+        );
         assert_eq!(genres.iter().find(|g| g.name == "IDM").unwrap().tracks, 2);
     }
 
@@ -441,7 +542,10 @@ mod tests {
     fn aggregate_empty_tags_bucket_as_empty_string_on_wire() {
         let idx = index_with(vec![("/m/u.flac", track("", "", "", "", 7))]);
         let (artists, genres, _, _) = aggregate(&idx);
-        assert_eq!(artists[0].name, "", "wire carries raw empty; UI renders 'Unknown Artist'");
+        assert_eq!(
+            artists[0].name, "",
+            "wire carries raw empty; UI renders 'Unknown Artist'"
+        );
         assert_eq!(genres[0].name, "");
     }
 
@@ -450,21 +554,37 @@ mod tests {
         use crate::manifest::{Manifest, ManifestEntry};
         let idx = index_with(vec![
             ("/m/on_ipod_kept.flac", track("Keep", "", "K", "IDM", 10)),
-            ("/m/on_ipod_dropped.flac", track("Drop", "", "D", "Rock", 20)),
+            (
+                "/m/on_ipod_dropped.flac",
+                track("Drop", "", "D", "Rock", 20),
+            ),
             ("/m/new_selected.flac", track("Keep", "", "K2", "IDM", 30)),
         ]);
         let entry = |p: &str| ManifestEntry {
-            source_path: PathBuf::from(p), source_mtime: 1, source_size: 1,
-            source_fingerprint: String::new(), ipod_dbid: 1,
-            ipod_relpath: String::new(), source_known: true,
-            audio_fingerprint: String::new(), encoder: "unknown".into(),
-            encoder_version: String::new(), source_format: "flac".into(),
+            source_path: PathBuf::from(p),
+            source_mtime: 1,
+            source_size: 1,
+            source_fingerprint: String::new(),
+            ipod_dbid: 1,
+            ipod_relpath: String::new(),
+            source_known: true,
+            audio_fingerprint: String::new(),
+            encoder: "unknown".into(),
+            encoder_version: String::new(),
+            source_format: "flac".into(),
         };
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
-            tracks: vec![entry("/m/on_ipod_kept.flac"), entry("/m/on_ipod_dropped.flac")],
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![
+                entry("/m/on_ipod_kept.flac"),
+                entry("/m/on_ipod_dropped.flac"),
+            ],
         };
-        let rules = vec![SelectionRule::Artist { name: "Keep".into() }];
+        let rules = vec![SelectionRule::Artist {
+            name: "Keep".into(),
+        }];
         let (selected_tracks, selected_bytes, adds, removes) =
             preview(&idx, &manifest, SelectionMode::Include, &rules);
         assert_eq!(selected_tracks, 2);
@@ -477,7 +597,12 @@ mod tests {
     fn preview_mode_all_selects_everything_removes_nothing() {
         use crate::manifest::Manifest;
         let idx = index_with(vec![("/m/a.flac", track("X", "", "A", "G", 10))]);
-        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![] };
+        let manifest = Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![],
+        };
         let (selected, _, adds, removes) = preview(&idx, &manifest, SelectionMode::All, &[]);
         assert_eq!(selected, 1);
         assert_eq!(adds, 1);
@@ -488,7 +613,7 @@ mod tests {
 
     use crate::device_config::Subscriptions;
     use crate::playlist::{ManualPlaylist, Playlist, PlaylistStore, SmartPlaylist};
-    use crate::playlist_rules::{Match, Order, RULES_VERSION, SmartRules};
+    use crate::playlist_rules::{Match, Order, SmartRules, RULES_VERSION};
 
     fn tempdir_under_target(label: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -497,14 +622,25 @@ mod tests {
         let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("test-tmp")
-            .join(format!("daemon-library-{label}-{}-{}", std::process::id(), n));
+            .join(format!(
+                "daemon-library-{label}-{}-{}",
+                std::process::id(),
+                n
+            ));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base
     }
 
     fn empty_rules() -> SmartRules {
-        SmartRules { version: RULES_VERSION, matching: Match::All, rules: vec![], limit: None, order: Order::default(), seed: 0 }
+        SmartRules {
+            version: RULES_VERSION,
+            matching: Match::All,
+            rules: vec![],
+            limit: None,
+            order: Order::default(),
+            seed: 0,
+        }
     }
 
     #[test]
@@ -513,17 +649,24 @@ mod tests {
         let store = PlaylistStore::open(root.clone()).unwrap();
         store
             .save(&Playlist::Manual(ManualPlaylist {
-                slug: "gym".into(), name: "Gym".into(),
+                slug: "gym".into(),
+                name: "Gym".into(),
                 tracks: vec![PathBuf::from("a1.flac"), PathBuf::from("missing.flac")],
                 skipped_unsafe: 0,
             }))
             .unwrap();
         let mut smart_rules = empty_rules();
         smart_rules.rules = vec![crate::playlist_rules::Rule {
-            field: crate::playlist_rules::Field::Genre, op: crate::playlist_rules::Op::Is, value: "IDM".into(),
+            field: crate::playlist_rules::Field::Genre,
+            op: crate::playlist_rules::Op::Is,
+            value: "IDM".into(),
         }];
         store
-            .save(&Playlist::Smart(SmartPlaylist { slug: "chill".into(), name: "Chill".into(), rules: smart_rules }))
+            .save(&Playlist::Smart(SmartPlaylist {
+                slug: "chill".into(),
+                name: "Chill".into(),
+                rules: smart_rules,
+            }))
             .unwrap();
 
         let idx = index_with(vec![
@@ -536,13 +679,19 @@ mod tests {
         // sorted by slug: "chill" < "gym"
         assert_eq!(summaries[0].slug, "chill");
         assert_eq!(summaries[0].kind, PlaylistKind::Smart);
-        assert_eq!(summaries[0].tracks, 2, "both IDM tracks match the smart rule");
+        assert_eq!(
+            summaries[0].tracks, 2,
+            "both IDM tracks match the smart rule"
+        );
         assert_eq!(summaries[0].bytes, 150);
         assert!(summaries[0].error.is_none());
 
         assert_eq!(summaries[1].slug, "gym");
         assert_eq!(summaries[1].kind, PlaylistKind::Manual);
-        assert_eq!(summaries[1].tracks, 1, "missing.flac isn't in the index, so it's dropped");
+        assert_eq!(
+            summaries[1].tracks, 1,
+            "missing.flac isn't in the index, so it's dropped"
+        );
         assert_eq!(summaries[1].bytes, 100);
     }
 
@@ -560,7 +709,10 @@ mod tests {
         assert_eq!(summaries[0].kind, PlaylistKind::Smart);
         assert_eq!(summaries[0].tracks, 0);
         assert_eq!(summaries[0].bytes, 0);
-        assert!(summaries[0].error.is_some(), "corrupt file surfaces with its parse error, not silently dropped");
+        assert!(
+            summaries[0].error.is_some(),
+            "corrupt file surfaces with its parse error, not silently dropped"
+        );
     }
 
     #[test]
@@ -570,7 +722,8 @@ mod tests {
         // "extra" is entirely outside the selection scope below.
         store
             .save(&Playlist::Manual(ManualPlaylist {
-                slug: "extra".into(), name: "Extra".into(),
+                slug: "extra".into(),
+                name: "Extra".into(),
                 tracks: vec![PathBuf::from("out_of_scope.flac")],
                 skipped_unsafe: 0,
             }))
@@ -578,28 +731,55 @@ mod tests {
 
         let idx = index_with(vec![
             ("/m/in_scope.flac", track("Keep", "", "Album", "G", 1_000)),
-            ("/m/out_of_scope.flac", track("Drop", "", "Album2", "G", 500)),
+            (
+                "/m/out_of_scope.flac",
+                track("Drop", "", "Album2", "G", 500),
+            ),
         ]);
         let selection = Selection {
             version: crate::selection::SELECTION_VERSION,
             mode: SelectionMode::Include,
-            rules: vec![SelectionRule::Artist { name: "Keep".into() }],
+            rules: vec![SelectionRule::Artist {
+                name: "Keep".into(),
+            }],
         };
-        let subs = Subscriptions { version: 1, playlists: vec!["extra".into()] };
+        let subs = Subscriptions {
+            version: 1,
+            playlists: vec!["extra".into()],
+        };
 
         let event = compute_device_preview(
-            &idx, &selection, &subs, Some(&store), Some(10_000), &HashSet::new());
+            &idx,
+            &selection,
+            &subs,
+            Some(&store),
+            Some(10_000),
+            &HashSet::new(),
+            "serial-a",
+            "request-a".into(),
+        );
         match event {
             DaemonEvent::DevicePreview {
-                selected_tracks, selected_bytes, playlist_extra_tracks, playlist_extra_bytes, projected_free_bytes,
+                selected_tracks,
+                selected_bytes,
+                playlist_extra_tracks,
+                playlist_extra_bytes,
+                projected_free_bytes,
                 unresolved_subscriptions,
+                ..
             } => {
                 assert_eq!(selected_tracks, 1);
                 assert_eq!(selected_bytes, 1_000);
-                assert_eq!(playlist_extra_tracks, 1, "out_of_scope.flac is pulled in only by the subscription");
+                assert_eq!(
+                    playlist_extra_tracks, 1,
+                    "out_of_scope.flac is pulled in only by the subscription"
+                );
                 assert_eq!(playlist_extra_bytes, 500);
                 assert_eq!(projected_free_bytes, Some(10_000 - 1_000 - 500));
-                assert!(unresolved_subscriptions.is_empty(), "the one subscription resolved cleanly");
+                assert!(
+                    unresolved_subscriptions.is_empty(),
+                    "the one subscription resolved cleanly"
+                );
             }
             other => panic!("expected DevicePreview, got {other:?}"),
         }
@@ -618,20 +798,57 @@ mod tests {
         ]);
         let subs = Subscriptions::default();
 
-        let all_synced: HashSet<PathBuf> =
-            [PathBuf::from("/m/a.flac"), PathBuf::from("/m/b.flac")].into_iter().collect();
-        match compute_device_preview(&idx, &Selection::all(), &subs, None, Some(10_000), &all_synced) {
-            DaemonEvent::DevicePreview { projected_free_bytes, selected_bytes, .. } => {
-                assert_eq!(selected_bytes, 1_300, "scope totals still report the full selection");
-                assert_eq!(projected_free_bytes, Some(10_000), "nothing new to sync — free space unchanged");
+        let all_synced: HashSet<PathBuf> = [PathBuf::from("/m/a.flac"), PathBuf::from("/m/b.flac")]
+            .into_iter()
+            .collect();
+        match compute_device_preview(
+            &idx,
+            &Selection::all(),
+            &subs,
+            None,
+            Some(10_000),
+            &all_synced,
+            "serial-a",
+            "request-a".into(),
+        ) {
+            DaemonEvent::DevicePreview {
+                projected_free_bytes,
+                selected_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    selected_bytes, 1_300,
+                    "scope totals still report the full selection"
+                );
+                assert_eq!(
+                    projected_free_bytes,
+                    Some(10_000),
+                    "nothing new to sync — free space unchanged"
+                );
             }
             other => panic!("expected DevicePreview, got {other:?}"),
         }
 
         let partial: HashSet<PathBuf> = [PathBuf::from("/m/a.flac")].into_iter().collect();
-        match compute_device_preview(&idx, &Selection::all(), &subs, None, Some(10_000), &partial) {
-            DaemonEvent::DevicePreview { projected_free_bytes, .. } => {
-                assert_eq!(projected_free_bytes, Some(10_000 - 300), "only the missing track counts");
+        match compute_device_preview(
+            &idx,
+            &Selection::all(),
+            &subs,
+            None,
+            Some(10_000),
+            &partial,
+            "serial-a",
+            "request-a".into(),
+        ) {
+            DaemonEvent::DevicePreview {
+                projected_free_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    projected_free_bytes,
+                    Some(10_000 - 300),
+                    "only the missing track counts"
+                );
             }
             other => panic!("expected DevicePreview, got {other:?}"),
         }
@@ -643,11 +860,27 @@ mod tests {
         let selection = Selection::all();
         let subs = Subscriptions::default();
 
-        let event = compute_device_preview(&idx, &selection, &subs, None, None, &HashSet::new());
+        let event = compute_device_preview(
+            &idx,
+            &selection,
+            &subs,
+            None,
+            None,
+            &HashSet::new(),
+            "serial-a",
+            "request-a".into(),
+        );
         match event {
-            DaemonEvent::DevicePreview { selected_tracks, projected_free_bytes, .. } => {
+            DaemonEvent::DevicePreview {
+                selected_tracks,
+                projected_free_bytes,
+                ..
+            } => {
                 assert_eq!(selected_tracks, 1);
-                assert_eq!(projected_free_bytes, None, "no live StorageInfo baseline to project from");
+                assert_eq!(
+                    projected_free_bytes, None,
+                    "no live StorageInfo baseline to project from"
+                );
             }
             other => panic!("expected DevicePreview, got {other:?}"),
         }
@@ -658,12 +891,28 @@ mod tests {
         let root = tempdir_under_target("preview-unresolvable");
         let store = PlaylistStore::open(root.clone()).unwrap(); // no playlists saved
         let idx = index_with(vec![("/m/a.flac", track("X", "", "A", "G", 10))]);
-        let subs = Subscriptions { version: 1, playlists: vec!["does-not-exist".into()] };
+        let subs = Subscriptions {
+            version: 1,
+            playlists: vec!["does-not-exist".into()],
+        };
 
         let event = compute_device_preview(
-            &idx, &Selection::all(), &subs, Some(&store), None, &HashSet::new());
+            &idx,
+            &Selection::all(),
+            &subs,
+            Some(&store),
+            None,
+            &HashSet::new(),
+            "serial-a",
+            "request-a".into(),
+        );
         match event {
-            DaemonEvent::DevicePreview { playlist_extra_tracks, playlist_extra_bytes, unresolved_subscriptions, .. } => {
+            DaemonEvent::DevicePreview {
+                playlist_extra_tracks,
+                playlist_extra_bytes,
+                unresolved_subscriptions,
+                ..
+            } => {
                 assert_eq!(playlist_extra_tracks, 0);
                 assert_eq!(playlist_extra_bytes, 0);
                 assert_eq!(
@@ -682,7 +931,8 @@ mod tests {
         let store = PlaylistStore::open(root.clone()).unwrap();
         store
             .save(&Playlist::Manual(ManualPlaylist {
-                slug: "gym".into(), name: "Gym".into(),
+                slug: "gym".into(),
+                name: "Gym".into(),
                 tracks: vec![PathBuf::from("a.flac")],
                 skipped_unsafe: 0,
             }))
@@ -691,13 +941,30 @@ mod tests {
         // "zzz" and "aaa" are both unresolvable; "gym" resolves. Insertion
         // order here is deliberately not alphabetical to prove the output
         // is sorted, not just insertion-order.
-        let subs = Subscriptions { version: 1, playlists: vec!["zzz".into(), "gym".into(), "aaa".into()] };
+        let subs = Subscriptions {
+            version: 1,
+            playlists: vec!["zzz".into(), "gym".into(), "aaa".into()],
+        };
 
         let event = compute_device_preview(
-            &idx, &Selection::all(), &subs, Some(&store), None, &HashSet::new());
+            &idx,
+            &Selection::all(),
+            &subs,
+            Some(&store),
+            None,
+            &HashSet::new(),
+            "serial-a",
+            "request-a".into(),
+        );
         match event {
-            DaemonEvent::DevicePreview { unresolved_subscriptions, .. } => {
-                assert_eq!(unresolved_subscriptions, vec!["aaa".to_string(), "zzz".to_string()]);
+            DaemonEvent::DevicePreview {
+                unresolved_subscriptions,
+                ..
+            } => {
+                assert_eq!(
+                    unresolved_subscriptions,
+                    vec!["aaa".to_string(), "zzz".to_string()]
+                );
             }
             other => panic!("expected DevicePreview, got {other:?}"),
         }
@@ -706,12 +973,26 @@ mod tests {
     #[test]
     fn compute_device_preview_no_store_marks_all_subscriptions_unresolved() {
         let idx = index_with(vec![("/m/a.flac", track("X", "", "A", "G", 10))]);
-        let subs = Subscriptions { version: 1, playlists: vec!["gym".into()] };
+        let subs = Subscriptions {
+            version: 1,
+            playlists: vec!["gym".into()],
+        };
 
         let event = compute_device_preview(
-            &idx, &Selection::all(), &subs, None, None, &HashSet::new());
+            &idx,
+            &Selection::all(),
+            &subs,
+            None,
+            None,
+            &HashSet::new(),
+            "serial-a",
+            "request-a".into(),
+        );
         match event {
-            DaemonEvent::DevicePreview { unresolved_subscriptions, .. } => {
+            DaemonEvent::DevicePreview {
+                unresolved_subscriptions,
+                ..
+            } => {
                 assert_eq!(unresolved_subscriptions, vec!["gym".to_string()]);
             }
             other => panic!("expected DevicePreview, got {other:?}"),
@@ -723,25 +1004,48 @@ mod tests {
     #[test]
     fn resolve_tracks_artist_rule_expands_to_all_its_files() {
         let idx = index_with(vec![
-            ("/m/Radiohead/OK Computer/01.flac", track("Radiohead", "", "OK Computer", "Rock", 1)),
-            ("/m/Radiohead/OK Computer/02.flac", track("Radiohead", "", "OK Computer", "Rock", 1)),
-            ("/m/Burial/Untrue/01.flac", track("Burial", "", "Untrue", "Dubstep", 1)),
+            (
+                "/m/Radiohead/OK Computer/01.flac",
+                track("Radiohead", "", "OK Computer", "Rock", 1),
+            ),
+            (
+                "/m/Radiohead/OK Computer/02.flac",
+                track("Radiohead", "", "OK Computer", "Rock", 1),
+            ),
+            (
+                "/m/Burial/Untrue/01.flac",
+                track("Burial", "", "Untrue", "Dubstep", 1),
+            ),
         ]);
-        let rules = vec![SelectionRule::Artist { name: "Radiohead".into() }];
+        let rules = vec![SelectionRule::Artist {
+            name: "Radiohead".into(),
+        }];
         let tracks = resolve_tracks(&idx, &rules);
-        assert_eq!(tracks, vec![
-            "Radiohead/OK Computer/01.flac".to_string(),
-            "Radiohead/OK Computer/02.flac".to_string(),
-        ]);
+        assert_eq!(
+            tracks,
+            vec![
+                "Radiohead/OK Computer/01.flac".to_string(),
+                "Radiohead/OK Computer/02.flac".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn resolve_tracks_album_rule_expands_to_that_album_only() {
         let idx = index_with(vec![
-            ("/m/Aphex Twin/Drukqs/01.flac", track("Aphex Twin", "", "Drukqs", "IDM", 1)),
-            ("/m/Aphex Twin/Syro/01.flac", track("Aphex Twin", "", "Syro", "IDM", 1)),
+            (
+                "/m/Aphex Twin/Drukqs/01.flac",
+                track("Aphex Twin", "", "Drukqs", "IDM", 1),
+            ),
+            (
+                "/m/Aphex Twin/Syro/01.flac",
+                track("Aphex Twin", "", "Syro", "IDM", 1),
+            ),
         ]);
-        let rules = vec![SelectionRule::Album { artist: "Aphex Twin".into(), album: "Drukqs".into() }];
+        let rules = vec![SelectionRule::Album {
+            artist: "Aphex Twin".into(),
+            album: "Drukqs".into(),
+        }];
         let tracks = resolve_tracks(&idx, &rules);
         assert_eq!(tracks, vec!["Aphex Twin/Drukqs/01.flac".to_string()]);
     }
@@ -755,39 +1059,58 @@ mod tests {
         ]);
         let rules = vec![SelectionRule::Genre { name: "IDM".into() }];
         let tracks = resolve_tracks(&idx, &rules);
-        assert_eq!(tracks, vec!["A/X/01.flac".to_string(), "B/Y/01.flac".to_string()]);
+        assert_eq!(
+            tracks,
+            vec!["A/X/01.flac".to_string(), "B/Y/01.flac".to_string()]
+        );
     }
 
     #[test]
     fn resolve_tracks_matches_case_insensitively() {
-        let idx = index_with(vec![
-            ("/m/Radiohead/OK Computer/01.flac", track("Radiohead", "", "OK Computer", "Rock", 1)),
-        ]);
-        let rules = vec![SelectionRule::Artist { name: "radiohead".into() }];
+        let idx = index_with(vec![(
+            "/m/Radiohead/OK Computer/01.flac",
+            track("Radiohead", "", "OK Computer", "Rock", 1),
+        )]);
+        let rules = vec![SelectionRule::Artist {
+            name: "radiohead".into(),
+        }];
         let tracks = resolve_tracks(&idx, &rules);
         assert_eq!(tracks, vec!["Radiohead/OK Computer/01.flac".to_string()]);
     }
 
     #[test]
     fn resolve_tracks_unmatched_rule_contributes_nothing() {
-        let idx = index_with(vec![
-            ("/m/Radiohead/OK Computer/01.flac", track("Radiohead", "", "OK Computer", "Rock", 1)),
-        ]);
-        let rules = vec![SelectionRule::Artist { name: "Nobody".into() }];
+        let idx = index_with(vec![(
+            "/m/Radiohead/OK Computer/01.flac",
+            track("Radiohead", "", "OK Computer", "Rock", 1),
+        )]);
+        let rules = vec![SelectionRule::Artist {
+            name: "Nobody".into(),
+        }];
         assert!(resolve_tracks(&idx, &rules).is_empty());
     }
 
     #[test]
     fn resolve_tracks_mixed_rules_dedup_a_track_matched_by_two_rules() {
         let idx = index_with(vec![
-            ("/m/Radiohead/OK Computer/01.flac", track("Radiohead", "", "OK Computer", "Rock", 1)),
-            ("/m/Burial/Untrue/01.flac", track("Burial", "", "Untrue", "Dubstep", 1)),
+            (
+                "/m/Radiohead/OK Computer/01.flac",
+                track("Radiohead", "", "OK Computer", "Rock", 1),
+            ),
+            (
+                "/m/Burial/Untrue/01.flac",
+                track("Burial", "", "Untrue", "Dubstep", 1),
+            ),
         ]);
         // Both the artist rule AND the genre rule match the Radiohead track;
         // it must appear exactly once in the result.
         let rules = vec![
-            SelectionRule::Artist { name: "Radiohead".into() },
-            SelectionRule::Genre { name: "Rock".into() },
+            SelectionRule::Artist {
+                name: "Radiohead".into(),
+            },
+            SelectionRule::Genre {
+                name: "Rock".into(),
+            },
         ];
         let tracks = resolve_tracks(&idx, &rules);
         assert_eq!(tracks, vec!["Radiohead/OK Computer/01.flac".to_string()]);
@@ -796,26 +1119,42 @@ mod tests {
     #[test]
     fn resolve_tracks_is_deterministically_sorted() {
         let idx = index_with(vec![
-            ("/m/Z Artist/Album/01.flac", track("Z Artist", "", "Album", "Rock", 1)),
-            ("/m/A Artist/Album/01.flac", track("A Artist", "", "Album", "Rock", 1)),
-            ("/m/M Artist/Album/01.flac", track("M Artist", "", "Album", "Rock", 1)),
+            (
+                "/m/Z Artist/Album/01.flac",
+                track("Z Artist", "", "Album", "Rock", 1),
+            ),
+            (
+                "/m/A Artist/Album/01.flac",
+                track("A Artist", "", "Album", "Rock", 1),
+            ),
+            (
+                "/m/M Artist/Album/01.flac",
+                track("M Artist", "", "Album", "Rock", 1),
+            ),
         ]);
-        let rules = vec![SelectionRule::Genre { name: "Rock".into() }];
+        let rules = vec![SelectionRule::Genre {
+            name: "Rock".into(),
+        }];
         let tracks = resolve_tracks(&idx, &rules);
         let mut sorted = tracks.clone();
         sorted.sort();
         assert_eq!(tracks, sorted, "must already be sorted");
-        assert_eq!(tracks, vec![
-            "A Artist/Album/01.flac".to_string(),
-            "M Artist/Album/01.flac".to_string(),
-            "Z Artist/Album/01.flac".to_string(),
-        ]);
+        assert_eq!(
+            tracks,
+            vec![
+                "A Artist/Album/01.flac".to_string(),
+                "M Artist/Album/01.flac".to_string(),
+                "Z Artist/Album/01.flac".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn resolve_tracks_empty_index_yields_empty_tracks() {
         let idx = LibraryIndex::empty(PathBuf::from("/m"));
-        let rules = vec![SelectionRule::Artist { name: "Anyone".into() }];
+        let rules = vec![SelectionRule::Artist {
+            name: "Anyone".into(),
+        }];
         assert!(resolve_tracks(&idx, &rules).is_empty());
     }
 

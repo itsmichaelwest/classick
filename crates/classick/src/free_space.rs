@@ -12,7 +12,7 @@ use std::path::Path;
 /// Snapshot of a volume's capacity. Sent on `DaemonEvent::StatusUpdate`
 /// so the popover can render storage used / free without itself having
 /// to know the iPod's drive letter / mount path.
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StorageInfo {
     pub total_bytes: u64,
     pub free_bytes: u64,
@@ -114,6 +114,9 @@ mod tests {
 
     #[test]
     fn query_nonexistent_path_returns_none() {
-        assert!(query(Path::new("/definitely/does/not/exist/classick-free-space-test")).is_none());
+        assert!(query(Path::new(
+            "/definitely/does/not/exist/classick-free-space-test"
+        ))
+        .is_none());
     }
 }
