@@ -431,4 +431,48 @@ final class WireCodecTests: XCTestCase {
         let settings = obj["settings"] as! [String: Any]
         XCTAssertNil(settings["version"], "settings wire mirrors auto_sync+rockbox_compat only, no version")
     }
+
+    // MARK: - resolve_tracks / resolved_tracks (protocol 1.7.0 — Add Songs picker)
+
+    func testEncodesResolveTracksReusingSelectionRuleShape() throws {
+        let cmd = DaemonCommand.resolveTracks(rules: [
+            .artist(name: "Boards of Canada"),
+            .album(artist: "Squarepusher", album: "Hard Normal Daddy"),
+            .genre(name: "IDM"),
+        ])
+        let data = try JSONEncoder().encode(cmd)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "resolve_tracks")
+        let rules = obj["rules"] as! [[String: Any]]
+        XCTAssertEqual(rules.count, 3)
+        XCTAssertEqual(rules[0]["kind"] as? String, "artist")
+        XCTAssertEqual(rules[0]["name"] as? String, "Boards of Canada")
+        XCTAssertEqual(rules[1]["kind"] as? String, "album")
+        XCTAssertEqual(rules[1]["artist"] as? String, "Squarepusher")
+        XCTAssertEqual(rules[1]["album"] as? String, "Hard Normal Daddy")
+        XCTAssertEqual(rules[2]["kind"] as? String, "genre")
+        XCTAssertEqual(rules[2]["name"] as? String, "IDM")
+    }
+
+    func testEncodesResolveTracksWithEmptyRules() throws {
+        let data = try JSONEncoder().encode(DaemonCommand.resolveTracks(rules: []))
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "resolve_tracks")
+        let rules = obj["rules"] as! [[String: Any]]
+        XCTAssertTrue(rules.isEmpty)
+    }
+
+    func testDecodesResolvedTracks() throws {
+        let json = #"{"type":"resolved_tracks","tracks":["Artist/Album/01.flac","B/02.flac"]}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .resolvedTracks(tracks) = ev else { return XCTFail() }
+        XCTAssertEqual(tracks, ["Artist/Album/01.flac", "B/02.flac"])
+    }
+
+    func testDecodesResolvedTracksEmptyIsValidNotAnError() throws {
+        let json = #"{"type":"resolved_tracks","tracks":[]}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .resolvedTracks(tracks) = ev else { return XCTFail() }
+        XCTAssertEqual(tracks, [])
+    }
 }

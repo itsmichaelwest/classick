@@ -1,0 +1,191 @@
+import XCTest
+@testable import Classick
+
+/// Pure-logic coverage for the playlist editor pages (Task 7): the manual
+/// track list (`ManualPlaylistLogic`), the shared rename/delete chrome
+/// (`PlaylistEditorLogic`), and the smart rule builder (`SmartRulesLogic`).
+/// No SwiftUI involved, mirroring `DeviceMusicLogicTests`'/
+/// `DeviceSettingsLogicTests`' style.
+final class PlaylistEditorLogicTests: XCTestCase {
+    // MARK: - ManualPlaylistLogic.trackDisplay
+
+    func testTrackDisplaySplitsArtistAlbumTrackPath() {
+        let display = ManualPlaylistLogic.trackDisplay(path: "Boards of Canada/Music Has the Right to Children/01 Wildlife Analysis.flac")
+        XCTAssertEqual(display.title, "01 Wildlife Analysis")
+        XCTAssertEqual(display.artist, "Boards of Canada")
+    }
+
+    func testTrackDisplayHandlesTwoComponentPath() {
+        let display = ManualPlaylistLogic.trackDisplay(path: "B/02.flac")
+        XCTAssertEqual(display.title, "02")
+        XCTAssertEqual(display.artist, "B")
+    }
+
+    func testTrackDisplayHandlesBareFilenameWithNoArtist() {
+        let display = ManualPlaylistLogic.trackDisplay(path: "track.flac")
+        XCTAssertEqual(display.title, "track")
+        XCTAssertNil(display.artist)
+    }
+
+    func testTrackDisplayNormalizesBackslashes() {
+        let display = ManualPlaylistLogic.trackDisplay(path: #"Artist\Album\01.flac"#)
+        XCTAssertEqual(display.title, "01")
+        XCTAssertEqual(display.artist, "Artist")
+    }
+
+    // MARK: - ManualPlaylistLogic.isLikelyMissing
+
+    func testIsLikelyMissingFalseWhenArtistKnown() {
+        let library = LibraryInfo(
+            sourceRoot: "/x", scannedAtUnixSecs: 1,
+            artists: [LibraryArtist(name: "Boards of Canada", albums: [LibraryAlbum(name: "Geogaddi", genre: nil, tracks: 1, bytes: 1)])],
+            genres: [], totalTracks: 1, totalBytes: 1)
+        XCTAssertFalse(ManualPlaylistLogic.isLikelyMissing(path: "Boards of Canada/Geogaddi/01.flac", library: library))
+    }
+
+    func testIsLikelyMissingTrueWhenArtistUnknown() {
+        let library = LibraryInfo(sourceRoot: "/x", scannedAtUnixSecs: 1, artists: [], genres: [], totalTracks: 0, totalBytes: 0)
+        XCTAssertTrue(ManualPlaylistLogic.isLikelyMissing(path: "Ghost Artist/Album/01.flac", library: library))
+    }
+
+    func testIsLikelyMissingTrueWhenAlbumUnknownUnderKnownArtist() {
+        let library = LibraryInfo(
+            sourceRoot: "/x", scannedAtUnixSecs: 1,
+            artists: [LibraryArtist(name: "Boards of Canada", albums: [LibraryAlbum(name: "Geogaddi", genre: nil, tracks: 1, bytes: 1)])],
+            genres: [], totalTracks: 1, totalBytes: 1)
+        XCTAssertTrue(ManualPlaylistLogic.isLikelyMissing(path: "Boards of Canada/Some Other Album/01.flac", library: library))
+    }
+
+    func testIsLikelyMissingCaseInsensitive() {
+        let library = LibraryInfo(
+            sourceRoot: "/x", scannedAtUnixSecs: 1,
+            artists: [LibraryArtist(name: "Boards Of Canada", albums: [LibraryAlbum(name: "Geogaddi", genre: nil, tracks: 1, bytes: 1)])],
+            genres: [], totalTracks: 1, totalBytes: 1)
+        XCTAssertFalse(ManualPlaylistLogic.isLikelyMissing(path: "boards of canada/geogaddi/01.flac", library: library))
+    }
+
+    func testIsLikelyMissingFalseWhenLibraryNotYetLoaded() {
+        XCTAssertFalse(ManualPlaylistLogic.isLikelyMissing(path: "Ghost Artist/Album/01.flac", library: nil), "no library data yet -- don't flag prematurely")
+    }
+
+    // MARK: - ManualPlaylistLogic.appendingTracks (dedup, preserve order)
+
+    func testAppendingTracksPreservesExistingOrderAndAppendsNew() {
+        let result = ManualPlaylistLogic.appendingTracks(["a.flac", "b.flac"], adding: ["c.flac", "d.flac"])
+        XCTAssertEqual(result, ["a.flac", "b.flac", "c.flac", "d.flac"])
+    }
+
+    func testAppendingTracksDedupsAgainstExisting() {
+        let result = ManualPlaylistLogic.appendingTracks(["a.flac", "b.flac"], adding: ["b.flac", "c.flac"])
+        XCTAssertEqual(result, ["a.flac", "b.flac", "c.flac"], "an already-present track must not be duplicated")
+    }
+
+    func testAppendingTracksDedupsWithinTheAddedBatchItself() {
+        let result = ManualPlaylistLogic.appendingTracks([], adding: ["a.flac", "a.flac", "b.flac"])
+        XCTAssertEqual(result, ["a.flac", "b.flac"])
+    }
+
+    // MARK: - ManualPlaylistLogic.moved / removed
+
+    func testMovedReordersTracks() {
+        let result = ManualPlaylistLogic.moved(["a", "b", "c"], from: IndexSet(integer: 2), to: 0)
+        XCTAssertEqual(result, ["c", "a", "b"])
+    }
+
+    func testRemovedDropsSelectedOffsets() {
+        let result = ManualPlaylistLogic.removed(["a", "b", "c"], at: IndexSet(integer: 1))
+        XCTAssertEqual(result, ["a", "c"])
+    }
+
+    // MARK: - PlaylistEditorLogic.subscribedDeviceCount / deleteConfirmMessage
+
+    func testSubscribedDeviceCountCountsOnlyDevicesSubscribedToThisSlug() {
+        let configs: [String: DeviceConfigState] = [
+            "0xA": .init(selection: .init(mode: .all, rules: []), subscriptions: .init(playlists: ["gym"]), settings: .init(autoSync: true, rockboxCompat: false), preview: nil),
+            "0xB": .init(selection: .init(mode: .all, rules: []), subscriptions: .init(playlists: ["chill"]), settings: .init(autoSync: true, rockboxCompat: false), preview: nil),
+            "0xC": .init(selection: .init(mode: .all, rules: []), subscriptions: .init(playlists: ["gym", "chill"]), settings: .init(autoSync: true, rockboxCompat: false), preview: nil),
+        ]
+        XCTAssertEqual(PlaylistEditorLogic.subscribedDeviceCount(slug: "gym", deviceConfigs: configs), 2)
+    }
+
+    func testDeleteConfirmMessageMentionsSubscribedDeviceCount() {
+        XCTAssertEqual(PlaylistEditorLogic.deleteConfirmMessage(subscribedDeviceCount: 2), "Also unsubscribes 2 devices.")
+        XCTAssertEqual(PlaylistEditorLogic.deleteConfirmMessage(subscribedDeviceCount: 1), "Also unsubscribes 1 device.")
+    }
+
+    func testDeleteConfirmMessageWhenNotSubscribedAnywhere() {
+        XCTAssertEqual(PlaylistEditorLogic.deleteConfirmMessage(subscribedDeviceCount: 0), "This can't be undone.")
+    }
+
+    // MARK: - PlaylistEditorLogic.isNameValid
+
+    func testIsNameValidRejectsBlankOrWhitespaceOnly() {
+        XCTAssertFalse(PlaylistEditorLogic.isNameValid(""))
+        XCTAssertFalse(PlaylistEditorLogic.isNameValid("   "))
+        XCTAssertTrue(PlaylistEditorLogic.isNameValid("Gym"))
+    }
+
+    // MARK: - SmartRulesLogic.rulesAreValid (rule-row validity -> save-enabled predicate)
+
+    func testRulesAreValidRequiresNonBlankValueOnEveryRow() {
+        XCTAssertTrue(SmartRulesLogic.rulesAreValid([SmartRuleWire(field: .genre, op: .is, value: "IDM")]))
+        XCTAssertFalse(SmartRulesLogic.rulesAreValid([SmartRuleWire(field: .genre, op: .is, value: "")]))
+        XCTAssertFalse(SmartRulesLogic.rulesAreValid([SmartRuleWire(field: .genre, op: .is, value: "  ")]))
+    }
+
+    func testRulesAreValidAllowsEmptyRuleSet() {
+        XCTAssertTrue(SmartRulesLogic.rulesAreValid([]), "zero rules is a valid (matches-everything) smart playlist")
+    }
+
+    // MARK: - SmartRulesLogic limit round-trip + validity
+
+    func testLimitKindAndValueTextRoundTripBytes() {
+        XCTAssertEqual(SmartRulesLogic.limitKind(for: .bytes(500_000_000)), .bytes)
+        XCTAssertEqual(SmartRulesLogic.limitValueText(for: .bytes(500_000_000)), "500000000")
+    }
+
+    func testLimitKindAndValueTextRoundTripTracks() {
+        XCTAssertEqual(SmartRulesLogic.limitKind(for: .tracks(50)), .tracks)
+        XCTAssertEqual(SmartRulesLogic.limitValueText(for: .tracks(50)), "50")
+    }
+
+    func testLimitKindAndValueTextRoundTripNone() {
+        XCTAssertEqual(SmartRulesLogic.limitKind(for: nil), .none)
+        XCTAssertEqual(SmartRulesLogic.limitValueText(for: nil), "")
+    }
+
+    func testIsLimitValidNoneIsAlwaysValid() {
+        XCTAssertTrue(SmartRulesLogic.isLimitValid(kind: .none, valueText: ""))
+        XCTAssertTrue(SmartRulesLogic.isLimitValid(kind: .none, valueText: "garbage"))
+    }
+
+    func testIsLimitValidRequiresPositiveNumberForBytesAndTracks() {
+        XCTAssertTrue(SmartRulesLogic.isLimitValid(kind: .bytes, valueText: "100"))
+        XCTAssertFalse(SmartRulesLogic.isLimitValid(kind: .bytes, valueText: "0"))
+        XCTAssertFalse(SmartRulesLogic.isLimitValid(kind: .bytes, valueText: "abc"))
+        XCTAssertTrue(SmartRulesLogic.isLimitValid(kind: .tracks, valueText: "50"))
+        XCTAssertFalse(SmartRulesLogic.isLimitValid(kind: .tracks, valueText: "-5"))
+    }
+
+    func testLimitBuildsCorrectWireCase() {
+        XCTAssertEqual(SmartRulesLogic.limit(kind: .none, valueText: ""), nil)
+        XCTAssertEqual(SmartRulesLogic.limit(kind: .bytes, valueText: "100"), .bytes(100))
+        XCTAssertEqual(SmartRulesLogic.limit(kind: .tracks, valueText: "50"), .tracks(50))
+    }
+
+    // MARK: - SmartRulesLogic.previewLine
+
+    func testPreviewLineFormatsTracksAndBytesFromSummary() {
+        let summary = PlaylistSummary(slug: "recent-idm", name: "Recent IDM", kind: .smart, tracks: 42, bytes: 123_456_789, error: nil)
+        XCTAssertEqual(SmartRulesLogic.previewLine(summary: summary), "42 tracks · \(formatBytes(123_456_789))")
+    }
+
+    func testPreviewLineSingularTrack() {
+        let summary = PlaylistSummary(slug: "x", name: "X", kind: .smart, tracks: 1, bytes: 0, error: nil)
+        XCTAssertEqual(SmartRulesLogic.previewLine(summary: summary), "1 track · \(formatBytes(0))")
+    }
+
+    func testPreviewLineWhenSummaryNotYetAvailable() {
+        XCTAssertEqual(SmartRulesLogic.previewLine(summary: nil), "Calculating…")
+    }
+}

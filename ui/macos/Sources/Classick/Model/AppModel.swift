@@ -120,6 +120,26 @@ final class AppModel {
     /// oldest still-pending request.
     private var pendingPreviewSerials: [String] = []
 
+    // MARK: - Protocol 1.7.0: Add Songs picker track resolution
+
+    /// Most recent `resolved_tracks` reply — the Add Songs picker's result.
+    /// Not scoped by request: only one Add can be in flight at a time (the
+    /// sheet disables its Add button while resolving), so this is a single
+    /// slot, not a queue.
+    private(set) var resolvedTracks: [String] = []
+    /// Bumped on every `resolved_tracks` reply, including an empty one — the
+    /// same "revision, not content-equality" pattern as
+    /// `playlistsUpdateRevision`, since an empty reply (no rule matched
+    /// anything) is a valid outcome the Add Songs sheet must still notice to
+    /// stop showing "Adding…".
+    private(set) var resolvedTracksRevision = 0
+    /// `resolved_tracks` carries no correlation id on the wire — mirrors
+    /// `pendingPreviewSerials`'s bookkeeping discipline, simplified to a
+    /// counter since there's nothing to attach the reply TO (unlike
+    /// `device_preview`, which must pick the right serial): a reply with
+    /// nothing pending is simply dropped rather than guessed at.
+    private var pendingResolveTrackRequests = 0
+
     private var isScanning = false
     /// Raw device capacity for the Choose Music footer's capacity bar
     /// (storageText is display-only). Set beside storageText in the
@@ -272,6 +292,12 @@ final class AppModel {
 
         case let .syncRejected(reason):
             phase = .error(Self.humanReadable(rejection: reason))
+
+        case let .resolvedTracks(tracks):
+            guard pendingResolveTrackRequests > 0 else { break }
+            pendingResolveTrackRequests -= 1
+            resolvedTracks = tracks
+            resolvedTracksRevision += 1
         }
     }
 
@@ -286,6 +312,12 @@ final class AppModel {
     /// necessary.
     func willRequestDevicePreview(serial: String) {
         pendingPreviewSerials.append(serial)
+    }
+
+    /// Call immediately before sending `.resolveTracks(rules:)` — see
+    /// `pendingResolveTrackRequests`'s doc comment.
+    func willRequestResolveTracks() {
+        pendingResolveTrackRequests += 1
     }
 
     private var phaseIsSyncing: Bool {

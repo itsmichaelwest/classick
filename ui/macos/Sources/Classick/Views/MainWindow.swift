@@ -24,6 +24,10 @@ struct MainWindow: View {
     // — the call site can compile clean while never actually wiring the
     // daemon send path. See `ClassickApp`'s `MainWindow(...)` call site.
     var onSavePlaylist: (PlaylistPayload) -> Void
+    // Playlist editor pages (Task 7).
+    var onGetPlaylist: (String) -> Void = { _ in }
+    var onDeletePlaylist: (String) -> Void = { _ in }
+    var onResolveTracks: ([SelectionRule]) -> Void = { _ in }
     // Device Music page (Task 5).
     var onLoadDeviceConfig: (String) -> Void = { _ in }
     var onPreviewDevice: (String) -> Void = { _ in }
@@ -83,11 +87,11 @@ struct MainWindow: View {
                     onForgetIpod: onForgetIpod, onBackfill: onBackfill, onReplaceLibrary: onReplaceLibrary)
                     .id(serial)
             case let .playlist(slug):
-                // Playlist editor pages are built in Task 7.
-                ContentUnavailableView(
-                    "Playlist Editor Coming Soon",
-                    systemImage: "music.note.list",
-                    description: Text(slug))
+                PlaylistPage(
+                    model: model, slug: slug, onSavePlaylist: onSavePlaylist,
+                    onGetPlaylist: onGetPlaylist, onDeletePlaylist: onDeletePlaylist,
+                    onResolveTracks: onResolveTracks)
+                    .id(slug)
             case .history:
                 HistoryView(model: model)
             }

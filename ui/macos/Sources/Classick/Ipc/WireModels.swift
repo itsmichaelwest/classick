@@ -328,8 +328,13 @@ struct PlaylistSummary: Codable, Equatable, Sendable {
 }
 
 enum SmartMatching: String, Codable, Equatable, Sendable { case all, any }
-enum SmartField: String, Codable, Equatable, Sendable { case artist, album, genre, year }
-enum SmartOp: String, Codable, Equatable, Sendable {
+// `CaseIterable` on `SmartField`/`SmartOp` is purely additive (auto-
+// synthesized for a plain enum with no associated values) — the rule
+// builder's field/op pickers (`SmartRulesEditor`, Task 7) need to enumerate
+// every case; nothing before that view needed to. Doesn't touch
+// `Codable`/wire shape.
+enum SmartField: String, Codable, Equatable, CaseIterable, Sendable { case artist, album, genre, year }
+enum SmartOp: String, Codable, Equatable, CaseIterable, Sendable {
     case `is` = "is"
     case contains
     case gte
@@ -567,6 +572,15 @@ enum DaemonCommand: Encodable, Sendable {
     /// as `saveConfig`.
     case saveDeviceConfig(serial: String, selection: SelectionState?, subscriptions: SubscriptionsWire?, settings: DeviceSettingsWire?)
     case previewDevice(serial: String)
+    /// **Since daemon protocol 1.7.0.** Expands artist/album/genre rules
+    /// (the same `SelectionRule` shape `save_device_config`'s selection
+    /// uses) into real, resolvable source-relative track paths, evaluated
+    /// server-side against the cached library index — the client has no
+    /// per-file data of its own (`LibraryArtist`/`LibraryAlbum` carry track
+    /// COUNTS only). Backs the playlist editor's Add Songs picker (Task 7):
+    /// there is no other way to turn a picked album into literal `.m3u8`
+    /// entries. Replies with `resolved_tracks`.
+    case resolveTracks(rules: [SelectionRule])
 
     enum Trigger: String, Encodable, Sendable {
         case manual, scheduled
@@ -662,6 +676,9 @@ enum DaemonCommand: Encodable, Sendable {
         case let .previewDevice(serial):
             try container.encode("preview_device", forKey: .type)
             try container.encode(serial, forKey: .serial)
+        case let .resolveTracks(rules):
+            try container.encode("resolve_tracks", forKey: .type)
+            try container.encode(rules, forKey: .rules)
         }
     }
 }
@@ -685,6 +702,12 @@ enum DaemonEvent: Decodable, Sendable {
     case playlistDetail(PlaylistDetail)
     case deviceConfigUpdate(serial: String, selection: SelectionState, subscriptions: SubscriptionsWire, settings: DeviceSettingsWire)
     case devicePreview(DevicePreview)
+    // MARK: Protocol 1.7.0 — Add Songs picker track resolution
+    /// Reply to `resolve_tracks`. Carries no correlation id (same pattern
+    /// as `device_preview`/`selection_preview`) — see
+    /// `AppModel.willRequestResolveTracks`. An empty `tracks` array is a
+    /// valid reply (no rule matched anything in the index), not an error.
+    case resolvedTracks(tracks: [String])
     case unknown            // forward-compat: log + ignore
 
     private enum CodingKeys: String, CodingKey {
@@ -834,6 +857,9 @@ enum DaemonEvent: Decodable, Sendable {
                 playlistExtraBytes: try container.decodeIfPresent(UInt64.self, forKey: .playlistExtraBytes) ?? 0,
                 projectedFreeBytes: try container.decodeIfPresent(UInt64.self, forKey: .projectedFreeBytes),
                 unresolvedSubscriptions: try container.decodeIfPresent([String].self, forKey: .unresolvedSubscriptions)))
+        case "resolved_tracks":
+            let tracks = try container.decodeIfPresent([String].self, forKey: .tracks) ?? []
+            self = .resolvedTracks(tracks: tracks)
         default:
             self = .unknown
         }

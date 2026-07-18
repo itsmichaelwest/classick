@@ -512,4 +512,37 @@ final class AppModelReducerTests: XCTestCase {
         m.apply(.playlistsUpdate(list))
         XCTAssertEqual(m.playlistsUpdateRevision, 2, "revision must bump even when the list content is identical")
     }
+
+    // MARK: - resolve_tracks / resolved_tracks (protocol 1.7.0 — Add Songs picker)
+
+    /// Mirrors `testDevicePreviewAttachesToTheRequestedSerial`'s bookkeeping
+    /// discipline: a request must be in flight for a reply to attach.
+    func testResolvedTracksStoresResultAndBumpsRevisionWhenRequestPending() {
+        let m = AppModel()
+        m.willRequestResolveTracks()
+        m.apply(.resolvedTracks(tracks: ["Artist/Album/01.flac", "B/02.flac"]))
+        XCTAssertEqual(m.resolvedTracks, ["Artist/Album/01.flac", "B/02.flac"])
+        XCTAssertEqual(m.resolvedTracksRevision, 1)
+    }
+
+    /// An empty reply is a valid outcome (no rules matched anything in the
+    /// index) — must still bump the revision so the Add Songs sheet's
+    /// `onChange` fires and stops showing "Adding…", not be treated as
+    /// nothing having happened.
+    func testResolvedTracksEmptyReplyStillBumpsRevision() {
+        let m = AppModel()
+        m.willRequestResolveTracks()
+        m.apply(.resolvedTracks(tracks: []))
+        XCTAssertEqual(m.resolvedTracks, [])
+        XCTAssertEqual(m.resolvedTracksRevision, 1)
+    }
+
+    /// No correlation id on the wire (same rationale as `device_preview`) —
+    /// a reply with nothing pending has nothing to attach to.
+    func testResolvedTracksWithNoPendingRequestIsDropped() {
+        let m = AppModel()
+        m.apply(.resolvedTracks(tracks: ["a.flac"]))
+        XCTAssertEqual(m.resolvedTracksRevision, 0)
+        XCTAssertEqual(m.resolvedTracks, [])
+    }
 }

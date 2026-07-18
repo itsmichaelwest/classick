@@ -255,6 +255,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.send(.savePlaylist(payload)) }
     }
 
+    /// Playlist editor pages (Task 7): fetches one playlist's full content
+    /// the moment the user navigates to its page — `model.playlistDetail`
+    /// is otherwise only ever populated by an unsolicited reply.
+    func getPlaylist(slug: String) {
+        Task { await daemonClient.send(.getPlaylist(slug: slug)) }
+    }
+
+    /// Toolbar menu's "Delete Playlist" (with confirmation, handled by the
+    /// caller). The daemon replies via an unsolicited `playlists_update`
+    /// broadcast, same as `savePlaylist`.
+    func deletePlaylist(slug: String) {
+        Task { await daemonClient.send(.deletePlaylist(slug: slug)) }
+    }
+
+    /// Add Songs picker (Task 7, protocol 1.7.0): expands checked
+    /// artist/album/genre rules into real track paths server-side — see
+    /// `AppModel.willRequestResolveTracks`'s doc comment for why this
+    /// bookkeeping precedes the send (mirrors `previewDevice`).
+    func resolveTracks(rules: [SelectionRule]) {
+        model.willRequestResolveTracks()
+        Task { await daemonClient.send(.resolveTracks(rules: rules)) }
+    }
+
     /// Device Music page (Task 5): fetches the device's current selection +
     /// subscriptions + settings, plus a fresh capacity preview, the moment
     /// the user navigates to its Music page. Device config isn't part of
@@ -387,6 +410,9 @@ struct ClassickApp: App {
                 onReplaceLibrary: appDelegate.replaceLibrary,
                 onAppearRequests: appDelegate.requestLibraryAndSelection,
                 onSavePlaylist: { payload in appDelegate.savePlaylist(payload) },
+                onGetPlaylist: { slug in appDelegate.getPlaylist(slug: slug) },
+                onDeletePlaylist: { slug in appDelegate.deletePlaylist(slug: slug) },
+                onResolveTracks: { rules in appDelegate.resolveTracks(rules: rules) },
                 onLoadDeviceConfig: { serial in appDelegate.loadDeviceConfig(serial: serial) },
                 onPreviewDevice: { serial in appDelegate.previewDevice(serial: serial) },
                 onSaveDeviceConfig: { serial, selection, subscriptions in
