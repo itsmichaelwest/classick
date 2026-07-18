@@ -6,6 +6,8 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::source_location::SourceLocation;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncMode {
@@ -102,6 +104,8 @@ pub struct PersistedConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_location: Option<SourceLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipod: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg: Option<PathBuf>,
@@ -169,7 +173,13 @@ pub fn save(path: &Path, cfg: &PersistedConfig) -> Result<()> {
     }
     let tmp = path.with_extension("toml.tmp");
     {
-        let s = toml::to_string_pretty(cfg)?;
+        let mut synchronized = cfg.clone();
+        match (&synchronized.source, &mut synchronized.source_location) {
+            (Some(source), Some(location)) => location.resolved_path = source.clone(),
+            (None, Some(location)) => synchronized.source = Some(location.resolved_path.clone()),
+            _ => {}
+        }
+        let s = toml::to_string_pretty(&synchronized)?;
         let f = std::fs::File::create(&tmp)
             .with_context(|| format!("create temp config {}", tmp.display()))?;
         let mut writer = std::io::BufWriter::new(f);
@@ -186,6 +196,8 @@ pub fn save(path: &Path, cfg: &PersistedConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portable_path::PortablePath;
+    use crate::source_location::{SourceIdentity, SourceLocation};
 
     const SAMPLE: &str = include_str!("../tests/fixtures/sample-config.toml");
 
@@ -200,6 +212,130 @@ mod tests {
         assert_eq!(cfg.ffmpeg.as_deref().unwrap().to_string_lossy(), "ffmpeg");
         assert_eq!(cfg.no_delete, Some(false));
         assert_eq!(cfg.no_tui, Some(false));
+        assert_eq!(
+            cfg.source_location,
+            Some(SourceLocation {
+                resolved_path: PathBuf::from(r"\\<host>\data\media\music"),
+                identity: SourceIdentity::Smb {
+                    host: "<host>".into(),
+                    share: "data".into(),
+                    subpath: Some(PortablePath::parse("media/music").unwrap()),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn old_toml_round_trips_without_a_source_location() {
+        let cfg: PersistedConfig = toml::from_str(r#"source = "/Volumes/Music""#).unwrap();
+
+        assert_eq!(cfg.source.as_deref(), Some(Path::new("/Volumes/Music")));
+        assert!(cfg.source_location.is_none());
+        let reparsed: PersistedConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(reparsed, cfg);
+    }
+
+    #[test]
+    fn new_toml_round_trips_smb_source_location() {
+        let cfg = PersistedConfig {
+            source: Some(PathBuf::from("/Volumes/data/media/music")),
+            source_location: Some(SourceLocation {
+                resolved_path: PathBuf::from("/Volumes/data/media/music"),
+                identity: SourceIdentity::Smb {
+                    host: "jupiter".into(),
+                    share: "data".into(),
+                    subpath: Some(PortablePath::parse("media/music").unwrap()),
+                },
+            }),
+            daemon: Some(DaemonSettings::default()),
+            ..PersistedConfig::default()
+        };
+
+        let encoded = toml::to_string(&cfg).unwrap();
+        let reparsed: PersistedConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(reparsed, cfg);
+    }
+
+    #[test]
+    fn new_toml_round_trips_local_library_id() {
+        let cfg = PersistedConfig {
+            source: Some(PathBuf::from("/Users/michael/Music")),
+            source_location: Some(SourceLocation {
+                resolved_path: PathBuf::from("/Users/michael/Music"),
+                identity: SourceIdentity::Local {
+                    library_id: "018f-stable-library-id".into(),
+                },
+            }),
+            daemon: Some(DaemonSettings::default()),
+            ..PersistedConfig::default()
+        };
+
+        let encoded = toml::to_string(&cfg).unwrap();
+        assert!(encoded.contains("018f-stable-library-id"));
+        assert_eq!(toml::from_str::<PersistedConfig>(&encoded).unwrap(), cfg);
+    }
+
+    #[test]
+    fn save_synchronizes_source_location_with_changed_legacy_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "classick-test-source-location-{}",
+            std::process::id()
+        ));
+        let path = dir.join("config.toml");
+        let cfg = PersistedConfig {
+            source: Some(PathBuf::from("/Volumes/data-1/media/music")),
+            source_location: Some(SourceLocation {
+                resolved_path: PathBuf::from("/Volumes/data/media/music"),
+                identity: SourceIdentity::Smb {
+                    host: "jupiter".into(),
+                    share: "data".into(),
+                    subpath: Some(PortablePath::parse("media/music").unwrap()),
+                },
+            }),
+            ..PersistedConfig::default()
+        };
+
+        save(&path, &cfg).unwrap();
+        let loaded = load(&path).unwrap().unwrap();
+        assert_eq!(
+            loaded.source.as_deref(),
+            Some(Path::new("/Volumes/data-1/media/music"))
+        );
+        assert_eq!(
+            loaded
+                .source_location
+                .as_ref()
+                .map(|location| location.resolved_path.as_path()),
+            Some(Path::new("/Volumes/data-1/media/music"))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn save_backfills_legacy_source_from_a_location_only_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "classick-test-location-only-{}",
+            std::process::id()
+        ));
+        let path = dir.join("config.toml");
+        let cfg = PersistedConfig {
+            source: None,
+            source_location: Some(SourceLocation {
+                resolved_path: PathBuf::from("/Volumes/data/media/music"),
+                identity: SourceIdentity::Local {
+                    library_id: "library-123".into(),
+                },
+            }),
+            ..PersistedConfig::default()
+        };
+
+        save(&path, &cfg).unwrap();
+        let loaded = load(&path).unwrap().unwrap();
+        assert_eq!(
+            loaded.source.as_deref(),
+            Some(Path::new("/Volumes/data/media/music"))
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -256,6 +392,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let cfg = PersistedConfig {
             source: Some(PathBuf::from(r"D:\music")),
+            source_location: None,
             ipod: Some("F:".to_string()),
             ffmpeg: None,
             no_delete: Some(true),
@@ -282,6 +419,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let cfg = PersistedConfig {
             source: Some(PathBuf::from(r"D:\music")),
+            source_location: None,
             ipod: None,
             ffmpeg: None,
             no_delete: None,

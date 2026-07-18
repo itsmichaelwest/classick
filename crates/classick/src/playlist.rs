@@ -56,7 +56,9 @@ pub struct ManualPlaylist {
 /// components. `.` (`CurDir`) components are tolerated. Playlist track
 /// paths cross a trust boundary — they come from user-editable `.m3u8`
 /// files that also travel between machines via the device mirror — so
-/// this is checked before ever joining onto `source_root`.
+/// this is checked before ever joining onto `source_root`. This remains
+/// intentionally more tolerant than strict manifest `PortablePath` parsing:
+/// playlists accept `.` components and normalize Windows separators.
 pub(crate) fn is_safe_relative(p: &Path) -> bool {
     use std::path::Component;
     for component in p.components() {
@@ -202,13 +204,17 @@ impl PlaylistStore {
     pub fn open(root: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&root)
             .with_context(|| format!("create playlists dir {}", root.display()))?;
-        Ok(Self { root, last_errors: RefCell::new(Vec::new()) })
+        Ok(Self {
+            root,
+            last_errors: RefCell::new(Vec::new()),
+        })
     }
 
     /// `<config dir>/classick/playlists/` — beside `selection.json` and
     /// `config.toml`.
     pub fn default_root() -> Result<PathBuf> {
-        let dir = dirs::config_dir().ok_or_else(|| anyhow::anyhow!("could not resolve config dir"))?;
+        let dir =
+            dirs::config_dir().ok_or_else(|| anyhow::anyhow!("could not resolve config dir"))?;
         Ok(dir.join(crate::PROJECT_DIR).join("playlists"))
     }
 
@@ -266,7 +272,9 @@ impl PlaylistStore {
             if !path.is_file() {
                 continue;
             }
-            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
             if let Some(slug) = file_name.strip_suffix(".m3u8") {
                 match Self::read_manual(&path, slug) {
                     Ok(p) => out.push(Playlist::Manual(p)),
@@ -287,7 +295,10 @@ impl PlaylistStore {
     pub fn load(&self, slug: &str) -> Result<Option<Playlist>> {
         let manual_path = self.manual_path(slug);
         if manual_path.exists() {
-            return Ok(Some(Playlist::Manual(Self::read_manual(&manual_path, slug)?)));
+            return Ok(Some(Playlist::Manual(Self::read_manual(
+                &manual_path,
+                slug,
+            )?)));
         }
         let smart_path = self.smart_path(slug);
         if smart_path.exists() {
@@ -341,12 +352,14 @@ impl PlaylistStore {
     }
 
     fn read_manual(path: &Path, slug: &str) -> Result<ManualPlaylist> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         parse_m3u8(&text, slug)
     }
 
     fn read_smart(path: &Path) -> Result<SmartPlaylist> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
     }
 }
@@ -355,17 +368,21 @@ impl PlaylistStore {
 /// pattern as `manifest::save_atomic` / `selection::save_atomic`.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create dir {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create dir {}", parent.display()))?;
     }
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     {
-        let f = std::fs::File::create(&tmp).with_context(|| format!("create temp file {}", tmp.display()))?;
+        let f = std::fs::File::create(&tmp)
+            .with_context(|| format!("create temp file {}", tmp.display()))?;
         let mut writer = std::io::BufWriter::new(f);
         std::io::Write::write_all(&mut writer, bytes)?;
         let f = std::io::BufWriter::into_inner(writer)?;
-        f.sync_all().with_context(|| format!("fsync {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
     }
-    std::fs::rename(&tmp, path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
@@ -472,7 +489,8 @@ mod tests {
             tracks: vec!["a/1.flac".into(), "gone/2.flac".into()],
             skipped_unsafe: 0,
         };
-        let (found, missing) = resolve_manual(&p, Path::new("/src"), &|p| !p.starts_with("/src/gone"));
+        let (found, missing) =
+            resolve_manual(&p, Path::new("/src"), &|p| !p.starts_with("/src/gone"));
         assert_eq!(found, vec![PathBuf::from("/src/a/1.flac")]);
         assert_eq!(missing, 1);
     }
@@ -521,8 +539,12 @@ mod tests {
         // Manual playlist takes the plain slug.
         let slug1 = store.unique_slug("Gym").unwrap();
         assert_eq!(slug1, "gym");
-        let manual =
-            ManualPlaylist { slug: slug1, name: "Gym".into(), tracks: vec!["A/1.flac".into()], skipped_unsafe: 0 };
+        let manual = ManualPlaylist {
+            slug: slug1,
+            name: "Gym".into(),
+            tracks: vec!["A/1.flac".into()],
+            skipped_unsafe: 0,
+        };
         store.save(&Playlist::Manual(manual.clone())).unwrap();
 
         // A second playlist named "Gym" (this time smart) collides on slug
@@ -579,27 +601,40 @@ mod tests {
         let store = PlaylistStore::open(root.clone()).unwrap();
 
         let manual = ManualPlaylist {
-            slug: "gym".into(), name: "Gym".into(),
-            tracks: vec!["A/1.flac".into()], skipped_unsafe: 0,
+            slug: "gym".into(),
+            name: "Gym".into(),
+            tracks: vec!["A/1.flac".into()],
+            skipped_unsafe: 0,
         };
         store.save(&Playlist::Manual(manual)).unwrap();
         assert!(root.join("gym.m3u8").exists());
 
         let smart = SmartPlaylist {
-            slug: "gym".into(), name: "Gym".into(),
+            slug: "gym".into(),
+            name: "Gym".into(),
             rules: SmartRules {
                 version: crate::playlist_rules::RULES_VERSION,
                 matching: crate::playlist_rules::Match::All,
-                rules: vec![], limit: None, order: crate::playlist_rules::Order::Alpha, seed: 0,
+                rules: vec![],
+                limit: None,
+                order: crate::playlist_rules::Order::Alpha,
+                seed: 0,
             },
         };
         store.save(&Playlist::Smart(smart.clone())).unwrap();
 
         assert!(root.join("gym.rules.json").exists());
-        assert!(!root.join("gym.m3u8").exists(), "stale manual file must be cleared on kind flip");
+        assert!(
+            !root.join("gym.m3u8").exists(),
+            "stale manual file must be cleared on kind flip"
+        );
 
         let listed = store.list().unwrap();
-        assert_eq!(listed.len(), 1, "one slug must yield exactly one playlist, not two");
+        assert_eq!(
+            listed.len(),
+            1,
+            "one slug must yield exactly one playlist, not two"
+        );
         assert_eq!(listed[0], Playlist::Smart(smart));
         assert!(store.last_errors().is_empty());
     }
@@ -610,27 +645,40 @@ mod tests {
         let store = PlaylistStore::open(root.clone()).unwrap();
 
         let smart = SmartPlaylist {
-            slug: "gym".into(), name: "Gym".into(),
+            slug: "gym".into(),
+            name: "Gym".into(),
             rules: SmartRules {
                 version: crate::playlist_rules::RULES_VERSION,
                 matching: crate::playlist_rules::Match::All,
-                rules: vec![], limit: None, order: crate::playlist_rules::Order::Alpha, seed: 0,
+                rules: vec![],
+                limit: None,
+                order: crate::playlist_rules::Order::Alpha,
+                seed: 0,
             },
         };
         store.save(&Playlist::Smart(smart)).unwrap();
         assert!(root.join("gym.rules.json").exists());
 
         let manual = ManualPlaylist {
-            slug: "gym".into(), name: "Gym".into(),
-            tracks: vec!["A/1.flac".into()], skipped_unsafe: 0,
+            slug: "gym".into(),
+            name: "Gym".into(),
+            tracks: vec!["A/1.flac".into()],
+            skipped_unsafe: 0,
         };
         store.save(&Playlist::Manual(manual.clone())).unwrap();
 
         assert!(root.join("gym.m3u8").exists());
-        assert!(!root.join("gym.rules.json").exists(), "stale smart file must be cleared on kind flip");
+        assert!(
+            !root.join("gym.rules.json").exists(),
+            "stale smart file must be cleared on kind flip"
+        );
 
         let listed = store.list().unwrap();
-        assert_eq!(listed.len(), 1, "one slug must yield exactly one playlist, not two");
+        assert_eq!(
+            listed.len(),
+            1,
+            "one slug must yield exactly one playlist, not two"
+        );
         assert_eq!(listed[0], Playlist::Manual(manual));
         assert!(store.last_errors().is_empty());
     }
@@ -643,8 +691,10 @@ mod tests {
         let root = tempdir_under_target("kind-flip-same-kind-twice");
         let store = PlaylistStore::open(root.clone()).unwrap();
         let manual = ManualPlaylist {
-            slug: "gym".into(), name: "Gym".into(),
-            tracks: vec!["A/1.flac".into()], skipped_unsafe: 0,
+            slug: "gym".into(),
+            name: "Gym".into(),
+            tracks: vec!["A/1.flac".into()],
+            skipped_unsafe: 0,
         };
         store.save(&Playlist::Manual(manual.clone())).unwrap();
         store.save(&Playlist::Manual(manual)).unwrap();

@@ -73,7 +73,12 @@ impl Config {
 pub fn resolve(cli: Cli) -> Result<Config> {
     let manifest_path = default_manifest_path()?;
     let persisted = config_file::load(&config_file::default_path()?)?;
-    resolve_with(cli, std::env::var(SOURCE_ENV).ok(), persisted, manifest_path)
+    resolve_with(
+        cli,
+        std::env::var(SOURCE_ENV).ok(),
+        persisted,
+        manifest_path,
+    )
 }
 
 /// Inner resolve — separated from `resolve` so tests can inject env + persisted
@@ -103,8 +108,11 @@ pub fn resolve_with(
         .or_else(|| persisted.as_ref().and_then(|p| p.ffmpeg.clone()))
         .unwrap_or_else(|| PathBuf::from("ffmpeg"));
 
-    let no_delete =
-        cli.no_delete || persisted.as_ref().and_then(|p| p.no_delete).unwrap_or(false);
+    let no_delete = cli.no_delete
+        || persisted
+            .as_ref()
+            .and_then(|p| p.no_delete)
+            .unwrap_or(false);
 
     let no_tui = cli.no_tui || persisted.as_ref().and_then(|p| p.no_tui).unwrap_or(false);
 
@@ -181,6 +189,12 @@ pub fn merge_source(
         .clone()
         .or_else(|| env_source.map(PathBuf::from))
         .or_else(|| persisted.as_ref().and_then(|p| p.source.clone()))
+        .or_else(|| {
+            persisted
+                .as_ref()
+                .and_then(|p| p.source_location.as_ref())
+                .map(|location| location.resolved_path.clone())
+        })
 }
 
 /// Public so the daemon (`daemon/runtime.rs`) can locate the manifest
@@ -206,6 +220,7 @@ mod tests {
     use super::*;
     use crate::cli::Cli;
     use crate::config_file::PersistedConfig;
+    use crate::source_location::{SourceIdentity, SourceLocation};
     use clap::Parser;
     use std::path::PathBuf;
 
@@ -215,7 +230,10 @@ mod tests {
         let err = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("no source library specified"), "got: {msg}");
-        assert!(msg.contains(SOURCE_ENV), "error should name the env var: {msg}");
+        assert!(
+            msg.contains(SOURCE_ENV),
+            "error should name the env var: {msg}"
+        );
     }
 
     #[test]
@@ -280,26 +298,16 @@ mod tests {
 
     #[test]
     fn restore_db_backup_threads_through_resolve() {
-        let cli = Cli::try_parse_from([
-            "classick",
-            "--source",
-            r"D:\m",
-            "--restore-db-backup",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--source", r"D:\m", "--restore-db-backup"]).unwrap();
         let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
         assert!(cfg.restore_db_backup);
     }
 
     #[test]
     fn replace_library_threads_through_resolve() {
-        let cli = Cli::try_parse_from([
-            "classick",
-            "--source",
-            r"D:\m",
-            "--replace-library",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--source", r"D:\m", "--replace-library"]).unwrap();
         let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
         assert!(cfg.replace_library);
     }
@@ -333,26 +341,16 @@ mod tests {
 
     #[test]
     fn verify_artwork_threads_through_resolve() {
-        let cli = Cli::try_parse_from([
-            "classick",
-            "--source",
-            r"D:\m",
-            "--verify-artwork",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--source", r"D:\m", "--verify-artwork"]).unwrap();
         let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
         assert!(cfg.verify_artwork);
     }
 
     #[test]
     fn verify_artwork_is_never_persisted() {
-        let cli = Cli::try_parse_from([
-            "classick",
-            "--source",
-            r"D:\m",
-            "--verify-artwork",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--source", r"D:\m", "--verify-artwork"]).unwrap();
         let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
         let persisted = cfg.to_persisted();
         let toml = toml::to_string(&persisted).unwrap();
@@ -361,21 +359,14 @@ mod tests {
 
     #[test]
     fn cli_encoder_wins_over_persisted_encoder() {
-        let cli = Cli::try_parse_from([
-            "classick",
-            "--source",
-            r"D:\m",
-            "--encoder",
-            "refalac",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--source", r"D:\m", "--encoder", "refalac"]).unwrap();
         let persisted = PersistedConfig {
             source: Some(PathBuf::from(r"X:\x")),
             encoder: Some(EncoderChoice::Ffmpeg),
             ..Default::default()
         };
-        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
-            .unwrap();
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
         assert_eq!(cfg.encoder, EncoderChoice::Refalac);
     }
 
@@ -387,8 +378,7 @@ mod tests {
             encoder: Some(EncoderChoice::Refalac),
             ..Default::default()
         };
-        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
-            .unwrap();
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
         assert_eq!(cfg.encoder, EncoderChoice::Refalac);
     }
 
@@ -414,8 +404,7 @@ mod tests {
             refalac_path: Some(PathBuf::from(r"X:\persisted\refalac64.exe")),
             ..Default::default()
         };
-        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
-            .unwrap();
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
         assert_eq!(cfg.refalac_path, PathBuf::from(r"C:\bin\refalac64.exe"));
     }
 
@@ -427,8 +416,7 @@ mod tests {
             refalac_path: Some(PathBuf::from(r"X:\persisted\refalac64.exe")),
             ..Default::default()
         };
-        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
-            .unwrap();
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
         assert_eq!(
             cfg.refalac_path,
             PathBuf::from(r"X:\persisted\refalac64.exe")
@@ -437,20 +425,14 @@ mod tests {
 
     #[test]
     fn cli_passthrough_wav_wins_over_persisted_false() {
-        let cli = Cli::try_parse_from([
-            "classick",
-            "--source",
-            r"D:\m",
-            "--passthrough-wav",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--source", r"D:\m", "--passthrough-wav"]).unwrap();
         let persisted = PersistedConfig {
             source: Some(PathBuf::from(r"X:\x")),
             passthrough_wav: Some(false),
             ..Default::default()
         };
-        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
-            .unwrap();
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
         assert!(cfg.passthrough_wav);
     }
 
@@ -462,27 +444,20 @@ mod tests {
             passthrough_wav: Some(true),
             ..Default::default()
         };
-        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
-            .unwrap();
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
         assert!(cfg.passthrough_wav);
     }
 
     #[test]
     fn cli_force_reencode_wins_over_persisted_false() {
-        let cli = Cli::try_parse_from([
-            "classick",
-            "--source",
-            r"D:\m",
-            "--force-reencode",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--source", r"D:\m", "--force-reencode"]).unwrap();
         let persisted = PersistedConfig {
             source: Some(PathBuf::from(r"X:\x")),
             force_reencode: Some(false),
             ..Default::default()
         };
-        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
-            .unwrap();
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
         assert!(cfg.force_reencode);
     }
 
@@ -508,7 +483,8 @@ mod tests {
     // whatever the global persisted daemon setting happened to be.
     #[test]
     fn rockbox_compat_cli_flag_mirrors_raw_cli_flag_not_the_merged_value() {
-        let cli = Cli::try_parse_from(["classick", "--source", r"D:\m", "--rockbox-compat"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--source", r"D:\m", "--rockbox-compat"]).unwrap();
         let persisted = PersistedConfig {
             source: Some(PathBuf::from(r"X:\x")),
             daemon: Some(crate::config_file::DaemonSettings {
@@ -518,7 +494,10 @@ mod tests {
             ..Default::default()
         };
         let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
-        assert!(cfg.rockbox_compat_cli_flag, "must reflect the raw --rockbox-compat flag");
+        assert!(
+            cfg.rockbox_compat_cli_flag,
+            "must reflect the raw --rockbox-compat flag"
+        );
 
         let cli2 = Cli::try_parse_from(["classick", "--source", r"D:\m"]).unwrap();
         let persisted2 = PersistedConfig {
@@ -530,8 +509,14 @@ mod tests {
             ..Default::default()
         };
         let cfg2 = resolve_with(cli2, None, Some(persisted2), PathBuf::from("dummy.json")).unwrap();
-        assert!(!cfg2.rockbox_compat_cli_flag, "must NOT pick up the persisted/global value");
-        assert!(cfg2.rockbox_compat, "merged value still reflects the persisted global setting");
+        assert!(
+            !cfg2.rockbox_compat_cli_flag,
+            "must NOT pick up the persisted/global value"
+        );
+        assert!(
+            cfg2.rockbox_compat,
+            "merged value still reflects the persisted global setting"
+        );
     }
 
     #[test]
@@ -545,20 +530,14 @@ mod tests {
             }),
             ..Default::default()
         };
-        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
-            .unwrap();
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
         assert!(cfg.rockbox_compat);
     }
 
     #[test]
     fn rockbox_compat_cli_flag_overrides_off_persisted() {
-        let cli = Cli::try_parse_from([
-            "classick",
-            "--source",
-            r"D:\m",
-            "--rockbox-compat",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--source", r"D:\m", "--rockbox-compat"]).unwrap();
         let persisted = PersistedConfig {
             source: Some(PathBuf::from(r"X:\x")),
             daemon: Some(crate::config_file::DaemonSettings {
@@ -567,8 +546,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json"))
-            .unwrap();
+        let cfg = resolve_with(cli, None, Some(persisted), PathBuf::from("dummy.json")).unwrap();
         assert!(cfg.rockbox_compat);
     }
 
@@ -591,14 +569,8 @@ mod tests {
 
     #[test]
     fn ipod_normalizes_drive_letter() {
-        let cli = Cli::try_parse_from([
-            "classick",
-            "--source",
-            r"D:\music",
-            "--ipod",
-            "G",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--source", r"D:\music", "--ipod", "G"]).unwrap();
         let config = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
         assert_eq!(
             config.ipod,
@@ -609,14 +581,12 @@ mod tests {
 
     #[test]
     fn merge_uses_cli_when_set() {
-        let cli =
-            Cli::try_parse_from(["classick", "--source", r"D:\music"]).unwrap();
+        let cli = Cli::try_parse_from(["classick", "--source", r"D:\music"]).unwrap();
         let persisted = PersistedConfig {
             source: Some(PathBuf::from(r"E:\persisted")),
             ..Default::default()
         };
-        let merged =
-            merge_source(&cli, std::env::var(SOURCE_ENV).ok(), &Some(persisted));
+        let merged = merge_source(&cli, std::env::var(SOURCE_ENV).ok(), &Some(persisted));
         assert_eq!(
             merged.unwrap(),
             PathBuf::from(r"D:\music"),
@@ -631,11 +601,7 @@ mod tests {
             source: Some(PathBuf::from(r"E:\persisted")),
             ..Default::default()
         };
-        let merged = merge_source(
-            &cli,
-            Some(r"F:\env-music".to_string()),
-            &Some(persisted),
-        );
+        let merged = merge_source(&cli, Some(r"F:\env-music".to_string()), &Some(persisted));
         assert_eq!(
             merged.unwrap(),
             PathBuf::from(r"F:\env-music"),
@@ -652,6 +618,26 @@ mod tests {
         };
         let merged = merge_source(&cli, None, &Some(persisted));
         assert_eq!(merged.unwrap(), PathBuf::from(r"E:\persisted"));
+    }
+
+    #[test]
+    fn merge_uses_resolved_source_location_when_legacy_source_is_absent() {
+        let cli = Cli::try_parse_from(["classick"]).unwrap();
+        let persisted = PersistedConfig {
+            source: None,
+            source_location: Some(SourceLocation {
+                resolved_path: PathBuf::from("/Volumes/data/media/music"),
+                identity: SourceIdentity::Local {
+                    library_id: "library-123".into(),
+                },
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            merge_source(&cli, None, &Some(persisted)),
+            Some(PathBuf::from("/Volumes/data/media/music"))
+        );
     }
 
     #[test]

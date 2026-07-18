@@ -610,3 +610,10 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   cancellation drain retains session ownership after unplug, so controls must
   keep the context for stale-event filtering while rendering a disconnected,
   non-interactive finishing state.
+
+## Portable source state (2026-07-18)
+
+- **Do not reuse strict manifest `PortablePath` parsing for `.m3u8` entries.**
+  Manual playlists intentionally normalize Windows separators and tolerate `.`
+  components; manifest paths reject both so persisted device state has one
+  unambiguous cross-platform representation.

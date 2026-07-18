@@ -3,3 +3,12 @@ ipod = "G:"
 ffmpeg = "ffmpeg"
 no_delete = false
 no_tui = false
+
+[source_location]
+resolved_path = "\\\\<host>\\data\\media\\music"
+
+[source_location.identity]
+kind = "smb"
+host = "<host>"
+share = "data"
+subpath = "media/music"
