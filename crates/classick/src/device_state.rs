@@ -63,6 +63,20 @@ pub fn device_manifest_path_in(root: &Path, serial: &str) -> Result<PathBuf> {
     Ok(device_dir_in(root, serial)?.join("manifest.json"))
 }
 
+/// Portable authority stored on the mounted iPod.
+pub fn portable_manifest_path(mount: &Path) -> PathBuf {
+    mount
+        .join("iPod_Control")
+        .join("classick")
+        .join("manifest.json")
+}
+
+/// Retained copy of a per-device v1 host manifest after its cache path is
+/// upgraded to v2.
+pub fn retained_v1_manifest_path(host_cache: &Path) -> PathBuf {
+    host_cache.with_file_name("manifest.v1.json")
+}
+
 /// Path to a device's selection.json, creating the device dir on demand.
 pub fn device_selection_path(serial: &str) -> Result<PathBuf> {
     Ok(device_dir(serial)?.join("selection.json"))

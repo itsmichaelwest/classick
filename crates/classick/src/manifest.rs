@@ -1,7 +1,9 @@
-//! Sync state: per-source-file record of (source identity, iPod identity).
-//! Atomic JSON file at %APPDATA%\classick\manifest.json per SPEC §4.3.
+//! Runtime sync state plus conversion to the portable v2 device manifest.
+//! Runtime paths stay native and absolute; v2 persistence is strictly relative.
 
+use crate::portable_path::PortablePath;
 use crate::source::SourceEntry;
+use crate::source_location::{SourceIdentity, SourceLocation};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -30,6 +32,162 @@ impl Manifest {
             last_source_root: None,
             tracks: Vec::new(),
         }
+    }
+
+    pub fn encode_v2(&self, source: &SourceLocation, serial: &str) -> Result<Vec<u8>> {
+        let tracks = self
+            .tracks
+            .iter()
+            .map(|entry| ManifestEntryV2::from_runtime(entry, &source.resolved_path))
+            .collect::<Result<Vec<_>>>()?;
+        let document = ManifestV2 {
+            version: 2,
+            ipod_serial: serial.to_string(),
+            source_identity: Some(source.identity.clone()),
+            tracks,
+        };
+        serde_json::to_vec_pretty(&document).context("encode portable manifest v2")
+    }
+
+    pub fn decode_v2(bytes: &[u8], current_root: &Path) -> Result<Self> {
+        decode_v2_document(bytes, current_root).map(|decoded| decoded.manifest)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestV2 {
+    version: u32,
+    ipod_serial: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_identity: Option<SourceIdentity>,
+    tracks: Vec<ManifestEntryV2>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestEntryV2 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_relpath: Option<PortablePath>,
+    source_mtime: i64,
+    source_size: u64,
+    source_fingerprint: String,
+    ipod_dbid: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ipod_relpath: Option<PortablePath>,
+    #[serde(default)]
+    audio_fingerprint: String,
+    #[serde(default = "default_encoder")]
+    encoder: String,
+    #[serde(default)]
+    encoder_version: String,
+    #[serde(default = "default_source_format")]
+    source_format: String,
+}
+
+impl ManifestEntryV2 {
+    fn from_runtime(entry: &ManifestEntry, root: &Path) -> Result<Self> {
+        let source_relpath = if entry.source_known {
+            Some(
+                PortablePath::from_absolute(root, &entry.source_path).with_context(|| {
+                    format!(
+                        "make source path {} portable beneath {}",
+                        entry.source_path.display(),
+                        root.display()
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+        let ipod_relpath = if entry.ipod_relpath.is_empty() {
+            None
+        } else {
+            Some(
+                PortablePath::parse(&entry.ipod_relpath.replace(['\\', ':'], "/"))
+                    .context("validate iPod-relative manifest path")?,
+            )
+        };
+        Ok(Self {
+            source_relpath,
+            source_mtime: entry.source_mtime,
+            source_size: entry.source_size,
+            source_fingerprint: entry.source_fingerprint.clone(),
+            ipod_dbid: entry.ipod_dbid,
+            ipod_relpath,
+            audio_fingerprint: entry.audio_fingerprint.clone(),
+            encoder: entry.encoder.clone(),
+            encoder_version: entry.encoder_version.clone(),
+            source_format: entry.source_format.clone(),
+        })
+    }
+
+    fn into_runtime(self, root: &Path) -> ManifestEntry {
+        let (source_path, source_known) = match self.source_relpath {
+            Some(relative) => (relative.resolve(root), true),
+            None => (PathBuf::new(), false),
+        };
+        ManifestEntry {
+            source_path,
+            source_mtime: self.source_mtime,
+            source_size: self.source_size,
+            source_fingerprint: self.source_fingerprint,
+            ipod_dbid: self.ipod_dbid,
+            ipod_relpath: self
+                .ipod_relpath
+                .map(|path| path.as_str().to_string())
+                .unwrap_or_default(),
+            source_known,
+            audio_fingerprint: self.audio_fingerprint,
+            encoder: self.encoder,
+            encoder_version: self.encoder_version,
+            source_format: self.source_format,
+        }
+    }
+}
+
+pub(crate) struct DecodedManifestV2 {
+    pub manifest: Manifest,
+    pub source_identity: Option<SourceIdentity>,
+}
+
+pub(crate) fn decode_v2_document(bytes: &[u8], current_root: &Path) -> Result<DecodedManifestV2> {
+    let document: ManifestV2 =
+        serde_json::from_slice(bytes).context("parse portable manifest v2")?;
+    if document.version != 2 {
+        anyhow::bail!("unsupported manifest version {}", document.version);
+    }
+    if document.ipod_serial.trim().is_empty() {
+        anyhow::bail!("portable manifest has an empty iPod serial");
+    }
+    validate_source_identity(document.source_identity.as_ref())?;
+    let tracks = document
+        .tracks
+        .into_iter()
+        .map(|entry| entry.into_runtime(current_root))
+        .collect();
+    Ok(DecodedManifestV2 {
+        manifest: Manifest {
+            version: 2,
+            ipod_serial: Some(document.ipod_serial),
+            last_source_root: Some(current_root.to_path_buf()),
+            tracks,
+        },
+        source_identity: document.source_identity,
+    })
+}
+
+fn validate_source_identity(identity: Option<&SourceIdentity>) -> Result<()> {
+    match identity {
+        Some(SourceIdentity::Smb { host, share, .. })
+            if host.trim().is_empty() || share.trim().is_empty() =>
+        {
+            anyhow::bail!("portable manifest has an incomplete SMB identity")
+        }
+        Some(SourceIdentity::Local { library_id }) if library_id.trim().is_empty() => {
+            anyhow::bail!("portable manifest has an empty local library identity")
+        }
+        _ => Ok(()),
     }
 }
 
@@ -262,6 +420,8 @@ mod tests {
     use crate::source::SourceEntry;
     use std::path::PathBuf;
 
+    const PORTABLE_V2: &[u8] = include_bytes!("../tests/fixtures/manifest-v2-portable.json");
+
     fn sample_entry(path: &str, fp: &str, size: u64) -> ManifestEntry {
         ManifestEntry {
             source_path: PathBuf::from(path),
@@ -284,6 +444,85 @@ mod tests {
             mtime: 1700000000,
             size,
         }
+    }
+
+    fn portable_source(root: &str) -> crate::source_location::SourceLocation {
+        crate::source_location::SourceLocation {
+            resolved_path: PathBuf::from(root),
+            identity: crate::source_location::SourceIdentity::Smb {
+                host: "jupiter".into(),
+                share: "data".into(),
+                subpath: Some(crate::portable_path::PortablePath::parse("media/music").unwrap()),
+            },
+        }
+    }
+
+    #[test]
+    fn v2_encoding_contains_only_portable_source_paths() {
+        let source = portable_source("/Volumes/data/media/music");
+        let mut manifest = Manifest::empty();
+        manifest.tracks.push(sample_entry(
+            "/Volumes/data/media/music/Birdy/Beautiful Lies/01.flac",
+            "blake3:aa",
+            100,
+        ));
+
+        let bytes = manifest.encode_v2(&source, "SERIAL-1").unwrap();
+        let json = String::from_utf8(bytes).unwrap();
+
+        assert!(json.contains(r#""source_relpath": "Birdy/Beautiful Lies/01.flac""#));
+        assert!(!json.contains("/Volumes/data/media/music"));
+        assert!(!json.contains("last_source_root"));
+    }
+
+    #[test]
+    fn v2_decoding_rebases_portable_paths_under_current_root() {
+        let manifest =
+            Manifest::decode_v2(PORTABLE_V2, Path::new("/Volumes/data/media/music")).unwrap();
+
+        assert_eq!(manifest.version, 2);
+        assert_eq!(manifest.ipod_serial.as_deref(), Some("SERIAL-1"));
+        assert_eq!(
+            manifest.tracks[0].source_path,
+            PathBuf::from("/Volumes/data/media/music/Birdy/Beautiful Lies/01 - Growing Pains.flac")
+        );
+    }
+
+    #[test]
+    fn v2_decoding_rebases_to_a_windows_root_on_any_host() {
+        let manifest = Manifest::decode_v2(PORTABLE_V2, Path::new(r"D:\Music")).unwrap();
+
+        assert_eq!(
+            manifest.tracks[0].source_path,
+            PathBuf::from(r"D:\Music").join("Birdy/Beautiful Lies/01 - Growing Pains.flac")
+        );
+    }
+
+    #[test]
+    fn v2_decoding_rejects_hostile_relative_paths() {
+        let hostile = String::from_utf8(PORTABLE_V2.to_vec()).unwrap().replace(
+            "Birdy/Beautiful Lies/01 - Growing Pains.flac",
+            "Birdy/../../outside.flac",
+        );
+
+        assert!(Manifest::decode_v2(hostile.as_bytes(), Path::new("/Music")).is_err());
+    }
+
+    #[test]
+    fn v2_round_trips_a_rebuilt_track_with_no_device_path_as_source_unknown() {
+        let source = portable_source("/Volumes/data/media/music");
+        let mut manifest = Manifest::empty();
+        let mut rebuilt = sample_entry("", "", 0);
+        rebuilt.source_known = false;
+        rebuilt.ipod_relpath.clear();
+        manifest.tracks.push(rebuilt);
+
+        let bytes = manifest.encode_v2(&source, "SERIAL-1").unwrap();
+        let decoded = Manifest::decode_v2(&bytes, &source.resolved_path).unwrap();
+
+        assert!(!decoded.tracks[0].source_known);
+        assert!(decoded.tracks[0].source_path.as_os_str().is_empty());
+        assert!(decoded.tracks[0].ipod_relpath.is_empty());
     }
 
     /// Fingerprint callback that panics if called. Used to assert the fast

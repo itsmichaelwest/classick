@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "ipod_serial": "SERIAL-1",
+  "last_source_root": "D:\\Music",
+  "tracks": [
+    {
+      "source_path": "D:\\Music\\Birdy\\Beautiful Lies\\01 - Growing Pains.flac",
+      "source_mtime": 1700000000,
+      "source_size": 1234,
+      "source_fingerprint": "blake3:file",
+      "ipod_dbid": 101,
+      "ipod_relpath": "iPod_Control\\Music\\F00\\AAAA.m4a",
+      "source_known": true,
+      "audio_fingerprint": "blake3:audio",
+      "encoder": "ffmpeg",
+      "encoder_version": "ffmpeg 7.0",
+      "source_format": "flac"
+    },
+    {
+      "source_path": "E:\\Other\\orphan.flac",
+      "source_mtime": 1700000001,
+      "source_size": 5678,
+      "source_fingerprint": "blake3:outside",
+      "ipod_dbid": 102,
+      "ipod_relpath": "iPod_Control\\Music\\F00\\BBBB.m4a",
+      "source_known": true,
+      "audio_fingerprint": "",
+      "encoder": "unknown",
+      "encoder_version": "",
+      "source_format": "flac"
+    }
+  ]
+}
