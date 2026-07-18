@@ -23,6 +23,41 @@ impl IokitDeviceWatcher {
     }
 }
 
+fn replace_inventory(
+    devices: &mut HashMap<String, DetectedIpod>,
+    current: Vec<DetectedIpod>,
+) -> Vec<DeviceEvent> {
+    let events = diff_inventory(devices, current.clone());
+    *devices = current.into_iter().fold(HashMap::new(), |mut inventory, ipod| {
+        inventory.insert(canonical_serial_key(&ipod.serial), ipod);
+        inventory
+    });
+    events
+}
+
+fn settle_added_inventory_change(
+    devices: &mut HashMap<String, DetectedIpod>,
+    attempts: usize,
+    scan: &mut dyn FnMut() -> Vec<DetectedIpod>,
+    emit: &mut dyn FnMut(DeviceEvent) -> bool,
+    wait: &mut dyn FnMut(),
+) -> bool {
+    for _ in 0..attempts {
+        let events = replace_inventory(devices, scan());
+        let changed = !events.is_empty();
+        for event in events {
+            if !emit(event) {
+                return false;
+            }
+        }
+        if changed {
+            return true;
+        }
+        wait();
+    }
+    false
+}
+
 impl DeviceWatcher for IokitDeviceWatcher {
     fn start(self: Box<Self>) -> mpsc::Receiver<DeviceEvent> {
         let (tx, rx) = mpsc::channel::<DeviceEvent>(crate::daemon::DEVICE_EVENT_CHANNEL_CAPACITY);
@@ -39,18 +74,14 @@ impl DeviceWatcher for IokitDeviceWatcher {
 
             let rescan = |devices: &mut HashMap<String, DetectedIpod>| -> Option<bool> {
                 let current = device::scan_for_ipods();
-                let present = !current.is_empty();
-                let events = diff_inventory(devices, current.clone());
-                *devices = current.into_iter().fold(HashMap::new(), |mut inventory, ipod| {
-                    inventory.insert(canonical_serial_key(&ipod.serial), ipod);
-                    inventory
-                });
+                let events = replace_inventory(devices, current);
+                let changed = !events.is_empty();
                 for event in events {
                     if tx.blocking_send(event).is_err() {
                         return None;
                     }
                 }
-                Some(present)
+                Some(changed)
             };
 
             // One-shot startup scan (NOT a poll — runs exactly once). The IOKit
@@ -72,17 +103,25 @@ impl DeviceWatcher for IokitDeviceWatcher {
                         // 30s for the mount — a bounded post-event settle, NOT
                         // steady-state polling. There's no second USB event to
                         // fall back on, so giving up early leaves it stuck.
-                        let mut found = false;
-                        for _ in 0..120 {
-                            match rescan(&mut devices) {
-                                Some(true) => {
-                                    found = true;
-                                    break;
-                                }
-                                Some(false) => {}
-                                None => return,
+                        let mut scan = device::scan_for_ipods;
+                        let mut send_failed = false;
+                        let mut emit = |event| match tx.blocking_send(event) {
+                            Ok(()) => true,
+                            Err(_) => {
+                                send_failed = true;
+                                false
                             }
-                            std::thread::sleep(Duration::from_millis(250));
+                        };
+                        let mut wait = || std::thread::sleep(Duration::from_millis(250));
+                        let found = settle_added_inventory_change(
+                            &mut devices,
+                            120,
+                            &mut scan,
+                            &mut emit,
+                            &mut wait,
+                        );
+                        if send_failed {
+                            return;
                         }
                         if !found {
                             tracing::info!(
@@ -127,5 +166,53 @@ impl DeviceWatcher for IokitDeviceWatcher {
         });
 
         rx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ipod(serial: &str) -> DetectedIpod {
+        DetectedIpod {
+            serial: serial.to_string(),
+            model_label: "iPod Classic".to_string(),
+            drive: format!("/Volumes/{serial}"),
+            name: None,
+            volume_guid: None,
+        }
+    }
+
+    fn inventory(ipods: Vec<DetectedIpod>) -> HashMap<String, DetectedIpod> {
+        ipods
+            .into_iter()
+            .map(|ipod| (canonical_serial_key(&ipod.serial), ipod))
+            .collect()
+    }
+
+    #[test]
+    fn added_settle_waits_for_an_inventory_change_when_another_ipod_is_present() {
+        let mut devices = inventory(vec![ipod("0xB")]);
+        let mut scans = vec![vec![ipod("0xB")], vec![ipod("0xA"), ipod("0xB")]];
+        let mut emitted = Vec::new();
+        let mut waits = 0;
+        let mut scan = || scans.remove(0);
+        let mut emit = |event| {
+            emitted.push(event);
+            true
+        };
+        let mut wait = || waits += 1;
+
+        let settled = settle_added_inventory_change(
+            &mut devices,
+            2,
+            &mut scan,
+            &mut emit,
+            &mut wait,
+        );
+
+        assert!(settled);
+        assert_eq!(waits, 1, "unchanged B must not settle A's Added signal");
+        assert_eq!(emitted, vec![DeviceEvent::Connected(ipod("0xA"))]);
     }
 }
