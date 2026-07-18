@@ -270,17 +270,20 @@ pub(crate) fn build_playlist_summaries(store: &PlaylistStore, index: &LibraryInd
 /// currently connected (its live `StorageInfo::free_bytes`); `store` is
 /// `Option` so a playlist-store-open failure degrades to "no playlist
 /// extras" rather than failing the whole preview. `projected_free_bytes`
-/// subtracts a "net-new" estimate — `selected_bytes + playlist_extra_bytes`
-/// — from `current_free_bytes`. This function has no manifest/on-device
-/// knowledge of what's already synced, so the estimate is conservative (as
-/// if syncing from empty), not an exact post-sync delta; `None` in,
-/// `None` out.
+/// subtracts a "net-new" estimate from `current_free_bytes`: the source
+/// bytes of selected + playlist-extra tracks NOT already on the device per
+/// `already_synced` (the device manifest's source paths). A fully-synced
+/// selection therefore projects no change — without this, the capacity bar
+/// showed a phantom "pending" band for bytes that were already on disk.
+/// Still an estimate (source FLAC size stands in for on-device ALAC size,
+/// and removes aren't credited back); `None` in, `None` out.
 pub(crate) fn compute_device_preview(
     index: &LibraryIndex,
     selection: &Selection,
     subs: &Subscriptions,
     store: Option<&PlaylistStore>,
     current_free_bytes: Option<u64>,
+    already_synced: &HashSet<PathBuf>,
 ) -> DaemonEvent {
     let mut selected_tracks = 0usize;
     let mut selected_bytes = 0u64;
@@ -319,7 +322,20 @@ pub(crate) fn compute_device_preview(
     let playlist_extra_bytes: u64 =
         extra_paths.iter().filter_map(|p| index.files.get(p)).map(|t| t.size).sum();
 
-    let net_new = selected_bytes.saturating_add(playlist_extra_bytes);
+    let net_new: u64 = selected_paths
+        .iter()
+        .copied()
+        .filter(|p| !already_synced.contains(*p))
+        .filter_map(|p| index.files.get(p))
+        .map(|t| t.size)
+        .chain(
+            extra_paths
+                .iter()
+                .filter(|p| !already_synced.contains(p.as_path()))
+                .filter_map(|p| index.files.get(p))
+                .map(|t| t.size),
+        )
+        .sum();
     let projected_free_bytes = current_free_bytes.map(|free| free.saturating_sub(net_new));
 
     DaemonEvent::DevicePreview {
@@ -571,8 +587,8 @@ mod tests {
         };
         let subs = Subscriptions { version: 1, playlists: vec!["extra".into()] };
 
-        let event =
-            compute_device_preview(&idx, &selection, &subs, Some(&store), Some(10_000));
+        let event = compute_device_preview(
+            &idx, &selection, &subs, Some(&store), Some(10_000), &HashSet::new());
         match event {
             DaemonEvent::DevicePreview {
                 selected_tracks, selected_bytes, playlist_extra_tracks, playlist_extra_bytes, projected_free_bytes,
@@ -589,13 +605,45 @@ mod tests {
         }
     }
 
+    /// Regression (2026-07-18): the projection used to assume "syncing from
+    /// empty", so a fully-synced selection still showed a phantom pending
+    /// band on the capacity bar. Tracks already in the device manifest must
+    /// not count toward net-new; a partially-synced selection counts only
+    /// the missing tracks.
+    #[test]
+    fn compute_device_preview_already_synced_tracks_project_no_change() {
+        let idx = index_with(vec![
+            ("/m/a.flac", track("X", "", "A", "G", 1_000)),
+            ("/m/b.flac", track("X", "", "B", "G", 300)),
+        ]);
+        let subs = Subscriptions::default();
+
+        let all_synced: HashSet<PathBuf> =
+            [PathBuf::from("/m/a.flac"), PathBuf::from("/m/b.flac")].into_iter().collect();
+        match compute_device_preview(&idx, &Selection::all(), &subs, None, Some(10_000), &all_synced) {
+            DaemonEvent::DevicePreview { projected_free_bytes, selected_bytes, .. } => {
+                assert_eq!(selected_bytes, 1_300, "scope totals still report the full selection");
+                assert_eq!(projected_free_bytes, Some(10_000), "nothing new to sync — free space unchanged");
+            }
+            other => panic!("expected DevicePreview, got {other:?}"),
+        }
+
+        let partial: HashSet<PathBuf> = [PathBuf::from("/m/a.flac")].into_iter().collect();
+        match compute_device_preview(&idx, &Selection::all(), &subs, None, Some(10_000), &partial) {
+            DaemonEvent::DevicePreview { projected_free_bytes, .. } => {
+                assert_eq!(projected_free_bytes, Some(10_000 - 300), "only the missing track counts");
+            }
+            other => panic!("expected DevicePreview, got {other:?}"),
+        }
+    }
+
     #[test]
     fn compute_device_preview_no_current_free_projects_none() {
         let idx = index_with(vec![("/m/a.flac", track("X", "", "A", "G", 10))]);
         let selection = Selection::all();
         let subs = Subscriptions::default();
 
-        let event = compute_device_preview(&idx, &selection, &subs, None, None);
+        let event = compute_device_preview(&idx, &selection, &subs, None, None, &HashSet::new());
         match event {
             DaemonEvent::DevicePreview { selected_tracks, projected_free_bytes, .. } => {
                 assert_eq!(selected_tracks, 1);
@@ -612,7 +660,8 @@ mod tests {
         let idx = index_with(vec![("/m/a.flac", track("X", "", "A", "G", 10))]);
         let subs = Subscriptions { version: 1, playlists: vec!["does-not-exist".into()] };
 
-        let event = compute_device_preview(&idx, &Selection::all(), &subs, Some(&store), None);
+        let event = compute_device_preview(
+            &idx, &Selection::all(), &subs, Some(&store), None, &HashSet::new());
         match event {
             DaemonEvent::DevicePreview { playlist_extra_tracks, playlist_extra_bytes, unresolved_subscriptions, .. } => {
                 assert_eq!(playlist_extra_tracks, 0);
@@ -644,7 +693,8 @@ mod tests {
         // is sorted, not just insertion-order.
         let subs = Subscriptions { version: 1, playlists: vec!["zzz".into(), "gym".into(), "aaa".into()] };
 
-        let event = compute_device_preview(&idx, &Selection::all(), &subs, Some(&store), None);
+        let event = compute_device_preview(
+            &idx, &Selection::all(), &subs, Some(&store), None, &HashSet::new());
         match event {
             DaemonEvent::DevicePreview { unresolved_subscriptions, .. } => {
                 assert_eq!(unresolved_subscriptions, vec!["aaa".to_string(), "zzz".to_string()]);
@@ -658,7 +708,8 @@ mod tests {
         let idx = index_with(vec![("/m/a.flac", track("X", "", "A", "G", 10))]);
         let subs = Subscriptions { version: 1, playlists: vec!["gym".into()] };
 
-        let event = compute_device_preview(&idx, &Selection::all(), &subs, None, None);
+        let event = compute_device_preview(
+            &idx, &Selection::all(), &subs, None, None, &HashSet::new());
         match event {
             DaemonEvent::DevicePreview { unresolved_subscriptions, .. } => {
                 assert_eq!(unresolved_subscriptions, vec!["gym".to_string()]);

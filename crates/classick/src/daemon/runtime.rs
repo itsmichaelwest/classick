@@ -22,7 +22,7 @@ use crate::ipc_daemon::{
 };
 use crate::ipod::device::DetectedIpod;
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -639,7 +639,6 @@ fn handle_internal_event(
             let _ = history.append(entry);
             state.finish_sync();
 
-            let _ = serial;  // recorded in history via trigger context above
             let _ = event_tx.send(DaemonEvent::StatusUpdate {
                 state: DaemonStateLabel::Idle,
                 configured: true,
@@ -647,7 +646,7 @@ fn handle_internal_event(
                 last_sync,
                 next_scheduled_unix_secs: None,
                 storage: current_storage(connected),
-                synced_count: synced_track_count(),
+                synced_count: synced_track_count(Some(&serial)),
                 library_count: *library_count_cache,
             });
         }
@@ -836,7 +835,7 @@ fn start_sync_session(
         last_sync: None,
         next_scheduled_unix_secs: None,
         storage: device_storage::query_storage(&drive),
-        synced_count: synced_track_count(),
+        synced_count: synced_track_count(Some(&serial)),
         library_count: library_count_cache,
     });
 
@@ -956,11 +955,18 @@ fn broadcast_status(
     history: &HistoryService,
     library_count: Option<usize>,
 ) {
-    let configured = config_file::load(config_path)
+    let identity_serial = config_file::load(config_path)
         .ok()
         .flatten()
         .and_then(|c| c.ipod_identity)
-        .is_some();
+        .map(|id| id.serial);
+    let configured = identity_serial.is_some();
+    // Count serial: the live device, else the paired one — a disconnected
+    // iPod's synced count is a fact on disk, not a connection property.
+    let count_serial = connected
+        .as_ref()
+        .map(|d| d.serial.clone())
+        .or(identity_serial);
     // Selection-aware Y: under a non-All selection this is the *selected*
     // track count; under mode=All it returns None and we keep the walk cache.
     let library_count = crate::daemon::library::selected_library_count(config_path)
@@ -973,7 +979,7 @@ fn broadcast_status(
         last_sync: entries.last().cloned(),
         next_scheduled_unix_secs: None,
         storage: current_storage(connected),
-        synced_count: synced_track_count(),
+        synced_count: synced_track_count(count_serial.as_deref()),
         library_count,
     });
 }
@@ -983,11 +989,45 @@ fn broadcast_status(
 /// walk. Falls back to 0 if the manifest path can't be resolved or the
 /// manifest doesn't exist yet (nothing synced yet is a legitimate 0, not
 /// an error worth surfacing on a status tick).
-fn synced_track_count() -> usize {
-    let Ok(manifest_path) = crate::config::default_manifest_path() else { return 0 };
+///
+/// PER-DEVICE since the trust package: syncs write
+/// `devices/<serial>/manifest.json`, but this counter kept reading the
+/// legacy flat path — so the daemon reported `synced_count: 0` for a fully
+/// synced iPod and the UI showed "Nothing synced yet" over real content
+/// (found live 2026-07-18). `serial` = connected device, falling back to
+/// the configured (paired) one; the legacy path remains a pre-migration
+/// fallback until that serial has a per-device manifest.
+fn synced_track_count(serial: Option<&str>) -> usize {
+    let Ok(legacy_path) = crate::config::default_manifest_path() else { return 0 };
+    let Some(config_root) = legacy_path.parent() else { return 0 };
+    synced_track_count_in(config_root, &legacy_path, serial)
+}
+
+fn synced_track_count_in(config_root: &Path, legacy_path: &Path, serial: Option<&str>) -> usize {
+    load_manifest_for_device_in(config_root, legacy_path, serial).tracks.len()
+}
+
+fn load_manifest_for_device(serial: Option<&str>) -> crate::manifest::Manifest {
+    let Ok(legacy_path) = crate::config::default_manifest_path() else {
+        return crate::manifest::Manifest::empty();
+    };
+    let Some(config_root) = legacy_path.parent() else {
+        return crate::manifest::Manifest::empty();
+    };
+    load_manifest_for_device_in(config_root, &legacy_path, serial)
+}
+
+fn load_manifest_for_device_in(
+    config_root: &Path,
+    legacy_path: &Path,
+    serial: Option<&str>,
+) -> crate::manifest::Manifest {
+    let manifest_path = serial
+        .and_then(|s| crate::device_state::device_manifest_path_in(config_root, s).ok())
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| legacy_path.to_path_buf());
     crate::manifest::load_or_default(&manifest_path)
-        .map(|m| m.tracks.len())
-        .unwrap_or(0)
+        .unwrap_or_else(|_| crate::manifest::Manifest::empty())
 }
 
 /// Kick off an off-thread walk of the configured source library to fill the
@@ -1078,6 +1118,10 @@ fn handle_client_command(
             let configured = configured_serial.is_some();
             let library_count = crate::daemon::library::selected_library_count(config_path)
                 .or(*library_count_cache);
+            let count_serial = connected
+                .as_ref()
+                .map(|d| d.serial.clone())
+                .or_else(|| configured_serial.clone());
             let entries = history.read();
             let _ = reply.send(DaemonEvent::StatusUpdate {
                 state: state_label(state),
@@ -1086,7 +1130,7 @@ fn handle_client_command(
                 last_sync: entries.last().cloned(),
                 next_scheduled_unix_secs: None,
                 storage: current_storage(connected),
-                synced_count: synced_track_count(),
+                synced_count: synced_track_count(count_serial.as_deref()),
                 library_count,
             });
         }
@@ -1770,7 +1814,16 @@ fn build_device_preview(
         .filter(|d| d.serial == serial)
         .and_then(|d| device_storage::query_storage(&d.drive))
         .map(|s| s.free_bytes);
-    crate::daemon::library::compute_device_preview(&index, &selection, &subs, store.as_ref().ok(), current_free_bytes)
+    // What's already on the device, from its manifest — so the projection
+    // only counts genuinely-new bytes (a fully-synced selection projects no
+    // change instead of a phantom "pending" band on the capacity bar).
+    let already_synced: std::collections::HashSet<PathBuf> = load_manifest_for_device(Some(serial))
+        .tracks
+        .into_iter()
+        .map(|track| track.source_path)
+        .collect();
+    crate::daemon::library::compute_device_preview(
+        &index, &selection, &subs, store.as_ref().ok(), current_free_bytes, &already_synced)
 }
 
 fn history_file_path() -> Result<PathBuf> {
@@ -1788,6 +1841,65 @@ fn _silence_mpsc_warning(_: mpsc::Sender<DaemonEvent>) {}
 mod tests {
     use super::*;
     use crate::config_file::PersistedConfig;
+
+    fn manifest_with_track_count(count: usize) -> crate::manifest::Manifest {
+        let tracks = (0..count)
+            .map(|i| crate::manifest::ManifestEntry {
+                source_path: PathBuf::from(format!("/music/{i}.flac")),
+                source_mtime: 0,
+                source_size: 1,
+                source_fingerprint: format!("fp-{i}"),
+                ipod_dbid: i as u64 + 1,
+                ipod_relpath: format!("iPod_Control/Music/F00/{i}.m4a"),
+                source_known: true,
+                audio_fingerprint: String::new(),
+                encoder: "unknown".to_string(),
+                encoder_version: String::new(),
+                source_format: "flac".to_string(),
+            })
+            .collect();
+        crate::manifest::Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks,
+        }
+    }
+
+    #[test]
+    fn synced_track_count_prefers_the_device_manifest() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let root = std::env::temp_dir().join(format!(
+            "classick-synced-count-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy_path = root.join("manifest.json");
+        crate::manifest::save_atomic(&legacy_path, &manifest_with_track_count(1)).unwrap();
+        let device_path = crate::device_state::device_manifest_path_in(&root, "SERIAL-1").unwrap();
+        crate::manifest::save_atomic(&device_path, &manifest_with_track_count(3)).unwrap();
+
+        assert_eq!(synced_track_count_in(&root, &legacy_path, Some("SERIAL-1")), 3);
+        assert_eq!(synced_track_count_in(&root, &legacy_path, None), 1);
+
+        std::fs::remove_file(&device_path).unwrap();
+        let preview_manifest = load_manifest_for_device_in(&root, &legacy_path, Some("SERIAL-1"));
+        assert_eq!(
+            preview_manifest.tracks.len(),
+            1,
+            "capacity preview must use the legacy manifest on an upgraded legacy-only install"
+        );
+        assert_eq!(
+            synced_track_count_in(&root, &legacy_path, Some("SERIAL-1")),
+            1,
+            "a known serial must fall back to the legacy manifest until its per-device manifest exists"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn state_label_maps_scan_sessions_to_scanning() {
