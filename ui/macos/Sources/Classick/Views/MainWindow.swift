@@ -14,11 +14,9 @@ struct MainWindow: View {
     var onPreview: (SelectionMode, [SelectionRule]) -> Void
     var onSaveSelection: (SelectionMode, [SelectionRule]) -> Void
     var onScan: () -> Void
-    var onSaveSettings: (_ source: String?, _ daemon: DaemonSettings) -> Void
     var onForgetIpod: () -> Void
     var onBackfill: () -> Void
     var onSetUp: () -> Void
-    var onSaveIpodSelection: (Bool) -> Void = { _ in }
     var onReplaceLibrary: () -> Void = {}
     var onAppearRequests: () -> Void = {}
     // Required (no no-op default): a defaulted `{ _ in }` here is exactly how
@@ -30,6 +28,8 @@ struct MainWindow: View {
     var onLoadDeviceConfig: (String) -> Void = { _ in }
     var onPreviewDevice: (String) -> Void = { _ in }
     var onSaveDeviceConfig: (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> Void = { _, _, _ in }
+    // Device Settings page (Task 6).
+    var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> Void = { _, _ in }
 
     private var selection: Binding<SidebarDestination?> {
         Binding(get: { model.selectedDestination }, set: { model.selectedDestination = $0 })
@@ -76,13 +76,12 @@ struct MainWindow: View {
                     onLoadDeviceConfig: onLoadDeviceConfig, onPreviewDevice: onPreviewDevice,
                     onSaveDeviceConfig: onSaveDeviceConfig)
                     .id(serial)
-            case .device(_, .settings):
-                // Device Settings page is built out in Task 6; for now it
-                // routes to the existing dashboard so navigation is
-                // exercisable end-to-end.
-                DeviceView(model: model, onSaveSettings: onSaveSettings,
-                           onForgetIpod: onForgetIpod, onBackfill: onBackfill,
-                           onSaveIpodSelection: onSaveIpodSelection, onReplaceLibrary: onReplaceLibrary)
+            case let .device(serial, .settings):
+                DeviceSettingsPage(
+                    model: model, serial: serial,
+                    onLoadDeviceConfig: onLoadDeviceConfig, onSaveDeviceSettings: onSaveDeviceSettings,
+                    onForgetIpod: onForgetIpod, onBackfill: onBackfill, onReplaceLibrary: onReplaceLibrary)
+                    .id(serial)
             case let .playlist(slug):
                 // Playlist editor pages are built in Task 7.
                 ContentUnavailableView(

@@ -1,0 +1,225 @@
+import SwiftUI
+
+/// The device Settings page (Task 6, Figma frame `4:6349`) — per-device
+/// preferences plus destructive/removal actions, split out of the retired
+/// `DeviceView` dashboard now that the sidebar routes Music (Task 5, sync
+/// intent) and Settings (here) to separate canonical pages. This page never
+/// touches selection rules or playlist subscriptions — Global Constraints:
+/// "canonical-surface (no sync-intent editing here — that's the Music
+/// page)" — every toggle edit here sends `save_device_config` with ONLY
+/// `settings` populated (see `DeviceSettingsLogic.saveSettingsCommand`).
+///
+/// Edits a local draft and auto-saves it (debounced), mirroring
+/// `DeviceMusicPage`'s pattern: seed the draft once from the daemon's
+/// `device_config_update` reply, never re-seed after the user starts
+/// editing (so a late/echoed reply can't clobber an in-progress edit).
+struct DeviceSettingsPage: View {
+    var model: AppModel
+    var serial: String
+    var onLoadDeviceConfig: (String) -> Void
+    var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> Void
+    var onForgetIpod: () -> Void
+    var onBackfill: () -> Void
+    var onReplaceLibrary: () -> Void
+
+    private struct SettingsDraft: Equatable {
+        var autoSync = true
+        var rockboxCompat = false
+    }
+
+    @State private var draft = SettingsDraft()
+    @State private var seededFromModel = false
+    @State private var userEdited = false
+    @State private var saveTask: Task<Void, Never>?
+    @State private var showReplaceConfirm = false
+
+    private var config: DeviceConfigState? { model.deviceConfigs[serial] }
+    private var isConnected: Bool { model.device?.serial == serial }
+    private var deviceName: String {
+        model.device?.name ?? model.device?.model ?? model.config?.ipod?.name ?? model.config?.ipod?.modelLabel ?? "This iPod"
+    }
+    private var syncedSummary: String {
+        if let total = model.libraryCount { return "\(model.syncedCount) of \(total)" }
+        return "\(model.syncedCount)"
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Name", value: deviceName)
+                if let storage = model.storageText { LabeledContent("Capacity", value: storage) }
+                LabeledContent("Synced", value: syncedSummary)
+                if let last = model.lastSync {
+                    LabeledContent("Last synced", value: shortDate(last.timestamp))
+                }
+                if let caption = DeviceSettingsLogic.caption(isConnected: isConnected) {
+                    Text(caption).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Section {
+                Toggle("Sync automatically when connected", isOn: Binding(
+                    get: { draft.autoSync }, set: { draft.autoSync = $0 }))
+                Toggle("Rockbox compatibility mode", isOn: Binding(
+                    get: { draft.rockboxCompat }, set: { draft.rockboxCompat = $0 }))
+                Button("Force update artwork and metadata", action: onBackfill)
+            }
+            Section {
+                Button("Replace Library…", role: .destructive) { showReplaceConfirm = true }
+                    .disabled(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: model.phase))
+                Text("Erase iPod and re-sync current selection")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Button("Remove iPod", role: .destructive, action: onForgetIpod)
+                Text(DeviceSettingsLogic.removeCaption(deviceName: deviceName))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        // Same dual-coverage rationale as `DeviceMusicPage`: `.task(id:)`
+        // covers a config already cached from a prior visit this launch
+        // (seed fires immediately); the `.onChange` covers the reply
+        // arriving after this view appears.
+        .task(id: serial) {
+            seedIfNeeded()
+            onLoadDeviceConfig(serial)
+        }
+        .onChange(of: config?.settings) { _, _ in seedIfNeeded() }
+        .onChange(of: draft) { _, newDraft in
+            userEdited = true
+            scheduleSave(newDraft)
+        }
+        .sheet(isPresented: $showReplaceConfirm) {
+            ReplaceLibraryConfirmationSheet(
+                deviceName: deviceName,
+                syncedCount: model.syncedCount,
+                onConfirm: {
+                    onReplaceLibrary()
+                    showReplaceConfirm = false
+                },
+                onCancel: { showReplaceConfirm = false }
+            )
+        }
+    }
+
+    private func shortDate(_ iso: String) -> String {
+        guard let d = ISO8601DateFormatter().date(from: iso) else { return iso }
+        return d.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    /// Seeds the local draft from the persisted per-device settings exactly
+    /// once, and never after the user has started editing.
+    private func seedIfNeeded() {
+        guard !seededFromModel, !userEdited, let config else { return }
+        draft = SettingsDraft(autoSync: config.settings.autoSync, rockboxCompat: config.settings.rockboxCompat)
+        seededFromModel = true
+    }
+
+    /// Debounced auto-save: every toggle edit sends `save_device_config`
+    /// with only `settings` populated (selection/subscriptions stay nil —
+    /// this page never edits sync intent). Mirrors `DeviceMusicPage`'s
+    /// 400ms `scheduleSave`.
+    private func scheduleSave(_ d: SettingsDraft) {
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            onSaveDeviceSettings(serial, DeviceSettingsWire(autoSync: d.autoSync, rockboxCompat: d.rockboxCompat))
+        }
+    }
+}
+
+/// Pure logic backing `DeviceSettingsPage` — no SwiftUI, fully
+/// unit-testable. Follows `DeviceMusicLogic`'s pattern of a plain static-fn
+/// enum alongside its view.
+enum DeviceSettingsLogic {
+    /// THE load-bearing function for this page: builds the
+    /// `save_device_config` command for a toggle edit, touching ONLY
+    /// `settings` — `selection`/`subscriptions` stay `nil` ("don't change"),
+    /// so a Settings-page edit can never disturb the Music page's sync
+    /// intent. Returns the real `DaemonCommand` (not a bespoke struct) so
+    /// tests can assert the exact wire shape via `JSONSerialization`, same
+    /// as `WireCodecTests`.
+    static func saveSettingsCommand(serial: String, settings: DeviceSettingsWire) -> DaemonCommand {
+        .saveDeviceConfig(serial: serial, selection: nil, subscriptions: nil, settings: settings)
+    }
+
+    /// Replace Library's disabled predicate: only guards against racing an
+    /// in-flight sync/scan (mirrors the retired `DeviceView`'s
+    /// `isSyncOrScanRunning`) — the daemon itself rejects a disconnected
+    /// Replace with `sync_rejected`, so disconnected devices stay editable
+    /// per the Global Constraints rather than being disabled here too.
+    static func isReplaceLibraryDisabled(phase: Phase) -> Bool {
+        switch phase {
+        case .syncing, .scanning: return true
+        default: return false
+        }
+    }
+
+    /// Disconnected-device caption (Global Constraints exact string) — `nil`
+    /// when connected so the page renders no extra line.
+    static func caption(isConnected: Bool) -> String? {
+        isConnected ? nil : "Not connected — changes apply on next sync"
+    }
+
+    /// "Remove {name} from Classick" caption above the Remove iPod button.
+    static func removeCaption(deviceName: String) -> String {
+        "Remove \(deviceName) from Classick"
+    }
+}
+
+/// Typed-confirmation gate for "Replace Library…" — the Confirm button only
+/// arms once the user has typed the device's exact name, case-sensitive —
+/// the same pattern GitHub uses for "delete this repository". Relocated
+/// verbatim from the retired `DeviceView` (Task 6); pure + `static` so it's
+/// unit-testable without a view.
+enum ReplaceConfirmation {
+    static func isArmed(input: String, deviceName: String) -> Bool {
+        !deviceName.isEmpty && input == deviceName
+    }
+}
+
+/// "Replace Library…" confirmation sheet. Cancel is always available; Confirm
+/// is disabled until `ReplaceConfirmation.isArmed` — see that type's doc
+/// comment. Sending `replace_library` itself is the caller's job
+/// (`onConfirm`); this view only gates the click. Relocated verbatim from
+/// the retired `DeviceView` (Task 6).
+private struct ReplaceLibraryConfirmationSheet: View {
+    var deviceName: String
+    var syncedCount: Int
+    var onConfirm: () -> Void
+    var onCancel: () -> Void
+
+    @State private var input = ""
+
+    private var isArmed: Bool {
+        ReplaceConfirmation.isArmed(input: input, deviceName: deviceName)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Replace Library on “\(deviceName)”?")
+                .font(.headline)
+            Text("This removes all \(syncedCount) tracks currently on “\(deviceName)”, then syncs your current selection.")
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Type “\(deviceName)” to confirm.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            TextField("Device name", text: $input)
+                .textFieldStyle(.roundedBorder)
+                .autocorrectionDisabled()
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Replace Library", role: .destructive, action: onConfirm)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!isArmed)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+    }
+}

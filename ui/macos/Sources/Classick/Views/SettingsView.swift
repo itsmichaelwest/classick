@@ -35,7 +35,6 @@ private struct GeneralTab: View {
     @State private var enabled = true
     @State private var scheduleMinutes: UInt32 = 0
     @State private var launchAtLogin = false
-    @State private var rockboxCompat = false
     @State private var isPickingFolder = false
     @State private var saveTask: Task<Void, Never>?
 
@@ -100,13 +99,7 @@ private struct GeneralTab: View {
                     }
                 ))
 
-            Toggle(
-                "Rockbox compatibility (embed tags & art in files)",
-                isOn: Binding(
-                    get: { rockboxCompat },
-                    set: { rockboxCompat = $0; scheduleSave() }
-                ))
-            Text("Embeds tags + cover art into the files so an iPod running Rockbox can read your library (applies to newly synced tracks). Keep any files you copy to the iPod yourself outside iPod_Control.")
+            Text("Rockbox compatibility mode moved to each iPod's own Settings page — select an iPod in the sidebar to change it.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
@@ -144,12 +137,15 @@ private struct GeneralTab: View {
             enabled = daemon.enabled
             scheduleMinutes = daemon.scheduleMinutes
             launchAtLogin = daemon.autostartWithWindows
-            rockboxCompat = daemon.rockboxCompat
         }
     }
 
     /// Debounces edits (toggles/picker/re-pick) into a single `save_config`
     /// 400ms after the last change, so rapid toggling doesn't spam the wire.
+    /// `rockboxCompat` is no longer editable from this view (Task 6: moved
+    /// to the per-device Settings page) but is still read straight from
+    /// `model.config` here so a save from THIS view can't reset whatever
+    /// value is currently persisted.
     private func scheduleSave() {
         saveTask?.cancel()
         saveTask = Task {
@@ -162,7 +158,7 @@ private struct GeneralTab: View {
                 subsequentSyncMode: model.config?.daemon?.subsequentSyncMode ?? "auto_apply",
                 scheduleMinutes: scheduleMinutes,
                 notifyOn: model.config?.daemon?.notifyOn ?? "all",
-                rockboxCompat: rockboxCompat)
+                rockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
             onSave(sourcePath, daemon)
         }
     }

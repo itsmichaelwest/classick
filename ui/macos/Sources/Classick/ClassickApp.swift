@@ -177,28 +177,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.send(.forgetIpod) }
     }
 
-    /// Device view's Selection picker (Task 17). SaveConfig replaces the
-    /// whole `ipod` blob, so this must be built from the *current* persisted
-    /// identity with only `customSelection` flipped — never a bare
-    /// `IpodIdentity(serial:modelLabel:...)` construction, which would drop
-    /// `name`/`model_label` and re-trigger the 0.2.1 wizard-clobber lesson
-    /// `IpodIdentity.customSelection`'s doc comment warns about. No-ops if
-    /// there's no persisted identity yet (nothing to flip).
-    func saveIpodSelection(customSelection: Bool) {
-        guard let ipod = Self.withCustomSelection(customSelection, from: model.config?.ipod) else { return }
-        Task { await daemonClient.send(.saveConfig(source: nil, daemon: nil, ipod: ipod)) }
-    }
-
-    /// Pure identity-preserving update used by `saveIpodSelection`. Static so
-    /// the preservation is unit-testable, mirroring `setupIpodIdentity` /
-    /// `setupDaemonSettings` above.
+    /// Pure identity-preserving update, kept for its dedicated coverage
+    /// (`AppModelReducerTests`) even though its former caller — the retired
+    /// `DeviceView`'s Shared/Custom Selection picker — was removed in Task 6
+    /// of the app restructure: per-device selection is now handled entirely
+    /// through `device_config` (Task 5's Music page), making a top-level
+    /// "shared vs. custom" toggle redundant. `IpodIdentity.customSelection`
+    /// itself stays alive via `setupIpodIdentity`/`finishSetup`, which still
+    /// need to preserve it across wizard re-runs.
     static func withCustomSelection(_ customSelection: Bool, from existing: IpodIdentity?) -> IpodIdentity? {
         guard let existing else { return nil }
         return IpodIdentity(serial: existing.serial, modelLabel: existing.modelLabel, name: existing.name, customSelection: customSelection)
     }
 
-    /// "Replace Library…" confirmation sheet's confirm action (Task 17). The
-    /// UI (`DeviceView`) is responsible for obtaining the user's typed
+    /// "Replace Library…" confirmation sheet's confirm action. The UI
+    /// (`DeviceSettingsPage`) is responsible for obtaining the user's typed
     /// confirmation before calling this — mirrors `replace_library`'s own
     /// contract on the wire (see `DaemonCommand.replaceLibrary`'s doc
     /// comment): the daemon does not prompt.
@@ -287,6 +280,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// Settings page's job (Task 6).
     func saveDeviceConfig(serial: String, selection: SelectionState?, subscriptions: SubscriptionsWire?) {
         Task { await daemonClient.send(.saveDeviceConfig(serial: serial, selection: selection, subscriptions: subscriptions, settings: nil)) }
+    }
+
+    /// Device Settings page's debounced auto-save (Task 6): the mirror image
+    /// of `saveDeviceConfig` above — `selection`/`subscriptions` are always
+    /// omitted (nil = "don't change") via `DeviceSettingsLogic.saveSettingsCommand`,
+    /// so a toggle edit here can never disturb the Music page's sync intent.
+    func saveDeviceSettings(serial: String, settings: DeviceSettingsWire) {
+        Task { await daemonClient.send(DeviceSettingsLogic.saveSettingsCommand(serial: serial, settings: settings)) }
     }
 
     /// No-op under `swift test` (see `Updater.swift`) — SPM's `Package.swift`
@@ -380,11 +381,9 @@ struct ClassickApp: App {
                 onPreview: { mode, rules in appDelegate.previewSelection(mode: mode, rules: rules) },
                 onSaveSelection: { mode, rules in appDelegate.saveSelectionDirect(mode: mode, rules: rules) },
                 onScan: appDelegate.rescan,
-                onSaveSettings: appDelegate.saveSettings,
                 onForgetIpod: appDelegate.forgetIpod,
                 onBackfill: appDelegate.backfillRockbox,
                 onSetUp: appDelegate.presentSetup,
-                onSaveIpodSelection: { custom in appDelegate.saveIpodSelection(customSelection: custom) },
                 onReplaceLibrary: appDelegate.replaceLibrary,
                 onAppearRequests: appDelegate.requestLibraryAndSelection,
                 onSavePlaylist: { payload in appDelegate.savePlaylist(payload) },
@@ -392,6 +391,9 @@ struct ClassickApp: App {
                 onPreviewDevice: { serial in appDelegate.previewDevice(serial: serial) },
                 onSaveDeviceConfig: { serial, selection, subscriptions in
                     appDelegate.saveDeviceConfig(serial: serial, selection: selection, subscriptions: subscriptions)
+                },
+                onSaveDeviceSettings: { serial, settings in
+                    appDelegate.saveDeviceSettings(serial: serial, settings: settings)
                 }
             )
         }
