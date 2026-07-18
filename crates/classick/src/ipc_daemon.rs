@@ -365,7 +365,7 @@ pub struct LibraryGenre {
     pub bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonStateLabel {
     Idle,
@@ -373,7 +373,7 @@ pub enum DaemonStateLabel {
     Scanning,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncRejectReason {
     AlreadySyncing,

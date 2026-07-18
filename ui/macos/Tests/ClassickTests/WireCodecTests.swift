@@ -25,6 +25,14 @@ final class WireCodecTests: XCTestCase {
     XCTAssertNil(s.storage)
   }
 
+  func testDecodesStatusUpdateAcknowledgedRequestID() throws {
+    let json =
+      #"{"type":"status_update","state":"idle","configured":false,"ipod_connected":false,"synced_count":0,"acknowledged_request_id":"request-status"}"#
+    let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+    guard case .statusUpdate(let info) = event else { return XCTFail() }
+    XCTAssertEqual(info.acknowledgedRequestID, "request-status")
+  }
+
   /// Verbatim `status_update` captured from a LIVE daemon (2026-07-18)
   /// with an iPod connected. Pins the `storage` wire keys
   /// (`free_bytes`/`total_bytes` — Rust `StorageInfo`): Swift once

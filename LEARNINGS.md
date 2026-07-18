@@ -581,3 +581,14 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   FIFO reply inference plus fire-and-forget writes can misroute concurrent
   drops or lose them across reconnects, so the macOS UI must not expose the
   feature until the daemon protocol supplies those guarantees.
+
+## Daemon IPC v2 audit (2026-07-18)
+
+- **A hello-first protocol is also an ordering requirement.** Dispatching each
+  socket line in an independent Swift `Task` lets a later event overtake an
+  invalid hello and leak into the UI; the dedicated reader must wait for each
+  actor-isolated line handler before enqueueing the next line.
+- **Validate device targets once before daemon command dispatch.** A required
+  `serial` field is not protection if individual match arms discard it; compare
+  canonical serial keys centrally, preserve the raw serial on the wire, and
+  fail closed before any destructive or active-session operation runs.

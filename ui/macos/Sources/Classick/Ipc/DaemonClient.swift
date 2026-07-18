@@ -8,7 +8,9 @@ import os
 /// stall every other call on this actor (including `send`) for as long as
 /// the daemon stays silent. So the read loop runs on a dedicated background
 /// `Thread`, which only ever touches its own local copy of the fd and
-/// reports decoded lines back onto the actor via `Task { await ... }`. The
+/// reports decoded lines back onto the actor via `Task { await ... }`, waiting
+/// for each line to finish before enqueueing the next so the hello gate cannot
+/// be overtaken by later events. The
 /// only state shared across the isolation boundary is the fd itself (a
 /// plain, Sendable `Int32`); the kernel already serializes concurrent
 /// read/write on it from different threads, so no additional Swift-side
@@ -135,12 +137,15 @@ actor DaemonClient {
             guard !lineData.isEmpty, let self else { continue }
             let wasFirst = isFirstLine
             isFirstLine = false
+            let handled = DispatchSemaphore(value: 0)
             Task {
               await self.handleLine(
                 lineData, isFirstLine: wasFirst,
                 runGeneration: runGeneration,
                 connectionGeneration: connectionGeneration)
+              handled.signal()
             }
+            handled.wait()
           }
         }
         resume.resume()
@@ -184,9 +189,9 @@ actor DaemonClient {
 
     if isFirstLine {
       guard case .hello(let protocolVersion, _) = event,
-        protocolVersion.split(separator: ".").first == "1"
+        Self.supportsDaemonProtocol(protocolVersion)
       else {
-        let message = "daemon handshake failed: expected hello major version 1, got \(event)"
+        let message = "daemon handshake failed: expected hello major version 2, got \(event)"
         logger.fault("\(message, privacy: .public)")
         lastFatalError = message
         isRunning = false
@@ -218,6 +223,10 @@ actor DaemonClient {
   ) -> Bool {
     runGeneration == currentRunGeneration
       && connectionGeneration == currentConnectionGeneration
+  }
+
+  nonisolated static func supportsDaemonProtocol(_ version: String) -> Bool {
+    version.split(separator: ".").first == "2"
   }
 
   // MARK: - Raw POSIX socket I/O

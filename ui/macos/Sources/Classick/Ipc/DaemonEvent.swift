@@ -387,6 +387,7 @@ enum DaemonEvent: Decodable, Sendable {
       let storage = try container.decodeIfPresent(StatusInfo.Storage.self, forKey: .storage)
       let syncedCount = try container.decodeIfPresent(Int.self, forKey: .syncedCount) ?? 0
       let libraryCount = try container.decodeIfPresent(Int.self, forKey: .libraryCount)
+      let requestID = try container.decodeIfPresent(String.self, forKey: .acknowledgedRequestID)
       self = .statusUpdate(
         StatusInfo(
           state: state,
@@ -396,7 +397,8 @@ enum DaemonEvent: Decodable, Sendable {
           nextScheduledUnixSecs: nextScheduledUnixSecs,
           storage: storage,
           syncedCount: syncedCount,
-          libraryCount: libraryCount))
+          libraryCount: libraryCount,
+          acknowledgedRequestID: requestID))
     case "config_update":
       let source = try container.decodeIfPresent(String.self, forKey: .source)
       let daemon = try container.decodeIfPresent(DaemonSettings.self, forKey: .daemon)

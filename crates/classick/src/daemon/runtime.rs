@@ -8,7 +8,7 @@
 //! a scripted device watcher and a fake spawn-fn.
 
 use crate::config_file::{self, PersistedConfig};
-use crate::daemon::device_registry::DeviceRegistry;
+use crate::daemon::device_registry::{canonical_serial_key, DeviceRegistry};
 use crate::daemon::device_storage::{self, StorageInfo};
 #[cfg(not(target_os = "macos"))]
 use crate::daemon::device_watcher::PollingDeviceWatcher;
@@ -71,6 +71,7 @@ pub async fn run_daemon() -> Result<()> {
             let rockbox_compat =
                 crate::device_config::DeviceSettings::load_or_migrate(&serial, &global)
                     .rockbox_compat;
+            let event_context = sync_orchestrator::SyncEventContext::device(serial);
             Box::pin(async move {
                 sync_orchestrator::run(
                     exe,
@@ -80,6 +81,7 @@ pub async fn run_daemon() -> Result<()> {
                     pause_rx,
                     prompt_rx,
                     event_tx,
+                    event_context,
                 )
                 .await
             })
@@ -89,12 +91,19 @@ pub async fn run_daemon() -> Result<()> {
     let exe_for_backfill = std::env::current_exe()?;
     let event_tx_for_backfill = event_tx.clone();
     let spawn_backfill: SpawnFn = Arc::new(
-        move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
+        move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
             let exe = exe_for_backfill.clone();
             let event_tx = event_tx_for_backfill.clone();
+            let event_context = sync_orchestrator::SyncEventContext::device(serial);
             Box::pin(async move {
                 sync_orchestrator::run_backfill(
-                    exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx,
+                    exe,
+                    drive,
+                    cancel_rx,
+                    pause_rx,
+                    prompt_rx,
+                    event_tx,
+                    event_context,
                 )
                 .await
             })
@@ -104,12 +113,19 @@ pub async fn run_daemon() -> Result<()> {
     let exe_for_replace = std::env::current_exe()?;
     let event_tx_for_replace = event_tx.clone();
     let spawn_replace_library: SpawnFn = Arc::new(
-        move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
+        move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
             let exe = exe_for_replace.clone();
             let event_tx = event_tx_for_replace.clone();
+            let event_context = sync_orchestrator::SyncEventContext::device(serial);
             Box::pin(async move {
                 sync_orchestrator::run_replace_library(
-                    exe, drive, cancel_rx, pause_rx, prompt_rx, event_tx,
+                    exe,
+                    drive,
+                    cancel_rx,
+                    pause_rx,
+                    prompt_rx,
+                    event_tx,
+                    event_context,
                 )
                 .await
             })
@@ -122,8 +138,17 @@ pub async fn run_daemon() -> Result<()> {
         move |_serial: String, _drive: String, cancel_rx, pause_rx, prompt_rx| {
             let exe = exe_for_scan.clone();
             let event_tx = event_tx_for_scan.clone();
+            let event_context = sync_orchestrator::SyncEventContext::global_scan();
             Box::pin(async move {
-                sync_orchestrator::run_scan(exe, cancel_rx, pause_rx, prompt_rx, event_tx).await
+                sync_orchestrator::run_scan(
+                    exe,
+                    cancel_rx,
+                    pause_rx,
+                    prompt_rx,
+                    event_tx,
+                    event_context,
+                )
+                .await
             })
         },
     );
@@ -253,6 +278,96 @@ enum InternalEvent {
     },
 }
 
+#[derive(Debug, Default)]
+struct ConfigRevision(u64);
+
+impl ConfigRevision {
+    fn current(&self) -> u64 {
+        self.0
+    }
+
+    fn record_persisted_mutation(&mut self, did_mutate: bool) -> u64 {
+        if did_mutate {
+            self.0 = self
+                .0
+                .checked_add(1)
+                .expect("daemon config revision space exhausted");
+        }
+        self.0
+    }
+
+    #[cfg(test)]
+    fn advance_after_persist(&mut self) -> u64 {
+        self.record_persisted_mutation(true)
+    }
+}
+
+fn same_serial(left: &str, right: &str) -> bool {
+    canonical_serial_key(left) == canonical_serial_key(right)
+}
+
+fn configured_connected_device<'a>(
+    configured_serial: Option<&str>,
+    connected: &'a Option<DetectedIpod>,
+) -> Option<&'a DetectedIpod> {
+    configured_serial
+        .zip(connected.as_ref())
+        .filter(|(configured, device)| same_serial(configured, &device.serial))
+        .map(|(_, device)| device)
+}
+
+fn singleton_target_rejection(
+    command: &DaemonCommand,
+    connected: &Option<DetectedIpod>,
+    configured_serial: Option<&str>,
+    state: &StateMachine,
+) -> Option<SyncRejectReason> {
+    let requested = command.target_serial()?;
+    let connected_serial = connected.as_ref().map(|device| device.serial.as_str());
+
+    if configured_serial
+        .zip(connected_serial)
+        .is_some_and(|(configured, connected)| !same_serial(configured, connected))
+    {
+        return Some(SyncRejectReason::NotConfigured);
+    }
+
+    let (expected, missing_or_mismatch) = match command {
+        DaemonCommand::CancelSync { .. }
+        | DaemonCommand::Pause { .. }
+        | DaemonCommand::DecidePrompt { .. } => {
+            let active_serial = match state.state() {
+                DaemonState::Syncing(session) if session.kind == SessionKind::Sync => {
+                    session.serial.as_deref()
+                }
+                _ => None,
+            };
+            (active_serial, SyncRejectReason::AlreadySyncing)
+        }
+        DaemonCommand::TriggerSync { .. }
+        | DaemonCommand::BackfillRockbox { .. }
+        | DaemonCommand::ReplaceLibrary { .. } => {
+            if configured_serial.is_none() {
+                return Some(SyncRejectReason::NotConfigured);
+            }
+            (connected_serial, SyncRejectReason::NoIpod)
+        }
+        DaemonCommand::ForgetIpod { .. }
+        | DaemonCommand::PreviewSelection { .. }
+        | DaemonCommand::GetDeviceConfig { .. }
+        | DaemonCommand::SaveDeviceConfig { .. }
+        | DaemonCommand::PreviewDevice { .. } => {
+            (configured_serial, SyncRejectReason::NotConfigured)
+        }
+        _ => return None,
+    };
+
+    match expected {
+        Some(actual) if same_serial(requested, actual) => None,
+        _ => Some(missing_or_mismatch),
+    }
+}
+
 /// Test-friendly entry. Production wraps real impls and calls this.
 pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let history_path = match deps.history_path {
@@ -278,6 +393,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
         history.migrate_legacy_entries(&serial)?;
     }
     let mut state = StateMachine::new();
+    let mut config_revision = ConfigRevision::default();
     let mut scheduler = SyncScheduler::new(deps.schedule_minutes);
     let mut debouncer = Debouncer::new(crate::daemon::DEVICE_DEBOUNCE_WINDOW);
     let mut connected: Option<DetectedIpod> = None;
@@ -400,6 +516,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &mut configured_serial,
                     &mut scheduler,
                     &mut library_count_cache,
+                    &mut config_revision,
                 );
                 // A SaveConfig may have changed the source path; re-point the
                 // watcher. rewatch() is a no-op when the path is unchanged.
@@ -436,6 +553,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     configured_serial.as_deref(),
                     &config_path,
                     library_count_cache,
+                    config_revision.current(),
                 );
                 broadcast_status(&event_tx, &state, &connected, &config_path, &history, library_count_cache);
             }
@@ -451,7 +569,16 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     prompt_tx_holder = None;
                     pause_tx_holder = None;
                 }
-                handle_internal_event(internal, &mut state, &event_tx, &history, &mut connected, &config_path, &mut library_count_cache);
+                handle_internal_event(
+                    internal,
+                    &mut state,
+                    &event_tx,
+                    &history,
+                    &mut connected,
+                    &config_path,
+                    &mut library_count_cache,
+                    &mut config_revision,
+                );
             }
 
             Some(()) = new_client_rx.recv() => {
@@ -470,15 +597,17 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                 // necessarily `connected`, though in practice a scheduled
                 // tick only does anything when they match — see the
                 // plug-in gate below for the equivalent check on attach).
-                let scheduled_gate = configured_serial
-                    .as_deref()
-                    .is_some_and(|serial| auto_sync_enabled(&config_path, serial));
-                if connected.is_some() && state.is_idle() && scheduled_gate {
-                    if let Some(drive) = connected.as_ref().map(|d| d.drive.clone()) {
+                let scheduled_device =
+                    configured_connected_device(configured_serial.as_deref(), &connected);
+                if state.is_idle()
+                    && scheduled_device
+                        .is_some_and(|device| auto_sync_enabled(&config_path, &device.serial))
+                {
+                    if let Some(device) = scheduled_device {
                         start_sync_session(
                             SyncTrigger::Scheduled,
-                            connected.as_ref().unwrap().serial.clone(),
-                            drive,
+                            device.serial.clone(),
+                            device.drive.clone(),
                             &mut state,
                             &event_tx,
                             &spawn_sync,
@@ -590,6 +719,7 @@ fn handle_internal_event(
     connected: &mut Option<DetectedIpod>,
     config_path: &std::path::Path,
     library_count_cache: &mut Option<usize>,
+    config_revision: &mut ConfigRevision,
 ) {
     match event {
         InternalEvent::LibraryCountComputed { count } => {
@@ -608,7 +738,7 @@ fn handle_internal_event(
             // the currently-connected device. (Device could've been
             // detached during the iTunesDB parse.)
             let Some(c) = connected.as_mut() else { return };
-            if c.serial != serial {
+            if !same_serial(&c.serial, &serial) {
                 return;
             }
             if c.name == name {
@@ -619,16 +749,20 @@ fn handle_internal_event(
             // Persist the name into the user's IpodIdentity so it
             // survives daemon restarts (read_ipod_name is a 100-500ms
             // op we don't want to repeat unnecessarily).
+            let mut persisted_name_change = false;
             if let Ok(Some(mut cfg)) = config_file::load(config_path) {
                 if let Some(id) = cfg.ipod_identity.as_mut() {
-                    if id.serial == serial && id.name != name {
+                    if same_serial(&id.serial, &serial) && id.name != name {
                         id.name = name.clone();
                         if let Err(e) = config_file::save(config_path, &cfg) {
                             tracing::warn!("daemon: failed to persist iPod name to config: {e}");
+                        } else {
+                            persisted_name_change = true;
                         }
                     }
                 }
             }
+            config_revision.record_persisted_mutation(persisted_name_change);
 
             // Re-broadcast DeviceConnected with the now-populated
             // name, and a ConfigUpdate so the popover/title bar
@@ -640,7 +774,7 @@ fn handle_internal_event(
                 name: c.name.clone(),
             });
             let cfg = config_file::load(config_path).ok().flatten();
-            let _ = event_tx.send(build_config_update(cfg, None));
+            let _ = event_tx.send(build_config_update(cfg, config_revision.current(), None));
             return;
         }
         InternalEvent::SyncCompleted {
@@ -800,6 +934,7 @@ fn handle_device_event(
     configured_serial: Option<&str>,
     config_path: &std::path::Path,
     library_count_cache: Option<usize>,
+    config_revision: u64,
 ) {
     match event {
         DeviceEvent::Connected(mut ipod) => {
@@ -830,6 +965,7 @@ fn handle_device_event(
             // match the connected serial and stays stuck on "Set Up".
             let _ = event_tx.send(build_config_update(
                 config_file::load(config_path).ok().flatten(),
+                config_revision,
                 None,
             ));
 
@@ -856,7 +992,7 @@ fn handle_device_event(
             // Auto-sync only fires for the configured serial AND when the
             // user has opted into automatic mode. Manual mode means they
             // want to drive sync explicitly via the tray's Sync Now action.
-            if configured_serial == Some(ipod.serial.as_str())
+            if configured_serial.is_some_and(|configured| same_serial(configured, &ipod.serial))
                 && state.is_idle()
                 && auto_sync_enabled(config_path, &ipod.serial)
             {
@@ -886,7 +1022,10 @@ fn handle_device_event(
             // be silently dropped (handle_internal_event checks for the
             // already-Idle case).
             if let DaemonState::Syncing(s) = state.state() {
-                if s.serial.as_deref() == Some(&serial) {
+                if s.serial
+                    .as_deref()
+                    .is_some_and(|active| same_serial(active, &serial))
+                {
                     let _ = history.append(make_history_entry(
                         serial.clone(),
                         s.trigger.clone(),
@@ -1243,8 +1382,30 @@ fn handle_client_command(
     configured_serial: &mut Option<String>,
     scheduler: &mut SyncScheduler,
     library_count_cache: &mut Option<usize>,
+    config_revision: &mut ConfigRevision,
 ) -> bool {
     tracing::info!("daemon: client {client_id} command: {command:?}");
+    if let Some(reason) =
+        singleton_target_rejection(&command, connected, configured_serial.as_deref(), state)
+    {
+        let serial = command
+            .target_serial()
+            .expect("target rejection requires a targeted command")
+            .to_string();
+        let request_id = command
+            .request_id()
+            .expect("targeted v2 commands require request correlation")
+            .to_string();
+        let _ = reply.send(DaemonEvent::SyncRejected {
+            reason,
+            serial,
+            acknowledged_request_id: request_id,
+        });
+        tracing::warn!(
+            "daemon: client {client_id} targeted a device other than the current singleton"
+        );
+        return false;
+    }
     match command {
         DaemonCommand::GetStatus { request_id } => {
             let configured = configured_serial.is_some();
@@ -1269,7 +1430,11 @@ fn handle_client_command(
         }
         DaemonCommand::GetConfig { request_id } => {
             let cfg = config_file::load(config_path).ok().flatten();
-            let _ = reply.send(build_config_update(cfg, Some(request_id)));
+            let _ = reply.send(build_config_update(
+                cfg,
+                config_revision.current(),
+                Some(request_id),
+            ));
         }
         DaemonCommand::SaveConfig {
             source,
@@ -1281,6 +1446,7 @@ fn handle_client_command(
                 .ok()
                 .flatten()
                 .unwrap_or_default();
+            let before = current.clone();
             if let Some(s) = source {
                 current.source = Some(PathBuf::from(s));
             }
@@ -1343,6 +1509,7 @@ fn handle_client_command(
                 tracing::error!("daemon: failed to save config: {e}");
                 return false;
             }
+            let persisted_revision = config_revision.record_persisted_mutation(current != before);
             // Invalidate the cached library count — the source path may
             // have changed, which would make the cached Y stale — then kick
             // off a fresh walk so "X of Y" refreshes without waiting for the
@@ -1373,21 +1540,31 @@ fn handle_client_command(
                 );
                 scheduler.rearm(new_minutes);
             }
-            let _ = event_tx.send(build_config_update(Some(current), Some(request_id)));
+            let _ = event_tx.send(build_config_update(
+                Some(current),
+                persisted_revision,
+                Some(request_id),
+            ));
         }
         DaemonCommand::ForgetIpod { request_id, .. } => {
             let mut current = config_file::load(config_path)
                 .ok()
                 .flatten()
                 .unwrap_or_default();
+            let changed = current.ipod_identity.is_some();
             current.ipod_identity = None;
             if let Err(e) = config_file::save(config_path, &current) {
                 tracing::error!("daemon: failed to save config after forget_ipod: {e}");
                 return false;
             }
+            let persisted_revision = config_revision.record_persisted_mutation(changed);
             *configured_serial = None;
             tracing::info!("daemon: client {client_id} cleared the persisted iPod identity");
-            let _ = event_tx.send(build_config_update(Some(current), Some(request_id)));
+            let _ = event_tx.send(build_config_update(
+                Some(current),
+                persisted_revision,
+                Some(request_id),
+            ));
             // Re-announce the currently-attached device (if any) so a
             // freshly-opened wizard sees it. Without this re-emit, the
             // device-watcher's polling loop is in steady-state — the
@@ -1882,6 +2059,7 @@ fn handle_client_command(
 
 fn build_config_update(
     cfg: Option<PersistedConfig>,
+    config_revision: u64,
     acknowledged_request_id: Option<String>,
 ) -> DaemonEvent {
     match cfg {
@@ -1889,14 +2067,14 @@ fn build_config_update(
             source: c.source.map(|p| p.display().to_string()),
             daemon: c.daemon,
             ipod: c.ipod_identity,
-            config_revision: 0,
+            config_revision,
             acknowledged_request_id,
         },
         None => DaemonEvent::ConfigUpdate {
             source: None,
             daemon: None,
             ipod: None,
-            config_revision: 0,
+            config_revision,
             acknowledged_request_id,
         },
     }
@@ -2079,7 +2257,7 @@ fn build_device_preview(
     }
     let current_free_bytes = connected
         .as_ref()
-        .filter(|d| d.serial == serial)
+        .filter(|d| same_serial(&d.serial, serial))
         .and_then(|d| device_storage::query_storage(&d.drive))
         .map(|s| s.free_bytes);
     // What's already on the device, from its manifest — so the projection
@@ -2117,6 +2295,191 @@ fn _silence_mpsc_warning(_: mpsc::Sender<DaemonEvent>) {}
 mod tests {
     use super::*;
     use crate::config_file::PersistedConfig;
+
+    fn detected(serial: &str) -> DetectedIpod {
+        DetectedIpod {
+            serial: serial.to_string(),
+            model_label: "iPod Classic".to_string(),
+            drive: "/Volumes/IPOD".to_string(),
+            name: None,
+            volume_guid: None,
+        }
+    }
+
+    #[test]
+    fn destructive_replace_rejects_a_different_connected_target() {
+        let command = DaemonCommand::ReplaceLibrary {
+            serial: "RAW-B".to_string(),
+            request_id: "replace-b".to_string(),
+        };
+        let state = StateMachine::new();
+        let connected = Some(detected(" raw-a "));
+
+        assert_eq!(
+            singleton_target_rejection(&command, &connected, Some("RAW-A"), &state),
+            Some(SyncRejectReason::NoIpod),
+            "replace_library for B must never wipe the currently connected A"
+        );
+    }
+
+    #[test]
+    fn active_controls_only_target_the_syncing_device() {
+        let mut state = StateMachine::new();
+        state.try_start_sync_for_device(
+            SyncTrigger::Manual,
+            "0xRAW-A".to_string(),
+            "/Volumes/IPOD".to_string(),
+        );
+        let connected = Some(detected("0xRAW-A"));
+        let wrong = DaemonCommand::CancelSync {
+            serial: "RAW-B".to_string(),
+            request_id: "cancel-b".to_string(),
+        };
+        let same_canonical = DaemonCommand::CancelSync {
+            serial: "raw-a".to_string(),
+            request_id: "cancel-a".to_string(),
+        };
+
+        assert_eq!(
+            singleton_target_rejection(&wrong, &connected, Some("RAW-A"), &state),
+            Some(SyncRejectReason::AlreadySyncing)
+        );
+        assert_eq!(
+            singleton_target_rejection(&same_canonical, &connected, Some("RAW-A"), &state),
+            None
+        );
+    }
+
+    #[test]
+    fn forget_only_targets_the_configured_device() {
+        let command = DaemonCommand::ForgetIpod {
+            serial: "RAW-B".to_string(),
+            request_id: "forget-b".to_string(),
+        };
+
+        assert_eq!(
+            singleton_target_rejection(&command, &None, Some("RAW-A"), &StateMachine::new()),
+            Some(SyncRejectReason::NotConfigured)
+        );
+    }
+
+    #[test]
+    fn every_serial_targeted_command_rejects_a_different_singleton() {
+        let commands = vec![
+            DaemonCommand::ForgetIpod {
+                serial: "RAW-B".into(),
+                request_id: "1".into(),
+            },
+            DaemonCommand::TriggerSync {
+                source: TriggerSource::Manual,
+                serial: "RAW-B".into(),
+                request_id: "2".into(),
+            },
+            DaemonCommand::CancelSync {
+                serial: "RAW-B".into(),
+                request_id: "3".into(),
+            },
+            DaemonCommand::Pause {
+                serial: "RAW-B".into(),
+                request_id: "4".into(),
+            },
+            DaemonCommand::DecidePrompt {
+                id: 7,
+                choice: 1,
+                serial: "RAW-B".into(),
+                request_id: "5".into(),
+            },
+            DaemonCommand::BackfillRockbox {
+                serial: "RAW-B".into(),
+                request_id: "6".into(),
+            },
+            DaemonCommand::ReplaceLibrary {
+                serial: "RAW-B".into(),
+                request_id: "7".into(),
+            },
+            DaemonCommand::PreviewSelection {
+                mode: crate::selection::SelectionMode::All,
+                rules: vec![],
+                serial: "RAW-B".into(),
+                request_id: "8".into(),
+            },
+            DaemonCommand::GetDeviceConfig {
+                serial: "RAW-B".into(),
+                request_id: "9".into(),
+            },
+            DaemonCommand::SaveDeviceConfig {
+                serial: "RAW-B".into(),
+                selection: None,
+                subscriptions: None,
+                settings: None,
+                request_id: "10".into(),
+            },
+            DaemonCommand::PreviewDevice {
+                serial: "RAW-B".into(),
+                request_id: "11".into(),
+            },
+        ];
+        let mut state = StateMachine::new();
+        state.try_start_sync_for_device(
+            SyncTrigger::Manual,
+            "RAW-A".into(),
+            "/Volumes/IPOD".into(),
+        );
+        let connected = Some(detected("RAW-A"));
+
+        for command in commands {
+            assert!(
+                singleton_target_rejection(&command, &connected, Some("RAW-A"), &state).is_some(),
+                "must reject mismatched target: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduled_sync_requires_configured_and_connected_serials_to_match() {
+        let connected = Some(detected(" RAW-A "));
+        assert!(configured_connected_device(Some("0xraw-a"), &connected).is_some());
+        assert!(configured_connected_device(Some("RAW-B"), &connected).is_none());
+        assert!(configured_connected_device(None, &connected).is_none());
+    }
+
+    #[test]
+    fn config_revision_is_monotonic_and_changes_only_after_persist() {
+        let mut revision = ConfigRevision::default();
+        assert_eq!(revision.current(), 0);
+        assert_eq!(
+            revision.record_persisted_mutation(false),
+            0,
+            "reads and failed/no-op paths do not advance"
+        );
+        assert_eq!(revision.advance_after_persist(), 1);
+        assert_eq!(revision.advance_after_persist(), 2);
+    }
+
+    #[test]
+    fn config_update_acknowledgements_distinguish_pre_and_post_mutation_order() {
+        let mut revision = ConfigRevision::default();
+        let before = build_config_update(None, revision.current(), Some("read".into()));
+        let persisted = revision.record_persisted_mutation(true);
+        let after = build_config_update(None, persisted, Some("save".into()));
+
+        assert!(matches!(
+            before,
+            DaemonEvent::ConfigUpdate {
+                config_revision: 0,
+                acknowledged_request_id: Some(id),
+                ..
+            } if id == "read"
+        ));
+        assert!(matches!(
+            after,
+            DaemonEvent::ConfigUpdate {
+                config_revision: 1,
+                acknowledged_request_id: Some(id),
+                ..
+            } if id == "save"
+        ));
+    }
 
     #[test]
     fn history_entries_keep_the_syncing_devices_raw_serial() {

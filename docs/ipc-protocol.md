@@ -1333,7 +1333,7 @@ real domain state.
 | `config_update` | `source`, `daemon`, `ipod`, `config_revision` | `acknowledged_request_id` (absent for an unsolicited broadcast) |
 | `history_update` | `entries`, `acknowledged_request_id` | —; there is no top-level `serial` |
 | `sync_rejected` | `reason`, `serial`, `acknowledged_request_id` | — |
-| `sync_event` | `line`, `session_id` | `serial` only for a global scan session |
+| `sync_event` | `line`, `session_id`; `serial` for every device session | `serial` is omitted only for a global scan session |
 | `device_inventory_snapshot` | `revision`, `devices` | Snapshot fields listed below |
 | `selection_preview` | `selected_tracks`, `selected_bytes`, `adds`, `removes`, `serial`, `acknowledged_request_id` | — |
 | `playlist_detail` | existing detail fields, `acknowledged_request_id` | content/error fields retain their documented result semantics |
@@ -1346,6 +1346,12 @@ may be either replies or broadcasts, so their `acknowledged_request_id` is
 optional. `HistoryEntry.serial` is required on the v2 wire;
 `HistoryEntry.session_id` remains optional because migrated historical records
 may predate session attribution.
+
+`config_revision` is monotonic for the lifetime of one daemon process. It
+advances only after a content-changing config write succeeds; reads, failed
+writes, and no-op saves retain the current revision. A new `hello` starts a new
+connection epoch, so clients discard revision ordering from the prior daemon
+process rather than comparing across restarts.
 
 ### Device inventory snapshot
 

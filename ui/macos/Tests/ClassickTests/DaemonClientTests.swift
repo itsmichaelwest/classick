@@ -57,6 +57,56 @@ private final class CommandSink: @unchecked Sendable {
 }
 
 final class DaemonClientTests: XCTestCase {
+    func testDaemonProtocolCompatibilityAcceptsOnlyMajorTwo() {
+        XCTAssertTrue(DaemonClient.supportsDaemonProtocol("2.0.0"))
+        XCTAssertTrue(DaemonClient.supportsDaemonProtocol("2.9.7"))
+        XCTAssertFalse(DaemonClient.supportsDaemonProtocol("1.7.0"))
+        XCTAssertFalse(DaemonClient.supportsDaemonProtocol("3.0.0"))
+        XCTAssertFalse(DaemonClient.supportsDaemonProtocol("invalid"))
+    }
+
+    func testInvalidHelloRejectsBeforeYieldingFollowingEvents() async throws {
+        let path = NSTemporaryDirectory() + "cdbad_\(UUID().uuidString.prefix(8)).sock"
+        defer { unlink(path) }
+
+        let listenFd = makeUnixListener(path: path)
+        defer { close(listenFd) }
+
+        let serverThread = Thread {
+            let clientFd = accept(listenFd, nil, nil)
+            guard clientFd >= 0 else { return }
+            defer { close(clientFd) }
+            writeLine(
+                #"{"type":"hello","protocol_version":"1.7.0","core_version":"2.0.0"}"# + "\n",
+                to: clientFd)
+            writeLine(
+                #"{"type":"device_connected","serial":"RAW-A","model_label":"iPod Classic","drive":"/Volumes/IPOD"}"# + "\n",
+                to: clientFd)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        serverThread.start()
+
+        let client = DaemonClient(socketPath: path)
+        let collector = EventCollector()
+        let stream = await client.events()
+        let consumer = Task {
+            for await event in stream { await collector.append(event) }
+        }
+
+        await client.start()
+        let deadline = Date().addingTimeInterval(5)
+        while await client.lastFatalError == nil && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let fatalError = await client.lastFatalError
+        let events = await collector.events
+        await client.stop()
+        consumer.cancel()
+
+        XCTAssertTrue(events.isEmpty, "invalid hello must gate every following event: \(events)")
+        XCTAssertTrue(fatalError?.contains("expected hello major version 2") == true)
+    }
+
     func testDelayedLineFromPreviousConnectionIsRejectedAfterReconnect() {
         XCTAssertFalse(DaemonClient.isCurrentLine(
             runGeneration: 4, currentRunGeneration: 4,
@@ -91,7 +141,7 @@ final class DaemonClientTests: XCTestCase {
             let clientFd = accept(listenFd, nil, nil)
             guard clientFd >= 0 else { return }
             defer { close(clientFd) }
-            writeLine(#"{"type":"hello","protocol_version":"1.1.0","core_version":"1.1.0"}"# + "\n", to: clientFd)
+            writeLine(#"{"type":"hello","protocol_version":"2.3.4","core_version":"2.3.4"}"# + "\n", to: clientFd)
             writeLine(
                 #"{"type":"device_connected","serial":"0x000A27002138B0A8","model_label":"iPod Classic (3rd gen)","drive":"/Volumes/IPOD","name":"Test iPod"}"#
                     + "\n",
@@ -117,13 +167,15 @@ final class DaemonClientTests: XCTestCase {
         consumer.cancel()
 
         let events = await collector.events
-        XCTAssertGreaterThanOrEqual(events.count, 2, "expected hello + device_connected, got \(events)")
+        guard events.count >= 2 else {
+            return XCTFail("expected hello + device_connected, got \(events)")
+        }
 
         guard case let .hello(protocolVersion, coreVersion) = events[0] else {
             return XCTFail("expected .hello first, got \(events[0])")
         }
-        XCTAssertEqual(protocolVersion, "1.1.0")
-        XCTAssertEqual(coreVersion, "1.1.0")
+        XCTAssertEqual(protocolVersion, "2.3.4")
+        XCTAssertEqual(coreVersion, "2.3.4")
 
         guard case let .deviceConnected(serial, modelLabel, drive, name) = events[1] else {
             return XCTFail("expected .deviceConnected second, got \(events[1])")
@@ -150,7 +202,7 @@ final class DaemonClientTests: XCTestCase {
             let clientFd = accept(listenFd, nil, nil)
             guard clientFd >= 0 else { return }
             defer { close(clientFd) }
-            writeLine(#"{"type":"hello","protocol_version":"1.1.0","core_version":"1.1.0"}"# + "\n", to: clientFd)
+            writeLine(#"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n", to: clientFd)
 
             // Bounded recv so the drain loop can't hang if the client stalls.
             var tv = timeval(tv_sec: 0, tv_usec: 500_000)
@@ -198,7 +250,7 @@ final class DaemonClientTests: XCTestCase {
             for _ in 0..<2 {
                 let clientFd = accept(listenFd, nil, nil)
                 guard clientFd >= 0 else { return }
-                writeLine(#"{"type":"hello","protocol_version":"1.1.0","core_version":"1.1.0"}"# + "\n", to: clientFd)
+                writeLine(#"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n", to: clientFd)
                 Thread.sleep(forTimeInterval: 0.1)
                 close(clientFd)
             }
