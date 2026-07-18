@@ -33,7 +33,8 @@ fn save_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         let mut writer = std::io::BufWriter::new(f);
         std::io::Write::write_all(&mut writer, json.as_bytes())?;
         let f = std::io::BufWriter::into_inner(writer)?;
-        f.sync_all().with_context(|| format!("fsync {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
     }
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
@@ -47,13 +48,19 @@ fn load_json_or_default<T: for<'de> Deserialize<'de> + Default>(kind: &str, path
         Ok(s) => match serde_json::from_str(&s) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("{kind}: parse failed at {} ({e}); using default", path.display());
+                tracing::warn!(
+                    "{kind}: parse failed at {} ({e}); using default",
+                    path.display()
+                );
                 T::default()
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => T::default(),
         Err(e) => {
-            tracing::warn!("{kind}: read failed at {} ({e}); using default", path.display());
+            tracing::warn!(
+                "{kind}: read failed at {} ({e}); using default",
+                path.display()
+            );
             T::default()
         }
     }
@@ -69,7 +76,10 @@ pub struct Subscriptions {
 
 impl Default for Subscriptions {
     fn default() -> Self {
-        Self { version: SUBSCRIPTIONS_VERSION, playlists: Vec::new() }
+        Self {
+            version: SUBSCRIPTIONS_VERSION,
+            playlists: Vec::new(),
+        }
     }
 }
 
@@ -100,7 +110,11 @@ pub struct DeviceSettings {
 
 impl Default for DeviceSettings {
     fn default() -> Self {
-        Self { version: DEVICE_SETTINGS_VERSION, auto_sync: true, rockbox_compat: false }
+        Self {
+            version: DEVICE_SETTINGS_VERSION,
+            auto_sync: true,
+            rockbox_compat: false,
+        }
     }
 }
 
@@ -152,7 +166,24 @@ impl DeviceSettings {
     /// for the exact seed-once contract; on write failure, seeded values are
     /// still returned and seeding is retried on the next call (fail-open).
     pub fn load_or_migrate(serial: &str, global: &crate::config_file::PersistedConfig) -> Self {
-        let path = match crate::device_state::device_settings_path(serial) {
+        let root = match dirs::config_dir() {
+            Some(root) => root.join(crate::PROJECT_DIR),
+            None => {
+                tracing::warn!(
+                    "device_settings: cannot resolve config directory for {serial}; using defaults"
+                );
+                return Self::default();
+            }
+        };
+        Self::load_or_migrate_in(&root, serial, global)
+    }
+
+    pub(crate) fn load_or_migrate_in(
+        root: &Path,
+        serial: &str,
+        global: &crate::config_file::PersistedConfig,
+    ) -> Self {
+        let path = match crate::device_state::device_settings_path_in(root, serial) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
@@ -176,13 +207,20 @@ mod tests {
         let base = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("test-tmp")
-            .join(format!("device_config-{label}-{}-{}", std::process::id(), n));
+            .join(format!(
+                "device_config-{label}-{}-{}",
+                std::process::id(),
+                n
+            ));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base
     }
 
-    fn persisted_config_with_daemon(enabled: bool, rockbox_compat: bool) -> crate::config_file::PersistedConfig {
+    fn persisted_config_with_daemon(
+        enabled: bool,
+        rockbox_compat: bool,
+    ) -> crate::config_file::PersistedConfig {
         crate::config_file::PersistedConfig {
             daemon: Some(crate::config_file::DaemonSettings {
                 enabled,
@@ -199,7 +237,10 @@ mod tests {
     fn subscriptions_load_or_default_missing_file_returns_default() {
         let base = tempdir_under_target("subs-missing");
         let path = base.join("subscriptions.json");
-        assert_eq!(Subscriptions::load_or_default(&path), Subscriptions::default());
+        assert_eq!(
+            Subscriptions::load_or_default(&path),
+            Subscriptions::default()
+        );
     }
 
     #[test]
@@ -207,7 +248,10 @@ mod tests {
         let base = tempdir_under_target("subs-corrupt");
         let path = base.join("subscriptions.json");
         std::fs::write(&path, b"{ not json").unwrap();
-        assert_eq!(Subscriptions::load_or_default(&path), Subscriptions::default());
+        assert_eq!(
+            Subscriptions::load_or_default(&path),
+            Subscriptions::default()
+        );
     }
 
     #[test]
@@ -228,7 +272,10 @@ mod tests {
     fn device_settings_load_or_default_missing_file_returns_default() {
         let base = tempdir_under_target("settings-missing");
         let path = base.join("settings.json");
-        assert_eq!(DeviceSettings::load_or_default(&path), DeviceSettings::default());
+        assert_eq!(
+            DeviceSettings::load_or_default(&path),
+            DeviceSettings::default()
+        );
     }
 
     #[test]
@@ -236,7 +283,10 @@ mod tests {
         let base = tempdir_under_target("settings-corrupt");
         let path = base.join("settings.json");
         std::fs::write(&path, b"{ not json").unwrap();
-        assert_eq!(DeviceSettings::load_or_default(&path), DeviceSettings::default());
+        assert_eq!(
+            DeviceSettings::load_or_default(&path),
+            DeviceSettings::default()
+        );
     }
 
     #[test]
@@ -264,7 +314,11 @@ mod tests {
 
         assert_eq!(
             seeded,
-            DeviceSettings { version: DEVICE_SETTINGS_VERSION, auto_sync: false, rockbox_compat: true }
+            DeviceSettings {
+                version: DEVICE_SETTINGS_VERSION,
+                auto_sync: false,
+                rockbox_compat: true
+            }
         );
         assert!(path.exists(), "seed must persist the file");
         assert_eq!(DeviceSettings::load_or_default(&path), seeded);
@@ -299,7 +353,11 @@ mod tests {
         let first = DeviceSettings::load_or_migrate_at(&path, &global1);
         assert_eq!(
             first,
-            DeviceSettings { version: DEVICE_SETTINGS_VERSION, auto_sync: true, rockbox_compat: false }
+            DeviceSettings {
+                version: DEVICE_SETTINGS_VERSION,
+                auto_sync: true,
+                rockbox_compat: false
+            }
         );
 
         let global2 = persisted_config_with_daemon(false, true);
@@ -321,7 +379,10 @@ mod tests {
         assert_eq!(seeded.auto_sync, false);
         assert_eq!(seeded.rockbox_compat, true);
         let path = crate::device_state::device_settings_path(serial).unwrap();
-        assert!(path.exists(), "public fn must persist through device_settings_path");
+        assert!(
+            path.exists(),
+            "public fn must persist through device_settings_path"
+        );
         if let Some(dir) = path.parent() {
             let _ = std::fs::remove_dir_all(dir);
         }

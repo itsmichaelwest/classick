@@ -121,6 +121,8 @@ async fn connect_transport(pipe_name: &str) -> tokio::net::windows::named_pipe::
 
 struct Sandbox {
     base: PathBuf,
+    config_path: PathBuf,
+    history_path: PathBuf,
     pipe_name: String,
     device_tx: mpsc::Sender<DeviceEvent>,
     spawn_rx: mpsc::UnboundedReceiver<SpawnCall>,
@@ -180,6 +182,7 @@ impl Sandbox {
             scan_finish_tx.send(finish).unwrap();
             Box::pin(async move { Ok(finished.await.unwrap()) })
         });
+        let history_path = base.join("history.json");
         let deps = DaemonDeps {
             configured_serial: legacy.map(|identity| identity.serial),
             watcher: Box::new(ScriptedWatcher(device_rx)),
@@ -189,13 +192,15 @@ impl Sandbox {
             spawn_scan,
             schedule_minutes: 0,
             preset_event_tx: None,
-            config_path: Some(config_path),
-            history_path: Some(base.join("history.json")),
+            config_path: Some(config_path.clone()),
+            history_path: Some(history_path.clone()),
             pipe_name: Some(pipe_name.clone()),
         };
         let runtime = tokio::spawn(run_daemon_with_deps(deps));
         Self {
             base,
+            config_path,
+            history_path,
             pipe_name,
             device_tx,
             spawn_rx,
@@ -238,6 +243,13 @@ impl Sandbox {
         #[cfg(unix)]
         let _ = std::fs::remove_file(&self.pipe_name);
         let _ = std::fs::remove_dir_all(&self.base);
+    }
+
+    async fn stop_keep_files(self) -> PathBuf {
+        self.runtime.abort();
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(&self.pipe_name);
+        self.base
     }
 }
 
@@ -442,5 +454,276 @@ async fn exact_targeting_uses_b_drive_and_rejects_unknown_occupied_and_stale_tar
         snapshot_device(&completed_snapshot, "RAW-B")["phase"],
         "idle"
     );
+    sandbox.shutdown().await;
+}
+
+#[tokio::test]
+async fn canonical_alias_uses_registry_raw_serial_for_device_config_paths() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[("0xraw-b", true)]).await;
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+
+    client
+        .send(json!({
+            "type": "save_device_config",
+            "serial": " RAW-B ",
+            "settings": {"auto_sync": false, "rockbox_compat": true},
+            "request_id": "alias-settings"
+        }))
+        .await;
+    let update = client.next_type("device_config_update").await;
+    assert_eq!(update["serial"], "0xraw-b");
+    assert_eq!(update["acknowledged_request_id"], "alias-settings");
+
+    let raw_path =
+        classick::device_state::device_settings_path_in(&sandbox.base, "0xraw-b").unwrap();
+    let requester_path =
+        classick::device_state::device_settings_path_in(&sandbox.base, " RAW-B ").unwrap();
+    assert!(raw_path.exists(), "registry raw serial must own the path");
+    assert_ne!(raw_path, requester_path);
+    assert!(
+        !requester_path.exists(),
+        "request spelling must never own state"
+    );
+    sandbox.finish_startup_scan().await;
+    sandbox.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_global_config_write_does_not_configure_device() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[("RAW-A", true), ("RAW-B", false)]).await;
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+    let config_tmp = sandbox.config_path.with_extension("toml.tmp");
+    std::fs::create_dir(&config_tmp).unwrap();
+
+    client
+        .send(json!({
+            "type": "save_config",
+            "source": sandbox.base.join("replacement-source").to_string_lossy(),
+            "ipod": {"serial": "RAW-B", "model_label": "iPod Classic"},
+            "request_id": "config-failure"
+        }))
+        .await;
+    let snapshot = client.next_type("device_inventory_snapshot").await;
+    assert!(!snapshot_device(&snapshot, "RAW-B")["configured"]
+        .as_bool()
+        .unwrap());
+
+    std::fs::remove_dir(config_tmp).unwrap();
+    sandbox.finish_startup_scan().await;
+    sandbox.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_registry_forget_keeps_legacy_input_and_registry_consistent() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[("RAW-A", true)]).await;
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+    let registry_path = classick::config_file::device_registry_path(&sandbox.config_path);
+    let registry_bytes = std::fs::read(&registry_path).unwrap();
+    std::fs::remove_file(&registry_path).unwrap();
+    std::fs::create_dir(&registry_path).unwrap();
+
+    client
+        .send(json!({
+            "type": "forget_ipod",
+            "serial": "raw-a",
+            "request_id": "forget-failure"
+        }))
+        .await;
+    let snapshot = client.next_type("device_inventory_snapshot").await;
+    assert!(snapshot_device(&snapshot, "RAW-A")["configured"]
+        .as_bool()
+        .unwrap());
+    let config = classick::config_file::load(&sandbox.config_path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.ipod_identity.unwrap().serial, "RAW-A");
+
+    std::fs::remove_dir(&registry_path).unwrap();
+    std::fs::write(&registry_path, registry_bytes).unwrap();
+    sandbox.finish_startup_scan().await;
+    sandbox.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_registry_configure_acknowledges_only_actual_global_and_device_authorities() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[("RAW-A", true), ("RAW-B", false)]).await;
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+    let registry_path = classick::config_file::device_registry_path(&sandbox.config_path);
+    let registry_bytes = std::fs::read(&registry_path).unwrap();
+    std::fs::remove_file(&registry_path).unwrap();
+    std::fs::create_dir(&registry_path).unwrap();
+    let replacement = sandbox.base.join("replacement-source");
+
+    client
+        .send(json!({
+            "type": "save_config",
+            "source": replacement.to_string_lossy(),
+            "ipod": {"serial": "RAW-B", "model_label": "iPod Classic"},
+            "request_id": "registry-configure-failure"
+        }))
+        .await;
+    let update = client.next_type("config_update").await;
+    assert_eq!(
+        update["acknowledged_request_id"],
+        "registry-configure-failure"
+    );
+    assert_eq!(update["source"], replacement.to_string_lossy().as_ref());
+    assert_eq!(update["ipod"]["serial"], "RAW-A");
+    let snapshot = client.next_type("device_inventory_snapshot").await;
+    assert!(!snapshot_device(&snapshot, "RAW-B")["configured"]
+        .as_bool()
+        .unwrap());
+
+    std::fs::remove_dir(&registry_path).unwrap();
+    std::fs::write(&registry_path, registry_bytes).unwrap();
+    sandbox.finish_startup_scan().await;
+    sandbox.shutdown().await;
+}
+
+#[tokio::test]
+async fn forget_keeps_connected_device_unconfigured_and_restart_does_not_remigrate_legacy() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[("RAW-A", true)]).await;
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+    sandbox.attach("RAW-A", "/Volumes/A").await;
+    let _ = client
+        .next_snapshot_where(|snapshot| snapshot_device(snapshot, "RAW-A")["connected"] == true)
+        .await;
+
+    client
+        .send(json!({
+            "type": "forget_ipod",
+            "serial": " raw-a ",
+            "request_id": "forget-a"
+        }))
+        .await;
+    let forgotten = client
+        .next_snapshot_where(|snapshot| {
+            snapshot_device(snapshot, "RAW-A")["connected"] == true
+                && snapshot_device(snapshot, "RAW-A")["configured"] == false
+        })
+        .await;
+    assert_eq!(
+        snapshot_device(&forgotten, "RAW-A")["phase"],
+        "unconfigured"
+    );
+    assert_eq!(
+        classick::config_file::load(&sandbox.config_path)
+            .unwrap()
+            .unwrap()
+            .ipod_identity
+            .unwrap()
+            .serial,
+        "RAW-A",
+        "legacy identity remains migration input, not live authority"
+    );
+    client
+        .send(json!({"type": "get_config", "request_id": "after-forget"}))
+        .await;
+    let update = client.next_type("config_update").await;
+    assert!(update["ipod"].is_null());
+    assert_eq!(update["acknowledged_request_id"], "after-forget");
+
+    sandbox.finish_startup_scan().await;
+    let base = sandbox.stop_keep_files().await;
+    let config_path = base.join("config.toml");
+    let registry =
+        std::fs::read_to_string(classick::config_file::device_registry_path(&config_path)).unwrap();
+    let registry: Value = serde_json::from_str(&registry).unwrap();
+    assert_eq!(registry["records"][0]["configured"], false);
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn save_device_config_advances_only_successfully_persisted_components() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[("RAW-A", true)]).await;
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+    let subscriptions_path =
+        classick::device_state::device_subscriptions_path_in(&sandbox.base, "RAW-A").unwrap();
+    let subscriptions_tmp = subscriptions_path.with_extension("json.tmp");
+    std::fs::create_dir(&subscriptions_tmp).unwrap();
+
+    client
+        .send(json!({
+            "type": "save_device_config",
+            "serial": "raw-a",
+            "selection": {"mode": "include", "rules": []},
+            "subscriptions": {"playlists": ["must-not-persist"]},
+            "settings": {"auto_sync": false, "rockbox_compat": true},
+            "request_id": "mixed-config"
+        }))
+        .await;
+    let update = client.next_type("device_config_update").await;
+    assert_eq!(update["serial"], "RAW-A");
+    assert_eq!(update["selection"]["mode"], "include");
+    assert_eq!(update["subscriptions"]["playlists"], json!([]));
+    assert_eq!(update["settings"]["auto_sync"], false);
+    assert_eq!(update["settings"]["rockbox_compat"], true);
+    let snapshot = client
+        .next_snapshot_where(|snapshot| {
+            snapshot_device(snapshot, "RAW-A")["selection_revision"] == 1
+        })
+        .await;
+    let a = snapshot_device(&snapshot, "RAW-A");
+    assert_eq!(a["selection_revision"], 1);
+    assert_eq!(a["subscriptions_revision"], 0);
+    assert_eq!(a["settings_revision"], 1);
+
+    std::fs::remove_dir(subscriptions_tmp).unwrap();
+    sandbox.finish_startup_scan().await;
+    sandbox.shutdown().await;
+}
+
+#[tokio::test]
+async fn history_persist_failure_retains_truthful_terminal_attempt_in_snapshot() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[("RAW-A", true)]).await;
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+    sandbox.attach("RAW-A", "/Volumes/A").await;
+    let _ = client
+        .next_snapshot_where(|snapshot| snapshot_device(snapshot, "RAW-A")["connected"] == true)
+        .await;
+    sandbox.finish_startup_scan().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+
+    client
+        .send(json!({
+            "type": "trigger_sync",
+            "source": "manual",
+            "serial": "raw-a",
+            "request_id": "sync-a"
+        }))
+        .await;
+    let call = sandbox.spawn_rx.recv().await.unwrap();
+    let history_tmp = sandbox.history_path.with_extension("json.tmp");
+    std::fs::create_dir(&history_tmp).unwrap();
+    call.finish.send(completed(None)).unwrap();
+
+    let snapshot = client
+        .next_snapshot_where(|snapshot| {
+            snapshot_device(snapshot, "RAW-A")["last_terminal_error"]
+                .as_str()
+                .is_some_and(|message| message.contains("persist sync history"))
+        })
+        .await;
+    let a = snapshot_device(&snapshot, "RAW-A");
+    assert_eq!(a["phase"], "error");
+    assert_eq!(a["latest_attempt"]["outcome"], "ok");
+    assert_eq!(a["latest_attempt"]["serial"], "RAW-A");
+    assert!(a["latest_successful_sync"].is_object());
+
+    std::fs::remove_dir(history_tmp).unwrap();
     sandbox.shutdown().await;
 }

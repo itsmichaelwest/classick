@@ -155,28 +155,56 @@ impl DeviceRegistry {
 
     #[allow(dead_code)]
     pub(crate) fn configure(&mut self, serial: &str) -> Result<()> {
+        self.configure_identity(&IpodIdentity {
+            serial: serial.to_string(),
+            model_label: String::new(),
+            name: None,
+            custom_selection: true,
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn configure_identity(&mut self, identity: &IpodIdentity) -> Result<bool> {
+        let serial = &identity.serial;
         let key = Self::required_key(serial)?;
         let mut next = self.records.clone();
         let record = next
             .get_mut(&key)
             .ok_or_else(|| anyhow!("cannot configure unknown device serial {serial:?}"))?;
+        let mut changed = false;
         if !record.configured {
             record.configured = true;
             record.settings_revision = record
                 .settings_revision
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("settings revision overflow for device {serial:?}"))?;
+            changed = true;
         }
-        self.replace_records(next)
+        if !identity.model_label.is_empty() && record.model_label != identity.model_label {
+            record.model_label = identity.model_label.clone();
+            changed = true;
+        }
+        if identity.name.is_some() && record.name != identity.name {
+            record.name = identity.name.clone();
+            changed = true;
+        }
+        if !changed {
+            return Ok(false);
+        }
+        self.replace_records(next).map(|()| true)
     }
 
     #[allow(dead_code)]
     pub(crate) fn forget(&mut self, serial: &str) -> Result<()> {
         let key = Self::required_key(serial)?;
         let mut next = self.records.clone();
-        if next.remove(&key).is_none() {
-            return Err(anyhow!("cannot forget unknown device serial {serial:?}"));
+        let record = next
+            .get_mut(&key)
+            .ok_or_else(|| anyhow!("cannot forget unknown device serial {serial:?}"))?;
+        if !record.configured {
+            return Ok(());
         }
+        record.configured = false;
         self.replace_records(next)
     }
 
@@ -368,6 +396,20 @@ mod tests {
     }
 
     #[test]
+    fn restart_does_not_remigrate_forgotten_device_from_legacy_config() {
+        let path = temp_path("forgotten-authoritative");
+        let legacy = legacy("RAW-A");
+        let mut registry = DeviceRegistry::load_or_migrate(path.clone(), Some(&legacy)).unwrap();
+        registry.forget("raw-a").unwrap();
+
+        let restarted = DeviceRegistry::load_or_migrate(path, Some(&legacy)).unwrap();
+
+        let record = restarted.record("RAW-A").unwrap();
+        assert!(!record.configured);
+        assert_eq!(record.serial, "RAW-A");
+    }
+
+    #[test]
     fn observing_unconfigured_b_does_not_replace_configured_a() {
         let path = temp_path("observe-b");
         let mut registry = DeviceRegistry::load_or_migrate(path, Some(&legacy("A"))).unwrap();
@@ -385,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_b_preserves_a() {
+    fn forgetting_b_preserves_a_and_marks_b_unconfigured_across_restart() {
         let path = temp_path("forget-b");
         let mut registry =
             DeviceRegistry::load_or_migrate(path.clone(), Some(&legacy("A"))).unwrap();
@@ -395,9 +437,12 @@ mod tests {
 
         let reloaded = DeviceRegistry::load_or_migrate(path, None).unwrap();
         let records = reloaded.records();
-        assert_eq!(records.len(), 1);
+        assert_eq!(records.len(), 2);
         assert_eq!(records[0].serial, "A");
         assert!(records[0].configured);
+        assert_eq!(records[1].serial, "B");
+        assert!(!records[1].configured);
+        assert_eq!(records[1].last_seen_unix_secs, Some(42));
     }
 
     #[test]
@@ -517,5 +562,21 @@ mod tests {
         assert_eq!(record.selection_revision, 0);
         assert_eq!(record.settings_revision, 0);
         assert_eq!(record.subscriptions_revision, 0);
+    }
+
+    #[test]
+    fn failed_forget_persist_keeps_configured_record_in_memory_and_on_restart() {
+        let path = temp_path("forget-failure");
+        let mut registry =
+            DeviceRegistry::load_or_migrate(path.clone(), Some(&legacy("A"))).unwrap();
+        let unusable_path = path.parent().unwrap().join("registry-directory");
+        std::fs::create_dir_all(&unusable_path).unwrap();
+        registry.path = unusable_path;
+
+        registry.forget("a").unwrap_err();
+
+        assert!(registry.record("A").unwrap().configured);
+        let restarted = DeviceRegistry::load_or_migrate(path, None).unwrap();
+        assert!(restarted.record("A").unwrap().configured);
     }
 }

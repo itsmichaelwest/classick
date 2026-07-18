@@ -32,6 +32,10 @@ pub(crate) struct RuntimeState {
     admission: SessionAdmission,
     controls: BTreeMap<SessionId, SessionControls>,
     connected: BTreeMap<String, DetectedIpod>,
+    connection_generations: BTreeMap<String, u64>,
+    next_connection_generation: u64,
+    retained_terminal_attempts: BTreeMap<String, crate::daemon::history::HistoryEntry>,
+    terminal_persistence_errors: BTreeMap<String, String>,
 }
 
 impl RuntimeState {
@@ -40,6 +44,10 @@ impl RuntimeState {
             admission: SessionAdmission::single(),
             controls: BTreeMap::new(),
             connected: BTreeMap::new(),
+            connection_generations: BTreeMap::new(),
+            next_connection_generation: 0,
+            retained_terminal_attempts: BTreeMap::new(),
+            terminal_persistence_errors: BTreeMap::new(),
         }
     }
 
@@ -93,12 +101,20 @@ impl RuntimeState {
     }
 
     pub(crate) fn connect(&mut self, device: DetectedIpod) -> Option<DetectedIpod> {
-        self.connected
-            .insert(canonical_serial_key(&device.serial), device)
+        self.next_connection_generation = self
+            .next_connection_generation
+            .checked_add(1)
+            .expect("device connection generation space exhausted");
+        let key = canonical_serial_key(&device.serial);
+        self.connection_generations
+            .insert(key.clone(), self.next_connection_generation);
+        self.connected.insert(key, device)
     }
 
     pub(crate) fn disconnect(&mut self, serial: &str) -> Option<DetectedIpod> {
-        self.connected.remove(&canonical_serial_key(serial))
+        let key = canonical_serial_key(serial);
+        self.connection_generations.remove(&key);
+        self.connected.remove(&key)
     }
 
     pub(crate) fn connected_device(&self, serial: &str) -> Option<&DetectedIpod> {
@@ -111,6 +127,43 @@ impl RuntimeState {
 
     pub(crate) fn connected_devices(&self) -> impl Iterator<Item = &DetectedIpod> {
         self.connected.values()
+    }
+
+    pub(crate) fn connection_generation(&self, serial: &str) -> Option<u64> {
+        self.connection_generations
+            .get(&canonical_serial_key(serial))
+            .copied()
+    }
+
+    pub(crate) fn retain_terminal_attempt(
+        &mut self,
+        entry: crate::daemon::history::HistoryEntry,
+        persistence_error: String,
+    ) {
+        let key = canonical_serial_key(&entry.serial);
+        self.retained_terminal_attempts.insert(key.clone(), entry);
+        self.terminal_persistence_errors
+            .insert(key, persistence_error);
+    }
+
+    pub(crate) fn clear_retained_terminal_attempt(&mut self, serial: &str) {
+        let key = canonical_serial_key(serial);
+        self.retained_terminal_attempts.remove(&key);
+        self.terminal_persistence_errors.remove(&key);
+    }
+
+    pub(crate) fn retained_terminal_attempt(
+        &self,
+        serial: &str,
+    ) -> Option<&crate::daemon::history::HistoryEntry> {
+        self.retained_terminal_attempts
+            .get(&canonical_serial_key(serial))
+    }
+
+    pub(crate) fn terminal_persistence_error(&self, serial: &str) -> Option<&str> {
+        self.terminal_persistence_errors
+            .get(&canonical_serial_key(serial))
+            .map(String::as_str)
     }
 
     pub(crate) fn take_cancel(&mut self, id: SessionId) -> Option<oneshot::Sender<()>> {

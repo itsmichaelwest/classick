@@ -570,10 +570,10 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
 
 ## Multi-device cleanup audit (2026-07-18)
 
-- **Status and capacity reads prefer a present per-device manifest, but fall
-  back to the legacy flat manifest only when the per-device file is absent.**
-  A corrupt per-device manifest remains authoritative and fails safe to empty;
-  silently falling back there could project or mutate from stale host state.
+- **Any manifest read with an explicit serial is strictly per-device.** A
+  missing or corrupt per-device manifest fails safe to empty and never falls
+  back to the legacy flat manifest; legacy fallback is only for genuinely
+  unscoped migration reads, otherwise B can inherit A's synced facts.
 - **Never delete or overwrite a playlist without positive Classick ownership.**
   Empty smart playlists and same-named Rockbox `.m3u8` files may be foreign;
   broad sweeps and name-based adoption violate the device-playlist invariant.
@@ -592,3 +592,13 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   `serial` field is not protection if individual match arms discard it; compare
   canonical serial keys centrally, preserve the raw serial on the wire, and
   fail closed before any destructive or active-session operation runs.
+- **Treat `devices/registry.json` as the sole live configured-device
+  authority.** `config.toml`'s `ipod_identity` is migration input only;
+  mirroring configure/forget across both files can diverge on either write.
+- **Correlate off-thread iPod metadata reads with a connection generation.**
+  Serial alone is insufficient because the same device can disconnect and
+  reconnect before an old iTunesDB read completes.
+- **Retain terminal attempts when history persistence fails.** Publishing an
+  idle/clean snapshot with no latest attempt hides a real durability failure;
+  surface the retained attempt and persistence error until a later durable
+  history append succeeds.

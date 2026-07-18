@@ -59,11 +59,22 @@ fn build_snapshot(
                     crate::daemon::command_handler::same_serial(serial, &record.serial)
                 })
             });
-            let latest_attempt = history.latest_attempt(&record.serial);
-            let last_terminal_error = latest_attempt
-                .as_ref()
-                .filter(|entry| entry.outcome != SyncOutcome::Ok)
-                .and_then(|entry| entry.error_message.clone());
+            let retained_attempt = state.retained_terminal_attempt(&record.serial).cloned();
+            let latest_attempt = retained_attempt
+                .clone()
+                .or_else(|| history.latest_attempt(&record.serial));
+            let latest_successful_sync = retained_attempt
+                .filter(|entry| entry.outcome == SyncOutcome::Ok)
+                .or_else(|| history.latest_success(&record.serial));
+            let last_terminal_error = state
+                .terminal_persistence_error(&record.serial)
+                .map(str::to_string)
+                .or_else(|| {
+                    latest_attempt
+                        .as_ref()
+                        .filter(|entry| entry.outcome != SyncOutcome::Ok)
+                        .and_then(|entry| entry.error_message.clone())
+                });
             let phase = if connected.is_none() {
                 DevicePhaseLabel::Disconnected
             } else if !record.configured {
@@ -90,13 +101,16 @@ fn build_snapshot(
                 session_id: active.map(|session| session.id),
                 storage: connected
                     .and_then(|device| crate::daemon::device_storage::query_storage(&device.drive)),
-                synced_count: crate::daemon::runtime::synced_track_count(Some(&record.serial)),
+                synced_count: crate::daemon::runtime::synced_track_count_at(
+                    config_path,
+                    Some(&record.serial),
+                ),
                 library_count: crate::daemon::library::selected_library_count(
                     config_path,
                     &record.serial,
                 )
                 .or(library_count_cache),
-                latest_successful_sync: history.latest_success(&record.serial),
+                latest_successful_sync,
                 latest_attempt,
                 last_terminal_error,
                 selection_revision: record.selection_revision,

@@ -203,7 +203,8 @@ pub fn preview(
 /// read and write.
 pub fn selected_library_count(config_path: &Path, serial: &str) -> Option<usize> {
     let cfg = crate::config_file::load(config_path).ok().flatten()?;
-    let sel_path = selection::effective_device_selection_path(serial).ok()?;
+    let config_root = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let sel_path = selection::effective_device_selection_path_in(config_root, serial).ok()?;
     let sel = selection::load_or_all(&sel_path);
     if sel.mode == SelectionMode::All {
         return None;
