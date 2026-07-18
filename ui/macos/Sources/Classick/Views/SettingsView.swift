@@ -103,7 +103,7 @@ private struct GeneralTab: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
-            Button("Update artwork & metadata") { onBackfill() }
+            Button("Force update artwork and metadata") { onBackfill() }
             Text("Refresh artwork + metadata for everything already on the iPod — both the Apple firmware and Rockbox — without re-copying audio. Use after retagging your library (e.g. in Lidarr).")
                 .font(.footnote)
                 .foregroundStyle(.secondary)

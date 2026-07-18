@@ -23,6 +23,10 @@ struct DeviceMusicPage: View {
     var onLoadDeviceConfig: (String) -> Void
     var onPreviewDevice: (String) -> Void
     var onSaveDeviceConfig: (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> Void
+    // Required (no no-op default) — see `MainWindow`'s doc comment on
+    // `onSavePlaylist` for why a defaulted closure here would be exactly
+    // how this action could ship silently dead.
+    var onScan: () -> Void
 
     private struct MusicDraft: Equatable {
         var mode: SelectionMode = .all
@@ -140,10 +144,24 @@ struct DeviceMusicPage: View {
     private var content: some View {
         if facet == .playlists {
             subscriptionsChecklist
-        } else if let library = model.library, library.scannedAtUnixSecs != nil {
-            LibraryBrowser(library: library, facet: facet, mode: browserMode, search: search)
         } else {
-            emptyLibraryState
+            switch DeviceMusicLogic.contentState(
+                library: model.library, phase: model.phase, configuredSource: model.config?.source,
+                mode: draft.mode, isConnected: isConnected, syncedCount: model.syncedCount)
+            {
+            case .needsScan:
+                needsScanState
+            case let .scanning(current, total):
+                scanningState(current: current, total: total)
+            case let .libraryEmpty(path):
+                libraryEmptyState(path: path)
+            case .deviceEmpty:
+                deviceEmptyState
+            case .browser:
+                if let library = model.library {
+                    LibraryBrowser(library: library, facet: facet, mode: browserMode, search: search)
+                }
+            }
         }
     }
 
@@ -155,15 +173,54 @@ struct DeviceMusicPage: View {
         return .select(checked: Binding(get: { draft.checked }, set: { draft.checked = $0 }), style: .cascading)
     }
 
-    private var emptyLibraryState: some View {
+    private var needsScanState: some View {
         VStack(spacing: 12) {
             Spacer()
             Text("Classick needs to read your library's tags once").font(.headline)
-            if case let .scanning(current, total) = model.phase {
-                ProgressView(value: total > 0 ? Double(current) / Double(total) : 0)
-                    .frame(maxWidth: 260)
-                Text("Scanning… \(current) of \(total)").font(.caption).foregroundStyle(.secondary)
-            }
+            Button("Scan Library", action: onScan)
+                .keyboardShortcut(.defaultAction)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func scanningState(current: Int, total: Int) -> some View {
+        VStack(spacing: 12) {
+            Spacer()
+            ProgressView(value: total > 0 ? Double(current) / Double(total) : 0)
+                .frame(maxWidth: 260)
+            Text("Scanning… \(current) of \(total)").font(.caption).foregroundStyle(.secondary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Global Constraints: "library empty → 'No audio files found in
+    /// <path>'". Shared copy/behavior with `LibraryView`'s equivalent state
+    /// via `LibraryContentLogic`.
+    private func libraryEmptyState(path: String) -> some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Text("No audio files found in \(path)")
+                .font(.headline)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            Button("Rescan Library", action: onScan)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Global Constraints: "device empty → 'Nothing synced yet — press Sync
+    /// Now.'". Only reachable in Entire-library mode (see
+    /// `DeviceMusicLogic.contentState`) — in Selected/Except modes the
+    /// browser IS the primary interactive UI regardless of whether a first
+    /// sync has happened yet, so it must keep rendering there. No duplicate
+    /// button here: "press Sync Now" refers to the header's existing button.
+    private var deviceEmptyState: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Text("Nothing synced yet — press Sync Now.").font(.headline)
             Spacer()
         }
         .frame(maxWidth: .infinity)
@@ -303,6 +360,39 @@ enum DeviceMusicLogic {
         case .all: return "Everything in your library syncs to this iPod."
         case .include: return "Checked items sync to this iPod."
         case .exclude: return "Checked items are left off this iPod."
+        }
+    }
+
+    /// This page's four Global Constraints empty states, minus "no source
+    /// configured" (handled earlier, app-wide, by
+    /// `AppModel.needsFirstRunSetup` — see `LibraryContentLogic`'s doc
+    /// comment). Layers ONE more case, `.deviceEmpty`, onto
+    /// `LibraryContentLogic.state`'s three: Global Constraints' "device
+    /// empty → 'Nothing synced yet — press Sync Now.'" only when the mode
+    /// is Entire library (the browser is read-only there — nothing for the
+    /// user to configure before a first sync) AND this page's device is the
+    /// connected one AND it has never synced anything. In Selected/Except
+    /// modes the browser stays the primary interactive UI regardless of
+    /// sync history, so `.deviceEmpty` never overrides those.
+    enum MusicPageContentState: Equatable {
+        case needsScan
+        case scanning(current: Int, total: Int)
+        case libraryEmpty(path: String)
+        case deviceEmpty
+        case browser
+    }
+
+    static func contentState(
+        library: LibraryInfo?, phase: Phase, configuredSource: String?,
+        mode: SelectionMode, isConnected: Bool, syncedCount: Int
+    ) -> MusicPageContentState {
+        switch LibraryContentLogic.state(library: library, phase: phase, configuredSource: configuredSource) {
+        case .needsScan: return .needsScan
+        case let .scanning(current, total): return .scanning(current: current, total: total)
+        case let .libraryEmpty(path): return .libraryEmpty(path: path)
+        case .browse:
+            guard mode == .all, isConnected, syncedCount == 0 else { return .browser }
+            return .deviceEmpty
         }
     }
 

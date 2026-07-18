@@ -212,6 +212,83 @@ final class DeviceMusicLogicTests: XCTestCase {
         XCTAssertEqual(bar.projectedFraction, 0.6, accuracy: 0.0001)
     }
 
+    // MARK: - Content state (Task 8 empty states)
+
+    private func makeLibrary(scannedAt: UInt64?, totalTracks: Int, sourceRoot: String? = "/Music") -> LibraryInfo {
+        LibraryInfo(sourceRoot: sourceRoot, scannedAtUnixSecs: scannedAt, artists: [], genres: [], totalTracks: totalTracks, totalBytes: 0)
+    }
+
+    func testContentStateDelegatesNeedsScanFromLibraryContentLogic() {
+        XCTAssertEqual(
+            DeviceMusicLogic.contentState(
+                library: nil, phase: .idle, configuredSource: "/Music",
+                mode: .all, isConnected: true, syncedCount: 0),
+            .needsScan)
+    }
+
+    func testContentStateDelegatesScanningFromLibraryContentLogic() {
+        XCTAssertEqual(
+            DeviceMusicLogic.contentState(
+                library: nil, phase: .scanning(current: 1, total: 2), configuredSource: "/Music",
+                mode: .all, isConnected: true, syncedCount: 0),
+            .scanning(current: 1, total: 2))
+    }
+
+    func testContentStateDelegatesLibraryEmptyFromLibraryContentLogic() {
+        let library = makeLibrary(scannedAt: 100, totalTracks: 0, sourceRoot: "/Volumes/Music")
+        XCTAssertEqual(
+            DeviceMusicLogic.contentState(
+                library: library, phase: .idle, configuredSource: "/Music",
+                mode: .include, isConnected: false, syncedCount: 0),
+            .libraryEmpty(path: "/Volumes/Music"),
+            "library-empty must win regardless of mode/connection/synced-count")
+    }
+
+    /// Global Constraints: "device empty → 'Nothing synced yet — press
+    /// Sync Now.'" — only in Entire-library mode, connected, never synced.
+    func testContentStateIsDeviceEmptyOnlyInEntireModeConnectedWithZeroSynced() {
+        let library = makeLibrary(scannedAt: 100, totalTracks: 5)
+        XCTAssertEqual(
+            DeviceMusicLogic.contentState(
+                library: library, phase: .idle, configuredSource: "/Music",
+                mode: .all, isConnected: true, syncedCount: 0),
+            .deviceEmpty)
+    }
+
+    func testContentStateIsBrowserInEntireModeOnceSomethingHasSynced() {
+        let library = makeLibrary(scannedAt: 100, totalTracks: 5)
+        XCTAssertEqual(
+            DeviceMusicLogic.contentState(
+                library: library, phase: .idle, configuredSource: "/Music",
+                mode: .all, isConnected: true, syncedCount: 3),
+            .browser)
+    }
+
+    func testContentStateIsBrowserInEntireModeWhenDisconnectedEvenIfNeverSynced() {
+        // Disconnected already has its own caption ("Not connected…") — a
+        // second, contradictory "press Sync Now" (a disabled button) would
+        // be actively misleading, so this falls through to the ordinary
+        // read-only browse of the library instead.
+        let library = makeLibrary(scannedAt: 100, totalTracks: 5)
+        XCTAssertEqual(
+            DeviceMusicLogic.contentState(
+                library: library, phase: .idle, configuredSource: "/Music",
+                mode: .all, isConnected: false, syncedCount: 0),
+            .browser)
+    }
+
+    func testContentStateIsBrowserInSelectedModeEvenIfNeverSynced() {
+        // Selected/Except modes are the interactive checkbox UI the user
+        // needs BEFORE a first sync to build their selection — "device
+        // empty" must never hide it.
+        let library = makeLibrary(scannedAt: 100, totalTracks: 5)
+        XCTAssertEqual(
+            DeviceMusicLogic.contentState(
+                library: library, phase: .idle, configuredSource: "/Music",
+                mode: .include, isConnected: true, syncedCount: 0),
+            .browser)
+    }
+
     // MARK: - Unresolved subscriptions line
 
     func testUnresolvedSubscriptionsLineNilWhenAbsentOrEmpty() {

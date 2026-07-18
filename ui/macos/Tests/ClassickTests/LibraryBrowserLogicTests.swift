@@ -232,3 +232,51 @@ final class LibraryBrowserLogicTests: XCTestCase {
         XCTAssertFalse(LibraryBrowser.containsCaseInsensitive(.artist(name: "Aphex Twin"), in: checked))
     }
 }
+
+/// Task 8: pure-logic coverage for `LibraryContentLogic`, the Library
+/// page's/device Music page's shared empty-state decision — the Global
+/// Constraints trio "scan in progress / library empty / browse" ("no source
+/// configured" is handled earlier, app-wide, by
+/// `AppModel.needsFirstRunSetup` — see the type's doc comment).
+final class LibraryContentLogicTests: XCTestCase {
+    private func makeLibrary(scannedAt: UInt64?, totalTracks: Int, sourceRoot: String? = "/Users/x/Music") -> LibraryInfo {
+        LibraryInfo(sourceRoot: sourceRoot, scannedAtUnixSecs: scannedAt, artists: [], genres: [], totalTracks: totalTracks, totalBytes: 0)
+    }
+
+    func testNilLibraryIsNeedsScan() {
+        XCTAssertEqual(
+            LibraryContentLogic.state(library: nil, phase: .idle, configuredSource: "/Users/x/Music"),
+            .needsScan)
+    }
+
+    func testUnscannedLibraryIsNeedsScan() {
+        let library = makeLibrary(scannedAt: nil, totalTracks: 0)
+        XCTAssertEqual(LibraryContentLogic.state(library: library, phase: .idle, configuredSource: "/x"), .needsScan)
+    }
+
+    func testScanningPhaseWinsRegardlessOfLibraryState() {
+        let library = makeLibrary(scannedAt: 100, totalTracks: 50)
+        XCTAssertEqual(
+            LibraryContentLogic.state(library: library, phase: .scanning(current: 3, total: 10), configuredSource: "/x"),
+            .scanning(current: 3, total: 10))
+    }
+
+    func testScannedEmptyLibraryUsesSourceRootPath() {
+        let library = makeLibrary(scannedAt: 100, totalTracks: 0, sourceRoot: "/Volumes/Music")
+        XCTAssertEqual(
+            LibraryContentLogic.state(library: library, phase: .idle, configuredSource: "/x"),
+            .libraryEmpty(path: "/Volumes/Music"))
+    }
+
+    func testScannedEmptyLibraryFallsBackToConfiguredSourceWhenSourceRootMissing() {
+        let library = makeLibrary(scannedAt: 100, totalTracks: 0, sourceRoot: nil)
+        XCTAssertEqual(
+            LibraryContentLogic.state(library: library, phase: .idle, configuredSource: "/Users/x/Music"),
+            .libraryEmpty(path: "/Users/x/Music"))
+    }
+
+    func testScannedNonEmptyLibraryIsBrowse() {
+        let library = makeLibrary(scannedAt: 100, totalTracks: 5)
+        XCTAssertEqual(LibraryContentLogic.state(library: library, phase: .idle, configuredSource: "/x"), .browse)
+    }
+}

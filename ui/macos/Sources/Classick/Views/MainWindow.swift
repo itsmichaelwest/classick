@@ -78,7 +78,7 @@ struct MainWindow: View {
                 DeviceMusicPage(
                     model: model, serial: serial, onSyncNow: onSyncNow,
                     onLoadDeviceConfig: onLoadDeviceConfig, onPreviewDevice: onPreviewDevice,
-                    onSaveDeviceConfig: onSaveDeviceConfig)
+                    onSaveDeviceConfig: onSaveDeviceConfig, onScan: onScan)
                     .id(serial)
             case let .device(serial, .settings):
                 DeviceSettingsPage(
@@ -99,17 +99,21 @@ struct MainWindow: View {
     }
 }
 
-/// Shown in the detail area on a fresh, unconfigured install. Reuses the
-/// existing setup flow via `onSetUp`.
+/// Shown in the detail area on a fresh, unconfigured install — this IS
+/// Global Constraints' "no source configured" empty state ("Choose your
+/// music folder…", opens setup). It's implemented once, here, rather than
+/// per-page (Library/Device Music) because `MainWindow.detail` gates the
+/// entire detail area on `needsFirstRunSetup` before any page reachable —
+/// no page-level "no source configured" branch is ever reachable once a
+/// source has been configured, since `needsFirstRunSetup` only flips back
+/// to `true` if the source is cleared, which would route back here too.
 struct SetupCallToActionView: View {
     var onSetUp: () -> Void
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "ipod").font(.system(size: 48)).foregroundStyle(.secondary)
             Text("Welcome to Classick").font(.title2.bold())
-            Text("Choose your music folder to get started.")
-                .foregroundStyle(.secondary)
-            Button("Set Up Classick…", action: onSetUp)
+            Button("Choose your music folder…", action: onSetUp)
                 .keyboardShortcut(.defaultAction)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
