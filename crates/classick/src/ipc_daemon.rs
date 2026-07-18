@@ -4,12 +4,15 @@
 //! JSON, snake_case "type" discriminator, additive.
 //!
 //! Spec §7. Protocol semver: daemon emits hello with
-//! `protocol_version = "1.6.0"` since this extends M1's "1.0.0". v1.6.0
+//! `protocol_version = "1.7.0"` since this extends M1's "1.0.0". v1.6.0
 //! adds playlist CRUD (`list_playlists`/`get_playlist`/`save_playlist`/
 //! `delete_playlist` + `playlists_update`), per-device config
 //! (`get_device_config`/`save_device_config` + `device_config_update`),
 //! and a pure device-sync-footprint estimate (`preview_device` +
-//! `device_preview`) — see `docs/ipc-protocol.md` "Daemon v1.6.0".
+//! `device_preview`); v1.7.0 adds `resolve_tracks` + `resolved_tracks`
+//! (expand artist/album/genre selection rules into concrete source-
+//! relative track paths against the cached library index) — see
+//! `docs/ipc-protocol.md` "Daemon v1.7.0".
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
 use crate::daemon::device_storage::StorageInfo;
@@ -17,7 +20,7 @@ use crate::daemon::history::HistoryEntry;
 use crate::selection::{SelectionMode, SelectionRule};
 use serde::{Deserialize, Serialize};
 
-pub const DAEMON_PROTOCOL_VERSION: &str = "1.6.0";
+pub const DAEMON_PROTOCOL_VERSION: &str = "1.7.0";
 
 /// Events from daemon → UI clients (in addition to forwarded sync-
 /// subprocess events from `src/ipc.rs`).
@@ -176,6 +179,15 @@ pub enum DaemonEvent {
         /// entirely (not `[]`) when every subscription resolved.
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         unresolved_subscriptions: Vec<String>,
+    },
+    /// Reply to `resolve_tracks` (v1.7.0): concrete source-relative track
+    /// paths matched by the given selection rules, expanded against the
+    /// cached library index — see `daemon::library::resolve_tracks`. Rules
+    /// that match nothing contribute nothing; an absent/never-scanned index
+    /// yields an empty list. Both are ordinary replies (`tracks: []`),
+    /// never an error. Sorted lexicographically for deterministic ordering.
+    ResolvedTracks {
+        tracks: Vec<String>,
     },
 }
 
@@ -464,6 +476,21 @@ pub enum DaemonCommand {
     PreviewDevice {
         serial: String,
     },
+    /// v1.7.0: expand artist/album/genre selection rules — the SAME `rules`
+    /// wire shape `save_device_config`'s `selection.rules` uses
+    /// (`selection::SelectionRule`) — into concrete source-relative track
+    /// paths against the cached library index. Exists for clients (e.g. the
+    /// macOS "Add Songs" picker) that only see aggregate library data
+    /// (artist/album/genre + counts) and can't otherwise turn a rule-based
+    /// selection into concrete playlist track entries. Pure computation;
+    /// nothing persists. Reply: `resolved_tracks`, sent synchronously
+    /// inline (same reply-ordering contract as `preview_device`) rather
+    /// than after any async work, so replies arrive in request order.
+    /// Never fails the arm: an absent/never-scanned index degrades to an
+    /// empty `tracks` list rather than an error.
+    ResolveTracks {
+        rules: Vec<crate::selection::SelectionRule>,
+    },
     Shutdown,
 }
 
@@ -493,12 +520,12 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"hello""#));
-        assert!(json.contains(r#""protocol_version":"1.6.0""#));
+        assert!(json.contains(r#""protocol_version":"1.7.0""#));
     }
 
     #[test]
-    fn protocol_version_is_1_6_0() {
-        assert_eq!(DAEMON_PROTOCOL_VERSION, "1.6.0");
+    fn protocol_version_is_1_7_0() {
+        assert_eq!(DAEMON_PROTOCOL_VERSION, "1.7.0");
     }
 
     #[test]
@@ -960,5 +987,57 @@ mod tests {
         let json = serde_json::to_string(&none_unresolved).unwrap();
         assert!(!json.contains("unresolved_subscriptions"),
             "omitted entirely when empty, not serialized as []");
+    }
+
+    // --- v1.7.0: resolve_tracks -----------------------------------------
+
+    #[test]
+    fn resolve_tracks_command_deserializes_reusing_selection_rule_shape() {
+        // Doc-literal payload from docs/ipc-protocol.md "Daemon v1.7.0" —
+        // `rules` reuses the exact same wire shape as
+        // `save_device_config`'s `selection.rules`.
+        let json = r#"{"type":"resolve_tracks","rules":[
+            {"kind":"artist","name":"Boards of Canada"},
+            {"kind":"album","artist":"Aphex Twin","album":"Drukqs"},
+            {"kind":"genre","name":"Ambient"}]}"#;
+        let cmd: DaemonCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            DaemonCommand::ResolveTracks { rules } => {
+                assert_eq!(rules.len(), 3);
+                assert_eq!(rules[0], SelectionRule::Artist { name: "Boards of Canada".into() });
+                assert_eq!(rules[1], SelectionRule::Album {
+                    artist: "Aphex Twin".into(), album: "Drukqs".into(),
+                });
+                assert_eq!(rules[2], SelectionRule::Genre { name: "Ambient".into() });
+            }
+            _ => panic!("expected ResolveTracks"),
+        }
+    }
+
+    #[test]
+    fn resolve_tracks_command_with_empty_rules_deserializes() {
+        let cmd: DaemonCommand =
+            serde_json::from_str(r#"{"type":"resolve_tracks","rules":[]}"#).unwrap();
+        assert!(matches!(cmd, DaemonCommand::ResolveTracks { rules } if rules.is_empty()));
+    }
+
+    #[test]
+    fn resolved_tracks_event_serializes_doc_literal_shape() {
+        let evt = DaemonEvent::ResolvedTracks {
+            tracks: vec!["Artist/Album/01.flac".into(), "Artist/Album/02.flac".into()],
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"resolved_tracks","tracks":["Artist/Album/01.flac","Artist/Album/02.flac"]}"#,
+            "got: {json}"
+        );
+    }
+
+    #[test]
+    fn resolved_tracks_event_empty_tracks_is_a_valid_reply_not_an_error() {
+        let evt = DaemonEvent::ResolvedTracks { tracks: vec![] };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(json, r#"{"type":"resolved_tracks","tracks":[]}"#);
     }
 }

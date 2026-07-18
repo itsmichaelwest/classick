@@ -1606,6 +1606,14 @@ fn handle_client_command(
         DaemonCommand::PreviewDevice { serial } => {
             let _ = reply.send(build_device_preview(config_path, connected, &serial));
         }
+        DaemonCommand::ResolveTracks { rules } => {
+            // Synchronous inline reply, same as PreviewDevice above — no
+            // spawn/await before sending, so replies stay in request order
+            // for the client's FIFO correlation.
+            let index = load_cached_index(config_path);
+            let tracks = crate::daemon::library::resolve_tracks(&index, &rules);
+            let _ = reply.send(DaemonEvent::ResolvedTracks { tracks });
+        }
         DaemonCommand::Shutdown => {
             tracing::info!("daemon: shutdown requested by client {client_id}; exiting loop");
             return true;

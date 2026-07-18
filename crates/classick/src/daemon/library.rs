@@ -332,6 +332,35 @@ pub(crate) fn compute_device_preview(
     }
 }
 
+/// Expand `rules` into concrete source-relative track paths against the
+/// cached library index — what `resolve_tracks` (v1.7.0) replies with so a
+/// client that only has aggregate library data (artist/album/genre counts)
+/// can turn a rule-based picker selection into concrete playlist entries.
+///
+/// Builds a throwaway `Selection { mode: Include, rules }` and reuses
+/// `Selection::wants` — the SAME case-insensitive matcher the sync filter,
+/// `preview`, and `compute_device_preview` all use — so this expands
+/// exactly the tracks a saved selection with the same rules would keep. A
+/// rule matching nothing contributes nothing (never an error); because the
+/// match is a single OR-across-all-rules pass over the index (not a
+/// per-rule expand-then-union), a track matched by more than one rule
+/// appears exactly once. Paths are `index.source_root`-relative with
+/// forward slashes (mirrors `playlist::render_m3u8`'s wire convention);
+/// a path that somehow isn't under `source_root` is dropped rather than
+/// panicking. Sorted lexicographically for deterministic wire ordering.
+/// An empty/never-scanned `index` (no source configured yet) yields an
+/// empty result, not an error.
+pub fn resolve_tracks(index: &LibraryIndex, rules: &[SelectionRule]) -> Vec<String> {
+    let sel = Selection { version: selection::SELECTION_VERSION, mode: SelectionMode::Include, rules: rules.to_vec() };
+    let mut out: Vec<String> = index.files.iter()
+        .filter(|(_, rec)| sel.wants(&rec.facts()))
+        .filter_map(|(path, _)| path.strip_prefix(&index.source_root).ok())
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .collect();
+    out.sort();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,5 +665,112 @@ mod tests {
             }
             other => panic!("expected DevicePreview, got {other:?}"),
         }
+    }
+
+    // --- v1.7.0: resolve_tracks ------------------------------------------
+
+    #[test]
+    fn resolve_tracks_artist_rule_expands_to_all_its_files() {
+        let idx = index_with(vec![
+            ("/m/Radiohead/OK Computer/01.flac", track("Radiohead", "", "OK Computer", "Rock", 1)),
+            ("/m/Radiohead/OK Computer/02.flac", track("Radiohead", "", "OK Computer", "Rock", 1)),
+            ("/m/Burial/Untrue/01.flac", track("Burial", "", "Untrue", "Dubstep", 1)),
+        ]);
+        let rules = vec![SelectionRule::Artist { name: "Radiohead".into() }];
+        let tracks = resolve_tracks(&idx, &rules);
+        assert_eq!(tracks, vec![
+            "Radiohead/OK Computer/01.flac".to_string(),
+            "Radiohead/OK Computer/02.flac".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn resolve_tracks_album_rule_expands_to_that_album_only() {
+        let idx = index_with(vec![
+            ("/m/Aphex Twin/Drukqs/01.flac", track("Aphex Twin", "", "Drukqs", "IDM", 1)),
+            ("/m/Aphex Twin/Syro/01.flac", track("Aphex Twin", "", "Syro", "IDM", 1)),
+        ]);
+        let rules = vec![SelectionRule::Album { artist: "Aphex Twin".into(), album: "Drukqs".into() }];
+        let tracks = resolve_tracks(&idx, &rules);
+        assert_eq!(tracks, vec!["Aphex Twin/Drukqs/01.flac".to_string()]);
+    }
+
+    #[test]
+    fn resolve_tracks_genre_rule_expands_across_artists() {
+        let idx = index_with(vec![
+            ("/m/A/X/01.flac", track("A", "", "X", "IDM", 1)),
+            ("/m/B/Y/01.flac", track("B", "", "Y", "IDM", 1)),
+            ("/m/C/Z/01.flac", track("C", "", "Z", "Rock", 1)),
+        ]);
+        let rules = vec![SelectionRule::Genre { name: "IDM".into() }];
+        let tracks = resolve_tracks(&idx, &rules);
+        assert_eq!(tracks, vec!["A/X/01.flac".to_string(), "B/Y/01.flac".to_string()]);
+    }
+
+    #[test]
+    fn resolve_tracks_matches_case_insensitively() {
+        let idx = index_with(vec![
+            ("/m/Radiohead/OK Computer/01.flac", track("Radiohead", "", "OK Computer", "Rock", 1)),
+        ]);
+        let rules = vec![SelectionRule::Artist { name: "radiohead".into() }];
+        let tracks = resolve_tracks(&idx, &rules);
+        assert_eq!(tracks, vec!["Radiohead/OK Computer/01.flac".to_string()]);
+    }
+
+    #[test]
+    fn resolve_tracks_unmatched_rule_contributes_nothing() {
+        let idx = index_with(vec![
+            ("/m/Radiohead/OK Computer/01.flac", track("Radiohead", "", "OK Computer", "Rock", 1)),
+        ]);
+        let rules = vec![SelectionRule::Artist { name: "Nobody".into() }];
+        assert!(resolve_tracks(&idx, &rules).is_empty());
+    }
+
+    #[test]
+    fn resolve_tracks_mixed_rules_dedup_a_track_matched_by_two_rules() {
+        let idx = index_with(vec![
+            ("/m/Radiohead/OK Computer/01.flac", track("Radiohead", "", "OK Computer", "Rock", 1)),
+            ("/m/Burial/Untrue/01.flac", track("Burial", "", "Untrue", "Dubstep", 1)),
+        ]);
+        // Both the artist rule AND the genre rule match the Radiohead track;
+        // it must appear exactly once in the result.
+        let rules = vec![
+            SelectionRule::Artist { name: "Radiohead".into() },
+            SelectionRule::Genre { name: "Rock".into() },
+        ];
+        let tracks = resolve_tracks(&idx, &rules);
+        assert_eq!(tracks, vec!["Radiohead/OK Computer/01.flac".to_string()]);
+    }
+
+    #[test]
+    fn resolve_tracks_is_deterministically_sorted() {
+        let idx = index_with(vec![
+            ("/m/Z Artist/Album/01.flac", track("Z Artist", "", "Album", "Rock", 1)),
+            ("/m/A Artist/Album/01.flac", track("A Artist", "", "Album", "Rock", 1)),
+            ("/m/M Artist/Album/01.flac", track("M Artist", "", "Album", "Rock", 1)),
+        ]);
+        let rules = vec![SelectionRule::Genre { name: "Rock".into() }];
+        let tracks = resolve_tracks(&idx, &rules);
+        let mut sorted = tracks.clone();
+        sorted.sort();
+        assert_eq!(tracks, sorted, "must already be sorted");
+        assert_eq!(tracks, vec![
+            "A Artist/Album/01.flac".to_string(),
+            "M Artist/Album/01.flac".to_string(),
+            "Z Artist/Album/01.flac".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn resolve_tracks_empty_index_yields_empty_tracks() {
+        let idx = LibraryIndex::empty(PathBuf::from("/m"));
+        let rules = vec![SelectionRule::Artist { name: "Anyone".into() }];
+        assert!(resolve_tracks(&idx, &rules).is_empty());
+    }
+
+    #[test]
+    fn resolve_tracks_no_rules_yields_empty_tracks() {
+        let idx = index_with(vec![("/m/A/X/01.flac", track("A", "", "X", "G", 1))]);
+        assert!(resolve_tracks(&idx, &[]).is_empty());
     }
 }

@@ -2,7 +2,7 @@
 
 > This title's version (`1.3.0`) is the **subprocess** protocol (stdin/stdout,
 > `--ipc-mode`) described below. The separate **daemon** protocol (named-pipe/
-> Unix-socket, UI ↔ daemon) is currently at **`1.6.0`** — see "Daemon v1.6.0"
+> Unix-socket, UI ↔ daemon) is currently at **`1.7.0`** — see "Daemon v1.7.0"
 > further down this document for its commands/events.
 
 Newline-delimited JSON over stdin/stdout, UTF-8, custom typed-envelope.
@@ -757,7 +757,7 @@ Bumps will append rows here. Don't edit historical rows.
 > `major.minor.patch` scheme and both currently sit on major `1`, but their
 > minor versions move on separate schedules and a matching number (e.g. both
 > once being `1.1.0`) is coincidence, not a shared release train. As of this
-> writing the daemon protocol is at **`1.6.0`** — see "Daemon v1.6.0" below;
+> writing the daemon protocol is at **`1.7.0`** — see "Daemon v1.7.0" below;
 > this section is kept as the historical record of the `1.1.0` daemon bump.
 
 When the wire transport is the named pipe `\\.\pipe\ipod-sync` (Windows) or a
@@ -1189,3 +1189,63 @@ selection (not just "the" configured one) going forward. `custom_selection`
 itself is unchanged on the wire (still rides `ipod` on `config_update`/
 `save_config`) but is now vestigial: it no longer gates which selection
 file `get_selection`/`save_selection` use.
+
+## Daemon v1.7.0 — `resolve_tracks`: expand selection rules to track paths (2026-07-18)
+
+The daemon now emits `hello` with `protocol_version = "1.7.0"`. Purely
+additive over v1.6.0: one new command, one new event. Rationale: v1.6.0's
+`library_update` is aggregate-only (artist/album/genre + counts, never
+per-track paths — see `LibraryUpdate` in `crates/classick/src/
+ipc_daemon.rs`), so a client that builds a rule-based selection (e.g. an
+"Add Songs" picker offering artist/album/genre checkboxes) has no way to
+turn that selection into the concrete track paths a manual playlist needs.
+`resolve_tracks` closes that gap by doing the expansion host-side, against
+the cached library index the daemon already maintains.
+
+### New command (UI → daemon)
+
+| Type | Fields | Behavior |
+|---|---|---|
+| `resolve_tracks` | `rules` (array of `SelectionRule`, below) | Pure computation over the cached library index; nothing persists. Replies `resolved_tracks`, sent synchronously inline — same reply-ordering contract as `preview_device` (§"Daemon v1.6.0" above): the daemon never spawns/awaits before sending this reply, so replies stay in request order for the client's FIFO correlation. |
+
+`rules` reuses the **exact same wire shape** as `save_device_config`'s
+`selection.rules` (`selection::SelectionRule`, tagged by `kind`) — no new
+encoding:
+
+```json
+{"type":"resolve_tracks","rules":[
+  {"kind":"artist","name":"Boards of Canada"},
+  {"kind":"album","artist":"Aphex Twin","album":"Drukqs"},
+  {"kind":"genre","name":"Ambient"}]}
+```
+
+An empty `rules` array is valid and resolves to zero tracks (there's
+nothing to match).
+
+### New event (daemon → UI)
+
+| Type | Fields |
+|---|---|
+| `resolved_tracks` | `tracks` (`string[]`) — reply to `resolve_tracks`. |
+
+```json
+{"type":"resolved_tracks","tracks":["Artist/Album/01.flac","Artist/Album/02.flac"]}
+```
+
+`tracks` are source-relative paths (the same convention manual playlists'
+`tracks` use — see `save_playlist`/`playlist_detail` in §"Daemon v1.6.0"
+above), expanded against the cached library index with the SAME
+case-insensitive matching the selection matcher uses
+(`selection::Selection::wants`/`eq_fold`'s `to_lowercase` comparison — see
+`crates/classick/src/selection.rs`). Internally this builds a throwaway
+`Selection { mode: include, rules }` and reuses that exact matcher (see
+`daemon::library::resolve_tracks`), so `resolve_tracks` always expands a
+rule set to the same tracks a saved selection with those rules would keep.
+A rule that matches nothing contributes nothing — never an error. Because
+matching is a single OR-across-all-rules pass over the index rather than a
+per-rule expand-then-union, a track matched by more than one rule (e.g. an
+artist rule and a genre rule both matching the same file) appears exactly
+once in `tracks`. Results are sorted lexicographically by path for
+deterministic wire ordering. If the library index is absent (no source
+configured yet) or not yet scanned, the reply is `{"tracks":[]}` — an empty
+array is a valid reply, never an error.
