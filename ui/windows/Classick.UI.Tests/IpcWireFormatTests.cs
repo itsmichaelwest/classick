@@ -111,6 +111,14 @@ public class IpcWireFormatTests
     }
 
     [Fact]
+    public void Paused_event_deserializes_with_type_only()
+    {
+        var evt = JsonSerializer.Deserialize<IpcEvent>("""{"type":"paused"}""");
+
+        Assert.IsType<PausedEvent>(evt);
+    }
+
+    [Fact]
     public void Log_event_deserializes_message()
     {
         var json = """{"type":"log","message":"transcoded in 6.3s"}""";

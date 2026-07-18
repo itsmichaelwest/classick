@@ -133,11 +133,12 @@ public sealed partial class WizardWindow : Window
             FirstSyncMode: "review",
             SubsequentSyncMode: payload.SubsequentSyncMode,
             ScheduleMinutes: payload.ScheduleMinutes,
-            NotifyOn: "all");
+            NotifyOn: "all",
+            RockboxCompat: false);
         await daemon.SendAsync(new SaveConfigCommand(
             Source: payload.Source,
             Daemon: daemonSettings,
-            Ipod: new IpodIdentity(payload.IpodSerial, payload.IpodModelLabel, payload.IpodName),
+            Ipod: new IpodIdentity(payload.IpodSerial, payload.IpodModelLabel, payload.IpodName, CustomSelection: false),
             RequestId: Guid.NewGuid().ToString("N")));
     }
 }

@@ -102,7 +102,8 @@ public partial class SettingsViewModel : ObservableObject
             FirstSyncMode: General.FirstSyncMode,
             SubsequentSyncMode: General.SubsequentSyncMode,
             ScheduleMinutes: (uint)General.ScheduleMinutes,
-            NotifyOn: Notifications.NotifyOn);
+            NotifyOn: Notifications.NotifyOn,
+            RockboxCompat: false);
     }
 }
 

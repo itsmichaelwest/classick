@@ -7,7 +7,7 @@ using Xunit;
 public class PopoverViewModelTests
 {
     private static StatusUpdateEvent Status(string state, bool ipodConnected, HistoryEntry? last = null)
-        => new StatusUpdateEvent(state, true, ipodConnected, last, null);
+        => new StatusUpdateEvent(state, true, ipodConnected, last, null, null, 0, null, null);
 
     [Fact]
     public void Initial_status_text_is_offline_when_no_status_received_yet()

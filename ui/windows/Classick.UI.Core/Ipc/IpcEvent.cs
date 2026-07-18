@@ -20,6 +20,7 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(LogEvent), "log")]
 [JsonDerivedType(typeof(ErrorEvent), "error")]
 [JsonDerivedType(typeof(FinishEvent), "finish")]
+[JsonDerivedType(typeof(PausedEvent), "paused")]
 public abstract record IpcEvent;
 
 /// <summary>Handshake; first event emitted after spawn. See §4.1.</summary>
@@ -84,6 +85,9 @@ public sealed record TrackStartEvent(
 
 /// <summary>Per-track operation end. See §4.8.</summary>
 public sealed record TrackDoneEvent : IpcEvent;
+
+/// <summary>Graceful sync checkpoint reached after a pause request.</summary>
+public sealed record PausedEvent : IpcEvent;
 
 /// <summary>Informational log line. See §4.9.</summary>
 public sealed record LogEvent(

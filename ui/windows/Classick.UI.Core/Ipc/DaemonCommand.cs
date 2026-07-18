@@ -14,6 +14,19 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(CancelSyncCommand), "cancel_sync")]
 [JsonDerivedType(typeof(PauseCommand), "pause")]
 [JsonDerivedType(typeof(DecidePromptCommand), "decide_prompt")]
+[JsonDerivedType(typeof(BackfillRockboxCommand), "backfill_rockbox")]
+[JsonDerivedType(typeof(ReplaceLibraryCommand), "replace_library")]
+[JsonDerivedType(typeof(GetLibraryCommand), "get_library")]
+[JsonDerivedType(typeof(ScanLibraryCommand), "scan_library")]
+[JsonDerivedType(typeof(PreviewSelectionCommand), "preview_selection")]
+[JsonDerivedType(typeof(ListPlaylistsCommand), "list_playlists")]
+[JsonDerivedType(typeof(GetPlaylistCommand), "get_playlist")]
+[JsonDerivedType(typeof(SavePlaylistCommand), "save_playlist")]
+[JsonDerivedType(typeof(DeletePlaylistCommand), "delete_playlist")]
+[JsonDerivedType(typeof(GetDeviceConfigCommand), "get_device_config")]
+[JsonDerivedType(typeof(SaveDeviceConfigCommand), "save_device_config")]
+[JsonDerivedType(typeof(PreviewDeviceCommand), "preview_device")]
+[JsonDerivedType(typeof(ResolveTracksCommand), "resolve_tracks")]
 [JsonDerivedType(typeof(ShutdownCommand), "shutdown")]
 public abstract record DaemonCommand;
 
@@ -26,9 +39,9 @@ public sealed record GetConfigCommand(
 ) : DaemonCommand;
 
 public sealed record SaveConfigCommand(
-    [property: JsonPropertyName("source")] string? Source,
-    [property: JsonPropertyName("daemon")] DaemonSettings? Daemon,
-    [property: JsonPropertyName("ipod")] IpodIdentity? Ipod,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("source")] string? Source,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("daemon")] DaemonSettings? Daemon,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("ipod")] IpodIdentity? Ipod,
     [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
 ) : DaemonCommand;
 
@@ -47,8 +60,8 @@ public sealed record TriggerSyncCommand(
 ) : DaemonCommand;
 
 public sealed record GetHistoryCommand(
-    [property: JsonPropertyName("limit")] int Limit,
-    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("limit")] int? Limit = null
 ) : DaemonCommand;
 
 public sealed record SubscribeDeviceEventsCommand : DaemonCommand;
@@ -77,6 +90,73 @@ public sealed record DecidePromptCommand(
     [property: JsonPropertyName("id")] ulong Id,
     [property: JsonPropertyName("choice")] int Choice,
     [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record BackfillRockboxCommand(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record ReplaceLibraryCommand(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record GetLibraryCommand(
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record ScanLibraryCommand(
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record PreviewSelectionCommand(
+    [property: JsonPropertyName("mode")] SelectionMode Mode,
+    [property: JsonPropertyName("rules")] IReadOnlyList<SelectionRule> Rules,
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record ListPlaylistsCommand(
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record GetPlaylistCommand(
+    [property: JsonRequired, JsonPropertyName("slug")] string Slug,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record SavePlaylistCommand(
+    [property: JsonRequired, JsonPropertyName("playlist")] PlaylistPayload Playlist,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record DeletePlaylistCommand(
+    [property: JsonRequired, JsonPropertyName("slug")] string Slug,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record GetDeviceConfigCommand(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record SaveDeviceConfigCommand(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("selection")] SelectionState? Selection,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("subscriptions")] Subscriptions? Subscriptions,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("settings")] DeviceSettings? Settings,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record PreviewDeviceCommand(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record ResolveTracksCommand(
+    [property: JsonPropertyName("rules")] IReadOnlyList<SelectionRule> Rules,
     [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
 ) : DaemonCommand;
 

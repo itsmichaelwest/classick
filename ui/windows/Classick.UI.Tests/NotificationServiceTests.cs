@@ -8,9 +8,9 @@ public class NotificationServiceTests
     {
         var lastSync = errorMessage is null
             ? new HistoryEntry("2026-05-25T10:00:00Z", 5, "plug_in", "ok", null,
-                new SyncSummary(1, 0, 0, 0, 0), "SERIAL-A")
+                new SyncSummary(1, 0, 0, 0, 0, 0, 0, 0, 0), "SERIAL-A")
             : new HistoryEntry("2026-05-25T10:00:00Z", 5, "plug_in", "error", errorMessage, null, "SERIAL-A");
-        return new StatusUpdateEvent(state, true, true, lastSync, null);
+        return new StatusUpdateEvent(state, true, true, lastSync, null, null, 0, null, null);
     }
 
     [Fact]

@@ -15,7 +15,7 @@ public class DaemonEventRouterTests
         router.StatusUpdated += s => received = s;
 
         router.Start();
-        await channel.Writer.WriteAsync(new StatusUpdateEvent("idle", true, true, null, null));
+        await channel.Writer.WriteAsync(new StatusUpdateEvent("idle", true, true, null, null, null, 0, null, null));
         await Task.Delay(50);
 
         Assert.NotNull(received);
@@ -33,7 +33,7 @@ public class DaemonEventRouterTests
         router.StatusUpdated += _ => count2++;
 
         router.Start();
-        await channel.Writer.WriteAsync(new StatusUpdateEvent("idle", true, true, null, null));
+        await channel.Writer.WriteAsync(new StatusUpdateEvent("idle", true, true, null, null, null, 0, null, null));
         await Task.Delay(50);
 
         Assert.Equal(1, count1);
@@ -71,12 +71,12 @@ public class DaemonEventRouterTests
         router.StatusUpdated += Handler;
 
         router.Start();
-        await channel.Writer.WriteAsync(new StatusUpdateEvent("idle", true, true, null, null));
+        await channel.Writer.WriteAsync(new StatusUpdateEvent("idle", true, true, null, null, null, 0, null, null));
         await Task.Delay(50);
         Assert.Equal(1, count);
 
         router.StatusUpdated -= Handler;
-        await channel.Writer.WriteAsync(new StatusUpdateEvent("syncing", true, true, null, null));
+        await channel.Writer.WriteAsync(new StatusUpdateEvent("syncing", true, true, null, null, null, 0, null, null));
         await Task.Delay(50);
         Assert.Equal(1, count);  // unchanged
         router.Stop();
@@ -97,6 +97,22 @@ public class DaemonEventRouterTests
 
         Assert.NotNull(routed);
         Assert.IsType<TrackDoneEvent>(routed);
+        router.Stop();
+    }
+
+    [Fact]
+    public async Task Paused_sync_event_is_re_parsed_and_routed()
+    {
+        var channel = Channel.CreateUnbounded<object>();
+        IpcEvent? routed = null;
+        var router = new DaemonEventRouter(channel.Reader);
+        router.IpcEventReceived += item => routed = item;
+
+        router.Start();
+        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""paused""}", "A", 11));
+        await Task.Delay(50);
+
+        Assert.IsType<PausedEvent>(routed);
         router.Stop();
     }
 
@@ -136,6 +152,23 @@ public class DaemonEventRouterTests
         Assert.Equal(3UL, received!.Revision);
         Assert.Single(received.Devices);
         Assert.Equal("A", received.Devices[0].Identity.Serial);
+        router.Stop();
+    }
+
+    [Fact]
+    public async Task Routes_remaining_v2_daemon_events_without_treating_them_as_subprocess_events()
+    {
+        var channel = Channel.CreateUnbounded<object>();
+        DaemonEvent? received = null;
+        var router = new DaemonEventRouter(channel.Reader);
+        router.DaemonEventReceived += daemonEvent => received = daemonEvent;
+
+        router.Start();
+        await channel.Writer.WriteAsync(new ResolvedTracksEvent(["Bowie/Heroes.flac"], "resolve"));
+        await Task.Delay(50);
+
+        var resolved = Assert.IsType<ResolvedTracksEvent>(received);
+        Assert.Equal("resolve", resolved.AcknowledgedRequestId);
         router.Stop();
     }
 }
