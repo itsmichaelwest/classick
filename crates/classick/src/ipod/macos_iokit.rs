@@ -37,6 +37,38 @@ pub fn format_firewire_guid(usb_serial: &str) -> String {
     format!("0x{}", usb_serial.trim().to_uppercase())
 }
 
+fn supported_ipod_added_identity(usb_serial: &str, pid: u16) -> Option<String> {
+    let serial = usb_serial.trim();
+    if serial.len() != 16
+        || !serial.chars().all(|character| character.is_ascii_hexdigit())
+        || !matches!(
+            pid,
+            0x1201
+                | 0x1202
+                | 0x1203
+                | 0x1204
+                | 0x1205
+                | 0x1206
+                | 0x1209
+                | 0x1240
+                | 0x1260
+                | 0x1261
+                | 0x1262
+                | 0x1263
+                | 0x1265
+                | 0x1266
+                | 0x1267
+                | 0x1300
+                | 0x1301
+                | 0x1302
+                | 0x1303
+        )
+    {
+        return None;
+    }
+    Some(format_firewire_guid(serial))
+}
+
 /// Resolve a mounted iPod volume to its USB identity. Returns `None` if the
 /// mount can't be resolved to a BSD name, isn't backed by an Apple USB
 /// device, or lacks a serial number.
@@ -150,9 +182,9 @@ unsafe fn read_string_prop(entry: io_registry_entry_t, key: &str) -> Option<Stri
 }
 
 /// A USB attach/detach signal from the IOKit run loop.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum UsbChange {
-    Added,
+    Added { serial: String },
     Removed,
 }
 
@@ -227,6 +259,18 @@ pub fn run_usb_notifications(on_event: Box<dyn FnMut(UsbChange) + Send>) {
                 IOObjectRelease(service);
                 continue;
             }
+            let Some(pid) = read_u64_prop(service, "idProduct").map(|pid| pid as u16) else {
+                IOObjectRelease(service);
+                continue;
+            };
+            let Some(raw_serial) = read_string_prop(service, "USB Serial Number") else {
+                IOObjectRelease(service);
+                continue;
+            };
+            let Some(serial) = supported_ipod_added_identity(&raw_serial, pid) else {
+                IOObjectRelease(service);
+                continue;
+            };
             let interest = Box::into_raw(Box::new(Interest {
                 ctx: refcon as *mut Ctx,
                 notification: 0,
@@ -244,7 +288,7 @@ pub fn run_usb_notifications(on_event: Box<dyn FnMut(UsbChange) + Send>) {
             if kr == 0 {
                 (*interest).notification = notification;
                 // Keep `service` alive — released in device_terminated.
-                (ctx.on_event)(UsbChange::Added);
+                (ctx.on_event)(UsbChange::Added { serial });
             } else {
                 tracing::warn!("IOServiceAddInterestNotification failed: {kr}");
                 drop(Box::from_raw(interest));
@@ -321,6 +365,16 @@ mod tests {
     #[test]
     fn trims_and_uppercases() {
         assert_eq!(format_firewire_guid("  ab12cd  "), "0xAB12CD");
+    }
+
+    #[test]
+    fn supported_ipod_added_identity_requires_a_guid_and_known_ipod_pid() {
+        assert_eq!(
+            supported_ipod_added_identity(" 000a27002138b0a8 ", 0x1261),
+            Some("0x000A27002138B0A8".to_string())
+        );
+        assert_eq!(supported_ipod_added_identity("not-a-guid", 0x1261), None);
+        assert_eq!(supported_ipod_added_identity("000a27002138b0a8", 0x12AB), None);
     }
 
     // Regression: pin the IOKit notification/interest constants. The message

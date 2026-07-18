@@ -35,22 +35,26 @@ fn replace_inventory(
     events
 }
 
-fn settle_added_inventory_change(
+fn settle_added_serial(
     devices: &mut HashMap<String, DetectedIpod>,
+    serial: &str,
     attempts: usize,
     scan: &mut dyn FnMut() -> Vec<DetectedIpod>,
     emit: &mut dyn FnMut(DeviceEvent) -> bool,
     wait: &mut dyn FnMut(),
 ) -> bool {
+    let serial_key = canonical_serial_key(serial);
+    if devices.contains_key(&serial_key) {
+        return true;
+    }
     for _ in 0..attempts {
         let events = replace_inventory(devices, scan());
-        let changed = !events.is_empty();
         for event in events {
             if !emit(event) {
                 return false;
             }
         }
-        if changed {
+        if devices.contains_key(&serial_key) {
             return true;
         }
         wait();
@@ -95,7 +99,7 @@ impl DeviceWatcher for IokitDeviceWatcher {
             while let Ok(change) = raw_rx.recv() {
                 tracing::debug!("device watcher: raw USB signal {change:?}");
                 match change {
-                    UsbChange::Added => {
+                    UsbChange::Added { serial } => {
                         // A USB attach precedes the volume mount, and an iPod
                         // Classic's spinning HDD can take 10s+ to spin up and
                         // mount after re-plug (at startup it's instant only
@@ -103,6 +107,12 @@ impl DeviceWatcher for IokitDeviceWatcher {
                         // 30s for the mount — a bounded post-event settle, NOT
                         // steady-state polling. There's no second USB event to
                         // fall back on, so giving up early leaves it stuck.
+                        if devices.contains_key(&canonical_serial_key(&serial)) {
+                            tracing::debug!(
+                                "device watcher: iPod {serial} already present; ignoring Added"
+                            );
+                            continue;
+                        }
                         let mut scan = device::scan_for_ipods;
                         let mut send_failed = false;
                         let mut emit = |event| match tx.blocking_send(event) {
@@ -113,8 +123,9 @@ impl DeviceWatcher for IokitDeviceWatcher {
                             }
                         };
                         let mut wait = || std::thread::sleep(Duration::from_millis(250));
-                        let found = settle_added_inventory_change(
+                        let found = settle_added_serial(
                             &mut devices,
+                            &serial,
                             120,
                             &mut scan,
                             &mut emit,
@@ -191,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn added_settle_waits_for_an_inventory_change_when_another_ipod_is_present() {
+    fn added_for_absent_serial_waits_until_that_ipod_appears() {
         let mut devices = inventory(vec![ipod("0xB")]);
         let mut scans = vec![vec![ipod("0xB")], vec![ipod("0xA"), ipod("0xB")]];
         let mut emitted = Vec::new();
@@ -203,8 +214,9 @@ mod tests {
         };
         let mut wait = || waits += 1;
 
-        let settled = settle_added_inventory_change(
+        let settled = settle_added_serial(
             &mut devices,
+            "0xA",
             2,
             &mut scan,
             &mut emit,
@@ -214,5 +226,36 @@ mod tests {
         assert!(settled);
         assert_eq!(waits, 1, "unchanged B must not settle A's Added signal");
         assert_eq!(emitted, vec![DeviceEvent::Connected(ipod("0xA"))]);
+    }
+
+    #[test]
+    fn added_for_known_serial_finishes_without_scanning_or_waiting() {
+        let mut devices = inventory(vec![ipod("0xB")]);
+        let mut scans = 0;
+        let mut emitted = Vec::new();
+        let mut waits = 0;
+        let mut scan = || {
+            scans += 1;
+            vec![ipod("0xB")]
+        };
+        let mut emit = |event| {
+            emitted.push(event);
+            true
+        };
+        let mut wait = || waits += 1;
+
+        let settled = settle_added_serial(
+            &mut devices,
+            "0xB",
+            120,
+            &mut scan,
+            &mut emit,
+            &mut wait,
+        );
+
+        assert!(settled);
+        assert_eq!(scans, 0);
+        assert_eq!(waits, 0);
+        assert!(emitted.is_empty());
     }
 }
