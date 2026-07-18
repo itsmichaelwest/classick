@@ -72,12 +72,7 @@ pub(crate) fn ffmpeg_version(ffmpeg_path: &std::path::Path) -> Result<String> {
         .output()
         .with_context(|| format!("invoking {} -version", ffmpeg_path.display()))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
-    Ok(stdout
-        .lines()
-        .next()
-        .unwrap_or("ffmpeg")
-        .trim()
-        .to_string())
+    Ok(stdout.lines().next().unwrap_or("ffmpeg").trim().to_string())
 }
 
 /// Effective Rockbox-compat for one run: the raw `--rockbox-compat` CLI flag
@@ -86,7 +81,10 @@ pub(crate) fn ffmpeg_version(ffmpeg_path: &std::path::Path) -> Result<String> {
 /// `config::resolve_with`'s `rockbox_compat` merge); otherwise the syncing
 /// device's own setting wins. Pure so it's testable without touching the
 /// device-settings file.
-pub(crate) fn effective_rockbox(cli_flag: bool, device: &crate::device_config::DeviceSettings) -> bool {
+pub(crate) fn effective_rockbox(
+    cli_flag: bool,
+    device: &crate::device_config::DeviceSettings,
+) -> bool {
     cli_flag || device.rockbox_compat
 }
 
@@ -102,7 +100,11 @@ pub enum RunOutcome {
     Paused,
 }
 
-pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<RunOutcome> {
+pub fn run(
+    config: &mut Config,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<RunOutcome> {
     if config.dry_run && config.apply {
         return Err(anyhow!("--dry-run and --apply are mutually exclusive"));
     }
@@ -183,8 +185,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     let library_idx: Option<library_index::LibraryIndex> = library_index::default_index_path()
         .ok()
         .map(|p| library_index::load_or_empty(&p, &config.source));
-    let index_for_sync_set =
-        library_idx.clone().unwrap_or_else(|| library_index::LibraryIndex::empty(config.source.clone()));
+    let index_for_sync_set = library_idx
+        .clone()
+        .unwrap_or_else(|| library_index::LibraryIndex::empty(config.source.clone()));
     // Fix 1 (per-device selection ignored by sync): always resolve this
     // device's own `devices/<serial>/selection.json` — never the deprecated
     // `custom_selection`-gated shared/per-device split. This must match
@@ -212,10 +215,17 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // commit skips entirely rather than deleting every previously-managed
     // playlist over a transient store-open failure.
     let mut desired_playlists: Option<Vec<(String, String, Vec<PathBuf>)>> = None;
-    let sources = match crate::playlist::PlaylistStore::default_root().and_then(crate::playlist::PlaylistStore::open) {
+    let sources = match crate::playlist::PlaylistStore::default_root()
+        .and_then(crate::playlist::PlaylistStore::open)
+    {
         Ok(store) => {
             let effective = crate::sync_set::compute(
-                sources, &selection, &subscriptions, &store, &index_for_sync_set, &config.source,
+                sources,
+                &selection,
+                &subscriptions,
+                &store,
+                &index_for_sync_set,
+                &config.source,
             );
             for (slug, err) in &effective.playlist_errors {
                 progress.log(format!("playlist '{slug}': {err}"));
@@ -237,17 +247,19 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
             sources
         }
         Err(e) => {
-            tracing::warn!("playlists: cannot open playlist store ({e:#}); syncing scope selection only");
+            tracing::warn!(
+                "playlists: cannot open playlist store ({e:#}); syncing scope selection only"
+            );
             crate::selection::apply_to_sources(sources, &config.source, &serial, |msg| {
                 progress.log(msg)
             })
         }
     };
     let _ = &effective_set; // sources + missing/error counts already consumed above
-    // One-time move of the legacy flat manifest.json into the per-device
-    // trust-package layout; a no-op once migrated. `config.manifest_path`
-    // keeps meaning "the legacy/root path" (still test-overridable) — the
-    // per-device path returned here is what load/save actually use.
+                            // One-time move of the legacy flat manifest.json into the per-device
+                            // trust-package layout; a no-op once migrated. `config.manifest_path`
+                            // keeps meaning "the legacy/root path" (still test-overridable) — the
+                            // per-device path returned here is what load/save actually use.
     let manifest_path = device_state::migrate_legacy_manifest(&config.manifest_path, &serial)?;
 
     // 3. Load (or rebuild) manifest.
@@ -313,7 +325,11 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
     // only `&library_idx`), so passing it into `fit::plan_fit` doesn't
     // consume it.
     let album_tag_of = |path: &Path| -> Option<String> {
-        library_idx.as_ref()?.files.get(path).map(|t| t.album.clone())
+        library_idx
+            .as_ref()?
+            .files
+            .get(path)
+            .map(|t| t.album.clone())
     };
     let remove_credit: u64 = actions
         .iter()
@@ -387,7 +403,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
             manifest.tracks.len()
         ));
     } else {
-        progress.log(format!("Loaded {} existing manifest entries", manifest.tracks.len()));
+        progress.log(format!(
+            "Loaded {} existing manifest entries",
+            manifest.tracks.len()
+        ));
     }
     progress.log(format!("Source: {} FLAC file(s)", sources.len()));
 
@@ -436,7 +455,11 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                         "Use --no-delete for this run",
                         "Abort",
                     ],
-                    &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                    &[
+                        PromptOutcome::Retry,
+                        PromptOutcome::Skip,
+                        PromptOutcome::Abort,
+                    ],
                 )?;
                 match outcome {
                     PromptOutcome::Retry => {
@@ -477,7 +500,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         no_delete
     } else {
         // Interactive review.
-        progress.review(summary_struct, config.no_delete || safeguard_force_no_delete);
+        progress.review(
+            summary_struct,
+            config.no_delete || safeguard_force_no_delete,
+        );
         match decision_rx.recv() {
             Ok(Decision::Review(ReviewDecision::Apply { no_delete })) => {
                 let no_delete = no_delete || safeguard_force_no_delete;
@@ -500,7 +526,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 // wired yet, and Pause only makes sense once the apply loop
                 // is running). Return loudly rather than silently swallowing
                 // a stray decision.
-                return Err(anyhow!("unexpected prompt/form/pause decision before any prompt was sent"));
+                return Err(anyhow!(
+                    "unexpected prompt/form/pause decision before any prompt was sent"
+                ));
             }
             Err(_) => {
                 return Err(anyhow!("review channel disconnected unexpectedly"));
@@ -678,7 +706,8 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
             // outcome reported to the caller.
             match decision_rx.try_recv() {
                 Ok(Decision::Review(ReviewDecision::Quit)) => {
-                    progress.log("Cancel requested — finalising completed tracks before stopping...");
+                    progress
+                        .log("Cancel requested — finalising completed tracks before stopping...");
                     cancelled = true;
                     break;
                 }
@@ -703,7 +732,11 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     progress.track_start(
                         i,
                         total_planned,
-                        format!("REMOVE {} (dbid {})", display_path(&entry.source_path), entry.ipod_dbid),
+                        format!(
+                            "REMOVE {} (dbid {})",
+                            display_path(&entry.source_path),
+                            entry.ipod_dbid
+                        ),
                     );
                     // Retry/Skip/Abort loop. Skip leaves the manifest entry
                     // intact: the track is still on the iPod (delete failed),
@@ -721,9 +754,15 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                                     entry.ipod_dbid
                                 );
                                 let outcome = await_prompt(
-                                    progress, decision_rx, msg,
+                                    progress,
+                                    decision_rx,
+                                    msg,
                                     &["Retry", "Skip this track", "Abort"],
-                                    &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                                    &[
+                                        PromptOutcome::Retry,
+                                        PromptOutcome::Skip,
+                                        PromptOutcome::Abort,
+                                    ],
                                 )?;
                                 match outcome {
                                     PromptOutcome::Retry => continue,
@@ -774,8 +813,9 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // manifest entry stays as-is.
                     let deleted = loop {
                         match crate::try_with_prompt::retry_transient(&crate::RETRY_BACKOFF, || {
-                            db.delete_track(old.ipod_dbid)
-                                .with_context(|| format!("delete-for-modify dbid {}", old.ipod_dbid))
+                            db.delete_track(old.ipod_dbid).with_context(|| {
+                                format!("delete-for-modify dbid {}", old.ipod_dbid)
+                            })
                         }) {
                             Ok(()) => break true,
                             Err(e) => {
@@ -785,9 +825,15 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                                     old.ipod_dbid
                                 );
                                 let outcome = await_prompt(
-                                    progress, decision_rx, msg,
+                                    progress,
+                                    decision_rx,
+                                    msg,
                                     &["Retry", "Skip this track", "Abort"],
-                                    &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                                    &[
+                                        PromptOutcome::Retry,
+                                        PromptOutcome::Skip,
+                                        PromptOutcome::Abort,
+                                    ],
                                 )?;
                                 match outcome {
                                     PromptOutcome::Retry => continue,
@@ -821,8 +867,16 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // new not added; the next run's diff sees the missing
                     // iPod entry and re-adds naturally).
                     commit_pipelined(
-                        &transcoder, idx, &db, &mut manifest, &src, deleted, progress, decision_rx,
-                        &mut bytes_written, &mut artwork_counts,
+                        &transcoder,
+                        idx,
+                        &db,
+                        &mut manifest,
+                        &src,
+                        deleted,
+                        progress,
+                        decision_rx,
+                        &mut bytes_written,
+                        &mut artwork_counts,
                     )?;
                     progress.track_done();
                 }
@@ -836,8 +890,16 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                     // Add always dispatches a job (see the filter above), so
                     // `take(idx)` always runs here.
                     commit_pipelined(
-                        &transcoder, idx, &db, &mut manifest, &src, true, progress, decision_rx,
-                        &mut bytes_written, &mut artwork_counts,
+                        &transcoder,
+                        idx,
+                        &db,
+                        &mut manifest,
+                        &src,
+                        true,
+                        progress,
+                        decision_rx,
+                        &mut bytes_written,
+                        &mut artwork_counts,
                     )?;
                     progress.track_done();
                 }
@@ -860,9 +922,15 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                                     source.path.display()
                                 );
                                 let outcome = await_prompt(
-                                    progress, decision_rx, msg,
+                                    progress,
+                                    decision_rx,
+                                    msg,
                                     &["Retry", "Skip this track", "Abort"],
-                                    &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+                                    &[
+                                        PromptOutcome::Retry,
+                                        PromptOutcome::Skip,
+                                        PromptOutcome::Abort,
+                                    ],
                                 )?;
                                 match outcome {
                                     PromptOutcome::Retry => continue,
@@ -1019,9 +1087,12 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         // runs regardless.
         if should_reconcile_playlists(cancelled, paused) {
             if let Some(desired) = &desired_playlists {
-                if let Err(e) = reconcile_playlists_step(&db, desired, &manifest, &serial, progress) {
+                if let Err(e) = reconcile_playlists_step(&db, desired, &manifest, &serial, progress)
+                {
                     tracing::warn!("playlist reconcile failed: {e:#}");
-                    progress.log(format!("playlist update failed: {e:#} — will retry next sync"));
+                    progress.log(format!(
+                        "playlist update failed: {e:#} — will retry next sync"
+                    ));
                 }
             }
         }
@@ -1049,9 +1120,12 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
         manifest::save_atomic(&manifest_path, &manifest)?;
 
         if paused {
-            progress.log("Sync paused. Completed tracks were saved. Eject the iPod before unplugging.");
+            progress
+                .log("Sync paused. Completed tracks were saved. Eject the iPod before unplugging.");
         } else if cancelled {
-            progress.log("Sync cancelled. Completed tracks were saved. Eject the iPod before unplugging.");
+            progress.log(
+                "Sync cancelled. Completed tracks were saved. Eject the iPod before unplugging.",
+            );
         } else {
             progress.log("Done. Eject the iPod before unplugging.");
         }
@@ -1101,8 +1175,11 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                 .iter()
                 .filter(|e| e.source_known && !e.ipod_relpath.is_empty())
             {
-                let device_file = Path::new(&mount)
-                    .join(entry.ipod_relpath.replace('\\', std::path::MAIN_SEPARATOR_STR));
+                let device_file = Path::new(&mount).join(
+                    entry
+                        .ipod_relpath
+                        .replace('\\', std::path::MAIN_SEPARATOR_STR),
+                );
                 if !device_file.exists() || !entry.source_path.exists() {
                     continue;
                 }
@@ -1118,7 +1195,10 @@ pub fn run(config: &mut Config, progress: &Progress, decision_rx: &Receiver<Deci
                         refreshed.push((entry.ipod_dbid, tags, art));
                     }
                     Err(e) => {
-                        tracing::warn!("art refresh: {} skipped: {e:#}", entry.source_path.display())
+                        tracing::warn!(
+                            "art refresh: {} skipped: {e:#}",
+                            entry.source_path.display()
+                        )
                     }
                 }
             }
@@ -1328,10 +1408,18 @@ const RECOVERY_HINT_LINES: &[&str] = &[
 /// `fit::plan_fit` treats as fail-open (keep everything; a genuine
 /// out-of-space condition will surface later as a normal iPod-write error).
 /// `pub(crate)` so this can be unit-tested without a real mounted device.
-pub(crate) fn compute_budget(storage: Option<free_space::StorageInfo>, remove_credit: u64) -> Option<u64> {
+pub(crate) fn compute_budget(
+    storage: Option<free_space::StorageInfo>,
+    remove_credit: u64,
+) -> Option<u64> {
     let storage = storage?;
     let reserve = crate::fit::reserve_bytes(storage.total_bytes);
-    Some(storage.free_bytes.saturating_add(remove_credit).saturating_sub(reserve))
+    Some(
+        storage
+            .free_bytes
+            .saturating_add(remove_credit)
+            .saturating_sub(reserve),
+    )
 }
 
 /// Builds the `SkippedForSpace` rollup from a final (post-retry, if any)
@@ -1426,7 +1514,9 @@ pub fn retry_deferred(
     }
 
     let total = retry_outcome.kept.len();
-    progress.log(format!("Retrying {total} previously-deferred track(s) that now fit…"));
+    progress.log(format!(
+        "Retrying {total} previously-deferred track(s) that now fit…"
+    ));
 
     let jobs: Vec<(usize, SourceEntry)> = retry_outcome
         .kept
@@ -1448,9 +1538,21 @@ pub fn retry_deferred(
 
     for (idx, action) in retry_outcome.kept.into_iter().enumerate() {
         let Action::Add(src) = action else { continue };
-        progress.track_start(idx + 1, total, format!("ADD {} (retry)", display_path(&src.path)));
+        progress.track_start(
+            idx + 1,
+            total,
+            format!("ADD {} (retry)", display_path(&src.path)),
+        );
         commit_pipelined(
-            &transcoder, idx, db, manifest, &src, true, progress, decision_rx, bytes_written,
+            &transcoder,
+            idx,
+            db,
+            manifest,
+            &src,
+            true,
+            progress,
+            decision_rx,
+            bytes_written,
             artwork_counts,
         )?;
         progress.track_done();
@@ -1501,11 +1603,13 @@ pub(crate) fn do_metadata_only(
     };
     let art_outcome = ArtOutcome::from_probe(has_art, art.is_some());
     db.update_track_metadata(entry.ipod_dbid, &tags, art.as_deref())
-        .with_context(|| format!(
-            "update_track_metadata dbid {} for {}",
-            entry.ipod_dbid,
-            source.path.display()
-        ))?;
+        .with_context(|| {
+            format!(
+                "update_track_metadata dbid {} for {}",
+                entry.ipod_dbid,
+                source.path.display()
+            )
+        })?;
     let new_file_fp = source::fingerprint(&source.path)
         .with_context(|| format!("fingerprint {}", source.path.display()))?;
     Ok((
@@ -1640,7 +1744,10 @@ pub(crate) fn transcode_one(
             Ok(bytes) => match crate::artwork::normalize(&bytes) {
                 Ok(norm) => Some(norm),
                 Err(e) => {
-                    tracing::warn!("art normalize failed for {}: {e:#}; using raw bytes", src.path.display());
+                    tracing::warn!(
+                        "art normalize failed for {}: {e:#}; using raw bytes",
+                        src.path.display()
+                    );
                     Some(bytes)
                 }
             },
@@ -1753,7 +1860,10 @@ fn commit_pipelined(
         Ok(t) => t,
         Err(e) => {
             if commit {
-                progress.error(format!("Transcode failed for {}: {e:#}", src.path.display()));
+                progress.error(format!(
+                    "Transcode failed for {}: {e:#}",
+                    src.path.display()
+                ));
                 progress.log(format!("Skipped {} (transcode failed)", src.path.display()));
             }
             return Ok(());
@@ -1806,7 +1916,11 @@ fn prompt_retry_skip_abort(
         decision_rx,
         msg,
         &["Retry", "Skip this track", "Abort"],
-        &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort],
+        &[
+            PromptOutcome::Retry,
+            PromptOutcome::Skip,
+            PromptOutcome::Abort,
+        ],
     )
 }
 
@@ -1819,11 +1933,9 @@ fn display_path(p: &Path) -> String {
     let parent = p.parent().and_then(|p| p.file_name());
     let file = p.file_name();
     match (parent, file) {
-        (Some(parent), Some(file)) => format!(
-            "{}\\{}",
-            parent.to_string_lossy(),
-            file.to_string_lossy()
-        ),
+        (Some(parent), Some(file)) => {
+            format!("{}\\{}", parent.to_string_lossy(), file.to_string_lossy())
+        }
         _ => p.display().to_string(),
     }
 }
@@ -1884,15 +1996,16 @@ pub(crate) fn source_tags_and_art(
     source: &Path,
     ffmpeg: &Path,
 ) -> Result<(crate::ipod::db::Tags, Option<Vec<u8>>)> {
-    let probe = transcode::probe(source, ffmpeg)
-        .with_context(|| format!("probe {}", source.display()))?;
+    let probe =
+        transcode::probe(source, ffmpeg).with_context(|| format!("probe {}", source.display()))?;
     let tags = tags_from_probe(&probe);
     let art: Option<Vec<u8>> = if has_embedded_art(&probe) {
         let art_path = transcode::temp_art_path();
         let raw = transcode::extract_cover_art(source, &art_path, ffmpeg)
             .and_then(|()| std::fs::read(&art_path).map_err(Into::into));
         let _ = std::fs::remove_file(&art_path);
-        raw.ok().and_then(|b| crate::artwork::normalize(&b).ok().or(Some(b)))
+        raw.ok()
+            .and_then(|b| crate::artwork::normalize(&b).ok().or(Some(b)))
     } else {
         None
     };
@@ -1959,8 +2072,11 @@ pub fn backfill_rockbox(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         progress.track_start(i + 1, total, label);
-        let device_file = Path::new(&mount)
-            .join(entry.ipod_relpath.replace('\\', std::path::MAIN_SEPARATOR_STR));
+        let device_file = Path::new(&mount).join(
+            entry
+                .ipod_relpath
+                .replace('\\', std::path::MAIN_SEPARATOR_STR),
+        );
         if !device_file.exists() || !entry.source_path.exists() {
             skipped += 1;
             progress.track_done();
@@ -2068,28 +2184,39 @@ pub(crate) fn build_rebuild_manifest(db: &OwnedDb, serial: &str) -> Manifest {
 
 /// Pure core of [`build_rebuild_manifest`], split out so it's unit-testable
 /// without a real libgpod-backed `OwnedDb`.
-pub(crate) fn build_rebuild_manifest_from_handles(handles: Vec<TrackHandle>, serial: &str) -> Manifest {
-    let tracks = handles.into_iter().map(|h| ManifestEntry {
-        source_path: std::path::PathBuf::new(),
-        source_mtime: 0,
-        source_size: 0,
-        source_fingerprint: String::new(),
-        ipod_dbid: h.dbid,
-        ipod_relpath: h.ipod_relpath,
-        source_known: false,
-        audio_fingerprint: String::new(),
-        // Rebuilt entries have no source file to introspect — encoder and
-        // source_format are genuinely unknown. The encoder-mismatch carve-out
-        // for "unknown" keeps these untouched on first run after rebuild,
-        // and they'll get refilled on the next Modify via entry_from.
-        encoder: "unknown".to_string(),
-        encoder_version: String::new(),
-        source_format: "flac".to_string(),
-    }).collect();
+pub(crate) fn build_rebuild_manifest_from_handles(
+    handles: Vec<TrackHandle>,
+    serial: &str,
+) -> Manifest {
+    let tracks = handles
+        .into_iter()
+        .map(|h| ManifestEntry {
+            source_path: std::path::PathBuf::new(),
+            source_mtime: 0,
+            source_size: 0,
+            source_fingerprint: String::new(),
+            ipod_dbid: h.dbid,
+            ipod_relpath: h.ipod_relpath,
+            source_known: false,
+            audio_fingerprint: String::new(),
+            // Rebuilt entries have no source file to introspect — encoder and
+            // source_format are genuinely unknown. The encoder-mismatch carve-out
+            // for "unknown" keeps these untouched on first run after rebuild,
+            // and they'll get refilled on the next Modify via entry_from.
+            encoder: "unknown".to_string(),
+            encoder_version: String::new(),
+            source_format: "flac".to_string(),
+        })
+        .collect();
     // last_source_root is intentionally None: the iPod's DB doesn't carry
     // the original source library root. The next normal sync's
     // manifest::save_atomic populates it from config.source.
-    Manifest { version: 1, ipod_serial: Some(serial.to_string()), last_source_root: None, tracks }
+    Manifest {
+        version: 1,
+        ipod_serial: Some(serial.to_string()),
+        last_source_root: None,
+        tracks,
+    }
 }
 
 // -- Task 6: playlist reconcile helpers --------------------------------
@@ -2220,7 +2347,11 @@ pub(crate) fn manifest_is_foreign(manifest: &Manifest, serial: &str) -> bool {
 /// lifecycle in `run`): this run's OWN diff can be entirely Unchanged
 /// (`changed == 0`) and it must still repair, because the outstanding damage
 /// predates this run's diff.
-pub(crate) fn should_rebuild_artwork(changed: usize, unchanged: usize, marker_present: bool) -> bool {
+pub(crate) fn should_rebuild_artwork(
+    changed: usize,
+    unchanged: usize,
+    marker_present: bool,
+) -> bool {
     let _ = unchanged; // see doc comment: intentionally not part of the gate
     changed > 0 || marker_present
 }
@@ -2237,7 +2368,10 @@ pub(crate) fn touch_marker(path: &Path) {
         return;
     }
     if let Err(e) = std::fs::write(path, b"") {
-        tracing::warn!("artwork-dirty marker: failed to create {}: {e:#}", path.display());
+        tracing::warn!(
+            "artwork-dirty marker: failed to create {}: {e:#}",
+            path.display()
+        );
     }
 }
 
@@ -2250,7 +2384,10 @@ pub(crate) fn clear_marker(path: &Path) {
         return;
     }
     if let Err(e) = std::fs::remove_file(path) {
-        tracing::warn!("artwork-dirty marker: failed to remove {}: {e:#}", path.display());
+        tracing::warn!(
+            "artwork-dirty marker: failed to remove {}: {e:#}",
+            path.display()
+        );
     }
 }
 
@@ -2332,26 +2469,42 @@ mod tests {
     }
 
     fn device_settings_with_rockbox(rockbox_compat: bool) -> crate::device_config::DeviceSettings {
-        crate::device_config::DeviceSettings { rockbox_compat, ..crate::device_config::DeviceSettings::default() }
+        crate::device_config::DeviceSettings {
+            rockbox_compat,
+            ..crate::device_config::DeviceSettings::default()
+        }
     }
 
     /// The CLI `--rockbox-compat` flag force-enables for one run regardless
     /// of what the device's own settings.json says.
     #[test]
     fn effective_rockbox_cli_flag_forces_on() {
-        assert!(effective_rockbox(true, &device_settings_with_rockbox(false)));
+        assert!(effective_rockbox(
+            true,
+            &device_settings_with_rockbox(false)
+        ));
         assert!(effective_rockbox(true, &device_settings_with_rockbox(true)));
     }
 
     /// Without the CLI flag, the device's own setting decides.
     #[test]
     fn effective_rockbox_without_cli_flag_follows_device_setting() {
-        assert!(!effective_rockbox(false, &device_settings_with_rockbox(false)));
-        assert!(effective_rockbox(false, &device_settings_with_rockbox(true)));
+        assert!(!effective_rockbox(
+            false,
+            &device_settings_with_rockbox(false)
+        ));
+        assert!(effective_rockbox(
+            false,
+            &device_settings_with_rockbox(true)
+        ));
     }
 
     fn guard_test_entry(path: &str) -> SourceEntry {
-        SourceEntry { path: std::path::PathBuf::from(path), mtime: 1, size: 10 }
+        SourceEntry {
+            path: std::path::PathBuf::from(path),
+            mtime: 1,
+            size: 10,
+        }
     }
 
     /// A raw walk that found zero audio files must never be treated as "the
@@ -2383,11 +2536,14 @@ mod tests {
 
         // Downstream, selection filtering to zero is still allowed to happen —
         // it never reaches (or re-triggers) the guard.
-        let mut index = crate::library_index::LibraryIndex::empty(std::path::PathBuf::from("/m/music"));
+        let mut index =
+            crate::library_index::LibraryIndex::empty(std::path::PathBuf::from("/m/music"));
         let sel = crate::selection::Selection {
             version: 1,
             mode: crate::selection::SelectionMode::Include,
-            rules: vec![crate::selection::SelectionRule::Artist { name: "Nobody".into() }],
+            rules: vec![crate::selection::SelectionRule::Artist {
+                name: "Nobody".into(),
+            }],
         };
         let (kept, _dirty) = crate::selection::filter(sources, &sel, &mut index, |_| {
             Ok(crate::library_index::TrackTags {
@@ -2400,7 +2556,10 @@ mod tests {
                 year: None,
             })
         });
-        assert!(kept.is_empty(), "selection filtering everything out must still be allowed");
+        assert!(
+            kept.is_empty(),
+            "selection filtering everything out must still be allowed"
+        );
     }
 
     // -- final-review #1: replace_library validates before wiping --------
@@ -2449,8 +2608,11 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
-        std::fs::write(tmp.join("track.flac"), b"not really flac, walk() only checks the extension")
-            .unwrap();
+        std::fs::write(
+            tmp.join("track.flac"),
+            b"not really flac, walk() only checks the extension",
+        )
+        .unwrap();
 
         let mut config = test_config_for_preflight(tmp.clone());
         let (progress, decision_rx) = crate::progress::Progress::start(false, false).unwrap();
@@ -2576,7 +2738,10 @@ mod tests {
         assert_eq!(m.ipod_serial, Some("SER123".to_string()));
         assert_eq!(m.tracks.len(), 2);
         assert_eq!(m.tracks[0].ipod_dbid, 111);
-        assert!(!m.tracks[0].source_known, "rebuilt entries have no known source");
+        assert!(
+            !m.tracks[0].source_known,
+            "rebuilt entries have no known source"
+        );
         assert_eq!(m.last_source_root, None);
     }
 
@@ -2593,13 +2758,19 @@ mod tests {
     fn compute_budget_underflow_saturates_to_zero() {
         // 10GB total -> reserve is the 512MB floor (2% of 10GB < 512MB).
         // free=0, credit=0 -> 0 - 512MB must saturate to 0, not panic/wrap.
-        let storage = free_space::StorageInfo { total_bytes: 10 * GB, free_bytes: 0 };
+        let storage = free_space::StorageInfo {
+            total_bytes: 10 * GB,
+            free_bytes: 0,
+        };
         assert_eq!(compute_budget(Some(storage), 0), Some(0));
     }
 
     #[test]
     fn compute_budget_normal_case_is_free_plus_credit_minus_reserve() {
-        let storage = free_space::StorageInfo { total_bytes: 100 * GB, free_bytes: 10 * GB };
+        let storage = free_space::StorageInfo {
+            total_bytes: 100 * GB,
+            free_bytes: 10 * GB,
+        };
         let remove_credit = 2 * GB;
         let reserve = crate::fit::reserve_bytes(storage.total_bytes); // 2% of 100GB = 2GB
         let expected = 10 * GB + remove_credit - reserve;
@@ -2608,7 +2779,10 @@ mod tests {
 
     #[test]
     fn compute_budget_zero_credit_is_free_minus_reserve() {
-        let storage = free_space::StorageInfo { total_bytes: 100 * GB, free_bytes: 50 * GB };
+        let storage = free_space::StorageInfo {
+            total_bytes: 100 * GB,
+            free_bytes: 50 * GB,
+        };
         let reserve = crate::fit::reserve_bytes(storage.total_bytes);
         assert_eq!(compute_budget(Some(storage), 0), Some(50 * GB - reserve));
     }
@@ -2616,11 +2790,19 @@ mod tests {
     // -- Task 8: deferred_add_actions ------------------------------------
 
     fn src_entry(path: &str, size: u64) -> SourceEntry {
-        SourceEntry { path: std::path::PathBuf::from(path), mtime: 1_700_000_000, size }
+        SourceEntry {
+            path: std::path::PathBuf::from(path),
+            mtime: 1_700_000_000,
+            size,
+        }
     }
 
     fn deferred_album(key: &str, tracks: usize, bytes: u64) -> DeferredAlbum {
-        DeferredAlbum { key: key.to_string(), tracks, bytes }
+        DeferredAlbum {
+            key: key.to_string(),
+            tracks,
+            bytes,
+        }
     }
 
     #[test]
@@ -2672,7 +2854,11 @@ mod tests {
             }
         };
         let actions = deferred_add_actions(&original_adds, &deferred, tag_of);
-        assert_eq!(actions.len(), 2, "only the tagged pair belongs to the deferred album");
+        assert_eq!(
+            actions.len(),
+            2,
+            "only the tagged pair belongs to the deferred album"
+        );
     }
 
     // -- Task 8: skipped_for_space rollup ---------------------------------
@@ -2857,12 +3043,19 @@ mod backfill_tests {
         let dir = std::env::temp_dir().join(format!("classick-backfill-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dev = dir.join("track.m4a");
-        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/bare.m4a"), &dev).unwrap();
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/bare.m4a"),
+            &dev,
+        )
+        .unwrap();
 
         // The per-track backfill step exactly as production runs it
         // (apply_loop's backfill paths): probe source tags → normalize art
         // → embed into the on-device file.
-        let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tagged.flac")); // existing fixture: tags + embedded PNG art
+        let src = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tagged.flac"
+        )); // existing fixture: tags + embedded PNG art
         let before = std::fs::metadata(&dev).unwrap().len();
         let (tags, art) =
             super::source_tags_and_art(src, &std::path::PathBuf::from("ffmpeg")).unwrap();
@@ -2871,8 +3064,14 @@ mod backfill_tests {
         assert!(after >= before, "embedding should not shrink the file");
         // The returned tags + normalized art are what the caller re-applies to
         // the Apple ithmb (the art-break fix); a tagged source must yield them.
-        assert!(tags.title.is_some() || tags.artist.is_some(), "tags extracted from source");
-        assert!(art.is_some(), "normalized cover art returned for a track with embedded art");
+        assert!(
+            tags.title.is_some() || tags.artist.is_some(),
+            "tags extracted from source"
+        );
+        assert!(
+            art.is_some(),
+            "normalized cover art returned for a track with embedded art"
+        );
 
         use lofty::file::TaggedFileExt;
         let tag = lofty::read_from_path(&dev).unwrap();

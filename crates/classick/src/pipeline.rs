@@ -34,8 +34,14 @@ impl<T: Send + 'static> OrderedTranscoder<T> {
     {
         let window = window.max(1);
         let workers = workers.max(1);
-        let results = Arc::new(Results { ready: Mutex::new(HashMap::new()), cv: Condvar::new() });
-        let permits = Arc::new(Permits { count: Mutex::new(window), cv: Condvar::new() });
+        let results = Arc::new(Results {
+            ready: Mutex::new(HashMap::new()),
+            cv: Condvar::new(),
+        });
+        let permits = Arc::new(Permits {
+            count: Mutex::new(window),
+            cv: Condvar::new(),
+        });
         let transcode = Arc::new(transcode);
 
         let (job_tx, job_rx): (SyncSender<(usize, J)>, Receiver<(usize, J)>) = sync_channel(window);
@@ -83,15 +89,21 @@ impl<T: Send + 'static> OrderedTranscoder<T> {
                 // checkpoints, and the daemon wedges in `Syncing`. Converting
                 // the panic to an `Err` lets `take` surface a deterministic,
                 // non-retried failure and the track is skipped gracefully.
-                let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| transcode(&job)))
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("transcode worker panicked")));
+                let out =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| transcode(&job)))
+                        .unwrap_or_else(|_| Err(anyhow::anyhow!("transcode worker panicked")));
                 let mut ready = results.ready.lock().unwrap();
                 ready.insert(seq, out);
                 results.cv.notify_all();
             }));
         }
 
-        Self { results, permits, _feeder: feeder, _workers: worker_handles }
+        Self {
+            results,
+            permits,
+            _feeder: feeder,
+            _workers: worker_handles,
+        }
     }
 
     /// Block until job `seq` has been transcoded, return its result, and free a
@@ -168,14 +180,21 @@ mod tests {
             let _ = ot.take(seq).unwrap();
         }
         // in-flight = concurrently-running transcodes; bounded by min(workers,window).
-        assert!(max_seen.load(Ordering::SeqCst) <= 8, "in-flight exceeded window");
+        assert!(
+            max_seen.load(Ordering::SeqCst) <= 8,
+            "in-flight exceeded window"
+        );
     }
 
     #[test]
     fn propagates_errors_in_order() {
         let jobs: Vec<(usize, usize)> = (0..3).map(|i| (i, i)).collect();
         let ot = OrderedTranscoder::start(jobs, 2, 4, |&i: &usize| {
-            if i == 1 { Err(anyhow::anyhow!("boom {i}")) } else { Ok::<usize, anyhow::Error>(i) }
+            if i == 1 {
+                Err(anyhow::anyhow!("boom {i}"))
+            } else {
+                Ok::<usize, anyhow::Error>(i)
+            }
         });
         assert_eq!(ot.take(0).unwrap(), 0);
         assert!(ot.take(1).is_err());
@@ -201,7 +220,10 @@ mod tests {
         for seq in 0..5 {
             let result = ot.take(seq);
             if seq == 2 {
-                assert!(result.is_err(), "panicking job should surface as Err, not hang");
+                assert!(
+                    result.is_err(),
+                    "panicking job should surface as Err, not hang"
+                );
             } else {
                 assert_eq!(result.unwrap(), seq * 10);
             }

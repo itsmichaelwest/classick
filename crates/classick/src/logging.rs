@@ -41,9 +41,12 @@ use tracing_subscriber::filter::EnvFilter;
 ///   (e.g. with `--verbose` for debug sessions), pass `--no-tui`.
 /// - else (plain mode): tracing writes to stderr as normal.
 pub fn init(verbose: bool, use_tui: bool, ipc_mode: bool) {
-    let default = if verbose { "classick=debug,info" } else { "classick=info,warn" };
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    let default = if verbose {
+        "classick=debug,info"
+    } else {
+        "classick=info,warn"
+    };
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     let builder = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
@@ -62,10 +65,7 @@ pub fn init(verbose: bool, use_tui: bool, ipc_mode: bool) {
                 // Last-ditch fallback: sink. Don't emit on stderr in case the
                 // parent process is capturing it for crash diagnostics.
                 let _ = e;
-                builder
-                    .with_ansi(false)
-                    .with_writer(std::io::sink)
-                    .init();
+                builder.with_ansi(false).with_writer(std::io::sink).init();
             }
         }
     } else if use_tui {

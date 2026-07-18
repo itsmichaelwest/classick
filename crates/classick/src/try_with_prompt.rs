@@ -40,7 +40,11 @@ pub fn await_prompt(
     options: &[&str],
     outcomes: OutcomeMap,
 ) -> Result<PromptOutcome> {
-    assert_eq!(options.len(), outcomes.len(), "options/outcomes length mismatch");
+    assert_eq!(
+        options.len(),
+        outcomes.len(),
+        "options/outcomes length mismatch"
+    );
     let id = progress.next_prompt_id();
     progress.prompt(PromptRequest {
         id,
@@ -50,7 +54,10 @@ pub fn await_prompt(
     loop {
         match decision_rx.recv() {
             Ok(Decision::Prompt { id: rid, choice }) if rid == id => {
-                return Ok(outcomes.get(choice).copied().unwrap_or(PromptOutcome::Abort));
+                return Ok(outcomes
+                    .get(choice)
+                    .copied()
+                    .unwrap_or(PromptOutcome::Abort));
             }
             Ok(_) => continue, // stray decision; ignore
             Err(e) => return Err(anyhow!("await_prompt: decision channel closed: {e}")),
@@ -100,7 +107,11 @@ mod tests {
     #[test]
     fn outcome_dispatch_chooses_correct_variant() {
         // Pure logic check — index into outcomes returns the right enum.
-        let outs: OutcomeMap = &[PromptOutcome::Retry, PromptOutcome::Skip, PromptOutcome::Abort];
+        let outs: OutcomeMap = &[
+            PromptOutcome::Retry,
+            PromptOutcome::Skip,
+            PromptOutcome::Abort,
+        ];
         assert_eq!(outs[0], PromptOutcome::Retry);
         assert_eq!(outs[1], PromptOutcome::Skip);
         assert_eq!(outs[2], PromptOutcome::Abort);
@@ -119,7 +130,10 @@ mod retry_tests {
     #[test]
     fn succeeds_first_try_without_retrying() {
         let calls = Cell::new(0);
-        let r: anyhow::Result<i32> = retry_transient(&NODELAY, || { calls.set(calls.get() + 1); Ok(7) });
+        let r: anyhow::Result<i32> = retry_transient(&NODELAY, || {
+            calls.set(calls.get() + 1);
+            Ok(7)
+        });
         assert_eq!(r.unwrap(), 7);
         assert_eq!(calls.get(), 1);
     }
@@ -129,7 +143,11 @@ mod retry_tests {
         let calls = Cell::new(0);
         let r: anyhow::Result<i32> = retry_transient(&NODELAY, || {
             calls.set(calls.get() + 1);
-            if calls.get() < 3 { Err(anyhow!("transient")) } else { Ok(42) }
+            if calls.get() < 3 {
+                Err(anyhow!("transient"))
+            } else {
+                Ok(42)
+            }
         });
         assert_eq!(r.unwrap(), 42);
         assert_eq!(calls.get(), 3);

@@ -15,7 +15,12 @@ pub struct CheckpointClock {
 
 impl CheckpointClock {
     pub fn new(max_tracks: usize, max_interval: Duration, now: Instant) -> Self {
-        Self { tracks_since: 0, last: now, max_tracks, max_interval }
+        Self {
+            tracks_since: 0,
+            last: now,
+            max_tracks,
+            max_interval,
+        }
     }
 
     /// Record one committed track. Returns `true` if a checkpoint is due now

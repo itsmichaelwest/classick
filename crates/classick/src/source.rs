@@ -146,8 +146,7 @@ fn build_source_entry(path: &Path) -> Result<SourceEntry> {
     // `with_context` preserves the underlying io::Error in the anyhow chain
     // so `is_transient` can downcast and skip retry for permanent kinds
     // (NotFound, PermissionDenied, etc.).
-    let meta = std::fs::metadata(path)
-        .with_context(|| format!("stat {}", path.display()))?;
+    let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
     let size = meta.len();
     let mtime = meta
         .modified()
@@ -155,18 +154,21 @@ fn build_source_entry(path: &Path) -> Result<SourceEntry> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    Ok(SourceEntry { path: path.to_path_buf(), mtime, size })
+    Ok(SourceEntry {
+        path: path.to_path_buf(),
+        mtime,
+        size,
+    })
 }
 
 /// Hash up to the first 1 MiB of a file with BLAKE3.
 pub fn fingerprint(path: &Path) -> Result<String> {
-    let mut f = std::fs::File::open(path)
-        .map_err(|e| anyhow!("open for fingerprint: {e}"))?;
+    let mut f = std::fs::File::open(path).map_err(|e| anyhow!("open for fingerprint: {e}"))?;
     let mut buf = vec![0u8; FINGERPRINT_PREFIX_BYTES];
     let mut read = 0usize;
     while read < buf.len() {
         match f.read(&mut buf[read..]) {
-            Ok(0) => break,  // EOF
+            Ok(0) => break, // EOF
             Ok(n) => read += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(anyhow!("read for fingerprint: {e}")),
@@ -186,8 +188,8 @@ pub fn fingerprint(path: &Path) -> Result<String> {
 ///
 /// We walk past every metadata block (cheap — header + skip), then hash the rest.
 pub fn audio_fingerprint(path: &Path) -> Result<String> {
-    let mut f = std::fs::File::open(path)
-        .map_err(|e| anyhow!("open for audio fingerprint: {e}"))?;
+    let mut f =
+        std::fs::File::open(path).map_err(|e| anyhow!("open for audio fingerprint: {e}"))?;
 
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)
@@ -218,7 +220,8 @@ pub fn audio_fingerprint(path: &Path) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; AUDIO_HASH_CHUNK_BYTES];
     loop {
-        let n = f.read(&mut buf)
+        let n = f
+            .read(&mut buf)
             .map_err(|e| anyhow!("read audio frames from {}: {e}", path.display()))?;
         if n == 0 {
             break;
@@ -260,8 +263,11 @@ mod tests {
         }
         let a = write_flac(&tmp, "a.flac", &payload_a);
         let b = write_flac(&tmp, "b.flac", &payload_b);
-        assert_eq!(fingerprint(&a).unwrap(), fingerprint(&b).unwrap(),
-            "files identical in first 1 MiB hash the same regardless of suffix");
+        assert_eq!(
+            fingerprint(&a).unwrap(),
+            fingerprint(&b).unwrap(),
+            "files identical in first 1 MiB hash the same regardless of suffix"
+        );
     }
 
     #[test]
@@ -270,9 +276,10 @@ mod tests {
         write_flac(&tmp, "song.flac", b"x");
         write_flac(&tmp, "Sub/SONG2.FLAC", b"x");
         write_flac(&tmp, "Sub/Sub2/song3.Flac", b"x");
-        write_flac(&tmp, "song.mp3", b"x");  // not flac, ignored
+        write_flac(&tmp, "song.mp3", b"x"); // not flac, ignored
         let entries = walk(&tmp).unwrap();
-        let names: std::collections::HashSet<_> = entries.iter()
+        let names: std::collections::HashSet<_> = entries
+            .iter()
             .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names.len(), 3);
@@ -288,7 +295,8 @@ mod tests {
         write_flac(&tmp, "_excluded/skip.flac", b"x");
         write_flac(&tmp, ".unwanted/also-skip.flac", b"x");
         let entries = walk(&tmp).unwrap();
-        let names: std::collections::HashSet<_> = entries.iter()
+        let names: std::collections::HashSet<_> = entries
+            .iter()
             .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names.len(), 1);
@@ -332,17 +340,23 @@ mod tests {
 
         let fa = audio_fingerprint(&a).unwrap();
         let fb = audio_fingerprint(&b).unwrap();
-        assert_eq!(fa, fb,
-            "tag-only differences must not change the audio fingerprint");
-        assert!(fa.starts_with("blake3-audio:"),
-            "fingerprint must be prefixed to distinguish from file fingerprint");
+        assert_eq!(
+            fa, fb,
+            "tag-only differences must not change the audio fingerprint"
+        );
+        assert!(
+            fa.starts_with("blake3-audio:"),
+            "fingerprint must be prefixed to distinguish from file fingerprint"
+        );
         assert_eq!(fa.len(), "blake3-audio:".len() + 64);
 
         // Sanity: confirm the FILE fingerprints DO differ (tags changed the file bytes)
         let file_a = fingerprint(&a).unwrap();
         let file_b = fingerprint(&b).unwrap();
-        assert_ne!(file_a, file_b,
-            "file fingerprints SHOULD differ when tags differ — this confirms the test setup");
+        assert_ne!(
+            file_a, file_b,
+            "file fingerprints SHOULD differ when tags differ — this confirms the test setup"
+        );
     }
 
     #[test]
@@ -351,11 +365,13 @@ mod tests {
         let a = tmp.join("a.flac");
         let b = tmp.join("b.flac");
         ffmpeg_synth_flac_with_freq(&a, "Same Title", 440.0);
-        ffmpeg_synth_flac_with_freq(&b, "Same Title", 880.0);  // different sine frequency
+        ffmpeg_synth_flac_with_freq(&b, "Same Title", 880.0); // different sine frequency
         let fa = audio_fingerprint(&a).unwrap();
         let fb = audio_fingerprint(&b).unwrap();
-        assert_ne!(fa, fb,
-            "different audio content must produce different audio fingerprints");
+        assert_ne!(
+            fa, fb,
+            "different audio content must produce different audio fingerprints"
+        );
     }
 
     #[test]
@@ -364,8 +380,10 @@ mod tests {
         let p = tmp.join("not-a-flac.txt");
         std::fs::write(&p, b"hello world").unwrap();
         let err = audio_fingerprint(&p).unwrap_err();
-        assert!(err.to_string().contains("fLaC"),
-            "error message must mention the missing FLAC magic: {err}");
+        assert!(
+            err.to_string().contains("fLaC"),
+            "error message must mention the missing FLAC magic: {err}"
+        );
     }
 
     /// Helper: synthesize a 1-second 440Hz sine FLAC with the given title/artist tags via ffmpeg.
@@ -386,16 +404,27 @@ mod tests {
     ) {
         let status = std::process::Command::new("ffmpeg")
             .args([
-                "-loglevel", "error", "-y",
-                "-f", "lavfi",
-                "-i", &format!("sine=frequency={freq}:duration=1:sample_rate=44100"),
-                "-c:a", "flac",
-                "-metadata", &format!("TITLE={title}"),
-                "-metadata", &format!("ARTIST={artist}"),
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("sine=frequency={freq}:duration=1:sample_rate=44100"),
+                "-c:a",
+                "flac",
+                "-metadata",
+                &format!("TITLE={title}"),
+                "-metadata",
+                &format!("ARTIST={artist}"),
             ])
             .arg(path)
             .status()
             .expect("spawn ffmpeg");
-        assert!(status.success(), "ffmpeg synth failed for {}", path.display());
+        assert!(
+            status.success(),
+            "ffmpeg synth failed for {}",
+            path.display()
+        );
     }
 }

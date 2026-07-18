@@ -8,11 +8,19 @@ pub fn tags_from_probe(p: &ProbeOutput) -> Tags {
     let duration_ms = p.duration_ms;
     let pt: &ProbeTags = match &p.format.tags {
         Some(t) => t,
-        None => return Tags { duration_ms, ..Tags::default() },
+        None => {
+            return Tags {
+                duration_ms,
+                ..Tags::default()
+            }
+        }
     };
 
     let track_nr = pt.track.as_deref().and_then(|s| parse_int_first_field(s));
-    let tracks_from_total = pt.track_total.as_deref().and_then(|s| s.trim().parse().ok());
+    let tracks_from_total = pt
+        .track_total
+        .as_deref()
+        .and_then(|s| s.trim().parse().ok());
     let tracks_from_slash = pt.track.as_deref().and_then(parse_int_second_field);
     let tracks = tracks_from_total.or(tracks_from_slash);
 

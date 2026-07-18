@@ -39,7 +39,8 @@ pub fn inject_guid(template: &[u8], firewire_guid: &str) -> Result<Vec<u8>> {
 }
 
 // Embedded per-model SysInfoExtended templates (CC0, see data/.../ATTRIBUTION.md).
-const CLASSIC_LATE2009: &[u8] = include_bytes!("../../data/sysinfo-extended/classic-late2009.plist");
+const CLASSIC_LATE2009: &[u8] =
+    include_bytes!("../../data/sysinfo-extended/classic-late2009.plist");
 const CLASSIC_6G: &[u8] = include_bytes!("../../data/sysinfo-extended/classic-6g.plist");
 const VIDEO_5G: &[u8] = include_bytes!("../../data/sysinfo-extended/video-5g.plist");
 const PHOTO_4G: &[u8] = include_bytes!("../../data/sysinfo-extended/photo-4g.plist");
@@ -144,16 +145,24 @@ const TABLE: &[(&str, &[u8])] = &[
 /// All embedded templates, for the validity test.
 #[cfg(test)]
 pub(super) const ALL_TEMPLATES: &[(&str, &[u8])] = &[
-    ("classic-late2009", CLASSIC_LATE2009), ("classic-6g", CLASSIC_6G),
-    ("video-5g", VIDEO_5G), ("photo-4g", PHOTO_4G),
-    ("nano-1g", NANO_1G), ("nano-2g", NANO_2G), ("nano-3g", NANO_3G), ("nano-4g", NANO_4G),
+    ("classic-late2009", CLASSIC_LATE2009),
+    ("classic-6g", CLASSIC_6G),
+    ("video-5g", VIDEO_5G),
+    ("photo-4g", PHOTO_4G),
+    ("nano-1g", NANO_1G),
+    ("nano-2g", NANO_2G),
+    ("nano-3g", NANO_3G),
+    ("nano-4g", NANO_4G),
 ];
 
 /// Embedded SysInfoExtended template for a resolved `ModelNumStr`, or `None`
 /// for a model we don't ship a template for (caller skips + warns; never
 /// substitute a near-model — a wrong template is worse than none).
 pub fn template_for_model(model_num_str: &str) -> Option<&'static [u8]> {
-    TABLE.iter().find(|(m, _)| *m == model_num_str).map(|(_, t)| *t)
+    TABLE
+        .iter()
+        .find(|(m, _)| *m == model_num_str)
+        .map(|(_, t)| *t)
 }
 
 /// Write the per-model `SysInfoExtended` (with the device's real GUID) to
@@ -171,12 +180,15 @@ pub fn provision(mount: &Path, identity: &crate::ipod::device::LibgpodIdentity) 
         return Ok(());
     };
     let xml = inject_guid(template, &identity.firewire_guid)?;
-    let path = mount.join("iPod_Control").join("Device").join("SysInfoExtended");
-    std::fs::write(&path, &xml)
-        .map_err(|e| anyhow!("writing {}: {e}", path.display()))?;
+    let path = mount
+        .join("iPod_Control")
+        .join("Device")
+        .join("SysInfoExtended");
+    std::fs::write(&path, &xml).map_err(|e| anyhow!("writing {}: {e}", path.display()))?;
     tracing::info!(
         "provisioned SysInfoExtended for {} ({} bytes)",
-        identity.model_num_str, xml.len()
+        identity.model_num_str,
+        xml.len()
     );
     Ok(())
 }
@@ -204,9 +216,13 @@ mod tests {
     #[test]
     fn normalizes_lowercase_and_bare_guid() {
         let lower = inject_guid(SAMPLE.as_bytes(), "0x000a27002138b0a8").unwrap();
-        assert!(String::from_utf8(lower).unwrap().contains("<string>000A27002138B0A8</string>"));
+        assert!(String::from_utf8(lower)
+            .unwrap()
+            .contains("<string>000A27002138B0A8</string>"));
         let bare = inject_guid(SAMPLE.as_bytes(), "000A27002138B0A8").unwrap();
-        assert!(String::from_utf8(bare).unwrap().contains("<string>000A27002138B0A8</string>"));
+        assert!(String::from_utf8(bare)
+            .unwrap()
+            .contains("<string>000A27002138B0A8</string>"));
     }
 
     #[test]
@@ -248,8 +264,8 @@ mod tests {
         // Unique per-process-AND-test temp mount with the Device dir libgpod
         // expects. The `label` keeps parallel tests from sharing a dir (one
         // test's remove_dir_all must not yank another's file mid-run).
-        let base = std::env::temp_dir()
-            .join(format!("classick-provision-{}-{label}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("classick-provision-{}-{label}", std::process::id()));
         std::fs::create_dir_all(base.join("iPod_Control/Device")).unwrap();
         base
     }
@@ -257,9 +273,13 @@ mod tests {
     #[test]
     fn provision_writes_sysinfoextended_for_known_model() {
         let mount = temp_mount("known");
-        let id = LibgpodIdentity { firewire_guid: "0x000A27002138B0A8".into(), model_num_str: "MC293".into() };
+        let id = LibgpodIdentity {
+            firewire_guid: "0x000A27002138B0A8".into(),
+            model_num_str: "MC293".into(),
+        };
         provision(&mount, &id).unwrap();
-        let written = std::fs::read_to_string(mount.join("iPod_Control/Device/SysInfoExtended")).unwrap();
+        let written =
+            std::fs::read_to_string(mount.join("iPod_Control/Device/SysInfoExtended")).unwrap();
         assert!(written.contains("<string>000A27002138B0A8</string>"));
         assert!(written.contains("<integer>1069</integer>"));
         // Idempotent: running again is fine.
@@ -270,7 +290,10 @@ mod tests {
     #[test]
     fn provision_skips_unknown_model_without_writing() {
         let mount = temp_mount("unknown");
-        let id = LibgpodIdentity { firewire_guid: "0x000A27002138B0A8".into(), model_num_str: "XPID_9999".into() };
+        let id = LibgpodIdentity {
+            firewire_guid: "0x000A27002138B0A8".into(),
+            model_num_str: "XPID_9999".into(),
+        };
         provision(&mount, &id).unwrap(); // Ok, but no file
         assert!(!mount.join("iPod_Control/Device/SysInfoExtended").exists());
         let _ = std::fs::remove_dir_all(&mount);

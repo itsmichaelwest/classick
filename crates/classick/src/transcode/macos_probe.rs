@@ -64,7 +64,10 @@ pub fn probe_output_from_lofty(path: &Path) -> Result<ProbeOutput> {
 
     Ok(ProbeOutput {
         streams,
-        format: ProbeFormat { format_name, tags: Some(tags) },
+        format: ProbeFormat {
+            format_name,
+            tags: Some(tags),
+        },
         duration_ms,
     })
 }

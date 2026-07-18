@@ -12,7 +12,9 @@ use std::path::PathBuf;
 // add a `pub struct EncoderConfig { default: EncoderChoice, per_format: HashMap<String, EncoderChoice> }`
 // and have apply_loop resolve `cfg.for_source(&probe.codec_name)` instead of
 // passing the global `cfg.encoder`. Everything below this layer is unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 #[clap(rename_all = "lowercase")]
 pub enum EncoderChoice {
@@ -254,18 +256,28 @@ mod tests {
     fn parses_all_flags() {
         let cli = Cli::try_parse_from([
             "classick",
-            "--source", r"D:\music",
-            "--ipod", "G:",
-            "--ffmpeg", r"C:\bin\ffmpeg.exe",
+            "--source",
+            r"D:\music",
+            "--ipod",
+            "G:",
+            "--ffmpeg",
+            r"C:\bin\ffmpeg.exe",
             "--dry-run",
             "--no-delete",
             "--verbose",
             "--rebuild-manifest",
             "--no-tui",
-        ]).unwrap();
-        assert_eq!(cli.source.as_deref().and_then(|p| p.to_str()), Some(r"D:\music"));
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.source.as_deref().and_then(|p| p.to_str()),
+            Some(r"D:\music")
+        );
         assert_eq!(cli.ipod.as_deref(), Some("G:"));
-        assert_eq!(cli.ffmpeg.as_deref().and_then(|p| p.to_str()), Some(r"C:\bin\ffmpeg.exe"));
+        assert_eq!(
+            cli.ffmpeg.as_deref().and_then(|p| p.to_str()),
+            Some(r"C:\bin\ffmpeg.exe")
+        );
         assert!(cli.dry_run);
         assert!(cli.no_delete);
         assert!(cli.verbose);
@@ -287,7 +299,10 @@ mod tests {
     #[test]
     fn parses_save_config_flag() {
         let cli = Cli::try_parse_from(["classick", "--save-config"]).unwrap();
-        assert!(cli.save_config, "expected --save-config to set the save_config field");
+        assert!(
+            cli.save_config,
+            "expected --save-config to set the save_config field"
+        );
     }
 
     #[test]
@@ -331,12 +346,8 @@ mod tests {
 
     #[test]
     fn parses_rockbox_compat_and_backfill_rockbox_flags() {
-        let cli = Cli::try_parse_from([
-            "classick",
-            "--rockbox-compat",
-            "--backfill-rockbox",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["classick", "--rockbox-compat", "--backfill-rockbox"]).unwrap();
         assert!(cli.rockbox_compat);
         assert!(cli.backfill_rockbox);
     }
@@ -352,8 +363,7 @@ mod tests {
     #[test]
     fn restore_db_backup_conflicts_with_backfill_rockbox_and_scan_library() {
         assert!(
-            Cli::try_parse_from(["classick", "--restore-db-backup", "--backfill-rockbox"])
-                .is_err()
+            Cli::try_parse_from(["classick", "--restore-db-backup", "--backfill-rockbox"]).is_err()
         );
         assert!(
             Cli::try_parse_from(["classick", "--restore-db-backup", "--scan-library"]).is_err()
@@ -377,16 +387,13 @@ mod tests {
 
     #[test]
     fn replace_library_conflicts_with_scan_library() {
-        assert!(
-            Cli::try_parse_from(["classick", "--replace-library", "--scan-library"]).is_err()
-        );
+        assert!(Cli::try_parse_from(["classick", "--replace-library", "--scan-library"]).is_err());
     }
 
     #[test]
     fn replace_library_conflicts_with_restore_db_backup() {
         assert!(
-            Cli::try_parse_from(["classick", "--replace-library", "--restore-db-backup"])
-                .is_err()
+            Cli::try_parse_from(["classick", "--replace-library", "--restore-db-backup"]).is_err()
         );
     }
 
@@ -398,8 +405,7 @@ mod tests {
     #[test]
     fn replace_library_conflicts_with_rebuild_manifest() {
         assert!(
-            Cli::try_parse_from(["classick", "--replace-library", "--rebuild-manifest"])
-                .is_err()
+            Cli::try_parse_from(["classick", "--replace-library", "--rebuild-manifest"]).is_err()
         );
     }
 
@@ -427,9 +433,7 @@ mod tests {
 
     #[test]
     fn verify_artwork_conflicts_with_scan_library() {
-        assert!(
-            Cli::try_parse_from(["classick", "--verify-artwork", "--scan-library"]).is_err()
-        );
+        assert!(Cli::try_parse_from(["classick", "--verify-artwork", "--scan-library"]).is_err());
     }
 
     #[test]

@@ -89,7 +89,10 @@ pub fn verify_itunes_not_running(
 ) -> Result<()> {
     loop {
         let conflicts = detect_apple_processes();
-        let blocking = conflicts.iter().filter(|p| p.is_blocking).collect::<Vec<_>>();
+        let blocking = conflicts
+            .iter()
+            .filter(|p| p.is_blocking)
+            .collect::<Vec<_>>();
         if blocking.is_empty() {
             return Ok(());
         }
@@ -420,7 +423,11 @@ pub fn walk_source(
                     decision_rx,
                     msg,
                     &["Retry", "Change source path", "Abort"],
-                    &[PromptOutcome::Retry, PromptOutcome::Custom(1), PromptOutcome::Abort],
+                    &[
+                        PromptOutcome::Retry,
+                        PromptOutcome::Custom(1),
+                        PromptOutcome::Abort,
+                    ],
                 )?;
                 match outcome {
                     PromptOutcome::Retry => continue,

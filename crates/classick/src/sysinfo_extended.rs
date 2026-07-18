@@ -123,12 +123,10 @@ impl ParsedSysInfo {
 /// write doesn't leave a half-formed file libgpod might try to parse.
 pub fn write_to_ipod(ipod_mount: &Path, xml: &str) -> Result<()> {
     let dir = ipod_mount.join("iPod_Control").join("Device");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let dst = dir.join("SysInfoExtended");
     let tmp = dst.with_extension("SysInfoExtended.tmp");
-    std::fs::write(&tmp, xml.as_bytes())
-        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::write(&tmp, xml.as_bytes()).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, &dst)
         .with_context(|| format!("renaming {} → {}", tmp.display(), dst.display()))?;
     Ok(())
@@ -209,11 +207,17 @@ mod tests {
             <key>FirewireGuid</key><string>0xDEF</string>
         </dict></plist>"#;
         assert_eq!(
-            ParsedSysInfo::from_xml(pascal).unwrap().firewire_guid.as_deref(),
+            ParsedSysInfo::from_xml(pascal)
+                .unwrap()
+                .firewire_guid
+                .as_deref(),
             Some("0xABC"),
         );
         assert_eq!(
-            ParsedSysInfo::from_xml(camel).unwrap().firewire_guid.as_deref(),
+            ParsedSysInfo::from_xml(camel)
+                .unwrap()
+                .firewire_guid
+                .as_deref(),
             Some("0xDEF"),
         );
     }

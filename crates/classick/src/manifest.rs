@@ -24,7 +24,12 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn empty() -> Self {
-        Self { version: 1, ipod_serial: None, last_source_root: None, tracks: Vec::new() }
+        Self {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: Vec::new(),
+        }
     }
 }
 
@@ -65,9 +70,15 @@ pub struct ManifestEntry {
     pub source_format: String,
 }
 
-fn default_source_known() -> bool { true }
-fn default_encoder() -> String { "unknown".to_string() }
-fn default_source_format() -> String { "flac".to_string() }
+fn default_source_known() -> bool {
+    true
+}
+fn default_encoder() -> String {
+    "unknown".to_string()
+}
+fn default_source_format() -> String {
+    "flac".to_string()
+}
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -125,8 +136,7 @@ pub fn diff(
         match manifest_by_path.get(&src.path) {
             None => actions.push(Action::Add(src.clone())),
             Some(entry) => {
-                let stat_matches = entry.source_mtime == src.mtime
-                    && entry.source_size == src.size;
+                let stat_matches = entry.source_mtime == src.mtime && entry.source_size == src.size;
                 if stat_matches {
                     // FAST PATH — no fingerprint read.
                     // Encoder-mismatch check: if the stored encoder differs
@@ -141,8 +151,8 @@ pub fn diff(
                 } else {
                     // Slow path: hash the first MiB and compare.
                     let fp = compute_fingerprint(&src.path)?;
-                    let content_unchanged = fp == entry.source_fingerprint
-                        && src.size == entry.source_size;
+                    let content_unchanged =
+                        fp == entry.source_fingerprint && src.size == entry.source_size;
                     if content_unchanged {
                         // mtime was touched but content is identical.
                         // Same encoder-mismatch check as the fast path.
@@ -179,7 +189,7 @@ pub fn diff(
 
     for entry in &manifest.tracks {
         if !entry.source_known {
-            continue;  // preserved as-is
+            continue; // preserved as-is
         }
         if !source_paths.contains(&entry.source_path) {
             actions.push(Action::Remove(entry.clone()));
@@ -200,9 +210,15 @@ pub fn diff(
 /// - `encoder == "passthrough"`: there's no encoder for a copied file; the
 ///   on-iPod bytes are the source bytes regardless of what's set globally.
 fn is_encoder_mismatch(entry: &ManifestEntry, target: &str, force: bool) -> bool {
-    if force { return true; }
-    if entry.encoder == "unknown" { return false; }
-    if entry.encoder == "passthrough" { return false; }
+    if force {
+        return true;
+    }
+    if entry.encoder == "unknown" {
+        return false;
+    }
+    if entry.encoder == "passthrough" {
+        return false;
+    }
     entry.encoder != target
 }
 
@@ -231,7 +247,8 @@ pub fn save_atomic(path: &Path, manifest: &Manifest) -> Result<()> {
         let mut writer = std::io::BufWriter::new(f);
         std::io::Write::write_all(&mut writer, json.as_bytes())?;
         let f = std::io::BufWriter::into_inner(writer)?;
-        f.sync_all().with_context(|| format!("fsync {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
     }
     // On Windows, std::fs::rename overwrites an existing target (unlike POSIX).
     std::fs::rename(&tmp, path)
@@ -308,7 +325,8 @@ mod tests {
 
     #[test]
     fn load_or_default_returns_empty_when_missing() {
-        let path = std::env::temp_dir().join(format!("classick-test-missing-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("classick-test-missing-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let m = load_or_default(&path).unwrap();
         assert_eq!(m.tracks.len(), 0);
@@ -317,8 +335,14 @@ mod tests {
 
     #[test]
     fn save_atomic_roundtrip() {
-        let path = std::env::temp_dir().join(format!("classick-test-rt-{}.json", std::process::id()));
-        let m = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)] };
+        let path =
+            std::env::temp_dir().join(format!("classick-test-rt-{}.json", std::process::id()));
+        let m = Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
+        };
         save_atomic(&path, &m).unwrap();
         let loaded = load_or_default(&path).unwrap();
         assert_eq!(loaded.tracks.len(), 1);
@@ -330,11 +354,21 @@ mod tests {
         // mtime + size both match the manifest → FAST PATH; callback must
         // NOT fire. `never_called()` asserts that invariant for us.
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
-        let actions = diff(&manifest, &sources, never_called(), never_called_audio(), "ffmpeg", false).unwrap();
+        let actions = diff(
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "ffmpeg",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
     }
@@ -342,9 +376,22 @@ mod tests {
     #[test]
     fn diff_classifies_new() {
         // Add path doesn't go through the fingerprint callback either.
-        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![] };
+        let manifest = Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![],
+        };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
-        let actions = diff(&manifest, &sources, never_called(), never_called_audio(), "ffmpeg", false).unwrap();
+        let actions = diff(
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "ffmpeg",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Add(_)));
     }
@@ -356,13 +403,23 @@ mod tests {
         // entry has empty audio_fingerprint (sample_entry default) so the
         // bootstrap branch emits Modify without invoking the audio callback.
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
         src.mtime = 1700099999;
         let sources = vec![src];
-        let actions = diff(&manifest, &sources, returns("blake3:bb"), never_called_audio(), "ffmpeg", false).unwrap();
+        let actions = diff(
+            &manifest,
+            &sources,
+            returns("blake3:bb"),
+            never_called_audio(),
+            "ffmpeg",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)));
     }
@@ -374,11 +431,21 @@ mod tests {
         // file scenario). Manifest entry has empty audio_fingerprint so the
         // bootstrap branch fires — no audio callback invocation.
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 200)];
-        let actions = diff(&manifest, &sources, returns("blake3:aa"), never_called_audio(), "ffmpeg", false).unwrap();
+        let actions = diff(
+            &manifest,
+            &sources,
+            returns("blake3:aa"),
+            never_called_audio(),
+            "ffmpeg",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)));
     }
@@ -387,11 +454,21 @@ mod tests {
     fn diff_classifies_removed() {
         // No source list → Remove emitted without any callback work.
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let sources = vec![];
-        let actions = diff(&manifest, &sources, never_called(), never_called_audio(), "ffmpeg", false).unwrap();
+        let actions = diff(
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "ffmpeg",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Remove(_)));
     }
@@ -399,11 +476,28 @@ mod tests {
     #[test]
     fn diff_preserves_unknown_source_entries() {
         let mut entry = sample_entry(r"C:\unknown.flac", "blake3:??", 0);
-        entry.source_known = false;  // from --rebuild-manifest
-        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
-        let sources = vec![];  // no sources present
-        let actions = diff(&manifest, &sources, never_called(), never_called_audio(), "ffmpeg", false).unwrap();
-        assert_eq!(actions.len(), 0, "unknown-source entries are NOT removed when source is absent");
+        entry.source_known = false; // from --rebuild-manifest
+        let manifest = Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![entry],
+        };
+        let sources = vec![]; // no sources present
+        let actions = diff(
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "ffmpeg",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            actions.len(),
+            0,
+            "unknown-source entries are NOT removed when source is absent"
+        );
     }
 
     #[test]
@@ -412,12 +506,22 @@ mod tests {
         // Slow path runs, callback fires, but result is Unchanged (file
         // fingerprint matched → audio callback not consulted).
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![sample_entry(r"C:\a.flac", "blake3:aa", 100)],
         };
         let mut src = sample_source(r"C:\a.flac", "blake3:aa", 100);
-        src.mtime = 1700099999;  // touched
-        let actions = diff(&manifest, &[src], returns("blake3:aa"), never_called_audio(), "ffmpeg", false).unwrap();
+        src.mtime = 1700099999; // touched
+        let actions = diff(
+            &manifest,
+            &[src],
+            returns("blake3:aa"),
+            never_called_audio(),
+            "ffmpeg",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
     }
@@ -428,7 +532,12 @@ mod tests {
         // differs (tags edited) but the audio_fingerprint matches → MetadataOnly.
         let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         entry.audio_fingerprint = "blake3-audio:zz".to_string();
-        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
+        let manifest = Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![entry],
+        };
         // Bump mtime so stat doesn't match → slow path runs.
         let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
         src.mtime = 1700099999;
@@ -440,19 +549,30 @@ mod tests {
             returns_audio("blake3-audio:zz"),
             "ffmpeg",
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::MetadataOnly { .. }),
-            "got {:?}", actions[0]);
+        assert!(
+            matches!(actions[0], Action::MetadataOnly { .. }),
+            "got {:?}",
+            actions[0]
+        );
     }
 
     #[test]
     fn diff_falls_back_to_modify_when_manifest_has_no_audio_fingerprint() {
         // Phase 2 manifest entry — audio_fingerprint is empty string.
         let entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
-        assert_eq!(entry.audio_fingerprint, "",
-            "test premise: sample_entry produces empty audio_fingerprint");
-        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
+        assert_eq!(
+            entry.audio_fingerprint, "",
+            "test premise: sample_entry produces empty audio_fingerprint"
+        );
+        let manifest = Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![entry],
+        };
         let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
         src.mtime = 1700099999;
         let sources = vec![src];
@@ -460,20 +580,29 @@ mod tests {
             &manifest,
             &sources,
             returns("blake3:bb"),
-            never_called_audio(),  // audio callback MUST NOT fire — nothing to compare to
+            never_called_audio(), // audio callback MUST NOT fire — nothing to compare to
             "ffmpeg",
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::Modify(_, _)),
-            "bootstrap path: missing audio_fingerprint in manifest forces Modify, got {:?}", actions[0]);
+        assert!(
+            matches!(actions[0], Action::Modify(_, _)),
+            "bootstrap path: missing audio_fingerprint in manifest forces Modify, got {:?}",
+            actions[0]
+        );
     }
 
     #[test]
     fn diff_classifies_modify_when_audio_actually_changed() {
         let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         entry.audio_fingerprint = "blake3-audio:zz".to_string();
-        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
+        let manifest = Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![entry],
+        };
         // Source: file fingerprint changed AND audio actually differs.
         let mut src = sample_source(r"C:\a.flac", "blake3:bb", 100);
         src.mtime = 1700099999;
@@ -485,7 +614,8 @@ mod tests {
             returns_audio("blake3-audio:different"),
             "ffmpeg",
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Modify(_, _)));
     }
@@ -496,7 +626,12 @@ mod tests {
         // stat-match path must short-circuit before either callback fires.
         let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         entry.audio_fingerprint = "blake3-audio:zz".to_string();
-        let manifest = Manifest { version: 1, ipod_serial: None, last_source_root: None, tracks: vec![entry] };
+        let manifest = Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![entry],
+        };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
         let actions = diff(
             &manifest,
@@ -505,7 +640,8 @@ mod tests {
             never_called_audio(),
             "ffmpeg",
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(matches!(actions[0], Action::Unchanged(_)));
     }
@@ -550,8 +686,10 @@ mod tests {
             "source_known": true
         }"#;
         let entry: ManifestEntry = serde_json::from_str(old).unwrap();
-        assert_eq!(entry.audio_fingerprint, "",
-            "Phase 2 entries must deserialize with empty audio_fingerprint");
+        assert_eq!(
+            entry.audio_fingerprint, "",
+            "Phase 2 entries must deserialize with empty audio_fingerprint"
+        );
 
         // New-shape JSON (Phase 3.x manifest):
         let new = r#"{
@@ -584,10 +722,14 @@ mod tests {
             "source_known": true
         }"#;
         let entry: ManifestEntry = serde_json::from_str(phase2).unwrap();
-        assert_eq!(entry.encoder, "unknown",
-            "missing encoder field must default to 'unknown' for back-compat");
-        assert_eq!(entry.encoder_version, "",
-            "missing encoder_version must default to empty string");
+        assert_eq!(
+            entry.encoder, "unknown",
+            "missing encoder field must default to 'unknown' for back-compat"
+        );
+        assert_eq!(
+            entry.encoder_version, "",
+            "missing encoder_version must default to empty string"
+        );
     }
 
     #[test]
@@ -604,8 +746,10 @@ mod tests {
             "source_known": true
         }"#;
         let entry: ManifestEntry = serde_json::from_str(phase2).unwrap();
-        assert_eq!(entry.source_format, "flac",
-            "missing source_format must default to 'flac' (Phase 2 only handled FLAC)");
+        assert_eq!(
+            entry.source_format, "flac",
+            "missing source_format must default to 'flac' (Phase 2 only handled FLAC)"
+        );
     }
 
     #[test]
@@ -614,17 +758,27 @@ mod tests {
         let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         entry.encoder = "ffmpeg".to_string();
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![entry],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
         let actions = diff(
-            &manifest, &sources, never_called(), never_called_audio(),
-            "ffmpeg", false,
-        ).unwrap();
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "ffmpeg",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::Unchanged(_)),
-            "encoder match + content unchanged must stay Unchanged; got {:?}", actions[0]);
+        assert!(
+            matches!(actions[0], Action::Unchanged(_)),
+            "encoder match + content unchanged must stay Unchanged; got {:?}",
+            actions[0]
+        );
     }
 
     #[test]
@@ -634,18 +788,27 @@ mod tests {
         let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         entry.encoder = "ffmpeg".to_string();
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![entry],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
         let actions = diff(
-            &manifest, &sources, never_called(), never_called_audio(),
-            "refalac", false,
-        ).unwrap();
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "refalac",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::Modify(_, _)),
+        assert!(
+            matches!(actions[0], Action::Modify(_, _)),
             "encoder mismatch on otherwise-Unchanged entry must trigger Modify; got {:?}",
-            actions[0]);
+            actions[0]
+        );
     }
 
     #[test]
@@ -654,17 +817,26 @@ mod tests {
         let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         entry.encoder = "ffmpeg".to_string();
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![entry],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
         let actions = diff(
-            &manifest, &sources, never_called(), never_called_audio(),
-            "ffmpeg", true,
-        ).unwrap();
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "ffmpeg",
+            true,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::Modify(_, _)),
-            "--force-reencode must promote even encoder-match entries to Modify");
+        assert!(
+            matches!(actions[0], Action::Modify(_, _)),
+            "--force-reencode must promote even encoder-match entries to Modify"
+        );
     }
 
     #[test]
@@ -675,18 +847,27 @@ mod tests {
         let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
         entry.encoder = "unknown".to_string();
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![entry],
         };
         let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
         let actions = diff(
-            &manifest, &sources, never_called(), never_called_audio(),
-            "ffmpeg", false,
-        ).unwrap();
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "ffmpeg",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::Unchanged(_)),
+        assert!(
+            matches!(actions[0], Action::Unchanged(_)),
             "unknown-encoder entries (Phase 2 back-compat) must stay Unchanged; got {:?}",
-            actions[0]);
+            actions[0]
+        );
     }
 
     #[test]
@@ -697,17 +878,26 @@ mod tests {
         entry.encoder = "passthrough".to_string();
         entry.source_format = "mp3".to_string();
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![entry],
         };
         let sources = vec![sample_source(r"C:\a.mp3", "blake3:aa", 100)];
         let actions = diff(
-            &manifest, &sources, never_called(), never_called_audio(),
-            "refalac", false,
-        ).unwrap();
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "refalac",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::Unchanged(_)),
+        assert!(
+            matches!(actions[0], Action::Unchanged(_)),
             "passthrough entries must be immune to encoder-mismatch; got {:?}",
-            actions[0]);
+            actions[0]
+        );
     }
 }

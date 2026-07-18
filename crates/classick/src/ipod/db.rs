@@ -204,7 +204,10 @@ impl OwnedDb {
             // Read the assigned dbid + ipod_path from the now-attached track.
             let dbid = (*track).dbid as u64;
             let relpath = read_ipod_relpath(track);
-            Ok(TrackHandle { dbid, ipod_relpath: relpath })
+            Ok(TrackHandle {
+                dbid,
+                ipod_relpath: relpath,
+            })
         }
     }
 
@@ -221,7 +224,9 @@ impl OwnedDb {
             // Delete the on-iPod file via libgpod's path helper.
             let fname_c = ffi::itdb_filename_on_ipod(found);
             if !fname_c.is_null() {
-                let path_str = std::ffi::CStr::from_ptr(fname_c).to_string_lossy().into_owned();
+                let path_str = std::ffi::CStr::from_ptr(fname_c)
+                    .to_string_lossy()
+                    .into_owned();
                 let _ = std::fs::remove_file(std::path::Path::new(&path_str));
                 ffi::g_free(fname_c as *mut std::os::raw::c_void);
             }
@@ -240,12 +245,7 @@ impl OwnedDb {
     /// Does NOT call `itdb_write` — caller batches that at end of run.
     /// Returns `Ok(())` even if the dbid isn't found (idempotent, matching
     /// `delete_track`'s semantics).
-    pub fn update_track_metadata(
-        &self,
-        dbid: u64,
-        tags: &Tags,
-        art: Option<&[u8]>,
-    ) -> Result<()> {
+    pub fn update_track_metadata(&self, dbid: u64, tags: &Tags, art: Option<&[u8]>) -> Result<()> {
         unsafe {
             let found = self.find_track_by_dbid(dbid);
             if found.is_null() {
@@ -375,10 +375,7 @@ impl OwnedDb {
                     orphans_deleted += 1;
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "reconcile: failed to delete orphan {}: {e}",
-                        full.display()
-                    );
+                    tracing::warn!("reconcile: failed to delete orphan {}: {e}", full.display());
                     orphans_failed += 1;
                 }
             }
@@ -827,8 +824,12 @@ pub fn restore_itunesdb_from_backup(ipod_mount: &Path) -> Result<()> {
             backup.display()
         ));
     }
-    parse_check(&backup)
-        .map_err(|e| anyhow!("session backup at {} does not parse: {e:#}", backup.display()))?;
+    parse_check(&backup).map_err(|e| {
+        anyhow!(
+            "session backup at {} does not parse: {e:#}",
+            backup.display()
+        )
+    })?;
 
     let live = crate::ipod::layout::itunes_db_path(ipod_mount);
     let aside = ipod_mount
@@ -839,7 +840,11 @@ pub fn restore_itunesdb_from_backup(ipod_mount: &Path) -> Result<()> {
 
     // Step 1: copy backup → tmp (same tmp naming pattern already used).
     std::fs::copy(&backup, &tmp).with_context(|| {
-        format!("failed to copy backup {} -> {}", backup.display(), tmp.display())
+        format!(
+            "failed to copy backup {} -> {}",
+            backup.display(),
+            tmp.display()
+        )
     })?;
 
     // Step 2: rename live DB → corrupt aside (replace-existing).
@@ -857,7 +862,11 @@ pub fn restore_itunesdb_from_backup(ipod_mount: &Path) -> Result<()> {
     if let Err(e) = std::fs::rename(&tmp, &live) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| {
-            format!("failed to rename restored DB {} -> {}", tmp.display(), live.display())
+            format!(
+                "failed to rename restored DB {} -> {}",
+                tmp.display(),
+                live.display()
+            )
         });
     }
 
@@ -876,10 +885,7 @@ pub fn restore_itunesdb_from_backup(ipod_mount: &Path) -> Result<()> {
 /// `OwnedDb::open` error — not the restore error — wrapped with context
 /// naming both manual remedies (`--rebuild-manifest`, `--restore-db-backup`)
 /// so the user isn't left with a dead end.
-pub fn open_with_auto_restore(
-    ipod_mount: &Path,
-    on_restore: impl FnOnce(),
-) -> Result<OwnedDb> {
+pub fn open_with_auto_restore(ipod_mount: &Path, on_restore: impl FnOnce()) -> Result<OwnedDb> {
     match OwnedDb::open(ipod_mount) {
         Ok(db) => Ok(db),
         Err(open_err) => {
@@ -924,7 +930,11 @@ pub fn read_ipod_name(ipod_mount: &Path) -> Option<String> {
             return None;
         }
         let s = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
-        if s.trim().is_empty() { None } else { Some(s) }
+        if s.trim().is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
 }
 
@@ -998,15 +1008,16 @@ fn path_to_cstring(p: &Path) -> Result<CString> {
     let s = p
         .to_str()
         .ok_or_else(|| anyhow!("path contains non-UTF-8: {}", p.display()))?;
-    CString::new(s)
-        .map_err(|_| anyhow!("path contains interior NUL byte: {}", p.display()))
+    CString::new(s).map_err(|_| anyhow!("path contains interior NUL byte: {}", p.display()))
 }
 
 unsafe fn gerror_to_anyhow(api: &str, err: *mut ffi::GError) -> anyhow::Error {
     if err.is_null() {
         return anyhow!("{api} failed (no error detail)");
     }
-    let msg = CStr::from_ptr((*err).message).to_string_lossy().into_owned();
+    let msg = CStr::from_ptr((*err).message)
+        .to_string_lossy()
+        .into_owned();
     ffi::g_error_free(err);
     anyhow!("{api} failed: {msg}")
 }

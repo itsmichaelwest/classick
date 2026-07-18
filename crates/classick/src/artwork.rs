@@ -20,7 +20,11 @@ pub fn normalize(source_art: &[u8]) -> Result<Vec<u8>> {
     let img = image::load_from_memory(source_art).context("decoding source cover art")?;
     let (w, h) = (img.width(), img.height());
     let scaled = if w > MAX_ART_EDGE || h > MAX_ART_EDGE {
-        img.resize(MAX_ART_EDGE, MAX_ART_EDGE, image::imageops::FilterType::Lanczos3)
+        img.resize(
+            MAX_ART_EDGE,
+            MAX_ART_EDGE,
+            image::imageops::FilterType::Lanczos3,
+        )
     } else {
         img
     };
@@ -29,22 +33,31 @@ pub fn normalize(source_art: &[u8]) -> Result<Vec<u8>> {
     let rgb = scaled.to_rgb8();
     let mut out = Vec::new();
     let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut out), 85);
-    enc.encode(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
-        .context("encoding normalized cover art JPEG")?;
+    enc.encode(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        image::ExtendedColorType::Rgb8,
+    )
+    .context("encoding normalized cover art JPEG")?;
     Ok(out)
 }
 
 /// Embed MP4 `ilst` metadata tags + an optional `covr` cover-art atom into an
 /// existing `.m4a`, overwriting any existing tags/art (idempotent). Pure file
 /// I/O — safe on a transcode worker; never touches libgpod.
-pub fn embed_track_metadata(m4a: &Path, tags: &crate::ipod::db::Tags, art: Option<&[u8]>) -> Result<()> {
+pub fn embed_track_metadata(
+    m4a: &Path,
+    tags: &crate::ipod::db::Tags,
+    art: Option<&[u8]>,
+) -> Result<()> {
     use lofty::config::WriteOptions;
     use lofty::file::TaggedFileExt;
     use lofty::prelude::*;
     use lofty::tag::{Tag, TagType};
 
-    let mut file =
-        lofty::read_from_path(m4a).with_context(|| format!("reading {} for tagging", m4a.display()))?;
+    let mut file = lofty::read_from_path(m4a)
+        .with_context(|| format!("reading {} for tagging", m4a.display()))?;
     if file.primary_tag().is_none() {
         file.insert_tag(Tag::new(TagType::Mp4Ilst));
     }
@@ -135,7 +148,10 @@ mod tests {
         // JPEG magic (baseline + progressive both start FF D8 FF).
         assert_eq!(&out[..2], &[0xFF, 0xD8]);
         // No progressive-JPEG SOF2 marker (0xFF 0xC2) — must be baseline.
-        assert!(!out.windows(2).any(|w| w == [0xFF, 0xC2]), "must be baseline JPEG");
+        assert!(
+            !out.windows(2).any(|w| w == [0xFF, 0xC2]),
+            "must be baseline JPEG"
+        );
     }
 
     #[test]
@@ -188,11 +204,15 @@ mod tests {
         use lofty::file::TaggedFileExt;
         use lofty::prelude::*;
         let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/bare.m4a");
-        let tmp = std::env::temp_dir().join(format!("classick-embed-noart-{}.m4a", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("classick-embed-noart-{}.m4a", std::process::id()));
         std::fs::copy(fixture, &tmp).unwrap();
         embed_track_metadata(&tmp, &tags_fixture(), None).unwrap();
         let f = lofty::read_from_path(&tmp).unwrap();
-        assert_eq!(f.primary_tag().unwrap().title().as_deref(), Some("Wake Me Up Tomorrow"));
+        assert_eq!(
+            f.primary_tag().unwrap().title().as_deref(),
+            Some("Wake Me Up Tomorrow")
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -218,11 +238,15 @@ mod tests {
         wav.extend_from_slice(&4u32.to_le_bytes());
         wav.extend_from_slice(&[0, 0, 0, 0]);
 
-        let tmp = std::env::temp_dir().join(format!("classick-embed-wav-{}.wav", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("classick-embed-wav-{}.wav", std::process::id()));
         std::fs::write(&tmp, &wav).unwrap();
         // Must not panic; must be Err (unsupported tag type).
         let r = embed_track_metadata(&tmp, &tags_fixture(), None);
-        assert!(r.is_err(), "embedding into a non-MP4 file must return Err, not panic");
+        assert!(
+            r.is_err(),
+            "embedding into a non-MP4 file must return Err, not panic"
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 }

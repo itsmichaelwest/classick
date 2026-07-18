@@ -284,7 +284,12 @@ impl IpcEvent {
             // skipped_for_space/artwork/db_restored are populated on
             // `Progress` via `note_*` calls during the run (Task 8's fit
             // pass, Task 4's auto-restore) and read back here unchanged.
-            PE::Finish { success, skipped_for_space, artwork, db_restored } => IpcEvent::Finish {
+            PE::Finish {
+                success,
+                skipped_for_space,
+                artwork,
+                db_restored,
+            } => IpcEvent::Finish {
                 success: *success,
                 skipped_for_space: skipped_for_space.clone(),
                 artwork: artwork.clone(),
@@ -390,7 +395,10 @@ mod tests {
     #[test]
     fn pause_command_maps_to_pause_decision() {
         let cmd: IpcCommand = serde_json::from_str(r#"{"type":"pause"}"#).unwrap();
-        assert!(matches!(cmd.to_decision(), Some(crate::progress::Decision::Pause)));
+        assert!(matches!(
+            cmd.to_decision(),
+            Some(crate::progress::Decision::Pause)
+        ));
     }
 
     #[test]
@@ -398,10 +406,7 @@ mod tests {
         let cmd: IpcCommand = serde_json::from_str(r#"{"type":"cancel"}"#).unwrap();
         let decision = cmd.to_decision().unwrap();
         use crate::progress::{Decision, ReviewDecision};
-        assert!(matches!(
-            decision,
-            Decision::Review(ReviewDecision::Quit)
-        ));
+        assert!(matches!(decision, Decision::Review(ReviewDecision::Quit)));
     }
 
     #[test]
@@ -428,7 +433,10 @@ mod tests {
         assert!(!json.contains("eta_secs"), "got: {json}");
         assert!(json.contains(r#""current":1"#), "got: {json}");
         assert!(json.contains(r#""total":15"#), "got: {json}");
-        assert!(json.contains(r#""label":"Aphex Twin - #ATC1""#), "got: {json}");
+        assert!(
+            json.contains(r#""label":"Aphex Twin - #ATC1""#),
+            "got: {json}"
+        );
     }
 
     #[test]
@@ -524,7 +532,12 @@ mod tests {
         };
         let wire = IpcEvent::from_progress(&event).unwrap();
         match wire {
-            IpcEvent::Finish { success, skipped_for_space, artwork, db_restored } => {
+            IpcEvent::Finish {
+                success,
+                skipped_for_space,
+                artwork,
+                db_restored,
+            } => {
                 assert!(!success);
                 assert_eq!(skipped_for_space.unwrap().albums, 1);
                 assert!(artwork.is_none());
@@ -536,12 +549,24 @@ mod tests {
 
     #[test]
     fn skipped_for_space_describe_reads_naturally() {
-        let s = SkippedForSpace { albums: 1, tracks: 8, bytes: 1_200_000_000 };
+        let s = SkippedForSpace {
+            albums: 1,
+            tracks: 8,
+            bytes: 1_200_000_000,
+        };
         let text = s.describe();
         assert!(text.starts_with("1 album ("), "got: {text}");
         assert!(text.contains("didn't fit"), "got: {text}");
 
-        let plural = SkippedForSpace { albums: 3, tracks: 8, bytes: 1_200_000_000 };
-        assert!(plural.describe().starts_with("3 albums ("), "got: {}", plural.describe());
+        let plural = SkippedForSpace {
+            albums: 3,
+            tracks: 8,
+            bytes: 1_200_000_000,
+        };
+        assert!(
+            plural.describe().starts_with("3 albums ("),
+            "got: {}",
+            plural.describe()
+        );
     }
 }

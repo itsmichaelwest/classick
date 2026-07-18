@@ -135,7 +135,11 @@ pub fn migrate_legacy_manifest(legacy_path: &Path, serial: &str) -> Result<PathB
 }
 
 /// Test/override variant of [`migrate_legacy_manifest`].
-pub fn migrate_legacy_manifest_in(root: &Path, legacy_path: &Path, serial: &str) -> Result<PathBuf> {
+pub fn migrate_legacy_manifest_in(
+    root: &Path,
+    legacy_path: &Path,
+    serial: &str,
+) -> Result<PathBuf> {
     let dst = device_manifest_path_in(root, serial)?;
 
     if !legacy_path.exists() {
@@ -157,11 +161,14 @@ pub fn migrate_legacy_manifest_in(root: &Path, legacy_path: &Path, serial: &str)
             // Cross-filesystem rename fails on some platforms; fall back to
             // copy + delete.
             fs::copy(legacy_path, &dst).with_context(|| {
-                format!("copy legacy manifest {} -> {}", legacy_path.display(), dst.display())
+                format!(
+                    "copy legacy manifest {} -> {}",
+                    legacy_path.display(),
+                    dst.display()
+                )
             })?;
-            fs::remove_file(legacy_path).with_context(|| {
-                format!("remove legacy manifest {}", legacy_path.display())
-            })?;
+            fs::remove_file(legacy_path)
+                .with_context(|| format!("remove legacy manifest {}", legacy_path.display()))?;
         }
     }
 
@@ -210,7 +217,10 @@ mod tests {
         let root = tempdir_under_target();
         let p = device_manifest_path_in(&root, "0xABC").unwrap();
         assert_eq!(p, root.join("devices").join("ABC").join("manifest.json"));
-        assert!(p.parent().unwrap().is_dir(), "device_dir is created on demand");
+        assert!(
+            p.parent().unwrap().is_dir(),
+            "device_dir is created on demand"
+        );
     }
 
     #[test]
@@ -218,16 +228,36 @@ mod tests {
         let root = tempdir_under_target();
 
         let subs = device_subscriptions_path_in(&root, "0xABC").unwrap();
-        assert_eq!(subs, root.join("devices").join("ABC").join("subscriptions.json"));
-        assert!(subs.parent().unwrap().is_dir(), "device_dir is created on demand");
+        assert_eq!(
+            subs,
+            root.join("devices").join("ABC").join("subscriptions.json")
+        );
+        assert!(
+            subs.parent().unwrap().is_dir(),
+            "device_dir is created on demand"
+        );
 
         let settings = device_settings_path_in(&root, "0xABC").unwrap();
-        assert_eq!(settings, root.join("devices").join("ABC").join("settings.json"));
-        assert!(settings.parent().unwrap().is_dir(), "device_dir is created on demand");
+        assert_eq!(
+            settings,
+            root.join("devices").join("ABC").join("settings.json")
+        );
+        assert!(
+            settings.parent().unwrap().is_dir(),
+            "device_dir is created on demand"
+        );
 
         let managed = managed_playlists_path_in(&root, "0xABC").unwrap();
-        assert_eq!(managed, root.join("devices").join("ABC").join("managed_playlists.json"));
-        assert!(managed.parent().unwrap().is_dir(), "device_dir is created on demand");
+        assert_eq!(
+            managed,
+            root.join("devices")
+                .join("ABC")
+                .join("managed_playlists.json")
+        );
+        assert!(
+            managed.parent().unwrap().is_dir(),
+            "device_dir is created on demand"
+        );
     }
 
     #[test]
@@ -253,7 +283,10 @@ mod tests {
         std::fs::write(&dst, r#"{"version":1,"ipod_serial":"SER1","tracks":[]}"#).unwrap();
         migrate_legacy_manifest_in(&root, &legacy, "SER1").unwrap();
         let kept = std::fs::read_to_string(&dst).unwrap();
-        assert!(kept.contains("SER1"), "existing per-device manifest wins; legacy left in place");
+        assert!(
+            kept.contains("SER1"),
+            "existing per-device manifest wins; legacy left in place"
+        );
         assert!(legacy.exists());
     }
 }

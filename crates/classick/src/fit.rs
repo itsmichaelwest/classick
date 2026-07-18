@@ -309,7 +309,10 @@ mod tests {
     fn album_exactly_matching_remaining_budget_is_kept() {
         let actions = vec![Action::Add(src("/m/Artist/Album/01.flac", 100))];
         let outcome = plan_fit(actions, Some(100), no_tags);
-        assert!(outcome.deferred.is_empty(), "exact-fit album must not be deferred");
+        assert!(
+            outcome.deferred.is_empty(),
+            "exact-fit album must not be deferred"
+        );
         assert_eq!(outcome.kept.len(), 1);
     }
 

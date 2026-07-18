@@ -85,8 +85,11 @@ pub struct SmartRules {
 /// Infallible — an empty index (or a rule set that matches nothing) simply
 /// produces an empty `Vec`.
 pub fn evaluate(rules: &SmartRules, index: &LibraryIndex) -> Vec<PathBuf> {
-    let mut matched: Vec<(&PathBuf, &IndexedTrack)> =
-        index.files.iter().filter(|(_, track)| matches_rules(rules, track)).collect();
+    let mut matched: Vec<(&PathBuf, &IndexedTrack)> = index
+        .files
+        .iter()
+        .filter(|(_, track)| matches_rules(rules, track))
+        .collect();
 
     order_matches(&mut matched, rules.order, rules.seed);
 
@@ -130,8 +133,12 @@ fn text_matches(op: Op, rule_value: &str, track_value: &str) -> bool {
 /// nothing at all (every track fails), rather than silently degrading to
 /// "match everything" or panicking.
 fn year_matches(op: Op, rule_value: &str, track_year: Option<i32>) -> bool {
-    let Some(track_year) = track_year else { return false };
-    let Ok(rule_year) = rule_value.trim().parse::<i32>() else { return false };
+    let Some(track_year) = track_year else {
+        return false;
+    };
+    let Ok(rule_year) = rule_value.trim().parse::<i32>() else {
+        return false;
+    };
     match op {
         Op::Is | Op::Contains => track_year == rule_year,
         Op::Gte => track_year >= rule_year,
@@ -217,20 +224,44 @@ mod tests {
     }
 
     fn rules(matching: Match, rules: Vec<Rule>) -> SmartRules {
-        SmartRules { version: RULES_VERSION, matching, rules, limit: None, order: Order::Alpha, seed: 0 }
+        SmartRules {
+            version: RULES_VERSION,
+            matching,
+            rules,
+            limit: None,
+            order: Order::Alpha,
+            seed: 0,
+        }
     }
 
     #[test]
     fn all_vs_any_matching() {
         let index = index_with(vec![
-            ("/music/both.flac", track("Brian Eno", "Ambient", None, 1, 1)),
-            ("/music/artist_only.flac", track("Brian Eno", "Rock", None, 1, 1)),
-            ("/music/genre_only.flac", track("Bowie", "Ambient", None, 1, 1)),
+            (
+                "/music/both.flac",
+                track("Brian Eno", "Ambient", None, 1, 1),
+            ),
+            (
+                "/music/artist_only.flac",
+                track("Brian Eno", "Rock", None, 1, 1),
+            ),
+            (
+                "/music/genre_only.flac",
+                track("Bowie", "Ambient", None, 1, 1),
+            ),
             ("/music/neither.flac", track("Bowie", "Rock", None, 1, 1)),
         ]);
         let two_rules = vec![
-            Rule { field: Field::Genre, op: Op::Is, value: "Ambient".into() },
-            Rule { field: Field::Artist, op: Op::Contains, value: "eno".into() },
+            Rule {
+                field: Field::Genre,
+                op: Op::Is,
+                value: "Ambient".into(),
+            },
+            Rule {
+                field: Field::Artist,
+                op: Op::Contains,
+                value: "eno".into(),
+            },
         ];
 
         let all = evaluate(&rules(Match::All, two_rules.clone()), &index);
@@ -256,16 +287,35 @@ mod tests {
             ("/music/unknown.flac", track("A", "G", None, 1, 1)),
         ]);
 
-        let gte = rules(Match::All, vec![Rule { field: Field::Year, op: Op::Gte, value: "2000".into() }]);
+        let gte = rules(
+            Match::All,
+            vec![Rule {
+                field: Field::Year,
+                op: Op::Gte,
+                value: "2000".into(),
+            }],
+        );
         assert_eq!(
             evaluate(&gte, &index),
-            vec![PathBuf::from("/music/boundary.flac"), PathBuf::from("/music/new.flac")],
+            vec![
+                PathBuf::from("/music/boundary.flac"),
+                PathBuf::from("/music/new.flac")
+            ],
             "years >= 2000 only; the yearless track never matches"
         );
 
-        let non_numeric =
-            rules(Match::All, vec![Rule { field: Field::Year, op: Op::Gte, value: "abc".into() }]);
-        assert!(evaluate(&non_numeric, &index).is_empty(), "non-numeric rule value matches nothing");
+        let non_numeric = rules(
+            Match::All,
+            vec![Rule {
+                field: Field::Year,
+                op: Op::Gte,
+                value: "abc".into(),
+            }],
+        );
+        assert!(
+            evaluate(&non_numeric, &index).is_empty(),
+            "non-numeric rule value matches nothing"
+        );
     }
 
     #[test]
@@ -287,11 +337,17 @@ mod tests {
 
         let run1 = evaluate(&seed42a, &index);
         let run2 = evaluate(&seed42b, &index);
-        assert_eq!(run1, run2, "same seed must reproduce the same order every time");
+        assert_eq!(
+            run1, run2,
+            "same seed must reproduce the same order every time"
+        );
         assert_eq!(run1.len(), 10);
 
         let run3 = evaluate(&seed7, &index);
-        assert_ne!(run1, run3, "a different seed must (for 10 tracks) produce a different order");
+        assert_ne!(
+            run1, run3,
+            "a different seed must (for 10 tracks) produce a different order"
+        );
     }
 
     #[test]
@@ -306,7 +362,10 @@ mod tests {
 
         assert_eq!(
             evaluate(&r, &index),
-            vec![PathBuf::from("/music/a.flac"), PathBuf::from("/music/b.flac")],
+            vec![
+                PathBuf::from("/music/a.flac"),
+                PathBuf::from("/music/b.flac")
+            ],
             "alpha order, 250-byte budget fits exactly the first two 100-byte tracks"
         );
     }
@@ -335,7 +394,10 @@ mod tests {
         r.limit = Some(Limit::Tracks(2));
         assert_eq!(
             evaluate(&r, &index),
-            vec![PathBuf::from("/music/a.flac"), PathBuf::from("/music/b.flac")]
+            vec![
+                PathBuf::from("/music/a.flac"),
+                PathBuf::from("/music/b.flac")
+            ]
         );
     }
 
@@ -361,7 +423,14 @@ mod tests {
     #[test]
     fn empty_index_evaluates_to_empty() {
         let index = LibraryIndex::empty(PathBuf::from("/music"));
-        let r = rules(Match::All, vec![Rule { field: Field::Artist, op: Op::Is, value: "X".into() }]);
+        let r = rules(
+            Match::All,
+            vec![Rule {
+                field: Field::Artist,
+                op: Op::Is,
+                value: "X".into(),
+            }],
+        );
         assert!(evaluate(&r, &index).is_empty());
     }
 }

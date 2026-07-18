@@ -65,7 +65,12 @@ pub struct LibraryIndex {
 
 impl LibraryIndex {
     pub fn empty(source_root: PathBuf) -> Self {
-        Self { version: INDEX_VERSION, source_root, scanned_at_unix_secs: None, files: BTreeMap::new() }
+        Self {
+            version: INDEX_VERSION,
+            source_root,
+            scanned_at_unix_secs: None,
+            files: BTreeMap::new(),
+        }
     }
 }
 
@@ -91,8 +96,7 @@ pub struct UpdateStats {
 
 /// <config dir>/classick/library-index.json — beside config.toml/manifest.json.
 pub fn default_index_path() -> Result<PathBuf> {
-    let dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not resolve config dir"))?;
+    let dir = dirs::config_dir().ok_or_else(|| anyhow::anyhow!("could not resolve config dir"))?;
     Ok(dir.join(crate::PROJECT_DIR).join("library-index.json"))
 }
 
@@ -114,13 +118,16 @@ pub fn load_or_empty(path: &Path, source_root: &Path) -> LibraryIndex {
         Some(idx) if idx.source_root != source_root => {
             tracing::info!(
                 "library_index: source root changed ({} -> {}); starting fresh",
-                idx.source_root.display(), source_root.display());
+                idx.source_root.display(),
+                source_root.display()
+            );
             LibraryIndex::empty(source_root.to_path_buf())
         }
         Some(idx) => {
             tracing::info!(
                 "library_index: cache version changed ({} -> {INDEX_VERSION}); starting fresh",
-                idx.version);
+                idx.version
+            );
             LibraryIndex::empty(source_root.to_path_buf())
         }
         None => LibraryIndex::empty(source_root.to_path_buf()),
@@ -140,7 +147,8 @@ pub fn save_atomic(path: &Path, index: &LibraryIndex) -> Result<()> {
         let mut writer = std::io::BufWriter::new(f);
         std::io::Write::write_all(&mut writer, json.as_bytes())?;
         let f = std::io::BufWriter::into_inner(writer)?;
-        f.sync_all().with_context(|| format!("fsync {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
     }
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
@@ -175,9 +183,12 @@ pub fn read_track_tags(path: &Path) -> Result<TrackTags> {
 /// The walked entries whose (mtime, size) don't match the cache — i.e. what
 /// a scan will actually probe. Used to size the progress total up front.
 pub fn stale_entries(index: &LibraryIndex, entries: &[SourceEntry]) -> Vec<SourceEntry> {
-    entries.iter()
+    entries
+        .iter()
         .filter(|e| {
-            index.files.get(&e.path)
+            index
+                .files
+                .get(&e.path)
                 .map(|rec| rec.mtime != e.mtime || rec.size != e.size)
                 .unwrap_or(true)
         })
@@ -212,23 +223,29 @@ pub fn update_index(
         let tags = match probe(&e.path) {
             Ok(t) => t,
             Err(err) => {
-                tracing::warn!("library_index: probe failed for {} ({err:#}); bucketing as unknown", e.path.display());
+                tracing::warn!(
+                    "library_index: probe failed for {} ({err:#}); bucketing as unknown",
+                    e.path.display()
+                );
                 stats.failed += 1;
                 TrackTags::default()
             }
         };
         stats.probed += 1;
-        index.files.insert(e.path.clone(), IndexedTrack {
-            mtime: e.mtime,
-            size: e.size,
-            artist: tags.artist,
-            album_artist: tags.album_artist,
-            album: tags.album,
-            genre: tags.genre,
-            title: tags.title,
-            duration_ms: tags.duration_ms,
-            year: tags.year,
-        });
+        index.files.insert(
+            e.path.clone(),
+            IndexedTrack {
+                mtime: e.mtime,
+                size: e.size,
+                artist: tags.artist,
+                album_artist: tags.album_artist,
+                album: tags.album,
+                genre: tags.genre,
+                title: tags.title,
+                duration_ms: tags.duration_ms,
+                year: tags.year,
+            },
+        );
     }
 
     let live: std::collections::HashSet<&PathBuf> = entries.iter().map(|e| &e.path).collect();
@@ -245,7 +262,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn entry(path: &str, mtime: i64, size: u64) -> SourceEntry {
-        SourceEntry { path: PathBuf::from(path), mtime, size }
+        SourceEntry {
+            path: PathBuf::from(path),
+            mtime,
+            size,
+        }
     }
 
     fn tags(artist: &str) -> TrackTags {
@@ -264,14 +285,27 @@ mod tests {
     fn cache_hit_is_not_probed() {
         let root = PathBuf::from("/music");
         let mut index = LibraryIndex::empty(root);
-        index.files.insert(PathBuf::from("/music/a.flac"), IndexedTrack {
-            mtime: 100, size: 5, artist: "X".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
-        });
+        index.files.insert(
+            PathBuf::from("/music/a.flac"),
+            IndexedTrack {
+                mtime: 100,
+                size: 5,
+                artist: "X".into(),
+                album_artist: String::new(),
+                album: "A".into(),
+                genre: "G".into(),
+                title: "T".into(),
+                duration_ms: 1,
+                year: None,
+            },
+        );
         let entries = vec![entry("/music/a.flac", 100, 5)];
-        let stats = update_index(&mut index, &entries,
+        let stats = update_index(
+            &mut index,
+            &entries,
             |_| panic!("probe must not fire on (mtime,size) match"),
-            |_, _, _| {});
+            |_, _, _| {},
+        );
         assert_eq!(stats.reused, 1);
         assert_eq!(stats.probed, 0);
     }
@@ -280,19 +314,37 @@ mod tests {
     fn cache_miss_probes_and_records() {
         let mut index = LibraryIndex::empty(PathBuf::from("/music"));
         let entries = vec![entry("/music/new.flac", 100, 5)];
-        let stats = update_index(&mut index, &entries, |_| Ok(tags("Aphex Twin")), |_, _, _| {});
+        let stats = update_index(
+            &mut index,
+            &entries,
+            |_| Ok(tags("Aphex Twin")),
+            |_, _, _| {},
+        );
         assert_eq!(stats.probed, 1);
-        assert_eq!(index.files[&PathBuf::from("/music/new.flac")].artist, "Aphex Twin");
+        assert_eq!(
+            index.files[&PathBuf::from("/music/new.flac")].artist,
+            "Aphex Twin"
+        );
         assert_eq!(index.files[&PathBuf::from("/music/new.flac")].mtime, 100);
     }
 
     #[test]
     fn changed_file_is_reprobed() {
         let mut index = LibraryIndex::empty(PathBuf::from("/music"));
-        index.files.insert(PathBuf::from("/music/a.flac"), IndexedTrack {
-            mtime: 100, size: 5, artist: "Old".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
-        });
+        index.files.insert(
+            PathBuf::from("/music/a.flac"),
+            IndexedTrack {
+                mtime: 100,
+                size: 5,
+                artist: "Old".into(),
+                album_artist: String::new(),
+                album: "A".into(),
+                genre: "G".into(),
+                title: "T".into(),
+                duration_ms: 1,
+                year: None,
+            },
+        );
         let entries = vec![entry("/music/a.flac", 200, 5)]; // mtime bumped
         let stats = update_index(&mut index, &entries, |_| Ok(tags("New")), |_, _, _| {});
         assert_eq!(stats.probed, 1);
@@ -302,10 +354,20 @@ mod tests {
     #[test]
     fn vanished_files_are_dropped() {
         let mut index = LibraryIndex::empty(PathBuf::from("/music"));
-        index.files.insert(PathBuf::from("/music/gone.flac"), IndexedTrack {
-            mtime: 1, size: 1, artist: "X".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
-        });
+        index.files.insert(
+            PathBuf::from("/music/gone.flac"),
+            IndexedTrack {
+                mtime: 1,
+                size: 1,
+                artist: "X".into(),
+                album_artist: String::new(),
+                album: "A".into(),
+                genre: "G".into(),
+                title: "T".into(),
+                duration_ms: 1,
+                year: None,
+            },
+        );
         let stats = update_index(&mut index, &[], |_| unreachable!(), |_, _, _| {});
         assert_eq!(stats.dropped, 1);
         assert!(index.files.is_empty());
@@ -317,36 +379,77 @@ mod tests {
         // Unknown Artist bucket and stays cached until the file changes.
         let mut index = LibraryIndex::empty(PathBuf::from("/music"));
         let entries = vec![entry("/music/bad.flac", 100, 5)];
-        let stats = update_index(&mut index, &entries,
-            |_| Err(anyhow::anyhow!("boom")), |_, _, _| {});
+        let stats = update_index(
+            &mut index,
+            &entries,
+            |_| Err(anyhow::anyhow!("boom")),
+            |_, _, _| {},
+        );
         assert_eq!(stats.failed, 1);
         let rec = &index.files[&PathBuf::from("/music/bad.flac")];
         assert_eq!(rec.artist, "");
-        assert_eq!(rec.mtime, 100, "stat still cached so it isn't re-probed every scan");
+        assert_eq!(
+            rec.mtime, 100,
+            "stat still cached so it isn't re-probed every scan"
+        );
     }
 
     #[test]
     fn on_progress_reports_probed_files_only() {
         let mut index = LibraryIndex::empty(PathBuf::from("/music"));
-        index.files.insert(PathBuf::from("/music/hit.flac"), IndexedTrack {
-            mtime: 1, size: 1, artist: "X".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
-        });
-        let entries = vec![entry("/music/hit.flac", 1, 1), entry("/music/miss.flac", 2, 2)];
+        index.files.insert(
+            PathBuf::from("/music/hit.flac"),
+            IndexedTrack {
+                mtime: 1,
+                size: 1,
+                artist: "X".into(),
+                album_artist: String::new(),
+                album: "A".into(),
+                genre: "G".into(),
+                title: "T".into(),
+                duration_ms: 1,
+                year: None,
+            },
+        );
+        let entries = vec![
+            entry("/music/hit.flac", 1, 1),
+            entry("/music/miss.flac", 2, 2),
+        ];
         let mut seen = Vec::new();
-        update_index(&mut index, &entries, |_| Ok(tags("Y")),
-            |current, total, _path| seen.push((current, total)));
-        assert_eq!(seen, vec![(1, 1)], "only the cache miss is progress-reported");
+        update_index(
+            &mut index,
+            &entries,
+            |_| Ok(tags("Y")),
+            |current, total, _path| seen.push((current, total)),
+        );
+        assert_eq!(
+            seen,
+            vec![(1, 1)],
+            "only the cache miss is progress-reported"
+        );
     }
 
     #[test]
     fn stale_entries_counts_misses() {
         let mut index = LibraryIndex::empty(PathBuf::from("/music"));
-        index.files.insert(PathBuf::from("/music/hit.flac"), IndexedTrack {
-            mtime: 1, size: 1, artist: "X".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
-        });
-        let entries = vec![entry("/music/hit.flac", 1, 1), entry("/music/miss.flac", 2, 2)];
+        index.files.insert(
+            PathBuf::from("/music/hit.flac"),
+            IndexedTrack {
+                mtime: 1,
+                size: 1,
+                artist: "X".into(),
+                album_artist: String::new(),
+                album: "A".into(),
+                genre: "G".into(),
+                title: "T".into(),
+                duration_ms: 1,
+                year: None,
+            },
+        );
+        let entries = vec![
+            entry("/music/hit.flac", 1, 1),
+            entry("/music/miss.flac", 2, 2),
+        ];
         let stale = stale_entries(&index, &entries);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].path, PathBuf::from("/music/miss.flac"));
@@ -365,7 +468,10 @@ mod tests {
         assert_eq!(same.scanned_at_unix_secs, Some(42));
 
         let other = load_or_empty(&path, &PathBuf::from("/other"));
-        assert_eq!(other.scanned_at_unix_secs, None, "root change forces full rescan");
+        assert_eq!(
+            other.scanned_at_unix_secs, None,
+            "root change forces full rescan"
+        );
         assert_eq!(other.source_root, PathBuf::from("/other"));
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -378,7 +484,10 @@ mod tests {
         let path = base.join("library-index.json");
         std::fs::write(&path, b"{ nope").unwrap();
         let idx = load_or_empty(&path, &PathBuf::from("/music"));
-        assert!(idx.files.is_empty(), "corrupt cache = never-scanned, not an error");
+        assert!(
+            idx.files.is_empty(),
+            "corrupt cache = never-scanned, not an error"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -394,8 +503,15 @@ mod tests {
         assert_eq!(tags.album, "Test Album");
         assert_eq!(tags.album_artist, "Test AA");
         assert_eq!(tags.genre, "Electronic");
-        assert_eq!(tags.year, Some(2024), "fixture's date=2024 Vorbis comment parses to a year");
-        assert!(tags.duration_ms >= 900, "1s fixture should have ~1000ms duration");
+        assert_eq!(
+            tags.year,
+            Some(2024),
+            "fixture's date=2024 Vorbis comment parses to a year"
+        );
+        assert!(
+            tags.duration_ms >= 900,
+            "1s fixture should have ~1000ms duration"
+        );
     }
 
     #[test]
@@ -410,15 +526,31 @@ mod tests {
         let mut stale = LibraryIndex::empty(PathBuf::from("/music"));
         stale.version = INDEX_VERSION - 1;
         stale.scanned_at_unix_secs = Some(99);
-        stale.files.insert(PathBuf::from("/music/a.flac"), IndexedTrack {
-            mtime: 1, size: 1, artist: "X".into(), album_artist: String::new(),
-            album: "A".into(), genre: "G".into(), title: "T".into(), duration_ms: 1, year: None,
-        });
+        stale.files.insert(
+            PathBuf::from("/music/a.flac"),
+            IndexedTrack {
+                mtime: 1,
+                size: 1,
+                artist: "X".into(),
+                album_artist: String::new(),
+                album: "A".into(),
+                genre: "G".into(),
+                title: "T".into(),
+                duration_ms: 1,
+                year: None,
+            },
+        );
         save_atomic(&path, &stale).unwrap();
 
         let loaded = load_or_empty(&path, &PathBuf::from("/music"));
-        assert_eq!(loaded.version, INDEX_VERSION, "reset to the current version");
-        assert_eq!(loaded.scanned_at_unix_secs, None, "version bump forces full rescan");
+        assert_eq!(
+            loaded.version, INDEX_VERSION,
+            "reset to the current version"
+        );
+        assert_eq!(
+            loaded.scanned_at_unix_secs, None,
+            "version bump forces full rescan"
+        );
         assert!(loaded.files.is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }

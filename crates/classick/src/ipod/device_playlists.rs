@@ -16,7 +16,9 @@
 //! device — Classick's new one, and the foreign one, left exactly as it
 //! was — rather than either side adopting the foreign playlist in place.
 
-use crate::ipod::db::{ensure_managed_playlist, remove_playlist_by_id, remove_playlist_by_name, OwnedDb};
+use crate::ipod::db::{
+    ensure_managed_playlist, remove_playlist_by_id, remove_playlist_by_name, OwnedDb,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -82,7 +84,11 @@ impl<'de> Deserialize<'de> for ManagedPlaylistEntry {
             },
         }
         Ok(match Repr::deserialize(deserializer)? {
-            Repr::Legacy(name) => ManagedPlaylistEntry { slug: String::new(), name, id: None },
+            Repr::Legacy(name) => ManagedPlaylistEntry {
+                slug: String::new(),
+                name,
+                id: None,
+            },
             Repr::Full { slug, name, id } => ManagedPlaylistEntry { slug, name, id },
         })
     }
@@ -155,7 +161,11 @@ impl ManagedPlaylists {
 /// the real per-device state directory (`devices/<serial>/managed_playlists.json`).
 /// See [`reconcile_in`] for the test/override variant and the full
 /// algorithm description.
-pub fn reconcile(db: &OwnedDb, desired: &[(String, String, Vec<u64>)], serial: &str) -> Result<ReconcileStats> {
+pub fn reconcile(
+    db: &OwnedDb,
+    desired: &[(String, String, Vec<u64>)],
+    serial: &str,
+) -> Result<ReconcileStats> {
     let record_path = crate::device_state::managed_playlists_path(serial)?;
     reconcile_at(db, desired, &record_path)
 }
@@ -269,7 +279,11 @@ fn reconcile_at(
                 } else {
                     stats.created += 1;
                 }
-                managed.push(ManagedPlaylistEntry { slug: slug.clone(), name: name.clone(), id: Some(new_id) });
+                managed.push(ManagedPlaylistEntry {
+                    slug: slug.clone(),
+                    name: name.clone(),
+                    id: Some(new_id),
+                });
             }
             Err(e) => {
                 tracing::warn!("device-playlists: failed to ensure \"{name}\" ({slug}): {e:#}");
@@ -304,7 +318,10 @@ fn reconcile_at(
                 // nothing left to retry.
             }
             Err(e) => {
-                tracing::warn!("device-playlists: failed to remove \"{}\": {e:#}", entry.name);
+                tracing::warn!(
+                    "device-playlists: failed to remove \"{}\": {e:#}",
+                    entry.name
+                );
                 // Keep it in the managed record so the next run gets
                 // another chance at removing it — see doc comment above.
                 managed.push(entry.clone());
@@ -312,7 +329,9 @@ fn reconcile_at(
         }
     }
 
-    managed.sort_by(|a, b| (a.slug.as_str(), a.name.as_str()).cmp(&(b.slug.as_str(), b.name.as_str())));
+    managed.sort_by(|a, b| {
+        (a.slug.as_str(), a.name.as_str()).cmp(&(b.slug.as_str(), b.name.as_str()))
+    });
     managed.dedup_by(|a, b| a.slug == b.slug && a.name == b.name);
     ManagedPlaylists { names: managed }.save(record_path)?;
 
@@ -335,12 +354,19 @@ fn reconcile_at(
 pub fn mirror_to_ipod(mount: &Path, playlists_root: &Path, subscriptions_path: &Path) {
     let dest_dir = crate::ipod::layout::playlists_mirror_dir(mount);
     if let Err(e) = std::fs::create_dir_all(&dest_dir) {
-        tracing::warn!("playlist mirror: failed to create {}: {e}", dest_dir.display());
+        tracing::warn!(
+            "playlist mirror: failed to create {}: {e}",
+            dest_dir.display()
+        );
         return;
     }
 
     let mut entries: Vec<PathBuf> = match std::fs::read_dir(playlists_root) {
-        Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file()).collect(),
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect(),
         Err(e) => {
             // NotFound is expected when nothing has ever been saved to the
             // store yet; anything else is worth a warning, but neither
@@ -358,7 +384,9 @@ pub fn mirror_to_ipod(mount: &Path, playlists_root: &Path, subscriptions_path: &
 
     let mut copied = 0usize;
     for src in &entries {
-        let Some(file_name) = src.file_name() else { continue };
+        let Some(file_name) = src.file_name() else {
+            continue;
+        };
         let dst = dest_dir.join(file_name);
         match std::fs::copy(src, &dst) {
             Ok(_) => copied += 1,
@@ -381,7 +409,10 @@ pub fn mirror_to_ipod(mount: &Path, playlists_root: &Path, subscriptions_path: &
         }
     }
 
-    tracing::debug!("playlist mirror: copied {copied} playlist file(s) to {}", dest_dir.display());
+    tracing::debug!(
+        "playlist mirror: copied {copied} playlist file(s) to {}",
+        dest_dir.display()
+    );
 }
 
 /// Adopt playlists from a previously-mirrored device, once, at session
@@ -420,7 +451,11 @@ pub fn adopt_from_ipod(mount: &Path, playlists_root: &Path, subscriptions_path: 
 
     let mirror_dir = crate::ipod::layout::playlists_mirror_dir(mount);
     let mut mirror_files: Vec<PathBuf> = match std::fs::read_dir(&mirror_dir) {
-        Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file()).collect(),
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect(),
         Err(_) => return 0, // no mirror on this device == nothing to adopt
     };
     if mirror_files.is_empty() {
@@ -429,13 +464,18 @@ pub fn adopt_from_ipod(mount: &Path, playlists_root: &Path, subscriptions_path: 
     mirror_files.sort();
 
     if let Err(e) = std::fs::create_dir_all(playlists_root) {
-        tracing::warn!("playlist adopt: failed to create {}: {e}", playlists_root.display());
+        tracing::warn!(
+            "playlist adopt: failed to create {}: {e}",
+            playlists_root.display()
+        );
         return 0;
     }
 
     let mut adopted_playlists = 0usize;
     for src in &mirror_files {
-        let Some(file_name) = src.file_name() else { continue };
+        let Some(file_name) = src.file_name() else {
+            continue;
+        };
         if file_name == "subscriptions.json" {
             // Defense in depth: the outer gate above already returns early
             // whenever `subscriptions_path` exists, so this should be
@@ -492,7 +532,11 @@ mod tests {
         let base = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("test-tmp")
-            .join(format!("device-playlists-{label}-{}-{}", std::process::id(), n));
+            .join(format!(
+                "device-playlists-{label}-{}-{}",
+                std::process::id(),
+                n
+            ));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base
@@ -521,11 +565,21 @@ mod tests {
         let path = dir.join("nested").join("managed_playlists.json");
         let record = ManagedPlaylists {
             names: vec![
-                ManagedPlaylistEntry { slug: "gym".to_string(), name: "Gym".to_string(), id: Some(111) },
-                ManagedPlaylistEntry { slug: "road-trip".to_string(), name: "Road Trip".to_string(), id: Some(222) },
+                ManagedPlaylistEntry {
+                    slug: "gym".to_string(),
+                    name: "Gym".to_string(),
+                    id: Some(111),
+                },
+                ManagedPlaylistEntry {
+                    slug: "road-trip".to_string(),
+                    name: "Road Trip".to_string(),
+                    id: Some(222),
+                },
             ],
         };
-        record.save(&path).expect("save should create parent dirs and succeed");
+        record
+            .save(&path)
+            .expect("save should create parent dirs and succeed");
         let loaded = ManagedPlaylists::load(&path);
         assert_eq!(loaded, record);
     }
@@ -540,8 +594,16 @@ mod tests {
             loaded,
             ManagedPlaylists {
                 names: vec![
-                    ManagedPlaylistEntry { slug: String::new(), name: "Gym".to_string(), id: None },
-                    ManagedPlaylistEntry { slug: String::new(), name: "Road Trip".to_string(), id: None },
+                    ManagedPlaylistEntry {
+                        slug: String::new(),
+                        name: "Gym".to_string(),
+                        id: None
+                    },
+                    ManagedPlaylistEntry {
+                        slug: String::new(),
+                        name: "Road Trip".to_string(),
+                        id: None
+                    },
                 ],
             }
         );
@@ -559,7 +621,11 @@ mod tests {
         assert_eq!(
             loaded,
             ManagedPlaylists {
-                names: vec![ManagedPlaylistEntry { slug: String::new(), name: "Gym".to_string(), id: Some(111) }],
+                names: vec![ManagedPlaylistEntry {
+                    slug: String::new(),
+                    name: "Gym".to_string(),
+                    id: Some(111)
+                }],
             }
         );
     }
@@ -569,7 +635,11 @@ mod tests {
         let dir = tempdir_under_target("atomic");
         let path = dir.join("managed_playlists.json");
         ManagedPlaylists {
-            names: vec![ManagedPlaylistEntry { slug: "a".to_string(), name: "A".to_string(), id: Some(1) }],
+            names: vec![ManagedPlaylistEntry {
+                slug: "a".to_string(),
+                name: "A".to_string(),
+                id: Some(1),
+            }],
         }
         .save(&path)
         .unwrap();

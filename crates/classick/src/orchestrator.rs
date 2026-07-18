@@ -19,7 +19,11 @@ use crate::wizard;
 /// The `RunOutcome` (Completed vs Paused) is passed through from
 /// `apply_loop::run` so main.rs can decide which terminal progress event to
 /// emit before tearing down.
-pub fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decision>) -> Result<RunOutcome> {
+pub fn orchestrate(
+    cli: Cli,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+) -> Result<RunOutcome> {
     // Surface config.toml parse errors with a TUI prompt + reset option BEFORE
     // anything else touches the persisted config (ensure_source_or_wizard
     // itself calls config_file::load and would otherwise blow up on a corrupt
@@ -82,7 +86,11 @@ pub fn orchestrate(cli: Cli, progress: &Progress, decision_rx: &Receiver<Decisio
         return Err(anyhow!(
             "artwork audit found {} inconsistenc{} out of {} track(s) checked",
             report.failures.len(),
-            if report.failures.len() == 1 { "y" } else { "ies" },
+            if report.failures.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
             report.checked,
         ));
     }

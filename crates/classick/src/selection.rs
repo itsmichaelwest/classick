@@ -38,7 +38,11 @@ pub struct Selection {
 
 impl Selection {
     pub fn all() -> Self {
-        Self { version: SELECTION_VERSION, mode: SelectionMode::All, rules: Vec::new() }
+        Self {
+            version: SELECTION_VERSION,
+            mode: SelectionMode::All,
+            rules: Vec::new(),
+        }
     }
 
     /// Does the current selection want this track on the iPod?
@@ -75,7 +79,11 @@ impl<'a> TrackFacts<'a> {
     /// The grouping artist: album_artist when set (compilations group under
     /// "Various Artists"), else the track artist. Mirrors the browser display.
     pub fn effective_artist(&self) -> &'a str {
-        if self.album_artist.is_empty() { self.artist } else { self.album_artist }
+        if self.album_artist.is_empty() {
+            self.artist
+        } else {
+            self.album_artist
+        }
     }
 }
 
@@ -85,8 +93,7 @@ fn eq_fold(a: &str, b: &str) -> bool {
 
 /// <config dir>/classick/selection.json — beside config.toml.
 pub fn default_selection_path() -> Result<PathBuf> {
-    let dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not resolve config dir"))?;
+    let dir = dirs::config_dir().ok_or_else(|| anyhow::anyhow!("could not resolve config dir"))?;
     Ok(dir.join(crate::PROJECT_DIR).join("selection.json"))
 }
 
@@ -99,7 +106,9 @@ pub fn default_selection_path() -> Result<PathBuf> {
 /// always resolves to the per-device file regardless of `custom_selection`.
 /// Kept in place while callers migrate; not marked `#[deprecated]` to avoid
 /// warning churn during the transition.
-pub fn effective_selection_path(identity: Option<&crate::config_file::IpodIdentity>) -> Result<PathBuf> {
+pub fn effective_selection_path(
+    identity: Option<&crate::config_file::IpodIdentity>,
+) -> Result<PathBuf> {
     match identity {
         Some(id) if id.custom_selection => crate::device_state::device_selection_path(&id.serial),
         _ => default_selection_path(),
@@ -154,7 +163,11 @@ pub fn seed_custom_selection(shared: &Path, custom: &Path) -> Result<()> {
             .with_context(|| format!("create dir {}", parent.display()))?;
     }
     std::fs::copy(shared, custom).with_context(|| {
-        format!("seed custom selection {} -> {}", shared.display(), custom.display())
+        format!(
+            "seed custom selection {} -> {}",
+            shared.display(),
+            custom.display()
+        )
     })?;
     Ok(())
 }
@@ -166,13 +179,19 @@ pub fn load_or_all(path: &Path) -> Selection {
         Ok(s) => match serde_json::from_str(&s) {
             Ok(sel) => sel,
             Err(e) => {
-                tracing::warn!("selection: parse failed at {} ({e}); using mode=all", path.display());
+                tracing::warn!(
+                    "selection: parse failed at {} ({e}); using mode=all",
+                    path.display()
+                );
                 Selection::all()
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Selection::all(),
         Err(e) => {
-            tracing::warn!("selection: read failed at {} ({e}); using mode=all", path.display());
+            tracing::warn!(
+                "selection: read failed at {} ({e}); using mode=all",
+                path.display()
+            );
             Selection::all()
         }
     }
@@ -192,7 +211,8 @@ pub fn save_atomic(path: &Path, sel: &Selection) -> Result<()> {
         let mut writer = std::io::BufWriter::new(f);
         std::io::Write::write_all(&mut writer, json.as_bytes())?;
         let f = std::io::BufWriter::into_inner(writer)?;
-        f.sync_all().with_context(|| format!("fsync {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
     }
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
@@ -220,25 +240,35 @@ pub fn filter(
     let kept = sources
         .into_iter()
         .filter(|src| {
-            let fresh = index.files.get(&src.path)
+            let fresh = index
+                .files
+                .get(&src.path)
                 .map(|rec| rec.mtime == src.mtime && rec.size == src.size)
                 .unwrap_or(false);
             if !fresh {
                 match probe(&src.path) {
                     Ok(tags) => {
-                        index.files.insert(src.path.clone(), IndexedTrack {
-                            mtime: src.mtime, size: src.size,
-                            artist: tags.artist, album_artist: tags.album_artist,
-                            album: tags.album, genre: tags.genre,
-                            title: tags.title, duration_ms: tags.duration_ms,
-                            year: tags.year,
-                        });
+                        index.files.insert(
+                            src.path.clone(),
+                            IndexedTrack {
+                                mtime: src.mtime,
+                                size: src.size,
+                                artist: tags.artist,
+                                album_artist: tags.album_artist,
+                                album: tags.album,
+                                genre: tags.genre,
+                                title: tags.title,
+                                duration_ms: tags.duration_ms,
+                                year: tags.year,
+                            },
+                        );
                         dirty = true;
                     }
                     Err(e) => {
                         tracing::warn!(
                             "selection: cannot read tags for {} ({e:#}); keeping track (fail-open)",
-                            src.path.display());
+                            src.path.display()
+                        );
                         return true;
                     }
                 }
@@ -268,8 +298,14 @@ pub fn apply_to_sources(
             return sources;
         }
     };
-    apply_to_sources_in(sources, source_root, &root, serial,
-        crate::library_index::read_track_tags, progress_log)
+    apply_to_sources_in(
+        sources,
+        source_root,
+        &root,
+        serial,
+        crate::library_index::read_track_tags,
+        progress_log,
+    )
 }
 
 /// Root-injected core of [`apply_to_sources`]: resolves BOTH the per-device
@@ -298,7 +334,14 @@ pub fn apply_to_sources_in(
         }
     };
     let idx_path = root.join("library-index.json");
-    apply_with_paths(sources, source_root, &sel_path, &idx_path, probe, progress_log)
+    apply_with_paths(
+        sources,
+        source_root,
+        &sel_path,
+        &idx_path,
+        probe,
+        progress_log,
+    )
 }
 
 /// Path-injected core of `apply_to_sources` (testable without touching the
@@ -327,7 +370,10 @@ pub fn apply_with_paths(
     }
     progress_log(format!(
         "selection: {} of {} source track(s) selected (mode={:?})",
-        kept.len(), total, selection.mode));
+        kept.len(),
+        total,
+        selection.mode
+    ));
     kept
 }
 
@@ -339,64 +385,107 @@ mod tests {
     use std::path::PathBuf;
 
     fn src(path: &str) -> SourceEntry {
-        SourceEntry { path: PathBuf::from(path), mtime: 1, size: 10 }
+        SourceEntry {
+            path: PathBuf::from(path),
+            mtime: 1,
+            size: 10,
+        }
     }
 
     fn indexed(artist: &str, album: &str, genre: &str) -> IndexedTrack {
         IndexedTrack {
-            mtime: 1, size: 10,
-            artist: artist.to_string(), album_artist: String::new(),
-            album: album.to_string(), genre: genre.to_string(),
-            title: String::new(), duration_ms: 0, year: None,
+            mtime: 1,
+            size: 10,
+            artist: artist.to_string(),
+            album_artist: String::new(),
+            album: album.to_string(),
+            genre: genre.to_string(),
+            title: String::new(),
+            duration_ms: 0,
+            year: None,
         }
     }
 
-    fn facts<'a>(artist: &'a str, album_artist: &'a str, album: &'a str, genre: &'a str) -> TrackFacts<'a> {
-        TrackFacts { artist, album_artist, album, genre }
+    fn facts<'a>(
+        artist: &'a str,
+        album_artist: &'a str,
+        album: &'a str,
+        genre: &'a str,
+    ) -> TrackFacts<'a> {
+        TrackFacts {
+            artist,
+            album_artist,
+            album,
+            genre,
+        }
     }
 
     #[test]
     fn mode_all_wants_everything() {
-        let sel = Selection { version: 1, mode: SelectionMode::All, rules: vec![
-            SelectionRule::Artist { name: "Nobody".into() },
-        ]};
-        assert!(sel.wants(&facts("Aphex Twin", "", "Drukqs", "IDM")),
-            "mode=all ignores rules entirely");
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::All,
+            rules: vec![SelectionRule::Artist {
+                name: "Nobody".into(),
+            }],
+        };
+        assert!(
+            sel.wants(&facts("Aphex Twin", "", "Drukqs", "IDM")),
+            "mode=all ignores rules entirely"
+        );
     }
 
     #[test]
     fn include_mode_requires_a_matching_rule() {
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "Boards of Canada".into() },
-        ]};
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist {
+                name: "Boards of Canada".into(),
+            }],
+        };
         assert!(sel.wants(&facts("Boards of Canada", "", "Geogaddi", "IDM")));
         assert!(!sel.wants(&facts("Burial", "", "Untrue", "Dubstep")));
     }
 
     #[test]
     fn exclude_mode_inverts() {
-        let sel = Selection { version: 1, mode: SelectionMode::Exclude, rules: vec![
-            SelectionRule::Genre { name: "Ambient".into() },
-        ]};
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Exclude,
+            rules: vec![SelectionRule::Genre {
+                name: "Ambient".into(),
+            }],
+        };
         assert!(!sel.wants(&facts("Eno", "", "Music for Airports", "Ambient")));
         assert!(sel.wants(&facts("Burial", "", "Untrue", "Dubstep")));
     }
 
     #[test]
     fn matching_is_case_insensitive() {
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "aphex twin".into() },
-            SelectionRule::Genre { name: "IDM".into() },
-        ]};
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![
+                SelectionRule::Artist {
+                    name: "aphex twin".into(),
+                },
+                SelectionRule::Genre { name: "IDM".into() },
+            ],
+        };
         assert!(sel.wants(&facts("APHEX TWIN", "", "Drukqs", "")));
         assert!(sel.wants(&facts("Someone", "", "X", "idm")));
     }
 
     #[test]
     fn artist_means_album_artist_with_track_artist_fallback() {
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "Various Artists".into() },
-        ]};
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist {
+                name: "Various Artists".into(),
+            }],
+        };
         // album_artist present: it is the effective artist
         assert!(sel.wants(&facts("Aphex Twin", "Various Artists", "Compilation!", "")));
         // album_artist absent: track artist is the fallback
@@ -405,30 +494,57 @@ mod tests {
 
     #[test]
     fn album_rule_keys_on_artist_plus_album() {
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Album { artist: "Aphex Twin".into(), album: "Drukqs".into() },
-        ]};
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Album {
+                artist: "Aphex Twin".into(),
+                album: "Drukqs".into(),
+            }],
+        };
         assert!(sel.wants(&facts("Aphex Twin", "", "Drukqs", "")));
-        assert!(!sel.wants(&facts("Aphex Twin", "", "Syro", "")), "other album, same artist");
-        assert!(!sel.wants(&facts("Burial", "", "Drukqs", "")), "same album name, other artist");
+        assert!(
+            !sel.wants(&facts("Aphex Twin", "", "Syro", "")),
+            "other album, same artist"
+        );
+        assert!(
+            !sel.wants(&facts("Burial", "", "Drukqs", "")),
+            "same album name, other artist"
+        );
     }
 
     #[test]
     fn empty_tags_are_matchable_buckets() {
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "".into() },
-        ]};
-        assert!(sel.wants(&facts("", "", "Untitled", "")), "Unknown Artist bucket is checkable");
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist { name: "".into() }],
+        };
+        assert!(
+            sel.wants(&facts("", "", "Untitled", "")),
+            "Unknown Artist bucket is checkable"
+        );
         assert!(!sel.wants(&facts("Real Artist", "", "X", "")));
     }
 
     #[test]
     fn wire_shape_round_trips() {
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "Boards of Canada".into() },
-            SelectionRule::Album { artist: "Aphex Twin".into(), album: "Drukqs".into() },
-            SelectionRule::Genre { name: "Ambient".into() },
-        ]};
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![
+                SelectionRule::Artist {
+                    name: "Boards of Canada".into(),
+                },
+                SelectionRule::Album {
+                    artist: "Aphex Twin".into(),
+                    album: "Drukqs".into(),
+                },
+                SelectionRule::Genre {
+                    name: "Ambient".into(),
+                },
+            ],
+        };
         let json = serde_json::to_string(&sel).unwrap();
         assert!(json.contains(r#""mode":"include""#));
         assert!(json.contains(r#""kind":"artist""#));
@@ -449,8 +565,11 @@ mod tests {
 
         let corrupt = base.join("bad.json");
         std::fs::write(&corrupt, b"{ not json").unwrap();
-        assert_eq!(load_or_all(&corrupt).mode, SelectionMode::All,
-            "corrupt selection must degrade to All, never to sync-nothing");
+        assert_eq!(
+            load_or_all(&corrupt).mode,
+            SelectionMode::All,
+            "corrupt selection must degrade to All, never to sync-nothing"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -459,9 +578,13 @@ mod tests {
         let base = std::env::temp_dir().join(format!("classick-sel-rt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let path = base.join("selection.json");
-        let sel = Selection { version: 1, mode: SelectionMode::Exclude, rules: vec![
-            SelectionRule::Genre { name: "Podcast".into() },
-        ]};
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Exclude,
+            rules: vec![SelectionRule::Genre {
+                name: "Podcast".into(),
+            }],
+        };
         save_atomic(&path, &sel).unwrap();
         assert_eq!(load_or_all(&path), sel);
         let _ = std::fs::remove_dir_all(&base);
@@ -478,7 +601,10 @@ mod tests {
 
     #[test]
     fn effective_selection_path_none_identity_is_shared() {
-        assert_eq!(effective_selection_path(None).unwrap(), default_selection_path().unwrap());
+        assert_eq!(
+            effective_selection_path(None).unwrap(),
+            default_selection_path().unwrap()
+        );
     }
 
     #[test]
@@ -512,56 +638,79 @@ mod tests {
 
     #[test]
     fn seed_custom_selection_copies_shared_to_custom_when_missing() {
-        let base = std::env::temp_dir()
-            .join(format!("classick-seed-copy-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("classick-seed-copy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let shared = base.join("selection.json");
         let custom = base.join("devices").join("SER1").join("selection.json");
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "Boards of Canada".into() },
-        ]};
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist {
+                name: "Boards of Canada".into(),
+            }],
+        };
         save_atomic(&shared, &sel).unwrap();
 
         seed_custom_selection(&shared, &custom).unwrap();
 
         assert!(custom.exists(), "seed must create the per-device file");
-        assert_eq!(load_or_all(&custom), sel, "seeded content must match the shared selection");
+        assert_eq!(
+            load_or_all(&custom),
+            sel,
+            "seeded content must match the shared selection"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn seed_custom_selection_noop_when_shared_missing() {
-        let base = std::env::temp_dir()
-            .join(format!("classick-seed-noshared-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("classick-seed-noshared-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let shared = base.join("selection.json"); // never written
         let custom = base.join("devices").join("SER1").join("selection.json");
 
         seed_custom_selection(&shared, &custom).unwrap();
 
-        assert!(!custom.exists(), "nothing to seed from; custom must stay absent");
+        assert!(
+            !custom.exists(),
+            "nothing to seed from; custom must stay absent"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn seed_custom_selection_never_clobbers_existing_custom() {
-        let base = std::env::temp_dir()
-            .join(format!("classick-seed-noclobber-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("classick-seed-noclobber-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let shared = base.join("selection.json");
         let custom = base.join("devices").join("SER1").join("selection.json");
-        save_atomic(&shared, &Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "Shared Artist".into() },
-        ]}).unwrap();
-        let established = Selection { version: 1, mode: SelectionMode::Exclude, rules: vec![
-            SelectionRule::Genre { name: "Podcast".into() },
-        ]};
+        save_atomic(
+            &shared,
+            &Selection {
+                version: 1,
+                mode: SelectionMode::Include,
+                rules: vec![SelectionRule::Artist {
+                    name: "Shared Artist".into(),
+                }],
+            },
+        )
+        .unwrap();
+        let established = Selection {
+            version: 1,
+            mode: SelectionMode::Exclude,
+            rules: vec![SelectionRule::Genre {
+                name: "Podcast".into(),
+            }],
+        };
         save_atomic(&custom, &established).unwrap();
 
         seed_custom_selection(&shared, &custom).unwrap();
 
         assert_eq!(
-            load_or_all(&custom), established,
+            load_or_all(&custom),
+            established,
             "an already-established per-device selection must never be overwritten"
         );
         let _ = std::fs::remove_dir_all(&base);
@@ -571,8 +720,8 @@ mod tests {
     fn seed_custom_selection_is_idempotent() {
         // Calling it twice (e.g. two SaveConfig saves in a row with the flag
         // already true) must not re-copy or error the second time.
-        let base = std::env::temp_dir()
-            .join(format!("classick-seed-idempotent-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("classick-seed-idempotent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let shared = base.join("selection.json");
         let custom = base.join("devices").join("SER1").join("selection.json");
@@ -581,42 +730,66 @@ mod tests {
         seed_custom_selection(&shared, &custom).unwrap();
         assert!(custom.exists());
         // Mutate the custom file so a second copy would be observable.
-        let user_edit = Selection { version: 1, mode: SelectionMode::Exclude, rules: vec![
-            SelectionRule::Genre { name: "Live".into() },
-        ]};
+        let user_edit = Selection {
+            version: 1,
+            mode: SelectionMode::Exclude,
+            rules: vec![SelectionRule::Genre {
+                name: "Live".into(),
+            }],
+        };
         save_atomic(&custom, &user_edit).unwrap();
 
         seed_custom_selection(&shared, &custom).unwrap();
 
-        assert_eq!(load_or_all(&custom), user_edit, "second seed call must be a no-op");
+        assert_eq!(
+            load_or_all(&custom),
+            user_edit,
+            "second seed call must be a no-op"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn effective_device_selection_path_at_seeds_from_shared_exactly_once() {
-        let base = std::env::temp_dir()
-            .join(format!("classick-effdev-seed-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("classick-effdev-seed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let shared = base.join("selection.json");
         let custom = base.join("devices").join("SER1").join("selection.json");
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "Boards of Canada".into() },
-        ]};
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist {
+                name: "Boards of Canada".into(),
+            }],
+        };
         save_atomic(&shared, &sel).unwrap();
 
         let p = effective_device_selection_path_at(&shared, &custom).unwrap();
         assert_eq!(p, custom);
-        assert_eq!(load_or_all(&custom), sel, "first resolution seeds from shared");
+        assert_eq!(
+            load_or_all(&custom),
+            sel,
+            "first resolution seeds from shared"
+        );
 
         // Shared file changes after the first resolution...
-        let changed = Selection { version: 1, mode: SelectionMode::Exclude, rules: vec![
-            SelectionRule::Genre { name: "Podcast".into() },
-        ]};
+        let changed = Selection {
+            version: 1,
+            mode: SelectionMode::Exclude,
+            rules: vec![SelectionRule::Genre {
+                name: "Podcast".into(),
+            }],
+        };
         save_atomic(&shared, &changed).unwrap();
 
         // ...but the second resolution must not re-seed.
         effective_device_selection_path_at(&shared, &custom).unwrap();
-        assert_eq!(load_or_all(&custom), sel, "second resolution must ignore the shared change (seed-once)");
+        assert_eq!(
+            load_or_all(&custom),
+            sel,
+            "second resolution must ignore the shared change (seed-once)"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -636,8 +809,7 @@ mod tests {
 
     #[test]
     fn effective_device_selection_path_in_resolves_root_injected() {
-        let base = std::env::temp_dir()
-            .join(format!("classick-effdev-in-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("classick-effdev-in-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let serial = "SER-IN-TEST";
         let p = effective_device_selection_path_in(&base, serial).unwrap();
@@ -664,8 +836,8 @@ mod tests {
     /// different tracks, so the output changes.
     #[test]
     fn apply_to_sources_in_filters_by_per_device_selection_not_shared() {
-        let base = std::env::temp_dir()
-            .join(format!("classick-syncpath-apply-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("classick-syncpath-apply-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let serial = "SYNCPATH-SER1";
@@ -674,19 +846,33 @@ mod tests {
         // Per-device selection (what the daemon/UI wrote): keep only the
         // "Device Only" artist.
         let per_device_path = crate::device_state::device_selection_path_in(&base, serial).unwrap();
-        save_atomic(&per_device_path, &Selection {
-            version: 1, mode: SelectionMode::Include,
-            rules: vec![SelectionRule::Artist { name: "Device Only".into() }],
-        }).unwrap();
+        save_atomic(
+            &per_device_path,
+            &Selection {
+                version: 1,
+                mode: SelectionMode::Include,
+                rules: vec![SelectionRule::Artist {
+                    name: "Device Only".into(),
+                }],
+            },
+        )
+        .unwrap();
 
         // Shared selection (the deprecated resolver's custom_selection=false
         // target): keeps a DIFFERENT, disjoint artist. If the sync path read
         // THIS, the kept set below would be `[shared.flac]`, not
         // `[device.flac]`.
-        save_atomic(&base.join("selection.json"), &Selection {
-            version: 1, mode: SelectionMode::Include,
-            rules: vec![SelectionRule::Artist { name: "Shared Only".into() }],
-        }).unwrap();
+        save_atomic(
+            &base.join("selection.json"),
+            &Selection {
+                version: 1,
+                mode: SelectionMode::Include,
+                rules: vec![SelectionRule::Artist {
+                    name: "Shared Only".into(),
+                }],
+            },
+        )
+        .unwrap();
 
         let device_track = src("/lib/device.flac");
         let shared_track = src("/lib/shared.flac");
@@ -697,19 +883,30 @@ mod tests {
                 "Shared Only"
             };
             Ok(TrackTags {
-                artist: artist.into(), album_artist: String::new(),
-                album: "Album".into(), genre: "G".into(),
-                title: String::new(), duration_ms: 0, year: None,
+                artist: artist.into(),
+                album_artist: String::new(),
+                album: "Album".into(),
+                genre: "G".into(),
+                title: String::new(),
+                duration_ms: 0,
+                year: None,
             })
         };
 
         let kept = apply_to_sources_in(
             vec![device_track.clone(), shared_track],
-            &source_root, &base, serial, probe, |_msg| {},
+            &source_root,
+            &base,
+            serial,
+            probe,
+            |_msg| {},
         );
 
-        assert_eq!(kept, vec![device_track],
-            "sync path must filter by the PER-DEVICE selection, never the shared one");
+        assert_eq!(
+            kept,
+            vec![device_track],
+            "sync path must filter by the PER-DEVICE selection, never the shared one"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -718,8 +915,9 @@ mod tests {
     fn filter_mode_all_is_passthrough_and_never_probes() {
         let mut index = LibraryIndex::empty(PathBuf::from("/m"));
         let sources = vec![src("/m/a.flac"), src("/m/b.flac")];
-        let (kept, dirty) = filter(sources.clone(), &Selection::all(), &mut index,
-            |_| panic!("mode=all must not probe"));
+        let (kept, dirty) = filter(sources.clone(), &Selection::all(), &mut index, |_| {
+            panic!("mode=all must not probe")
+        });
         assert_eq!(kept, sources);
         assert!(!dirty);
     }
@@ -727,13 +925,27 @@ mod tests {
     #[test]
     fn filter_include_keeps_only_matches() {
         let mut index = LibraryIndex::empty(PathBuf::from("/m"));
-        index.files.insert(PathBuf::from("/m/keep.flac"), indexed("Boards of Canada", "Geogaddi", "IDM"));
-        index.files.insert(PathBuf::from("/m/drop.flac"), indexed("Burial", "Untrue", "Dubstep"));
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "Boards of Canada".into() },
-        ]};
-        let (kept, _) = filter(vec![src("/m/keep.flac"), src("/m/drop.flac")], &sel, &mut index,
-            |_| unreachable!("both files are indexed"));
+        index.files.insert(
+            PathBuf::from("/m/keep.flac"),
+            indexed("Boards of Canada", "Geogaddi", "IDM"),
+        );
+        index.files.insert(
+            PathBuf::from("/m/drop.flac"),
+            indexed("Burial", "Untrue", "Dubstep"),
+        );
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist {
+                name: "Boards of Canada".into(),
+            }],
+        };
+        let (kept, _) = filter(
+            vec![src("/m/keep.flac"), src("/m/drop.flac")],
+            &sel,
+            &mut index,
+            |_| unreachable!("both files are indexed"),
+        );
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].path, PathBuf::from("/m/keep.flac"));
     }
@@ -743,16 +955,31 @@ mod tests {
         // A file added since the last scan isn't in the index — the sync
         // self-heals by probing it inline and folding it into the cache.
         let mut index = LibraryIndex::empty(PathBuf::from("/m"));
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Genre { name: "IDM".into() },
-        ]};
-        let (kept, dirty) = filter(vec![src("/m/fresh.flac")], &sel, &mut index, |_| Ok(TrackTags {
-            artist: "Autechre".into(), album_artist: String::new(),
-            album: "Amber".into(), genre: "IDM".into(), title: String::new(), duration_ms: 0, year: None,
-        }));
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Genre { name: "IDM".into() }],
+        };
+        let (kept, dirty) = filter(vec![src("/m/fresh.flac")], &sel, &mut index, |_| {
+            Ok(TrackTags {
+                artist: "Autechre".into(),
+                album_artist: String::new(),
+                album: "Amber".into(),
+                genre: "IDM".into(),
+                title: String::new(),
+                duration_ms: 0,
+                year: None,
+            })
+        });
         assert_eq!(kept.len(), 1);
-        assert!(dirty, "inline probe must mark the index dirty so the caller saves it");
-        assert_eq!(index.files[&PathBuf::from("/m/fresh.flac")].artist, "Autechre");
+        assert!(
+            dirty,
+            "inline probe must mark the index dirty so the caller saves it"
+        );
+        assert_eq!(
+            index.files[&PathBuf::from("/m/fresh.flac")].artist,
+            "Autechre"
+        );
     }
 
     #[test]
@@ -760,18 +987,36 @@ mod tests {
         // Index has stale (mtime,size) for the path — tags may have changed,
         // so trust must be re-established before evaluating rules.
         let mut index = LibraryIndex::empty(PathBuf::from("/m"));
-        index.files.insert(PathBuf::from("/m/a.flac"), IndexedTrack {
-            mtime: 999, size: 999, // differs from src()'s (1, 10)
-            artist: "Old".into(), album_artist: String::new(),
-            album: "X".into(), genre: "Rock".into(), title: String::new(), duration_ms: 0, year: None,
+        index.files.insert(
+            PathBuf::from("/m/a.flac"),
+            IndexedTrack {
+                mtime: 999,
+                size: 999, // differs from src()'s (1, 10)
+                artist: "Old".into(),
+                album_artist: String::new(),
+                album: "X".into(),
+                genre: "Rock".into(),
+                title: String::new(),
+                duration_ms: 0,
+                year: None,
+            },
+        );
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist { name: "New".into() }],
+        };
+        let (kept, dirty) = filter(vec![src("/m/a.flac")], &sel, &mut index, |_| {
+            Ok(TrackTags {
+                artist: "New".into(),
+                album_artist: String::new(),
+                album: "X".into(),
+                genre: "Rock".into(),
+                title: String::new(),
+                duration_ms: 0,
+                year: None,
+            })
         });
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "New".into() },
-        ]};
-        let (kept, dirty) = filter(vec![src("/m/a.flac")], &sel, &mut index, |_| Ok(TrackTags {
-            artist: "New".into(), album_artist: String::new(),
-            album: "X".into(), genre: "Rock".into(), title: String::new(), duration_ms: 0, year: None,
-        }));
         assert_eq!(kept.len(), 1, "re-probed tags now match the rule");
         assert!(dirty);
     }
@@ -781,11 +1026,16 @@ mod tests {
         // Fail-open: a track we can't read tags for stays in the sync rather
         // than silently disappearing from the iPod.
         let mut index = LibraryIndex::empty(PathBuf::from("/m"));
-        let sel = Selection { version: 1, mode: SelectionMode::Exclude, rules: vec![
-            SelectionRule::Genre { name: "Podcast".into() },
-        ]};
-        let (kept, _) = filter(vec![src("/m/mystery.flac")], &sel, &mut index,
-            |_| Err(anyhow::anyhow!("unreadable")));
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Exclude,
+            rules: vec![SelectionRule::Genre {
+                name: "Podcast".into(),
+            }],
+        };
+        let (kept, _) = filter(vec![src("/m/mystery.flac")], &sel, &mut index, |_| {
+            Err(anyhow::anyhow!("unreadable"))
+        });
         assert_eq!(kept.len(), 1, "unreadable tags must not drop a track");
     }
 
@@ -795,28 +1045,56 @@ mod tests {
         // on-iPod tracks the selection no longer wants. THE core promise.
         use crate::manifest::{diff, Action, Manifest, ManifestEntry};
         let mut index = LibraryIndex::empty(PathBuf::from("/m"));
-        index.files.insert(PathBuf::from("/m/synced.flac"), indexed("Burial", "Untrue", "Dubstep"));
+        index.files.insert(
+            PathBuf::from("/m/synced.flac"),
+            indexed("Burial", "Untrue", "Dubstep"),
+        );
         let manifest = Manifest {
-            version: 1, ipod_serial: None, last_source_root: None,
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
             tracks: vec![ManifestEntry {
                 source_path: PathBuf::from("/m/synced.flac"),
-                source_mtime: 1, source_size: 10,
+                source_mtime: 1,
+                source_size: 10,
                 source_fingerprint: "blake3:aa".into(),
-                ipod_dbid: 1, ipod_relpath: "F00/X.m4a".into(),
-                source_known: true, audio_fingerprint: String::new(),
-                encoder: "unknown".into(), encoder_version: String::new(),
+                ipod_dbid: 1,
+                ipod_relpath: "F00/X.m4a".into(),
+                source_known: true,
+                audio_fingerprint: String::new(),
+                encoder: "unknown".into(),
+                encoder_version: String::new(),
                 source_format: "flac".into(),
             }],
         };
-        let sel = Selection { version: 1, mode: SelectionMode::Include, rules: vec![
-            SelectionRule::Artist { name: "Someone Else".into() },
-        ]};
-        let (kept, _) = filter(vec![src("/m/synced.flac")], &sel, &mut index, |_| unreachable!());
+        let sel = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![SelectionRule::Artist {
+                name: "Someone Else".into(),
+            }],
+        };
+        let (kept, _) = filter(
+            vec![src("/m/synced.flac")],
+            &sel,
+            &mut index,
+            |_| unreachable!(),
+        );
         assert!(kept.is_empty());
-        let actions = diff(&manifest, &kept, |_| unreachable!(), |_| unreachable!(), "ffmpeg", false).unwrap();
+        let actions = diff(
+            &manifest,
+            &kept,
+            |_| unreachable!(),
+            |_| unreachable!(),
+            "ffmpeg",
+            false,
+        )
+        .unwrap();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(actions[0], Action::Remove(_)),
-            "deselected + on-iPod must become an ordinary Remove");
+        assert!(
+            matches!(actions[0], Action::Remove(_)),
+            "deselected + on-iPod must become an ordinary Remove"
+        );
     }
 
     #[test]
@@ -829,16 +1107,35 @@ mod tests {
         let root = PathBuf::from("/m");
 
         // Selection: include only IDM. Index: empty (forces inline probe).
-        save_atomic(&sel_path, &Selection {
-            version: 1, mode: SelectionMode::Include,
-            rules: vec![SelectionRule::Genre { name: "IDM".into() }],
-        }).unwrap();
+        save_atomic(
+            &sel_path,
+            &Selection {
+                version: 1,
+                mode: SelectionMode::Include,
+                rules: vec![SelectionRule::Genre { name: "IDM".into() }],
+            },
+        )
+        .unwrap();
 
         let sources = vec![src("/m/a.flac")];
-        let kept = apply_with_paths(sources, &root, &sel_path, &idx_path, |_| Ok(TrackTags {
-            artist: "Autechre".into(), album_artist: String::new(),
-            album: "Amber".into(), genre: "IDM".into(), title: String::new(), duration_ms: 0, year: None,
-        }), |_msg| {});
+        let kept = apply_with_paths(
+            sources,
+            &root,
+            &sel_path,
+            &idx_path,
+            |_| {
+                Ok(TrackTags {
+                    artist: "Autechre".into(),
+                    album_artist: String::new(),
+                    album: "Amber".into(),
+                    genre: "IDM".into(),
+                    title: String::new(),
+                    duration_ms: 0,
+                    year: None,
+                })
+            },
+            |_msg| {},
+        );
         assert_eq!(kept.len(), 1);
 
         // The inline probe must have been persisted.

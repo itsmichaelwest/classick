@@ -39,7 +39,10 @@ impl EtaEstimator {
 
     /// Test seam: inject the start instant so elapsed time is deterministic.
     pub fn new_at(started_at: Instant) -> Self {
-        Self { started_at, done: 0 }
+        Self {
+            started_at,
+            done: 0,
+        }
     }
 
     /// Call once per completed track (on `TrackDone`).
@@ -111,9 +114,15 @@ pub struct FormRequest {
 #[derive(Debug, Clone)]
 pub enum Decision {
     Review(ReviewDecision),
-    Prompt { id: u64, choice: usize },
+    Prompt {
+        id: u64,
+        choice: usize,
+    },
     /// `value: None` means the user aborted (Esc / Ctrl+C).
-    Form { id: u64, value: Option<String> },
+    Form {
+        id: u64,
+        value: Option<String>,
+    },
     /// Graceful pause: drain in-flight tracks, checkpoint, then stop.
     /// Bare variant for now — IPC command/event + terminal outcome land in
     /// a later task; the apply loop's decision poll already matches it.
@@ -122,12 +131,30 @@ pub enum Decision {
 
 /// Events sent from the main thread to the progress thread.
 pub enum ProgressEvent {
-    Header { source: String, ipod: String, manifest: String },
-    Summary { add: usize, modify: usize, metadata_only: usize, remove: usize, unchanged: usize, total_planned: usize },
-    Review { summary: ActionPlanSummary, no_delete: bool },
+    Header {
+        source: String,
+        ipod: String,
+        manifest: String,
+    },
+    Summary {
+        add: usize,
+        modify: usize,
+        metadata_only: usize,
+        remove: usize,
+        unchanged: usize,
+        total_planned: usize,
+    },
+    Review {
+        summary: ActionPlanSummary,
+        no_delete: bool,
+    },
     Prompt(PromptRequest),
     Form(FormRequest),
-    TrackStart { current: usize, total: usize, label: String },
+    TrackStart {
+        current: usize,
+        total: usize,
+        label: String,
+    },
     TrackDone,
     Log(String),
     Error(String),
@@ -200,7 +227,9 @@ impl Progress {
                 let active_tui = use_tui && is_tty;
                 if active_tui {
                     if let Err(e) = run_tui(event_rx, decision_tx) {
-                        eprintln!("TUI failure: {e}; falling back to plain mode is not possible mid-run");
+                        eprintln!(
+                            "TUI failure: {e}; falling back to plain mode is not possible mid-run"
+                        );
                     }
                 } else {
                     run_plain(event_rx, decision_tx);
@@ -218,15 +247,36 @@ impl Progress {
     }
 
     pub fn header(&self, source: String, ipod: String, manifest: String) {
-        let _ = self.sender.send(ProgressEvent::Header { source, ipod, manifest });
+        let _ = self.sender.send(ProgressEvent::Header {
+            source,
+            ipod,
+            manifest,
+        });
     }
-    pub fn summary(&self, add: usize, modify: usize, metadata_only: usize, remove: usize, unchanged: usize, total_planned: usize) {
-        let _ = self.sender.send(ProgressEvent::Summary { add, modify, metadata_only, remove, unchanged, total_planned });
+    pub fn summary(
+        &self,
+        add: usize,
+        modify: usize,
+        metadata_only: usize,
+        remove: usize,
+        unchanged: usize,
+        total_planned: usize,
+    ) {
+        let _ = self.sender.send(ProgressEvent::Summary {
+            add,
+            modify,
+            metadata_only,
+            remove,
+            unchanged,
+            total_planned,
+        });
     }
     /// Send the action plan to the TUI for interactive Review. The caller
     /// must then `recv()` on the decision channel to await the user's choice.
     pub fn review(&self, summary: ActionPlanSummary, no_delete: bool) {
-        let _ = self.sender.send(ProgressEvent::Review { summary, no_delete });
+        let _ = self
+            .sender
+            .send(ProgressEvent::Review { summary, no_delete });
     }
     /// Show a choice prompt in the TUI. Returns immediately; caller awaits
     /// the user's choice via the decision channel.
@@ -247,7 +297,11 @@ impl Progress {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     }
     pub fn track_start(&self, current: usize, total: usize, label: String) {
-        let _ = self.sender.send(ProgressEvent::TrackStart { current, total, label });
+        let _ = self.sender.send(ProgressEvent::TrackStart {
+            current,
+            total,
+            label,
+        });
     }
     pub fn track_done(&self) {
         let _ = self.sender.send(ProgressEvent::TrackDone);
@@ -316,7 +370,11 @@ impl Progress {
         const JOIN_DEADLINE: Duration = Duration::from_secs(5);
         const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-        let details = self.finish_details.lock().map(|d| d.clone()).unwrap_or_default();
+        let details = self
+            .finish_details
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default();
         let _ = self.sender.send(ProgressEvent::Finish {
             success,
             skipped_for_space: details.skipped_for_space,
@@ -354,12 +412,23 @@ impl Progress {
 fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
     for event in rx {
         match event {
-            ProgressEvent::Header { source, ipod, manifest } => {
+            ProgressEvent::Header {
+                source,
+                ipod,
+                manifest,
+            } => {
                 println!("Source  : {source}");
                 println!("iPod    : {ipod}");
                 println!("Manifest: {manifest}");
             }
-            ProgressEvent::Summary { add, modify, metadata_only, remove, unchanged, .. } => {
+            ProgressEvent::Summary {
+                add,
+                modify,
+                metadata_only,
+                remove,
+                unchanged,
+                ..
+            } => {
                 println!();
                 println!("Action plan: add={add} modify={modify} metadata={metadata_only} remove={remove} unchanged={unchanged}");
             }
@@ -367,8 +436,10 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
                 // Non-TTY can't interactively review. The orchestrator should
                 // have errored at startup if neither --dry-run nor --apply
                 // was set; this is a safety net.
-                eprintln!("ERROR: interactive Review is not supported in plain mode; \
-                          pass --dry-run or --apply explicitly.");
+                eprintln!(
+                    "ERROR: interactive Review is not supported in plain mode; \
+                          pass --dry-run or --apply explicitly."
+                );
                 let _ = decision_tx.send(Decision::Review(ReviewDecision::Quit));
             }
             ProgressEvent::Prompt(req) => {
@@ -379,23 +450,35 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
                 // choice: 0 would have mapped to whichever PromptOutcome the
                 // caller put first, triggering retries (infinite loop) or
                 // destructive side-effects (e.g. config reset).
-                let _ = decision_tx.send(Decision::Prompt { id: req.id, choice: usize::MAX });
+                let _ = decision_tx.send(Decision::Prompt {
+                    id: req.id,
+                    choice: usize::MAX,
+                });
             }
             ProgressEvent::Form(req) => {
                 eprintln!("ERROR: interactive form is not supported in plain mode.");
                 eprintln!("  {}", req.label);
-                let _ = decision_tx.send(Decision::Form { id: req.id, value: None });
+                let _ = decision_tx.send(Decision::Form {
+                    id: req.id,
+                    value: None,
+                });
             }
-            ProgressEvent::TrackStart { current, total, label } => {
+            ProgressEvent::TrackStart {
+                current,
+                total,
+                label,
+            } => {
                 println!("[{current}/{total}] {label}");
             }
-            ProgressEvent::TrackDone => {}  // already printed at start
+            ProgressEvent::TrackDone => {} // already printed at start
             ProgressEvent::Log(s) => println!("{s}"),
             ProgressEvent::Error(s) => eprintln!("ERROR: {s}"),
             // success bool is ignored in plain mode (the process exit code
             // conveys it; we don't print a banner either way). db_restored
             // is skipped too — the on_restore closure already logged it.
-            ProgressEvent::Finish { skipped_for_space, .. } => {
+            ProgressEvent::Finish {
+                skipped_for_space, ..
+            } => {
                 if let Some(s) = &skipped_for_space {
                     println!("{}", s.describe());
                 }
@@ -449,7 +532,9 @@ fn run_ipc(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
             let line = match line {
                 Ok(l) => l,
                 Err(e) => {
-                    tracing::info!("ipc: stdin read returned error (likely EOF / pipe broken): {e}");
+                    tracing::info!(
+                        "ipc: stdin read returned error (likely EOF / pipe broken): {e}"
+                    );
                     break;
                 }
             };
@@ -468,7 +553,9 @@ fn run_ipc(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
                             break;
                         }
                     } else {
-                        tracing::info!("ipc: command has no decision payload (e.g. Start); silently consumed");
+                        tracing::info!(
+                            "ipc: command has no decision payload (e.g. Start); silently consumed"
+                        );
                     }
                 }
                 Err(e) => {
@@ -488,15 +575,18 @@ fn run_ipc(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
     tracing::info!("ipc: event loop entering");
     let mut eta = EtaEstimator::new();
     for event in rx {
-        let is_terminal = matches!(
-            event,
-            ProgressEvent::Finish { .. } | ProgressEvent::Paused
-        );
+        let is_terminal = matches!(event, ProgressEvent::Finish { .. } | ProgressEvent::Paused);
         if matches!(event, ProgressEvent::TrackDone) {
             eta.record_track_done();
         }
         if let Some(mut ipc_event) = IpcEvent::from_progress(&event) {
-            if let crate::ipc::IpcEvent::TrackStart { current, total, eta_secs, .. } = &mut ipc_event {
+            if let crate::ipc::IpcEvent::TrackStart {
+                current,
+                total,
+                eta_secs,
+                ..
+            } = &mut ipc_event
+            {
                 *eta_secs = eta.eta_secs(*current, *total);
             }
             tracing::info!("ipc: emitting event: {ipc_event:?}");
@@ -567,10 +657,18 @@ struct FormState {
 impl TuiState {
     fn new() -> Self {
         Self {
-            source: String::new(), ipod: String::new(), manifest: String::new(),
-            add: 0, modify: 0, remove: 0, unchanged: 0, total_planned: 0,
-            done: 0, current_label: String::new(),
-            current_index: 0, current_total: 0,
+            source: String::new(),
+            ipod: String::new(),
+            manifest: String::new(),
+            add: 0,
+            modify: 0,
+            remove: 0,
+            unchanged: 0,
+            total_planned: 0,
+            done: 0,
+            current_label: String::new(),
+            current_index: 0,
+            current_total: 0,
             started_at: Instant::now(),
             log_tail: VecDeque::with_capacity(LOG_TAIL_CAPACITY),
             review: None,
@@ -588,17 +686,23 @@ impl TuiState {
     }
 
     fn fraction(&self) -> f64 {
-        if self.total_planned == 0 { 0.0 } else {
+        if self.total_planned == 0 {
+            0.0
+        } else {
             (self.done as f64) / (self.total_planned as f64)
         }
     }
 
     fn eta(&self) -> Option<Duration> {
-        if self.done == 0 || self.total_planned == 0 { return None; }
+        if self.done == 0 || self.total_planned == 0 {
+            return None;
+        }
         let elapsed = self.started_at.elapsed();
         let per_track = elapsed.as_secs_f64() / (self.done as f64);
         let remaining = self.total_planned.saturating_sub(self.done);
-        if remaining == 0 { return None; }
+        if remaining == 0 {
+            return None;
+        }
         Some(Duration::from_secs_f64(per_track * remaining as f64))
     }
 }
@@ -609,7 +713,8 @@ fn run_tui(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
     let mut state = TuiState::new();
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout,
+    crossterm::execute!(
+        stdout,
         crossterm::terminal::EnterAlternateScreen,
         crossterm::cursor::Hide,
     )?;
@@ -624,7 +729,10 @@ fn run_tui(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
             match rx.try_recv() {
                 Ok(event) => apply_event(&mut state, event, &mut finished),
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => { finished = true; break; }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    finished = true;
+                    break;
+                }
             }
         }
 
@@ -667,7 +775,8 @@ fn run_tui(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
     }
 
     // Teardown.
-    crossterm::execute!(terminal.backend_mut(),
+    crossterm::execute!(
+        terminal.backend_mut(),
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::cursor::Show,
     )?;
@@ -686,7 +795,9 @@ fn handle_review_key(
     };
     match key.code {
         KeyCode::Char('a') => {
-            let _ = decision_tx.send(Decision::Review(ReviewDecision::Apply { no_delete: review.no_delete }));
+            let _ = decision_tx.send(Decision::Review(ReviewDecision::Apply {
+                no_delete: review.no_delete,
+            }));
             // Exit Review state so subsequent track progress can render.
             state.review = None;
         }
@@ -729,7 +840,10 @@ fn handle_prompt_key(
             }
             let choice = (digit as usize) - 1;
             if choice < prompt.options.len() {
-                let _ = decision_tx.send(Decision::Prompt { id: prompt.id, choice });
+                let _ = decision_tx.send(Decision::Prompt {
+                    id: prompt.id,
+                    choice,
+                });
                 state.prompt = None; // exit prompt state; caller's next event takes over
             }
         }
@@ -745,7 +859,10 @@ fn handle_form_key(
     use crossterm::event::KeyModifiers;
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => {
-            let _ = decision_tx.send(Decision::Form { id: form.request.id, value: None });
+            let _ = decision_tx.send(Decision::Form {
+                id: form.request.id,
+                value: None,
+            });
             *form_done = true;
         }
         (KeyCode::Enter, _) => {
@@ -759,21 +876,41 @@ fn handle_form_key(
             }
             // Empty input: ignore Enter (require either text or Esc).
         }
-        (KeyCode::Backspace, _) => { form.input.pop(); }
-        (KeyCode::Char(c), _) => { form.input.push(c); }
+        (KeyCode::Backspace, _) => {
+            form.input.pop();
+        }
+        (KeyCode::Char(c), _) => {
+            form.input.push(c);
+        }
         _ => {}
     }
 }
 
 fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) {
     match event {
-        ProgressEvent::Header { source, ipod, manifest } => {
-            state.source = source; state.ipod = ipod; state.manifest = manifest;
+        ProgressEvent::Header {
+            source,
+            ipod,
+            manifest,
+        } => {
+            state.source = source;
+            state.ipod = ipod;
+            state.manifest = manifest;
         }
-        ProgressEvent::Summary { add, modify, metadata_only: _, remove, unchanged, total_planned } => {
-            state.add = add; state.modify = modify; state.remove = remove;
-            state.unchanged = unchanged; state.total_planned = total_planned;
-            state.started_at = Instant::now();  // reset clock for ETA
+        ProgressEvent::Summary {
+            add,
+            modify,
+            metadata_only: _,
+            remove,
+            unchanged,
+            total_planned,
+        } => {
+            state.add = add;
+            state.modify = modify;
+            state.remove = remove;
+            state.unchanged = unchanged;
+            state.total_planned = total_planned;
+            state.started_at = Instant::now(); // reset clock for ETA
         }
         ProgressEvent::Review { summary, no_delete } => {
             state.review = Some(ReviewState { summary, no_delete });
@@ -787,11 +924,18 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
                 request: req,
             });
         }
-        ProgressEvent::TrackStart { current, total, label } => {
-            state.current_index = current; state.current_total = total;
+        ProgressEvent::TrackStart {
+            current,
+            total,
+            label,
+        } => {
+            state.current_index = current;
+            state.current_total = total;
             state.current_label = label;
         }
-        ProgressEvent::TrackDone => { state.done += 1; }
+        ProgressEvent::TrackDone => {
+            state.done += 1;
+        }
         ProgressEvent::Log(s) => state.push_log(s),
         ProgressEvent::Error(s) => state.push_log(format!("ERROR: {s}")),
         // TUI doesn't surface success/failure directly here — the process
@@ -799,7 +943,9 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
         // `terminal.draw` runs after this (see `run_tui`'s loop body) before
         // teardown, so a log line pushed here does get one frame of
         // visibility.
-        ProgressEvent::Finish { skipped_for_space, .. } => {
+        ProgressEvent::Finish {
+            skipped_for_space, ..
+        } => {
             if let Some(s) = &skipped_for_space {
                 state.push_log(s.describe());
             }
@@ -831,10 +977,10 @@ fn render(f: &mut ratatui::Frame, state: &TuiState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // header
-            Constraint::Length(4),  // progress
-            Constraint::Length(3),  // current track
-            Constraint::Min(5),     // log tail
+            Constraint::Length(5), // header
+            Constraint::Length(4), // progress
+            Constraint::Length(3), // current track
+            Constraint::Min(5),    // log tail
         ])
         .split(f.area());
 
@@ -844,8 +990,11 @@ fn render(f: &mut ratatui::Frame, state: &TuiState) {
         Line::from(format!("Manifest: {}", state.manifest)),
     ];
     f.render_widget(
-        Paragraph::new(header_text)
-            .block(Block::default().borders(Borders::ALL).title(format!(" {} ", crate::DISPLAY_NAME))),
+        Paragraph::new(header_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", crate::DISPLAY_NAME)),
+        ),
         chunks[0],
     );
 
@@ -857,7 +1006,8 @@ fn render(f: &mut ratatui::Frame, state: &TuiState) {
         "(preparing...)".to_string()
     } else {
         let pct = (state.fraction() * 100.0) as u16;
-        let eta = state.eta()
+        let eta = state
+            .eta()
             .map(|d| format!(" ETA {}", format_duration(d)))
             .unwrap_or_default();
         format!("{}/{} ({}%){}", state.done, state.total_planned, pct, eta)
@@ -871,7 +1021,10 @@ fn render(f: &mut ratatui::Frame, state: &TuiState) {
     );
 
     let current = if state.current_total > 0 {
-        format!("[{}/{}] {}", state.current_index, state.current_total, state.current_label)
+        format!(
+            "[{}/{}] {}",
+            state.current_index, state.current_total, state.current_label
+        )
     } else {
         "(idle)".to_string()
     };
@@ -880,7 +1033,9 @@ fn render(f: &mut ratatui::Frame, state: &TuiState) {
         chunks[2],
     );
 
-    let log_items: Vec<ListItem> = state.log_tail.iter()
+    let log_items: Vec<ListItem> = state
+        .log_tail
+        .iter()
         .map(|l| ListItem::new(Line::from(l.as_str())))
         .collect();
     f.render_widget(
@@ -901,7 +1056,11 @@ fn render_review(f: &mut ratatui::Frame, state: &TuiState, review: &ReviewState)
         ])
         .split(f.area());
 
-    let no_delete_str = if review.no_delete { "ON (Removes skipped)" } else { "OFF" };
+    let no_delete_str = if review.no_delete {
+        "ON (Removes skipped)"
+    } else {
+        "OFF"
+    };
     let header_text = vec![
         Line::from(format!("Source     : {}", state.source)),
         Line::from(format!("iPod       : {}", state.ipod)),
@@ -909,12 +1068,19 @@ fn render_review(f: &mut ratatui::Frame, state: &TuiState, review: &ReviewState)
         Line::from(format!("--no-delete: {no_delete_str}")),
     ];
     f.render_widget(
-        Paragraph::new(header_text)
-            .block(Block::default().borders(Borders::ALL).title(format!(" {} — review ", crate::DISPLAY_NAME))),
+        Paragraph::new(header_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} — review ", crate::DISPLAY_NAME)),
+        ),
         chunks[0],
     );
 
-    let effective_remove = if review.no_delete { 0 } else { review.summary.remove };
+    let effective_remove = if review.no_delete {
+        0
+    } else {
+        review.summary.remove
+    };
     let plan_text = vec![
         Line::from(format!("Add          : {}", review.summary.add)),
         Line::from(format!("Modify       : {}", review.summary.modify)),
@@ -932,12 +1098,18 @@ fn render_review(f: &mut ratatui::Frame, state: &TuiState, review: &ReviewState)
         Line::from(""),
         Line::from(format!(
             "Total to apply: {}",
-            review.summary.add + review.summary.modify + review.summary.metadata_only + effective_remove
+            review.summary.add
+                + review.summary.modify
+                + review.summary.metadata_only
+                + effective_remove
         )),
     ];
     f.render_widget(
-        Paragraph::new(plan_text)
-            .block(Block::default().borders(Borders::ALL).title(" action plan ")),
+        Paragraph::new(plan_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" action plan "),
+        ),
         chunks[1],
     );
 
@@ -954,9 +1126,9 @@ fn render_prompt(f: &mut ratatui::Frame, state: &TuiState, prompt: &PromptReques
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),       // header
-            Constraint::Min(5),          // message
-            Constraint::Length(4 + prompt.options.len() as u16),  // options
+            Constraint::Length(4),                               // header
+            Constraint::Min(5),                                  // message
+            Constraint::Length(4 + prompt.options.len() as u16), // options
         ])
         .split(f.area());
 
@@ -965,8 +1137,11 @@ fn render_prompt(f: &mut ratatui::Frame, state: &TuiState, prompt: &PromptReques
         Line::from(format!("iPod       : {}", state.ipod)),
     ];
     f.render_widget(
-        Paragraph::new(header_text)
-            .block(Block::default().borders(Borders::ALL).title(format!(" {} ", crate::DISPLAY_NAME))),
+        Paragraph::new(header_text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", crate::DISPLAY_NAME)),
+        ),
         chunks[0],
     );
 
@@ -978,7 +1153,8 @@ fn render_prompt(f: &mut ratatui::Frame, state: &TuiState, prompt: &PromptReques
         chunks[1],
     );
 
-    let mut option_lines: Vec<Line> = prompt.options
+    let mut option_lines: Vec<Line> = prompt
+        .options
         .iter()
         .enumerate()
         .map(|(i, opt)| Line::from(format!("[{}] {opt}", i + 1)))
@@ -996,17 +1172,21 @@ fn render_form(f: &mut ratatui::Frame, form: &FormState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),  // label / header
-            Constraint::Length(3),  // input box
-            Constraint::Length(3),  // hint (1 line + borders; was Min(3) which ate the rest)
-            Constraint::Min(0),     // spacer to absorb the rest of the screen
+            Constraint::Length(4), // label / header
+            Constraint::Length(3), // input box
+            Constraint::Length(3), // hint (1 line + borders; was Min(3) which ate the rest)
+            Constraint::Min(0),    // spacer to absorb the rest of the screen
         ])
         .split(f.area());
 
     f.render_widget(
         Paragraph::new(form.request.label.as_str())
             .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(format!(" {} ", crate::DISPLAY_NAME))),
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} ", crate::DISPLAY_NAME)),
+            ),
         chunks[0],
     );
 
@@ -1057,7 +1237,9 @@ mod tests {
         let start = std::time::Instant::now() - std::time::Duration::from_secs(20);
         let mut e = EtaEstimator::new_at(start);
         // 4 tracks done over ~20s → ~5s/track. 6 remaining → ~30s.
-        for _ in 0..4 { e.record_track_done(); }
+        for _ in 0..4 {
+            e.record_track_done();
+        }
         let eta = e.eta_secs(5, 10).expect("estimate after completions");
         assert!((25..=35).contains(&eta), "eta {eta} not ~30s");
     }
@@ -1066,7 +1248,9 @@ mod tests {
     fn eta_estimator_none_when_nothing_remains() {
         let start = std::time::Instant::now() - std::time::Duration::from_secs(10);
         let mut e = EtaEstimator::new_at(start);
-        for _ in 0..10 { e.record_track_done(); }
+        for _ in 0..10 {
+            e.record_track_done();
+        }
         assert_eq!(e.eta_secs(10, 10), None, "no remaining tracks → no eta");
     }
 }

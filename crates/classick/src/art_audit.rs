@@ -51,7 +51,11 @@ pub struct ArtAuditFailure {
 /// the truth table in the test module. `ithmb_missing` is only consulted
 /// when both `source_has_art` and `db_has_art` are true; it names the first
 /// expected ithmb file that wasn't found on the mount.
-pub fn classify(source_has_art: bool, db_has_art: bool, ithmb_missing: Option<&str>) -> Option<String> {
+pub fn classify(
+    source_has_art: bool,
+    db_has_art: bool,
+    ithmb_missing: Option<&str>,
+) -> Option<String> {
     if !source_has_art && db_has_art {
         return Some("source has no embedded art".to_string());
     }
@@ -109,7 +113,10 @@ pub fn expected_ithmb_basenames(model_num_str: &str) -> Vec<&'static str> {
 /// First name in `expected` whose file doesn't exist under `artwork_dir`,
 /// or `None` if `expected` is empty or every file is present.
 fn missing_ithmb<'a>(artwork_dir: &Path, expected: &[&'a str]) -> Option<&'a str> {
-    expected.iter().copied().find(|name| !artwork_dir.join(name).exists())
+    expected
+        .iter()
+        .copied()
+        .find(|name| !artwork_dir.join(name).exists())
 }
 
 /// Resolve the iPod mount, non-interactively (no retry prompt — this is a
@@ -185,16 +192,28 @@ pub fn verify_artwork(config: &Config, progress: &Progress) -> Result<ArtAuditRe
                 continue;
             }
         };
-        let db_has_art = artwork_by_dbid.get(&entry.ipod_dbid).copied().unwrap_or(false);
+        let db_has_art = artwork_by_dbid
+            .get(&entry.ipod_dbid)
+            .copied()
+            .unwrap_or(false);
         let ithmb_missing = if source_has_art && db_has_art {
             missing_ithmb(&artwork_dir, &expected_ithmb)
         } else {
             None
         };
-        resolved.push((entry.source_path.clone(), source_has_art, db_has_art, ithmb_missing));
+        resolved.push((
+            entry.source_path.clone(),
+            source_has_art,
+            db_has_art,
+            ithmb_missing,
+        ));
     }
 
-    let sub = build_report(resolved.iter().map(|(p, s, d, i)| (p.as_path(), *s, *d, *i)));
+    let sub = build_report(
+        resolved
+            .iter()
+            .map(|(p, s, d, i)| (p.as_path(), *s, *d, *i)),
+    );
     report.checked += sub.checked;
     report.ok += sub.ok;
     report.failures.extend(sub.failures);
@@ -275,8 +294,8 @@ mod tests {
         let p2 = PathBuf::from("/music/b.flac");
         let p3 = PathBuf::from("/music/c.flac");
         let entries = vec![
-            (p1.as_path(), true, true, None),               // ok
-            (p2.as_path(), true, false, None),               // failure
+            (p1.as_path(), true, true, None),                  // ok
+            (p2.as_path(), true, false, None),                 // failure
             (p3.as_path(), true, true, Some("F1069_1.ithmb")), // failure
         ];
         let report = build_report(entries);
@@ -286,7 +305,10 @@ mod tests {
         assert_eq!(report.failures[0].source_path, p2);
         assert_eq!(report.failures[0].reason, "db track has_artwork=0");
         assert_eq!(report.failures[1].source_path, p3);
-        assert_eq!(report.failures[1].reason, "ithmb file missing: F1069_1.ithmb");
+        assert_eq!(
+            report.failures[1].reason,
+            "ithmb file missing: F1069_1.ithmb"
+        );
     }
 
     #[test]
@@ -299,8 +321,10 @@ mod tests {
             (true, true, None),
             (true, true, Some("F1069_1.ithmb")),
         ];
-        let entries: Vec<(&Path, bool, bool, Option<&str>)> =
-            cases.iter().map(|(s, d, i)| (p.as_path(), *s, *d, *i)).collect();
+        let entries: Vec<(&Path, bool, bool, Option<&str>)> = cases
+            .iter()
+            .map(|(s, d, i)| (p.as_path(), *s, *d, *i))
+            .collect();
         let report = build_report(entries);
         assert_eq!(report.checked, report.ok + report.failures.len());
     }
@@ -330,8 +354,8 @@ mod tests {
     // --- missing_ithmb: real filesystem checks -----------------------------
 
     fn scratch_dir(label: &str) -> PathBuf {
-        let base = std::env::temp_dir()
-            .join(format!("classick-art-audit-{}-{label}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("classick-art-audit-{}-{label}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base
@@ -346,7 +370,10 @@ mod tests {
     #[test]
     fn missing_ithmb_detects_absent_file() {
         let dir = scratch_dir("absent");
-        assert_eq!(missing_ithmb(&dir, &["F1069_1.ithmb"]), Some("F1069_1.ithmb"));
+        assert_eq!(
+            missing_ithmb(&dir, &["F1069_1.ithmb"]),
+            Some("F1069_1.ithmb")
+        );
     }
 
     #[test]
@@ -374,14 +401,21 @@ mod tests {
         let mut config = test_config();
         config.ipod = Some(dir.to_string_lossy().into_owned());
         let err = resolve_mount(&config).unwrap_err();
-        assert!(err.to_string().contains("iPod_Control/iTunes/iTunesDB"), "got: {err}");
+        assert!(
+            err.to_string().contains("iPod_Control/iTunes/iTunesDB"),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn resolve_mount_explicit_ipod_with_itunesdb_succeeds() {
         let dir = scratch_dir("with-itunesdb");
         std::fs::create_dir_all(dir.join("iPod_Control").join("iTunes")).unwrap();
-        std::fs::write(dir.join("iPod_Control").join("iTunes").join("iTunesDB"), b"stub").unwrap();
+        std::fs::write(
+            dir.join("iPod_Control").join("iTunes").join("iTunesDB"),
+            b"stub",
+        )
+        .unwrap();
         let mut config = test_config();
         config.ipod = Some(dir.to_string_lossy().into_owned());
         let resolved = resolve_mount(&config).unwrap();

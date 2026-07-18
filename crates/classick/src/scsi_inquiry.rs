@@ -206,13 +206,22 @@ fn inquiry_vpd(handle: HANDLE, page_code: u8) -> Result<Vec<u8>> {
             sense_info_offset: (std::mem::size_of::<ScsiPassThroughDirect>()
                 + std::mem::size_of::<[u8; 4]>()) as u32,
             cdb: [
-                0x12,       // INQUIRY
-                0x01,       // EVPD bit
-                page_code,  // VPD page code
+                0x12,      // INQUIRY
+                0x01,      // EVPD bit
+                page_code, // VPD page code
                 0x00,
                 IPOD_BUF_LENGTH as u8, // allocation length (252)
                 0x00,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
             ],
         },
         _pad: [0; 4],
@@ -234,7 +243,10 @@ fn inquiry_vpd(handle: HANDLE, page_code: u8) -> Result<Vec<u8>> {
     };
     if ok == 0 {
         let err = std::io::Error::last_os_error();
-        return Err(anyhow!("DeviceIoControl (INQUIRY page {:#04x}): {err}", page_code));
+        return Err(anyhow!(
+            "DeviceIoControl (INQUIRY page {:#04x}): {err}",
+            page_code
+        ));
     }
     if request.sptd.scsi_status != 0 {
         bail!(
@@ -262,15 +274,18 @@ pub fn read_sysinfo_extended(drive_letter: char) -> Result<String> {
     let handle: HANDLE = std::os::windows::io::AsRawHandle::as_raw_handle(&owned) as HANDLE;
 
     // Step 1: Read the index page to learn which content pages exist.
-    let index_response = inquiry_vpd(handle, VPD_INDEX_PAGE)
-        .context("SCSI INQUIRY VPD index page 0xC0")?;
+    let index_response =
+        inquiry_vpd(handle, VPD_INDEX_PAGE).context("SCSI INQUIRY VPD index page 0xC0")?;
     // VPD response layout (SPC-3 §6.5.1):
     //   byte 0: peripheral device type (low 5 bits) + qualifier
     //   byte 1: page code (echoes our request)
     //   byte 2-3: page length (BE u16) — # of payload bytes following
     //   byte 4..: payload (for page 0xC0: list of supported page codes)
     if index_response.len() < 4 {
-        bail!("VPD page 0xC0 response truncated (len {})", index_response.len());
+        bail!(
+            "VPD page 0xC0 response truncated (len {})",
+            index_response.len()
+        );
     }
     let payload_len = u16::from_be_bytes([index_response[2], index_response[3]]) as usize;
     let payload_end = std::cmp::min(4 + payload_len, index_response.len());
@@ -292,7 +307,11 @@ pub fn read_sysinfo_extended(drive_letter: char) -> Result<String> {
         let response = inquiry_vpd(handle, page_code)
             .with_context(|| format!("SCSI INQUIRY VPD content page {:#04x}", page_code))?;
         if response.len() < 4 {
-            bail!("VPD page {:#04x} response truncated (len {})", page_code, response.len());
+            bail!(
+                "VPD page {:#04x} response truncated (len {})",
+                page_code,
+                response.len()
+            );
         }
         let chunk_len = u16::from_be_bytes([response[2], response[3]]) as usize;
         let chunk_end = std::cmp::min(4 + chunk_len, response.len());
@@ -304,8 +323,7 @@ pub fn read_sysinfo_extended(drive_letter: char) -> Result<String> {
     while xml.last() == Some(&0) {
         xml.pop();
     }
-    String::from_utf8(xml)
-        .map_err(|e| anyhow!("SysInfoExtended payload is not valid UTF-8: {e}"))
+    String::from_utf8(xml).map_err(|e| anyhow!("SysInfoExtended payload is not valid UTF-8: {e}"))
 }
 
 #[cfg(test)]
@@ -339,7 +357,9 @@ mod tests {
                 timeout_value: 0,
                 data_buffer: std::ptr::null_mut(),
                 sense_info_offset: 0,
-                cdb: [0x12, 0x01, 0xC0, 0x00, 0xFC, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                cdb: [
+                    0x12, 0x01, 0xC0, 0x00, 0xFC, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ],
             },
             _pad: [0; 4],
             sense: [0; 32],

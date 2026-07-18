@@ -69,7 +69,9 @@ pub fn compute(
 
     let mut index_local = index.clone();
     let (mut sources, _dirty) = crate::selection::filter(walk, selection, &mut index_local, |_p| {
-        Err(anyhow::anyhow!("sync_set: no live filesystem probe available"))
+        Err(anyhow::anyhow!(
+            "sync_set: no live filesystem probe available"
+        ))
     });
     let mut present: HashSet<PathBuf> = sources.iter().map(|e| e.path.clone()).collect();
 
@@ -80,8 +82,9 @@ pub fn compute(
     for slug in &subs.playlists {
         let (name, resolved) = match store.load(slug) {
             Ok(Some(Playlist::Manual(manual))) => {
-                let (found, miss) =
-                    crate::playlist::resolve_manual(&manual, source_root, &|p| walk_map.contains_key(p));
+                let (found, miss) = crate::playlist::resolve_manual(&manual, source_root, &|p| {
+                    walk_map.contains_key(p)
+                });
                 missing += miss;
                 (manual.name.clone(), found)
             }
@@ -120,7 +123,12 @@ pub fn compute(
         playlist_tracks.push((slug.clone(), name, resolved));
     }
 
-    EffectiveSet { sources, playlist_tracks, missing_playlist_tracks: missing, playlist_errors: errors }
+    EffectiveSet {
+        sources,
+        playlist_tracks,
+        missing_playlist_tracks: missing,
+        playlist_errors: errors,
+    }
 }
 
 #[cfg(test)]
@@ -157,7 +165,11 @@ mod tests {
     }
 
     fn src(path: &str) -> SourceEntry {
-        SourceEntry { path: PathBuf::from(path), mtime: 1, size: 10 }
+        SourceEntry {
+            path: PathBuf::from(path),
+            mtime: 1,
+            size: 10,
+        }
     }
 
     fn indexed(artist: &str) -> IndexedTrack {
@@ -175,7 +187,10 @@ mod tests {
     }
 
     fn subs(slugs: &[&str]) -> Subscriptions {
-        Subscriptions { version: 1, playlists: slugs.iter().map(|s| s.to_string()).collect() }
+        Subscriptions {
+            version: 1,
+            playlists: slugs.iter().map(|s| s.to_string()).collect(),
+        }
     }
 
     #[test]
@@ -186,20 +201,39 @@ mod tests {
         let source_root = Path::new("/music");
         let walk = vec![src("/music/A/song.flac"), src("/music/B/song.flac")];
         let mut index = LibraryIndex::empty(source_root.to_path_buf());
-        index.files.insert(PathBuf::from("/music/A/song.flac"), indexed("Artist A"));
-        index.files.insert(PathBuf::from("/music/B/song.flac"), indexed("Artist B"));
+        index
+            .files
+            .insert(PathBuf::from("/music/A/song.flac"), indexed("Artist A"));
+        index
+            .files
+            .insert(PathBuf::from("/music/B/song.flac"), indexed("Artist B"));
 
         let selection = Selection {
             version: 1,
             mode: SelectionMode::Include,
-            rules: vec![SelectionRule::Artist { name: "Artist A".into() }],
+            rules: vec![SelectionRule::Artist {
+                name: "Artist A".into(),
+            }],
         };
 
-        let effective = compute(walk, &selection, &subs(&["mix"]), &store, &index, source_root);
+        let effective = compute(
+            walk,
+            &selection,
+            &subs(&["mix"]),
+            &store,
+            &index,
+            source_root,
+        );
 
         let paths: HashSet<_> = effective.sources.iter().map(|e| e.path.clone()).collect();
-        assert!(paths.contains(&PathBuf::from("/music/A/song.flac")), "in-scope track stays");
-        assert!(paths.contains(&PathBuf::from("/music/B/song.flac")), "playlist track outside scope still syncs");
+        assert!(
+            paths.contains(&PathBuf::from("/music/A/song.flac")),
+            "in-scope track stays"
+        );
+        assert!(
+            paths.contains(&PathBuf::from("/music/B/song.flac")),
+            "playlist track outside scope still syncs"
+        );
         assert_eq!(effective.sources.len(), 2);
         assert!(effective.playlist_errors.is_empty());
         assert_eq!(effective.missing_playlist_tracks, 0);
@@ -213,17 +247,39 @@ mod tests {
         let source_root = Path::new("/music");
         let walk = vec![src("/music/A/1.flac"), src("/music/B/2.flac")];
         let mut index = LibraryIndex::empty(source_root.to_path_buf());
-        index.files.insert(PathBuf::from("/music/A/1.flac"), indexed("Artist A"));
-        index.files.insert(PathBuf::from("/music/B/2.flac"), indexed("Artist B"));
+        index
+            .files
+            .insert(PathBuf::from("/music/A/1.flac"), indexed("Artist A"));
+        index
+            .files
+            .insert(PathBuf::from("/music/B/2.flac"), indexed("Artist B"));
 
         // Include mode with zero rules matches nothing — scope is empty.
-        let selection = Selection { version: 1, mode: SelectionMode::Include, rules: vec![] };
+        let selection = Selection {
+            version: 1,
+            mode: SelectionMode::Include,
+            rules: vec![],
+        };
 
-        let effective = compute(walk, &selection, &subs(&["mix"]), &store, &index, source_root);
+        let effective = compute(
+            walk,
+            &selection,
+            &subs(&["mix"]),
+            &store,
+            &index,
+            source_root,
+        );
 
         assert_eq!(
-            effective.sources.iter().map(|e| e.path.clone()).collect::<Vec<_>>(),
-            vec![PathBuf::from("/music/A/1.flac"), PathBuf::from("/music/B/2.flac")],
+            effective
+                .sources
+                .iter()
+                .map(|e| e.path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/music/A/1.flac"),
+                PathBuf::from("/music/B/2.flac")
+            ],
             "empty scope + one playlist -> sources == playlist tracks exactly"
         );
     }
@@ -235,7 +291,12 @@ mod tests {
         let store = store_with_manual(&root, "mix", &["C.flac", "B.flac", "D.flac"]);
 
         let source_root = Path::new("/music");
-        let walk = vec![src("/music/A.flac"), src("/music/B.flac"), src("/music/C.flac"), src("/music/D.flac")];
+        let walk = vec![
+            src("/music/A.flac"),
+            src("/music/B.flac"),
+            src("/music/C.flac"),
+            src("/music/D.flac"),
+        ];
         let mut index = LibraryIndex::empty(source_root.to_path_buf());
         for (p, artist) in [
             ("/music/A.flac", "Keep"),
@@ -249,10 +310,19 @@ mod tests {
         let selection = Selection {
             version: 1,
             mode: SelectionMode::Include,
-            rules: vec![SelectionRule::Artist { name: "Keep".into() }],
+            rules: vec![SelectionRule::Artist {
+                name: "Keep".into(),
+            }],
         };
 
-        let effective = compute(walk, &selection, &subs(&["mix"]), &store, &index, source_root);
+        let effective = compute(
+            walk,
+            &selection,
+            &subs(&["mix"]),
+            &store,
+            &index,
+            source_root,
+        );
 
         assert_eq!(
             effective.sources.iter().map(|e| e.path.clone()).collect::<Vec<_>>(),
@@ -274,16 +344,27 @@ mod tests {
         let source_root = Path::new("/music");
         let walk = vec![src("/music/A.flac")]; // "gone.flac" was never walked
         let mut index = LibraryIndex::empty(source_root.to_path_buf());
-        index.files.insert(PathBuf::from("/music/A.flac"), indexed("Artist"));
+        index
+            .files
+            .insert(PathBuf::from("/music/A.flac"), indexed("Artist"));
 
-        let effective =
-            compute(walk, &Selection::all(), &subs(&["mix"]), &store, &index, source_root);
+        let effective = compute(
+            walk,
+            &Selection::all(),
+            &subs(&["mix"]),
+            &store,
+            &index,
+            source_root,
+        );
 
         assert_eq!(effective.sources.len(), 1);
         assert_eq!(effective.sources[0].path, PathBuf::from("/music/A.flac"));
         assert_eq!(effective.missing_playlist_tracks, 1);
         assert!(
-            !effective.sources.iter().any(|e| e.path.ends_with("gone.flac")),
+            !effective
+                .sources
+                .iter()
+                .any(|e| e.path.ends_with("gone.flac")),
             "a playlist entry absent from the walk must never fabricate a SourceEntry"
         );
     }
@@ -306,7 +387,11 @@ mod tests {
             source_root,
         );
 
-        assert_eq!(effective.sources.len(), 1, "sync proceeds despite the bad subscription");
+        assert_eq!(
+            effective.sources.len(),
+            1,
+            "sync proceeds despite the bad subscription"
+        );
         assert_eq!(effective.playlist_errors.len(), 1);
         assert_eq!(effective.playlist_errors[0].0, "does-not-exist");
         assert!(effective.playlist_tracks.is_empty());

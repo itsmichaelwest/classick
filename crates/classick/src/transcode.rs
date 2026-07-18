@@ -64,7 +64,7 @@ impl<'de> Deserialize<'de> for ProbeTags {
             let s = match value {
                 serde_json::Value::String(s) => s,
                 serde_json::Value::Number(n) => n.to_string(),
-                _ => continue,  // skip arrays/objects/bools/null
+                _ => continue, // skip arrays/objects/bools/null
             };
             if s.is_empty() {
                 continue;
@@ -133,9 +133,11 @@ pub fn has_embedded_art(probe: &ProbeOutput) -> bool {
 /// probing automatically (F-16).
 pub fn ffprobe_path_for(ffmpeg: &Path) -> PathBuf {
     if ffmpeg.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
-        ffmpeg.with_file_name(
-            if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" }
-        )
+        ffmpeg.with_file_name(if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        })
     } else {
         PathBuf::from("ffprobe")
     }
@@ -152,13 +154,18 @@ pub fn ffmpeg_args(src: &Path, dst: &Path) -> Vec<String> {
         // pipe and is never closed). Observed in the wild as ffmpeg
         // wedging at ~97% of a track for the entire session.
         "-nostdin".into(),
-        "-loglevel".into(), "error".into(),
-        "-y".into(),  // overwrite output without prompting
-        "-i".into(), src.to_string_lossy().into_owned(),
-        "-map".into(), "0:a".into(),
-        "-c:a".into(), "alac".into(),
-        "-vn".into(),  // audio-only: embedded art is written later by artwork::embed
-        "-f".into(), "ipod".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(), // overwrite output without prompting
+        "-i".into(),
+        src.to_string_lossy().into_owned(),
+        "-map".into(),
+        "0:a".into(),
+        "-c:a".into(),
+        "alac".into(),
+        "-vn".into(), // audio-only: embedded art is written later by artwork::embed
+        "-f".into(),
+        "ipod".into(),
         dst.to_string_lossy().into_owned(),
     ]
 }
@@ -177,11 +184,23 @@ pub fn probe(src: &Path, _ffmpeg_path: &Path) -> Result<ProbeOutput> {
 pub fn probe(src: &Path, ffmpeg_path: &Path) -> Result<ProbeOutput> {
     let ffprobe = ffprobe_path_for(ffmpeg_path);
     let out = Command::new(&ffprobe)
-        .args(["-loglevel", "error", "-of", "json", "-show_format", "-show_streams"])
+        .args([
+            "-loglevel",
+            "error",
+            "-of",
+            "json",
+            "-show_format",
+            "-show_streams",
+        ])
         .arg(src)
         .no_console()
         .output()
-        .map_err(|e| anyhow!("failed to spawn {} (is it on PATH?): {e}", ffprobe.display()))?;
+        .map_err(|e| {
+            anyhow!(
+                "failed to spawn {} (is it on PATH?): {e}",
+                ffprobe.display()
+            )
+        })?;
     if !out.status.success() {
         return Err(anyhow!(
             "ffprobe failed (exit {:?}): {}",
@@ -255,9 +274,17 @@ pub fn transcode_to_alac(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<(
         .stdin(Stdio::null())
         .no_console()
         .status()
-        .map_err(|e| anyhow!("failed to spawn {} (is it on PATH?): {e}", ffmpeg_path.display()))?;
+        .map_err(|e| {
+            anyhow!(
+                "failed to spawn {} (is it on PATH?): {e}",
+                ffmpeg_path.display()
+            )
+        })?;
     if !status.success() {
-        return Err(anyhow!("ffmpeg transcode failed (exit {:?})", status.code()));
+        return Err(anyhow!(
+            "ffmpeg transcode failed (exit {:?})",
+            status.code()
+        ));
     }
     Ok(())
 }
@@ -366,7 +393,11 @@ fn project_temp_path(infix: &str, ext: &str) -> PathBuf {
     let filename = if infix.is_empty() {
         format!("{}-{}-{seq}.{ext}", crate::PROJECT_DIR, std::process::id())
     } else {
-        format!("{}-{infix}-{}-{seq}.{ext}", crate::PROJECT_DIR, std::process::id())
+        format!(
+            "{}-{infix}-{}-{seq}.{ext}",
+            crate::PROJECT_DIR,
+            std::process::id()
+        )
     };
     p.push(filename);
     p
@@ -496,9 +527,13 @@ pub fn passthrough(src: &Path, dst: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("create parent dir {}: {e}", parent.display()))?;
     }
-    std::fs::copy(src, dst)
-        .map(|_| ())
-        .map_err(|e| anyhow!("passthrough copy {} -> {}: {e}", src.display(), dst.display()))
+    std::fs::copy(src, dst).map(|_| ()).map_err(|e| {
+        anyhow!(
+            "passthrough copy {} -> {}: {e}",
+            src.display(),
+            dst.display()
+        )
+    })
 }
 
 /// Path for the refalac 2-step pipeline's WAV intermediate.
@@ -544,7 +579,14 @@ pub fn transcode_via_refalac(
     // video stream so refalac sees a pure-audio WAV. `-nostdin` + stdin
     // null prevents ffmpeg from blocking on inherited pipe-stdin.
     let mut ffmpeg = Command::new(ffmpeg_path);
-    ffmpeg.args(["-nostdin", "-hide_banner", "-loglevel", "warning", "-y", "-i"]);
+    ffmpeg.args([
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-y",
+        "-i",
+    ]);
     ffmpeg.arg(src);
     ffmpeg.args(["-vn", "-acodec", "pcm_s16le"]);
     ffmpeg.arg(&temp_wav);
@@ -611,7 +653,12 @@ pub fn extract_cover_art(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<(
         .stdin(Stdio::null())
         .no_console()
         .status()
-        .map_err(|e| anyhow!("failed to spawn {} for art extract: {e}", ffmpeg_path.display()))?;
+        .map_err(|e| {
+            anyhow!(
+                "failed to spawn {} for art extract: {e}",
+                ffmpeg_path.display()
+            )
+        })?;
     if !status.success() {
         return Err(anyhow!(
             "ffmpeg cover-art extract failed (exit {:?})",
@@ -630,17 +677,17 @@ mod tests {
 
     #[test]
     fn ffmpeg_cmd_args_match_spec() {
-        let args = ffmpeg_args(
-            Path::new(r"C:\src\song.flac"),
-            Path::new(r"C:\tmp\out.m4a"),
-        );
+        let args = ffmpeg_args(Path::new(r"C:\src\song.flac"), Path::new(r"C:\tmp\out.m4a"));
         // Order matters for ffmpeg — input flags before -i, output flags after.
         let joined = args.join(" ");
         assert!(joined.contains("-loglevel error"));
         assert!(joined.contains("-y"));
         assert!(joined.contains(r"-i C:\src\song.flac"));
         assert!(joined.contains("-map 0:a"));
-        assert!(!joined.contains("0:v"), "unified pipeline: transcode is audio-only");
+        assert!(
+            !joined.contains("0:v"),
+            "unified pipeline: transcode is audio-only"
+        );
         assert!(!joined.contains("attached_pic"));
         assert!(joined.contains("-c:a alac"));
         assert!(joined.contains("-f ipod"));
@@ -813,8 +860,7 @@ mod tests {
 
     #[test]
     fn passthrough_copies_bytes_verbatim() {
-        let src_dir =
-            std::env::temp_dir().join(format!("classick-pt-test-{}", std::process::id()));
+        let src_dir = std::env::temp_dir().join(format!("classick-pt-test-{}", std::process::id()));
         std::fs::create_dir_all(&src_dir).unwrap();
         let src = src_dir.join("in.mp3");
         let dst = src_dir.join("subdir").join("out.mp3");
@@ -860,21 +906,30 @@ mod tests {
     fn temp_alac_path_is_unique_per_call() {
         let a = temp_alac_path();
         let b = temp_alac_path();
-        assert_ne!(a, b, "concurrent transcode jobs must not share a temp ALAC path");
+        assert_ne!(
+            a, b,
+            "concurrent transcode jobs must not share a temp ALAC path"
+        );
     }
 
     #[test]
     fn temp_art_path_is_unique_per_call() {
         let a = temp_art_path();
         let b = temp_art_path();
-        assert_ne!(a, b, "concurrent transcode jobs must not share a temp art path");
+        assert_ne!(
+            a, b,
+            "concurrent transcode jobs must not share a temp art path"
+        );
     }
 
     #[test]
     fn temp_wav_path_is_unique_per_call() {
         let a = temp_wav_path();
         let b = temp_wav_path();
-        assert_ne!(a, b, "concurrent transcode jobs must not share a temp WAV path");
+        assert_ne!(
+            a, b,
+            "concurrent transcode jobs must not share a temp WAV path"
+        );
     }
 
     #[test]
@@ -882,7 +937,10 @@ mod tests {
         let src = Path::new(r"C:\a.mp3");
         let a = temp_passthrough_path(src);
         let b = temp_passthrough_path(src);
-        assert_ne!(a, b, "concurrent transcode jobs must not share a temp passthrough path");
+        assert_ne!(
+            a, b,
+            "concurrent transcode jobs must not share a temp passthrough path"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -892,8 +950,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[cfg(target_os = "macos")]
-    const FIXTURE_FLAC: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tagged.flac");
+    const FIXTURE_FLAC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tagged.flac");
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -915,10 +972,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_extract_cover_art_writes_image_with_valid_header() {
-        let dst = std::env::temp_dir().join(format!(
-            "classick-test-art-{}.img",
-            std::process::id()
-        ));
+        let dst =
+            std::env::temp_dir().join(format!("classick-test-art-{}.img", std::process::id()));
         let _ = std::fs::remove_file(&dst);
 
         extract_cover_art(Path::new(FIXTURE_FLAC), &dst, Path::new("afconvert")).unwrap();
@@ -927,7 +982,11 @@ mod tests {
         assert!(!bytes.is_empty());
         let is_png = bytes.starts_with(&[0x89, b'P', b'N', b'G']);
         let is_jpeg = bytes.starts_with(&[0xFF, 0xD8]);
-        assert!(is_png || is_jpeg, "expected PNG or JPEG header, got {:02X?}", &bytes[..bytes.len().min(8)]);
+        assert!(
+            is_png || is_jpeg,
+            "expected PNG or JPEG header, got {:02X?}",
+            &bytes[..bytes.len().min(8)]
+        );
 
         std::fs::remove_file(&dst).ok();
     }
