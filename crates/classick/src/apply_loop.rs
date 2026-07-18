@@ -1899,19 +1899,10 @@ pub(crate) fn source_tags_and_art(
     Ok((tags, art))
 }
 
-/// Embed a source's tags + normalized art into an on-device `.m4a` (Rockbox
-/// side). Returns `(tags, normalized_art, new_size)`. Pure file I/O; no libgpod.
-pub(crate) fn backfill_one_file(
-    device_file: &Path,
-    source: &Path,
-    ffmpeg: &Path,
-) -> Result<(crate::ipod::db::Tags, Option<Vec<u8>>, u64)> {
-    let (tags, art) = source_tags_and_art(source, ffmpeg)?;
-    crate::artwork::embed_track_metadata(device_file, &tags, art.as_deref())
-        .with_context(|| format!("embed into {}", device_file.display()))?;
-    let size = std::fs::metadata(device_file)?.len();
-    Ok((tags, art, size))
-}
+// (A `backfill_one_file` wrapper over `source_tags_and_art` +
+// `embed_track_metadata` used to live here; the production backfill paths
+// call the pair directly, so the wrapper was dead code — its end-to-end
+// fixture test survives below, exercising the same pair.)
 
 /// Refresh artwork + metadata for the already-synced library on BOTH firmwares,
 /// WITHOUT re-copying audio. Used by the "Update existing library" command and
@@ -2860,8 +2851,6 @@ mod tests {
 
 #[cfg(test)]
 mod backfill_tests {
-    use super::backfill_one_file;
-
     #[test]
     fn backfill_embeds_into_existing_device_file() {
         // Copy the bare fixture as a stand-in on-device .m4a.
@@ -2870,14 +2859,16 @@ mod backfill_tests {
         let dev = dir.join("track.m4a");
         std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/bare.m4a"), &dev).unwrap();
 
-        // The per-track backfill step: probe source tags → normalize art → embed.
+        // The per-track backfill step exactly as production runs it
+        // (apply_loop's backfill paths): probe source tags → normalize art
+        // → embed into the on-device file.
         let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tagged.flac")); // existing fixture: tags + embedded PNG art
         let before = std::fs::metadata(&dev).unwrap().len();
-        let (tags, art, size) =
-            backfill_one_file(&dev, src, &std::path::PathBuf::from("ffmpeg")).unwrap();
+        let (tags, art) =
+            super::source_tags_and_art(src, &std::path::PathBuf::from("ffmpeg")).unwrap();
+        crate::artwork::embed_track_metadata(&dev, &tags, art.as_deref()).unwrap();
         let after = std::fs::metadata(&dev).unwrap().len();
         assert!(after >= before, "embedding should not shrink the file");
-        assert_eq!(size, after, "returned size must match the embedded file");
         // The returned tags + normalized art are what the caller re-applies to
         // the Apple ithmb (the art-break fix); a tagged source must yield them.
         assert!(tags.title.is_some() || tags.artist.is_some(), "tags extracted from source");

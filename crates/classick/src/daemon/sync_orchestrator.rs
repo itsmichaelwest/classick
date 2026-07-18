@@ -356,6 +356,18 @@ async fn drive_child(
                 // subprocess died between the prompt emit and the
                 // user's click, the SyncCompleted event from the
                 // exited child will handle teardown normally.
+                //
+                // INVARIANT (wire audit 2026-07-18): `prompt_decision` is
+                // the ONLY reply this relay can carry. The subprocess's
+                // `form` and `review` events have no decision path through
+                // the daemon (no form_decision/review_decision relay
+                // exists, and the UIs can't answer them) — that's sound
+                // only because a daemon-spawned subprocess gets full
+                // config (the wizard that emits `form` never runs) and is
+                // always spawned auto-apply (`review` is never emitted).
+                // If either ever appears on a daemon-driven sync, the
+                // subprocess will block forever awaiting a reply that
+                // cannot arrive — add the relay before adding the emitter.
                 let line = format!("{{\"type\":\"prompt_decision\",\"id\":{id},\"choice\":{choice}}}\n");
                 if let Err(e) = stdin.write_all(line.as_bytes()).await {
                     tracing::warn!("orchestrator: failed to forward prompt_decision to subprocess: {e}");
