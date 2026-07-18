@@ -61,8 +61,7 @@ struct MainWindow: View {
         } else {
             switch model.selectedDestination {
             case .library, nil:
-                LibraryView(model: model, onScan: onScan,
-                            onPreview: onPreview, onSaveSelection: onSaveSelection)
+                LibraryView(model: model, onScan: onScan)
             case .device:
                 // Device Music/Settings pages are built out in Tasks 5-6; for
                 // now both pages of the disclosure route to the existing
