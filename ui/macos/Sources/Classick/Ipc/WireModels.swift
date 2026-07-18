@@ -249,6 +249,32 @@ enum SelectionRule: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+/// Wire shape of a selection nested under `device_config_update`/
+/// `save_device_config` (`{mode, rules}` only — no `version`, a file-format
+/// implementation detail not part of the wire contract; mirrors how
+/// `selection_update`/`save_selection` already flatten to just
+/// `mode`+`rules`). Also `AppModel`'s own global-selection state (protocol
+/// v1.4.0's `get_selection`/`selection_update`), which never carried
+/// `version` either. Decodes leniently (mode/rules default when absent)
+/// even though every known sender includes both today.
+struct SelectionState: Codable, Equatable, Sendable {
+    var mode: SelectionMode
+    var rules: [SelectionRule]
+
+    enum CodingKeys: String, CodingKey { case mode, rules }
+
+    init(mode: SelectionMode, rules: [SelectionRule]) {
+        self.mode = mode
+        self.rules = rules
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try c.decodeIfPresent(SelectionMode.self, forKey: .mode) ?? .all
+        rules = try c.decodeIfPresent([SelectionRule].self, forKey: .rules) ?? []
+    }
+}
+
 struct LibraryAlbum: Codable, Equatable, Sendable {
     var name: String
     var genre: String?
@@ -283,6 +309,228 @@ struct SelectionPreviewInfo: Equatable, Sendable {
     var removes: Int
 }
 
+// MARK: - Playlists & per-device config (daemon protocol v1.6.0)
+
+enum PlaylistKind: String, Codable, Equatable, Sendable {
+    case manual, smart
+}
+
+/// One entry on `playlists_update` — a summary (track COUNT, not the
+/// ordered list) for the playlists sidebar/list. See `PlaylistDetail` for
+/// the full-content reply the editor needs.
+struct PlaylistSummary: Codable, Equatable, Sendable {
+    var slug: String
+    var name: String
+    var kind: PlaylistKind
+    var tracks: Int
+    var bytes: UInt64
+    var error: String?
+}
+
+enum SmartMatching: String, Codable, Equatable, Sendable { case all, any }
+enum SmartField: String, Codable, Equatable, Sendable { case artist, album, genre, year }
+enum SmartOp: String, Codable, Equatable, Sendable {
+    case `is` = "is"
+    case contains
+    case gte
+    case lte
+}
+enum SmartOrder: String, Codable, Equatable, Sendable {
+    case recentlyModified = "recently_modified"
+    case randomStable = "random_stable"
+    case alpha
+}
+
+struct SmartRuleWire: Codable, Equatable, Sendable {
+    var field: SmartField
+    var op: SmartOp
+    var value: String
+}
+
+/// `{"bytes":<u64>}` or `{"tracks":<int>}` — Rust's `Limit` enum carries no
+/// explicit `#[serde(tag = …)]`, so it serializes externally tagged (the
+/// variant name is the sole object key).
+enum SmartLimitWire: Codable, Equatable, Sendable {
+    case bytes(UInt64)
+    case tracks(Int)
+
+    private enum CodingKeys: String, CodingKey { case bytes, tracks }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let n = try c.decodeIfPresent(UInt64.self, forKey: .bytes) {
+            self = .bytes(n)
+        } else if let n = try c.decodeIfPresent(Int.self, forKey: .tracks) {
+            self = .tracks(n)
+        } else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .bytes, in: c, debugDescription: "unknown smart-playlist limit shape")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .bytes(n): try c.encode(n, forKey: .bytes)
+        case let .tracks(n): try c.encode(n, forKey: .tracks)
+        }
+    }
+}
+
+/// Verbatim mirror of `playlist_rules::SmartRules`. `limit` serializes as an
+/// explicit `null` (not omitted) when absent — unlike most optional fields
+/// elsewhere on this wire, the Rust struct's fields carry no
+/// `skip_serializing_if`. `version`/`matching`/`order`/`seed` decode
+/// leniently (mirroring the Rust struct's own `#[serde(default)]`
+/// attributes) even though the daemon always sends them today.
+struct SmartRulesWire: Codable, Equatable, Sendable {
+    var version: Int
+    var matching: SmartMatching
+    var rules: [SmartRuleWire]
+    var limit: SmartLimitWire?
+    var order: SmartOrder
+    var seed: UInt64
+
+    enum CodingKeys: String, CodingKey { case version, matching, rules, limit, order, seed }
+
+    init(version: Int = 1, matching: SmartMatching, rules: [SmartRuleWire],
+         limit: SmartLimitWire? = nil, order: SmartOrder = .alpha, seed: UInt64 = 0) {
+        self.version = version
+        self.matching = matching
+        self.rules = rules
+        self.limit = limit
+        self.order = order
+        self.seed = seed
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        matching = try c.decodeIfPresent(SmartMatching.self, forKey: .matching) ?? .all
+        rules = try c.decodeIfPresent([SmartRuleWire].self, forKey: .rules) ?? []
+        limit = try c.decodeIfPresent(SmartLimitWire.self, forKey: .limit)
+        order = try c.decodeIfPresent(SmartOrder.self, forKey: .order) ?? .alpha
+        seed = try c.decodeIfPresent(UInt64.self, forKey: .seed) ?? 0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(matching, forKey: .matching)
+        try c.encode(rules, forKey: .rules)
+        if let limit {
+            try c.encode(limit, forKey: .limit)
+        } else {
+            try c.encodeNil(forKey: .limit)
+        }
+        try c.encode(order, forKey: .order)
+        try c.encode(seed, forKey: .seed)
+    }
+}
+
+/// `save_playlist`'s `playlist` field — Encodable only (the app constructs
+/// and sends this; the daemon never sends one back, see `PlaylistDetail`).
+/// An absent `slug` means "create a new playlist"; a present one means
+/// "create-or-replace at exactly this slug".
+enum PlaylistPayload: Encodable, Equatable, Sendable {
+    case manual(slug: String?, name: String, tracks: [String])
+    case smart(slug: String?, name: String, rules: SmartRulesWire)
+
+    private enum CodingKeys: String, CodingKey { case kind, slug, name, tracks, rules }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .manual(slug, name, tracks):
+            try c.encode("manual", forKey: .kind)
+            try c.encodeIfPresent(slug, forKey: .slug)
+            try c.encode(name, forKey: .name)
+            try c.encode(tracks, forKey: .tracks)
+        case let .smart(slug, name, rules):
+            try c.encode("smart", forKey: .kind)
+            try c.encodeIfPresent(slug, forKey: .slug)
+            try c.encode(name, forKey: .name)
+            try c.encode(rules, forKey: .rules)
+        }
+    }
+}
+
+/// Reply to `get_playlist`: the one playlist's full content, for the
+/// editor — unlike `PlaylistsUpdate`'s summary (a track count), `tracks`
+/// here is the actual ordered path list. On failure (unknown slug,
+/// unopenable store, or an unparseable on-disk file) only `slug`/`error`
+/// are set — `name`/`kind`/`tracks`/`rules` all stay `nil`.
+struct PlaylistDetail: Equatable, Sendable {
+    var slug: String
+    var name: String?
+    var kind: PlaylistKind?
+    var tracks: [String]?
+    var rules: SmartRulesWire?
+    var error: String?
+}
+
+/// Wire shape of subscriptions nested under `device_config_update`/
+/// `save_device_config` — the subscribed playlist slugs only (no
+/// `version`; same rationale as `SelectionState`). `version` isn't listed
+/// in `CodingKeys`, so it's never encoded/decoded — it always holds its
+/// default, matching the wire's own omission.
+struct SubscriptionsWire: Codable, Equatable, Sendable {
+    var version = 1
+    var playlists: [String]
+
+    enum CodingKeys: String, CodingKey { case playlists }
+
+    init(playlists: [String]) {
+        self.playlists = playlists
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        playlists = try c.decodeIfPresent([String].self, forKey: .playlists) ?? []
+    }
+}
+
+/// Wire shape of per-device settings nested under `device_config_update`/
+/// `save_device_config` (no `version`; same rationale as
+/// `SubscriptionsWire`).
+struct DeviceSettingsWire: Codable, Equatable, Sendable {
+    var version = 1
+    var autoSync: Bool
+    var rockboxCompat: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case autoSync = "auto_sync"
+        case rockboxCompat = "rockbox_compat"
+    }
+
+    init(autoSync: Bool, rockboxCompat: Bool) {
+        self.autoSync = autoSync
+        self.rockboxCompat = rockboxCompat
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        autoSync = try c.decodeIfPresent(Bool.self, forKey: .autoSync) ?? true
+        rockboxCompat = try c.decodeIfPresent(Bool.self, forKey: .rockboxCompat) ?? false
+    }
+}
+
+/// Reply to `preview_device`. **Carries no `serial`/correlation id** — like
+/// `selection_preview`, it's a plain reply on the requesting connection, not
+/// a broadcast — so the caller must remember which device it asked about;
+/// see `AppModel.willRequestDevicePreview`. `unresolvedSubscriptions` is
+/// omitted from the wire (not sent as `[]`) when every subscription
+/// resolved — decode absence as `nil`, not an empty array, so callers can
+/// still tell "omitted" from "explicitly empty" if that ever matters.
+struct DevicePreview: Equatable, Sendable {
+    var selectedTracks: Int
+    var selectedBytes: UInt64
+    var playlistExtraTracks: Int
+    var playlistExtraBytes: UInt64
+    var projectedFreeBytes: UInt64?
+    var unresolvedSubscriptions: [String]?
+}
+
 // MARK: - DaemonCommand (sent)
 
 enum DaemonCommand: Encodable, Sendable {
@@ -308,6 +556,16 @@ enum DaemonCommand: Encodable, Sendable {
     /// the daemon does not prompt. See docs/ipc-protocol.md "New command:
     /// replace_library".
     case replaceLibrary
+    // MARK: Protocol 1.6.0 — playlists, per-device config, device preview
+    case listPlaylists
+    case getPlaylist(slug: String)
+    case savePlaylist(PlaylistPayload)
+    case deletePlaylist(slug: String)
+    case getDeviceConfig(serial: String)
+    /// Each part `nil` means "don't change" — the same sentinel convention
+    /// as `saveConfig`.
+    case saveDeviceConfig(serial: String, selection: SelectionState?, subscriptions: SubscriptionsWire?, settings: DeviceSettingsWire?)
+    case previewDevice(serial: String)
 
     enum Trigger: String, Encodable, Sendable {
         case manual, scheduled
@@ -324,6 +582,12 @@ enum DaemonCommand: Encodable, Sendable {
         case mode
         case rules
         case limit
+        case slug
+        case playlist
+        case serial
+        case selection
+        case subscriptions
+        case settings
     }
 
     func encode(to encoder: Encoder) throws {
@@ -374,6 +638,29 @@ enum DaemonCommand: Encodable, Sendable {
             try container.encode(limit, forKey: .limit)
         case .replaceLibrary:
             try container.encode("replace_library", forKey: .type)
+        case .listPlaylists:
+            try container.encode("list_playlists", forKey: .type)
+        case let .getPlaylist(slug):
+            try container.encode("get_playlist", forKey: .type)
+            try container.encode(slug, forKey: .slug)
+        case let .savePlaylist(playlist):
+            try container.encode("save_playlist", forKey: .type)
+            try container.encode(playlist, forKey: .playlist)
+        case let .deletePlaylist(slug):
+            try container.encode("delete_playlist", forKey: .type)
+            try container.encode(slug, forKey: .slug)
+        case let .getDeviceConfig(serial):
+            try container.encode("get_device_config", forKey: .type)
+            try container.encode(serial, forKey: .serial)
+        case let .saveDeviceConfig(serial, selection, subscriptions, settings):
+            try container.encode("save_device_config", forKey: .type)
+            try container.encode(serial, forKey: .serial)
+            try container.encodeIfPresent(selection, forKey: .selection)
+            try container.encodeIfPresent(subscriptions, forKey: .subscriptions)
+            try container.encodeIfPresent(settings, forKey: .settings)
+        case let .previewDevice(serial):
+            try container.encode("preview_device", forKey: .type)
+            try container.encode(serial, forKey: .serial)
         }
     }
 }
@@ -392,6 +679,11 @@ enum DaemonEvent: Decodable, Sendable {
     case libraryUpdate(LibraryInfo)
     case selectionUpdate(mode: SelectionMode, rules: [SelectionRule])
     case selectionPreview(SelectionPreviewInfo)
+    // MARK: Protocol 1.6.0 — playlists, per-device config, device preview
+    case playlistsUpdate([PlaylistSummary])
+    case playlistDetail(PlaylistDetail)
+    case deviceConfigUpdate(serial: String, selection: SelectionState, subscriptions: SubscriptionsWire, settings: DeviceSettingsWire)
+    case devicePreview(DevicePreview)
     case unknown            // forward-compat: log + ignore
 
     private enum CodingKeys: String, CodingKey {
@@ -428,6 +720,18 @@ enum DaemonEvent: Decodable, Sendable {
         case selectedBytes = "selected_bytes"
         case adds
         case removes
+        case playlists
+        case slug
+        case kind
+        case tracks
+        case error
+        case selection
+        case subscriptions
+        case settings
+        case playlistExtraTracks = "playlist_extra_tracks"
+        case playlistExtraBytes = "playlist_extra_bytes"
+        case projectedFreeBytes = "projected_free_bytes"
+        case unresolvedSubscriptions = "unresolved_subscriptions"
     }
 
     init(from decoder: Decoder) throws {
@@ -501,6 +805,34 @@ enum DaemonEvent: Decodable, Sendable {
                 selectedBytes: try container.decodeIfPresent(UInt64.self, forKey: .selectedBytes) ?? 0,
                 adds: try container.decodeIfPresent(Int.self, forKey: .adds) ?? 0,
                 removes: try container.decodeIfPresent(Int.self, forKey: .removes) ?? 0))
+        case "playlists_update":
+            let playlists = try container.decodeIfPresent([PlaylistSummary].self, forKey: .playlists) ?? []
+            self = .playlistsUpdate(playlists)
+        case "playlist_detail":
+            let slug = try container.decode(String.self, forKey: .slug)
+            let name = try container.decodeIfPresent(String.self, forKey: .name)
+            let kind = try container.decodeIfPresent(PlaylistKind.self, forKey: .kind)
+            let tracks = try container.decodeIfPresent([String].self, forKey: .tracks)
+            let rules = try container.decodeIfPresent(SmartRulesWire.self, forKey: .rules)
+            let error = try container.decodeIfPresent(String.self, forKey: .error)
+            self = .playlistDetail(PlaylistDetail(slug: slug, name: name, kind: kind, tracks: tracks, rules: rules, error: error))
+        case "device_config_update":
+            let serial = try container.decode(String.self, forKey: .serial)
+            let selection = try container.decodeIfPresent(SelectionState.self, forKey: .selection)
+                ?? SelectionState(mode: .all, rules: [])
+            let subscriptions = try container.decodeIfPresent(SubscriptionsWire.self, forKey: .subscriptions)
+                ?? SubscriptionsWire(playlists: [])
+            let settings = try container.decodeIfPresent(DeviceSettingsWire.self, forKey: .settings)
+                ?? DeviceSettingsWire(autoSync: true, rockboxCompat: false)
+            self = .deviceConfigUpdate(serial: serial, selection: selection, subscriptions: subscriptions, settings: settings)
+        case "device_preview":
+            self = .devicePreview(DevicePreview(
+                selectedTracks: try container.decodeIfPresent(Int.self, forKey: .selectedTracks) ?? 0,
+                selectedBytes: try container.decodeIfPresent(UInt64.self, forKey: .selectedBytes) ?? 0,
+                playlistExtraTracks: try container.decodeIfPresent(Int.self, forKey: .playlistExtraTracks) ?? 0,
+                playlistExtraBytes: try container.decodeIfPresent(UInt64.self, forKey: .playlistExtraBytes) ?? 0,
+                projectedFreeBytes: try container.decodeIfPresent(UInt64.self, forKey: .projectedFreeBytes),
+                unresolvedSubscriptions: try container.decodeIfPresent([String].self, forKey: .unresolvedSubscriptions)))
         default:
             self = .unknown
         }

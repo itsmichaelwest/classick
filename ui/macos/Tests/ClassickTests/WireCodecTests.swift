@@ -223,4 +223,212 @@ final class WireCodecTests: XCTestCase {
         XCTAssertEqual(entry.summary?.skippedForSpaceBytes, 0)
         XCTAssertEqual(entry.summary?.artworkFailedSources, 0)
     }
+
+    // MARK: - Protocol 1.6.0: playlists, per-device config, device preview
+
+    func testDecodesPlaylistsUpdate() throws {
+        let json = #"{"type":"playlists_update","playlists":[{"slug":"gym","name":"Gym","kind":"manual","tracks":12,"bytes":900},{"slug":"broken","name":"broken","kind":"smart","tracks":0,"bytes":0,"error":"parse failed"}]}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .playlistsUpdate(playlists) = ev else { return XCTFail("expected playlistsUpdate") }
+        XCTAssertEqual(playlists.count, 2)
+        XCTAssertEqual(playlists[0], PlaylistSummary(slug: "gym", name: "Gym", kind: .manual, tracks: 12, bytes: 900, error: nil))
+        XCTAssertEqual(playlists[1].kind, .smart)
+        XCTAssertEqual(playlists[1].error, "parse failed")
+    }
+
+    func testDecodesPlaylistDetailManual() throws {
+        // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- playlist_detail example payloads"
+        let json = #"{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":["Artist/Album/01.flac","B/02.flac"]}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .playlistDetail(detail) = ev else { return XCTFail("expected playlistDetail") }
+        XCTAssertEqual(detail.slug, "gym")
+        XCTAssertEqual(detail.name, "Gym")
+        XCTAssertEqual(detail.kind, .manual)
+        XCTAssertEqual(detail.tracks, ["Artist/Album/01.flac", "B/02.flac"])
+        XCTAssertNil(detail.rules)
+        XCTAssertNil(detail.error)
+    }
+
+    func testDecodesPlaylistDetailSmart() throws {
+        // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- playlist_detail example payloads"
+        let json = #"{"type":"playlist_detail","slug":"recent-idm","name":"Recent IDM","kind":"smart","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0}}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .playlistDetail(detail) = ev else { return XCTFail("expected playlistDetail") }
+        XCTAssertEqual(detail.kind, .smart)
+        XCTAssertNil(detail.tracks)
+        XCTAssertEqual(detail.rules?.version, 1)
+        XCTAssertEqual(detail.rules?.matching, .all)
+        XCTAssertEqual(detail.rules?.rules, [SmartRuleWire(field: .genre, op: .is, value: "IDM")])
+        XCTAssertNil(detail.rules?.limit)
+        XCTAssertEqual(detail.rules?.order, .alpha)
+        XCTAssertEqual(detail.rules?.seed, 0)
+    }
+
+    func testDecodesPlaylistDetailErrorOnlySetsSlugAndError() throws {
+        // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- playlist_detail example payloads"
+        let json = #"{"type":"playlist_detail","slug":"ghost","error":"no such playlist"}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .playlistDetail(detail) = ev else { return XCTFail("expected playlistDetail") }
+        XCTAssertEqual(detail.slug, "ghost")
+        XCTAssertEqual(detail.error, "no such playlist")
+        XCTAssertNil(detail.name)
+        XCTAssertNil(detail.kind)
+        XCTAssertNil(detail.tracks)
+        XCTAssertNil(detail.rules)
+    }
+
+    func testDecodesDeviceConfigUpdateFullPayload() throws {
+        let json = #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"include","rules":[{"kind":"artist","name":"Boards of Canada"}]},"subscriptions":{"playlists":["gym","chill"]},"settings":{"auto_sync":true,"rockbox_compat":false}}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .deviceConfigUpdate(serial, selection, subscriptions, settings) = ev else {
+            return XCTFail("expected deviceConfigUpdate")
+        }
+        XCTAssertEqual(serial, "0xABC")
+        XCTAssertEqual(selection.mode, .include)
+        XCTAssertEqual(selection.rules, [.artist(name: "Boards of Canada")])
+        XCTAssertEqual(subscriptions.playlists, ["gym", "chill"])
+        XCTAssertTrue(settings.autoSync)
+        XCTAssertFalse(settings.rockboxCompat)
+    }
+
+    func testDecodesDeviceConfigUpdateWithoutSettingsDefaultsCleanly() throws {
+        // Absent-field tolerance: a `settings` object missing entirely must
+        // not crash the decode — old/newer daemon skew must never drop the
+        // whole device_config_update.
+        let json = #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]}}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .deviceConfigUpdate(_, _, _, settings) = ev else { return XCTFail("expected deviceConfigUpdate") }
+        XCTAssertTrue(settings.autoSync, "must default true, matching DeviceSettings::default()")
+        XCTAssertFalse(settings.rockboxCompat)
+    }
+
+    func testDecodesDevicePreviewWithProjection() throws {
+        // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- device_preview example payloads"
+        let json = #"{"type":"device_preview","selected_tracks":412,"selected_bytes":5123456789,"playlist_extra_tracks":3,"playlist_extra_bytes":90000000,"projected_free_bytes":1200000000}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .devicePreview(preview) = ev else { return XCTFail("expected devicePreview") }
+        XCTAssertEqual(preview.selectedTracks, 412)
+        XCTAssertEqual(preview.selectedBytes, 5_123_456_789)
+        XCTAssertEqual(preview.playlistExtraTracks, 3)
+        XCTAssertEqual(preview.playlistExtraBytes, 90_000_000)
+        XCTAssertEqual(preview.projectedFreeBytes, 1_200_000_000)
+        XCTAssertNil(preview.unresolvedSubscriptions)
+    }
+
+    func testDecodesDevicePreviewWithUnresolvedSubscriptionsAndNullProjection() throws {
+        // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- device_preview example payloads"
+        let json = #"{"type":"device_preview","selected_tracks":412,"selected_bytes":5123456789,"playlist_extra_tracks":0,"playlist_extra_bytes":0,"projected_free_bytes":null,"unresolved_subscriptions":["deleted-favorites"]}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .devicePreview(preview) = ev else { return XCTFail("expected devicePreview") }
+        XCTAssertNil(preview.projectedFreeBytes, "null means the previewed device isn't the one currently connected")
+        XCTAssertEqual(preview.unresolvedSubscriptions, ["deleted-favorites"])
+    }
+
+    func testEncodesListPlaylists() throws {
+        let data = try JSONEncoder().encode(DaemonCommand.listPlaylists)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "list_playlists")
+    }
+
+    func testEncodesGetPlaylist() throws {
+        let data = try JSONEncoder().encode(DaemonCommand.getPlaylist(slug: "gym"))
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "get_playlist")
+        XCTAssertEqual(obj["slug"] as? String, "gym")
+    }
+
+    func testEncodesDeletePlaylist() throws {
+        let data = try JSONEncoder().encode(DaemonCommand.deletePlaylist(slug: "gym"))
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "delete_playlist")
+        XCTAssertEqual(obj["slug"] as? String, "gym")
+    }
+
+    func testEncodesSavePlaylistManualCreateOmitsSlug() throws {
+        let cmd = DaemonCommand.savePlaylist(.manual(slug: nil, name: "Gym", tracks: ["Artist/Album/01.flac", "B/02.flac"]))
+        let data = try JSONEncoder().encode(cmd)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "save_playlist")
+        let playlist = obj["playlist"] as! [String: Any]
+        XCTAssertEqual(playlist["kind"] as? String, "manual")
+        XCTAssertNil(playlist["slug"], "absent slug means create -- must not send a key at all")
+        XCTAssertEqual(playlist["name"] as? String, "Gym")
+        XCTAssertEqual(playlist["tracks"] as? [String], ["Artist/Album/01.flac", "B/02.flac"])
+    }
+
+    func testEncodesSavePlaylistManualEditIncludesSlug() throws {
+        let cmd = DaemonCommand.savePlaylist(.manual(slug: "gym", name: "Gym Mix", tracks: []))
+        let data = try JSONEncoder().encode(cmd)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let playlist = obj["playlist"] as! [String: Any]
+        XCTAssertEqual(playlist["slug"] as? String, "gym")
+        XCTAssertEqual(playlist["name"] as? String, "Gym Mix")
+        XCTAssertEqual(playlist["tracks"] as? [String], [])
+    }
+
+    func testEncodesSavePlaylistSmartWithRules() throws {
+        let rules = SmartRulesWire(matching: .all, rules: [SmartRuleWire(field: .genre, op: .is, value: "IDM")])
+        let cmd = DaemonCommand.savePlaylist(.smart(slug: "recent-idm", name: "Recent IDM", rules: rules))
+        let data = try JSONEncoder().encode(cmd)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let playlist = obj["playlist"] as! [String: Any]
+        XCTAssertEqual(playlist["kind"] as? String, "smart")
+        XCTAssertEqual(playlist["slug"] as? String, "recent-idm")
+        let rulesObj = playlist["rules"] as! [String: Any]
+        XCTAssertEqual(rulesObj["version"] as? Int, 1)
+        XCTAssertEqual(rulesObj["matching"] as? String, "all")
+        XCTAssertTrue(rulesObj["limit"] is NSNull, "limit must serialize as explicit null, not be omitted")
+        XCTAssertEqual(rulesObj["order"] as? String, "alpha")
+        let ruleRows = rulesObj["rules"] as! [[String: Any]]
+        XCTAssertEqual(ruleRows.first?["field"] as? String, "genre")
+        XCTAssertEqual(ruleRows.first?["op"] as? String, "is")
+        XCTAssertEqual(ruleRows.first?["value"] as? String, "IDM")
+    }
+
+    func testEncodesGetDeviceConfig() throws {
+        let data = try JSONEncoder().encode(DaemonCommand.getDeviceConfig(serial: "0xABC"))
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "get_device_config")
+        XCTAssertEqual(obj["serial"] as? String, "0xABC")
+    }
+
+    func testEncodesPreviewDevice() throws {
+        let data = try JSONEncoder().encode(DaemonCommand.previewDevice(serial: "0xABC"))
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "preview_device")
+        XCTAssertEqual(obj["serial"] as? String, "0xABC")
+    }
+
+    func testEncodesSaveDeviceConfigPartialPayloadOmitsAbsentParts() throws {
+        let cmd = DaemonCommand.saveDeviceConfig(
+            serial: "0xABC", selection: nil, subscriptions: nil,
+            settings: DeviceSettingsWire(autoSync: false, rockboxCompat: true))
+        let data = try JSONEncoder().encode(cmd)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(obj["type"] as? String, "save_device_config")
+        XCTAssertEqual(obj["serial"] as? String, "0xABC")
+        XCTAssertNil(obj["selection"], "nil selection means don't change -- must be omitted, not null")
+        XCTAssertNil(obj["subscriptions"])
+        let settings = obj["settings"] as! [String: Any]
+        XCTAssertEqual(settings["auto_sync"] as? Bool, false)
+        XCTAssertEqual(settings["rockbox_compat"] as? Bool, true)
+    }
+
+    func testEncodesSaveDeviceConfigFullPayloadOmitsVersionOnNestedPayloads() throws {
+        let cmd = DaemonCommand.saveDeviceConfig(
+            serial: "0xABC",
+            selection: SelectionState(mode: .include, rules: [.artist(name: "Boards of Canada")]),
+            subscriptions: SubscriptionsWire(playlists: ["gym", "chill"]),
+            settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false))
+        let data = try JSONEncoder().encode(cmd)
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let selection = obj["selection"] as! [String: Any]
+        XCTAssertEqual(selection["mode"] as? String, "include")
+        XCTAssertNil(selection["version"], "selection wire mirrors mode+rules only")
+        let subscriptions = obj["subscriptions"] as! [String: Any]
+        XCTAssertEqual(subscriptions["playlists"] as? [String], ["gym", "chill"])
+        XCTAssertNil(subscriptions["version"], "subscriptions wire mirrors playlists only, no version")
+        let settings = obj["settings"] as! [String: Any]
+        XCTAssertNil(settings["version"], "settings wire mirrors auto_sync+rockbox_compat only, no version")
+    }
 }

@@ -141,6 +141,11 @@ final class AppModel {
         case let .selectionPreview(info):
             selectionPreview = info
 
+        // Protocol 1.6.0 events (playlists, per-device config, device
+        // preview): wired into AppModel state in a follow-up change.
+        case .playlistsUpdate, .playlistDetail, .deviceConfigUpdate, .devicePreview:
+            break
+
         case let .configUpdate(source, daemon, ipod):
             config = AppConfig(source: source, daemon: daemon, ipod: ipod)
             // The daemon considers itself configured once it has a persisted
