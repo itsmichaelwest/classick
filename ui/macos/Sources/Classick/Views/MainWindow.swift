@@ -33,8 +33,7 @@ struct MainWindow: View {
   var onResolveTracks: (_ slug: String, _ rules: [SelectionRule]) -> Void = { _, _ in }
   // Device Music page (Task 5).
   var onLoadDeviceConfig: (String) -> Void = { _ in }
-  var onPreviewDevice: (String) -> Void = { _ in }
-  var onSaveDeviceConfig:
+  var onSaveAndPreviewDeviceConfig:
     (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> Void =
       { _, _, _ in }
   // Device Settings page (Task 6).
@@ -96,8 +95,8 @@ struct MainWindow: View {
       case .device(let serial, .music):
         DeviceMusicPage(
           model: model, serial: serial, onSyncNow: onSyncNow,
-          onLoadDeviceConfig: onLoadDeviceConfig, onPreviewDevice: onPreviewDevice,
-          onSaveDeviceConfig: onSaveDeviceConfig, onScan: onScan
+          onLoadDeviceConfig: onLoadDeviceConfig,
+          onSaveAndPreviewDeviceConfig: onSaveAndPreviewDeviceConfig, onScan: onScan
         )
         .id(serial)
       case .device(let serial, .settings):

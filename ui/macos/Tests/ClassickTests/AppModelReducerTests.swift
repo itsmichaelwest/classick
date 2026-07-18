@@ -34,6 +34,7 @@ final class AppModelReducerTests: XCTestCase {
 
   func testFinishSyncEventPopulatesSkippedForSpaceArtworkAndDbRestoredState() {
     let m = AppModel()
+    seedDevice("0xA", phase: .syncing, sessionID: 1, in: m)
     m.apply(
       .syncEvent(
         line:
@@ -51,6 +52,7 @@ final class AppModelReducerTests: XCTestCase {
   /// that sync's rollup back to nil/nil/false.
   func testScanFinishDoesNotClobberPriorSyncRollup() {
     let m = AppModel()
+    seedDevice("0xA", phase: .syncing, sessionID: 1, in: m)
     m.apply(
       .syncEvent(
         line:
@@ -65,7 +67,7 @@ final class AppModelReducerTests: XCTestCase {
       .statusUpdate(
         .init(state: .scanning, configured: true, ipodConnected: true, lastSync: nil, storage: nil))
     )
-    m.apply(.syncEvent(line: #"{"type":"finish","success":true}"#, serial: "0xA", sessionID: 1))
+    m.apply(.syncEvent(line: #"{"type":"finish","success":true}"#, serial: nil, sessionID: 2))
 
     XCTAssertEqual(
       m.lastRunSkippedForSpace, SkippedForSpace(albums: 14, tracks: 183, bytes: 9_876_543_210))
@@ -87,9 +89,7 @@ final class AppModelReducerTests: XCTestCase {
 
   func testSyncProgressFromForwardedEvents() {
     let m = AppModel()
-    m.apply(
-      .statusUpdate(
-        .init(state: .syncing, configured: true, ipodConnected: true, lastSync: nil, storage: nil)))
+    seedDevice("0xA", phase: .syncing, sessionID: 1, in: m)
     m.apply(
       .syncEvent(
         line: #"{"type":"track_start","current":34,"total":120,"label":"Karma Police"}"#,
@@ -99,11 +99,12 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertEqual(total, 120)
     XCTAssertEqual(label, "Karma Police")
     m.apply(.syncEvent(line: #"{"type":"finish","success":true}"#, serial: "0xA", sessionID: 1))
-    XCTAssertEqual(m.phase, .idle)
+    guard case .syncing = m.phase else { return XCTFail("finish must await the terminal snapshot") }
   }
 
   func testPromptSurfaced() {
     let m = AppModel()
+    seedDevice("0xA", phase: .syncing, sessionID: 1, in: m)
     m.apply(
       .syncEvent(
         line: #"{"type":"prompt","id":7,"message":"Source changed","options":["Apply","Cancel"]}"#,
@@ -189,34 +190,16 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertEqual(m.libraryCount, 1500)
   }
 
-  func testPausedSyncEventEntersPausedPhase() {
+  func testPausedInventorySnapshotEntersPausedPhase() {
     let m = AppModel()
-    m.apply(
-      .statusUpdate(
-        .init(
-          state: .syncing, configured: true, ipodConnected: true, lastSync: nil, storage: nil,
-          syncedCount: 50, libraryCount: 1500)))
-    m.apply(.syncEvent(line: #"{"type":"paused"}"#, serial: "0xA", sessionID: 1))
+    seedDevice("0xA", phase: .paused, syncedCount: 50, libraryCount: 1500, in: m)
     guard case .paused = m.phase else { return XCTFail("expected .paused") }
   }
 
   func testPausedPhaseSurvivesTrailingIdleStatus() {
     let m = AppModel()
-    m.apply(
-      .deviceConnected(
-        serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
-    m.apply(
-      .configUpdate(
-        source: "/music", daemon: nil,
-        ipod: IpodIdentity(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", name: nil),
-        configRevision: 1, acknowledgedRequestID: "request-a"))
-    m.apply(
-      .statusUpdate(
-        .init(
-          state: .syncing, configured: true, ipodConnected: true, lastSync: nil, storage: nil,
-          syncedCount: 84, libraryCount: 1381)))
-    m.apply(.syncEvent(line: #"{"type":"paused"}"#, serial: "0xA", sessionID: 1))
-    guard case .paused = m.phase else { return XCTFail("expected .paused after pause event") }
+    seedDevice("0xA", phase: .paused, syncedCount: 84, libraryCount: 1381, in: m)
+    guard case .paused = m.phase else { return XCTFail("expected .paused after snapshot") }
     // Subprocess exits → daemon broadcasts idle. Paused MUST persist and
     // refresh its counts, not revert to plain idle.
     m.apply(
@@ -233,38 +216,33 @@ final class AppModelReducerTests: XCTestCase {
 
   func testResumeFromPausedEntersSyncing() {
     let m = AppModel()
-    m.apply(
-      .deviceConnected(
-        serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
-    m.apply(
-      .configUpdate(
-        source: "/music", daemon: nil,
-        ipod: IpodIdentity(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", name: nil),
-        configRevision: 1, acknowledgedRequestID: "request-a"))
-    m.apply(.syncEvent(line: #"{"type":"paused"}"#, serial: "0xA", sessionID: 1))
+    seedDevice("0xA", phase: .paused, syncedCount: 84, libraryCount: 1381, in: m)
     guard case .paused = m.phase else { return XCTFail("expected .paused") }
-    // Resume sends TriggerSync → daemon reports syncing → leave paused.
+    // Resume sends TriggerSync; the next authoritative snapshot starts a new session.
     m.apply(
-      .statusUpdate(
+      .deviceInventorySnapshot(
         .init(
-          state: .syncing, configured: true, ipodConnected: true, lastSync: nil, storage: nil,
-          syncedCount: 84, libraryCount: 1381)))
+          revision: 2,
+          devices: [
+            deviceSnapshot(
+              "0xA", phase: .syncing, sessionID: 2, syncedCount: 84, libraryCount: 1381)
+          ])))
     guard case .syncing = m.phase else { return XCTFail("expected .syncing after resume") }
   }
 
   func testPausedClearsOnDeviceDisconnect() {
     let m = AppModel()
-    m.apply(
-      .deviceConnected(
-        serial: "0xA", modelLabel: "iPod Classic (3rd gen)", drive: "/Volumes/IPOD", name: "iPod"))
-    m.apply(
-      .configUpdate(
-        source: "/music", daemon: nil,
-        ipod: IpodIdentity(serial: "0xA", modelLabel: "iPod Classic (3rd gen)", name: nil),
-        configRevision: 1, acknowledgedRequestID: "request-a"))
-    m.apply(.syncEvent(line: #"{"type":"paused"}"#, serial: "0xA", sessionID: 1))
+    seedDevice("0xA", phase: .paused, syncedCount: 84, libraryCount: 1381, in: m)
     guard case .paused = m.phase else { return XCTFail("expected .paused") }
-    m.apply(.deviceDisconnected(serial: "0xA"))
+    m.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 2,
+          devices: [
+            deviceSnapshot(
+              "0xA", connected: false, phase: .disconnected, syncedCount: 84,
+              libraryCount: 1381)
+          ])))
     guard case .noDevice = m.phase else { return XCTFail("expected .noDevice after unplug") }
   }
 
@@ -330,7 +308,7 @@ final class AppModelReducerTests: XCTestCase {
     // Forwarded scan progress must update .scanning, NOT flip to .syncing.
     m.apply(
       .syncEvent(
-        line: #"{"type":"track_start","current":5,"total":100,"label":"x.flac"}"#, serial: "0xA",
+        line: #"{"type":"track_start","current":5,"total":100,"label":"x.flac"}"#, serial: nil,
         sessionID: 1))
     guard case .scanning(let current, let total) = m.phase else {
       return XCTFail("track_start during a scan must stay in scanning; got \(m.phase)")
@@ -342,12 +320,7 @@ final class AppModelReducerTests: XCTestCase {
   @MainActor
   func testSyncingPhaseCarriesEta() {
     let m = AppModel()
-    m.apply(.deviceConnected(serial: "S", modelLabel: "iPod", drive: "/V", name: nil))
-    m.apply(
-      .configUpdate(
-        source: "/m", daemon: nil,
-        ipod: IpodIdentity(serial: "S", modelLabel: "iPod", name: nil), configRevision: 1,
-        acknowledgedRequestID: "request-a"))
+    seedDevice("0xA", phase: .syncing, sessionID: 1, in: m)
     m.apply(
       .syncEvent(
         line: #"{"type":"track_start","current":5,"total":10,"label":"X","eta_secs":42}"#,
@@ -521,7 +494,7 @@ final class AppModelReducerTests: XCTestCase {
   func testDevicePreviewAttachesToTheRequestedSerial() {
     let m = AppModel()
     seedDevices(["0xA"], in: m)
-    m.willRequestDevicePreview(serial: "0xA")
+    m.willRequestDevicePreview(serial: "0xA", requestID: "request-a")
     m.apply(
       .devicePreview(
         DevicePreview(
@@ -534,7 +507,7 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertEqual(m.deviceConfigs["0xA"]?.preview?.projectedFreeBytes, 1_200_000_000)
   }
 
-  func testDevicePreviewUsesRequiredWireSerialWithoutPendingRequest() {
+  func testDevicePreviewWithoutMatchingLocalRequestIsDropped() {
     let m = AppModel()
     seedDevices(["0xA"], in: m)
     m.apply(
@@ -544,23 +517,14 @@ final class AppModelReducerTests: XCTestCase {
           selectedTracks: 1, selectedBytes: 1, playlistExtraTracks: 0, playlistExtraBytes: 0,
           projectedFreeBytes: nil, unresolvedSubscriptions: nil,
           acknowledgedRequestID: "request-a")))
-    XCTAssertEqual(m.deviceConfigs["0xA"]?.preview?.selectedTracks, 1)
+    XCTAssertNil(m.deviceConfigs["0xA"]?.preview)
   }
 
-  /// Review finding #1: a single `String?` slot misattributes replies when
-  /// the user navigates to a second device's page inside the first page's
-  /// debounce window — both requests are in flight before either reply
-  /// lands, so the slot gets overwritten by the second request before the
-  /// first request's reply arrives. The fix is a FIFO queue: since the
-  /// daemon services one connection's commands strictly in order, replies
-  /// arrive in the same order the requests were sent, so dequeuing the
-  /// front of the queue on every reply always attaches to the right serial
-  /// — even when two requests are interleaved before either reply shows up.
-  func testDevicePreviewQueueAttachesInterleavedRepliesInRequestOrder() {
+  func testDevicePreviewCorrelationHandlesInterleavedSerials() {
     let m = AppModel()
     seedDevices(["0xA", "0xB"], in: m)
-    m.willRequestDevicePreview(serial: "0xA")
-    m.willRequestDevicePreview(serial: "0xB")
+    m.willRequestDevicePreview(serial: "0xA", requestID: "request-a")
+    m.willRequestDevicePreview(serial: "0xB", requestID: "request-b")
 
     m.apply(
       .devicePreview(
@@ -587,6 +551,197 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertEqual(
       m.deviceConfigs["0xA"]?.preview?.selectedTracks, 111,
       "the first serial's attached preview must be undisturbed")
+  }
+
+  func testDelayedDeviceConfigGetCannotOverwriteNewerSaveReply() {
+    let m = AppModel()
+    seedDevices(["0xA"], in: m)
+    m.willRequestDeviceConfig(serial: "0xA", requestID: "old-get", intent: .read)
+    m.willRequestDeviceConfig(serial: "0xA", requestID: "new-save", intent: .write)
+
+    m.apply(
+      .deviceConfigUpdate(
+        serial: "0xA",
+        selection: SelectionState(mode: .include, rules: [.genre(name: "New")]),
+        subscriptions: SubscriptionsWire(playlists: ["new"]),
+        settings: DeviceSettingsWire(autoSync: false, rockboxCompat: true),
+        acknowledgedRequestID: "new-save"))
+    m.apply(
+      .deviceConfigUpdate(
+        serial: "0xA",
+        selection: SelectionState(mode: .all, rules: []),
+        subscriptions: SubscriptionsWire(playlists: ["old"]),
+        settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        acknowledgedRequestID: "old-get"))
+
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.rules, [.genre(name: "New")])
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.subscriptions.playlists, ["new"])
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.settings.rockboxCompat, true)
+  }
+
+  func testUnknownDeviceConfigAcknowledgementIsAcceptedAsAnotherClientsBroadcast() {
+    let m = AppModel()
+    seedDevices(["0xA"], in: m)
+    m.willRequestDeviceConfig(
+      serial: "0xA", requestID: "our-pending-save", intent: .write)
+
+    m.apply(
+      .deviceConfigUpdate(
+        serial: "0xA",
+        selection: SelectionState(mode: .include, rules: [.artist(name: "Broadcast")]),
+        subscriptions: SubscriptionsWire(playlists: []),
+        settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        acknowledgedRequestID: "another-client"))
+
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.rules, [.artist(name: "Broadcast")])
+  }
+
+  func testExternalConfigBroadcastInvalidatesPendingLocalRead() {
+    let m = AppModel()
+    seedDevices(["0xA"], in: m)
+    m.willRequestDeviceConfig(serial: "0xA", requestID: "stale-get", intent: .read)
+
+    m.apply(
+      .deviceConfigUpdate(
+        serial: "0xA",
+        selection: SelectionState(mode: .include, rules: [.artist(name: "External")]),
+        subscriptions: SubscriptionsWire(playlists: ["external"]),
+        settings: DeviceSettingsWire(autoSync: false, rockboxCompat: true),
+        acknowledgedRequestID: "another-client"))
+    m.apply(
+      .deviceConfigUpdate(
+        serial: "0xA",
+        selection: SelectionState(mode: .all, rules: []),
+        subscriptions: SubscriptionsWire(playlists: ["stale"]),
+        settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        acknowledgedRequestID: "stale-get"))
+
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.rules, [.artist(name: "External")])
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.subscriptions.playlists, ["external"])
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.settings.rockboxCompat, true)
+  }
+
+  func testHelloClearsActionableDeviceProjectionUntilFreshInventory() {
+    let m = AppModel()
+    seedDevices(["0xA"], in: m)
+    m.selectedDestination = .device(serial: "0xA", page: .music)
+    m.willRequestDeviceConfig(serial: "0xA", requestID: "config", intent: .read)
+    m.apply(
+      .deviceConfigUpdate(
+        serial: "0xA", selection: .init(mode: .all, rules: []),
+        subscriptions: .init(playlists: []),
+        settings: .init(autoSync: true, rockboxCompat: false),
+        acknowledgedRequestID: "config"))
+    m.willRequestDevicePreview(serial: "0xA", requestID: "preview")
+    m.apply(
+      .devicePreview(
+        .init(
+          serial: "0xA", selectedTracks: 1, selectedBytes: 1, playlistExtraTracks: 0,
+          playlistExtraBytes: 0, projectedFreeBytes: nil, unresolvedSubscriptions: nil,
+          acknowledgedRequestID: "preview")))
+
+    m.apply(.hello(protocolVersion: "2.0.0", coreVersion: "2.0.0"))
+
+    XCTAssertTrue(m.devices.isEmpty)
+    XCTAssertTrue(m.deviceConfigs.isEmpty)
+    XCTAssertNil(m.device)
+    XCTAssertNil(m.focusedDeviceSerial)
+    XCTAssertEqual(m.phase, .noDevice)
+    XCTAssertFalse(m.deviceActionsAvailable)
+    XCTAssertNil(
+      MenuContentLogic.actionTarget(focusedSerial: m.focusedDeviceSerial, devices: m.devices))
+  }
+
+  func testDeviceCommandBoundaryRejectsOpenPageSerialAcrossReconnect() {
+    let m = AppModel()
+    seedDevices(["0xA"], in: m)
+    XCTAssertTrue(m.canSendDeviceCommand(to: "0xA"))
+
+    m.apply(.hello(protocolVersion: "2.0.0", coreVersion: "2.0.0"))
+    XCTAssertFalse(m.canSendDeviceCommand(to: "0xA"))
+
+    m.apply(
+      .deviceInventorySnapshot(
+        .init(revision: 1, devices: [deviceSnapshot("0xB")])))
+    XCTAssertFalse(m.canSendDeviceCommand(to: "0xA"))
+    XCTAssertTrue(m.canSendDeviceCommand(to: "0xB"))
+  }
+
+  func testDelayedDevicePreviewCannotOverwriteLatestPreviewReply() {
+    let m = AppModel()
+    seedDevices(["0xA"], in: m)
+    m.willRequestDevicePreview(serial: "0xA", requestID: "old-preview")
+    m.willRequestDevicePreview(serial: "0xA", requestID: "new-preview")
+
+    m.apply(
+      .devicePreview(
+        DevicePreview(
+          serial: "0xA", selectedTracks: 200, selectedBytes: 2, playlistExtraTracks: 0,
+          playlistExtraBytes: 0, projectedFreeBytes: nil, unresolvedSubscriptions: nil,
+          acknowledgedRequestID: "new-preview")))
+    m.apply(
+      .devicePreview(
+        DevicePreview(
+          serial: "0xA", selectedTracks: 100, selectedBytes: 1, playlistExtraTracks: 0,
+          playlistExtraBytes: 0, projectedFreeBytes: nil, unresolvedSubscriptions: nil,
+          acknowledgedRequestID: "old-preview")))
+
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.preview?.selectedTracks, 200)
+  }
+
+  func testOrderedSaveAndPreviewRepliesKeepOneCurrentProjection() {
+    let m = AppModel()
+    seedDevices(["0xA"], in: m)
+    m.willRequestDeviceConfig(serial: "0xA", requestID: "save", intent: .write)
+    m.willRequestDevicePreview(serial: "0xA", requestID: "preview")
+
+    m.apply(
+      .deviceConfigUpdate(
+        serial: "0xA",
+        selection: SelectionState(mode: .include, rules: [.genre(name: "Current")]),
+        subscriptions: SubscriptionsWire(playlists: ["current"]),
+        settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        acknowledgedRequestID: "save"))
+    m.apply(
+      .devicePreview(
+        DevicePreview(
+          serial: "0xA", selectedTracks: 42, selectedBytes: 420, playlistExtraTracks: 2,
+          playlistExtraBytes: 20, projectedFreeBytes: 1_000, unresolvedSubscriptions: nil,
+          acknowledgedRequestID: "preview")))
+
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.rules, [.genre(name: "Current")])
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.subscriptions.playlists, ["current"])
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.preview?.selectedTracks, 42)
+    XCTAssertEqual(m.devices["0xA"]?.preview?.projectedFreeBytes, 1_000)
+  }
+
+  func testSeriallessSyncEventOutsideScanIsDropped() {
+    let m = AppModel()
+
+    m.apply(
+      .syncEvent(
+        line: #"{"type":"track_start","current":5,"total":10,"label":"Not a scan"}"#,
+        serial: nil, sessionID: 7))
+
+    XCTAssertEqual(m.phase, .noDevice)
+  }
+
+  func testSeriallessScanEventsAreBoundToFirstObservedScanSession() {
+    let m = AppModel()
+    m.apply(
+      .statusUpdate(
+        .init(state: .scanning, configured: true, ipodConnected: false, lastSync: nil, storage: nil)
+      ))
+    m.apply(
+      .syncEvent(
+        line: #"{"type":"track_start","current":2,"total":10,"label":"Current scan"}"#,
+        serial: nil, sessionID: 7))
+    m.apply(
+      .syncEvent(
+        line: #"{"type":"track_start","current":9,"total":10,"label":"Stale scan"}"#,
+        serial: nil, sessionID: 6))
+
+    XCTAssertEqual(m.phase, .scanning(current: 2, total: 10))
   }
 
   func testDestinationForDeviceRowClickSelectsMusicPage() {
@@ -754,8 +909,8 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertEqual(m.resolvedTracksRevision, 1)
   }
 
-  /// No correlation id on the wire (same rationale as `device_preview`) —
-  /// a reply with nothing pending has nothing to attach to.
+  /// This older reducer path still uses its pending-slug queue to attach
+  /// the acknowledged reply to an editor.
   func testResolvedTracksWithNoPendingRequestIsDropped() {
     let m = AppModel()
     m.apply(.resolvedTracks(tracks: ["a.flac"], acknowledgedRequestID: "request-a"))
@@ -764,8 +919,8 @@ final class AppModelReducerTests: XCTestCase {
   }
 
   /// Fix (resolve-reply correlation hardening): `pendingResolveTracks` is a
-  /// FIFO queue keyed by slug, mirroring `pendingPreviewSerials` — two
-  /// interleaved requests from different playlist editors must each attach
+  /// FIFO queue keyed by slug — two interleaved requests from different
+  /// playlist editors must each attach
   /// their reply to the right slug, in request order, not overwrite each
   /// other or cross-attach.
   func testResolvedTracksQueueAttachesInterleavedRepliesToTheRightSlugs() {
@@ -839,24 +994,52 @@ final class AppModelReducerTests: XCTestCase {
   }
 
   private func seedDevices(_ serials: [String], in model: AppModel) {
-    let devices = serials.map { serial in
-      DeviceSnapshotWire(
-        identity: DeviceIdentityWire(serial: serial, modelLabel: "iPod Classic", name: nil),
-        configured: true,
-        connected: true,
-        mount: "/Volumes/\(serial)",
-        phase: .idle,
-        sessionID: nil,
-        storage: nil,
-        syncedCount: 0,
-        libraryCount: nil,
-        latestSuccessfulSync: nil,
-        latestAttempt: nil,
-        lastTerminalError: nil,
-        selectionRevision: 0,
-        settingsRevision: 0,
-        subscriptionsRevision: 0)
-    }
+    let devices = serials.map { deviceSnapshot($0) }
     model.apply(.deviceInventorySnapshot(.init(revision: 1, devices: devices)))
+  }
+
+  private func seedDevice(
+    _ serial: String,
+    phase: DevicePhaseLabel,
+    sessionID: UInt64? = nil,
+    syncedCount: Int = 0,
+    libraryCount: Int? = nil,
+    in model: AppModel
+  ) {
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 1,
+          devices: [
+            deviceSnapshot(
+              serial, phase: phase, sessionID: sessionID, syncedCount: syncedCount,
+              libraryCount: libraryCount)
+          ])))
+  }
+
+  private func deviceSnapshot(
+    _ serial: String,
+    connected: Bool = true,
+    phase: DevicePhaseLabel = .idle,
+    sessionID: UInt64? = nil,
+    syncedCount: Int = 0,
+    libraryCount: Int? = nil
+  ) -> DeviceSnapshotWire {
+    DeviceSnapshotWire(
+      identity: DeviceIdentityWire(serial: serial, modelLabel: "iPod Classic", name: nil),
+      configured: true,
+      connected: connected,
+      mount: connected ? "/Volumes/\(serial)" : nil,
+      phase: phase,
+      sessionID: sessionID,
+      storage: nil,
+      syncedCount: syncedCount,
+      libraryCount: libraryCount,
+      latestSuccessfulSync: nil,
+      latestAttempt: nil,
+      lastTerminalError: nil,
+      selectionRevision: 0,
+      settingsRevision: 0,
+      subscriptionsRevision: 0)
   }
 }

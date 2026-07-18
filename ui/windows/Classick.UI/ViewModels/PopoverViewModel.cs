@@ -14,13 +14,14 @@ public partial class PopoverViewModel : ObservableObject
     [ObservableProperty] private bool ipodConnected;
     [ObservableProperty] private int progressCurrent;
     [ObservableProperty] private int progressTotal;
+    [ObservableProperty] private bool finishingSync;
+    [ObservableProperty] private bool paused;
     /// <summary>Raw <see cref="TrackStartEvent.Label"/> for the currently
     /// processing track (e.g. "ADD /Music/Artist/Album/01 Track.flac").
     /// Not rendered as the primary caption — that's a counter — but
     /// exposed as a hover tooltip on the caption so anyone curious can
     /// see exactly which file is being processed.</summary>
     [ObservableProperty] private string currentTrackLabel = "";
-
     /// <summary>Wall-clock time the apply loop started (first
     /// <see cref="SummaryEvent"/>). Used to compute <see cref="EtaLabel"/>
     /// from <see cref="ProgressCurrent"/>/<see cref="ProgressTotal"/>.
@@ -66,6 +67,7 @@ public partial class PopoverViewModel : ObservableObject
         OnPropertyChanged(nameof(ShowEmptyState));
         OnPropertyChanged(nameof(ShowFooter));
         OnPropertyChanged(nameof(ShowSyncNowButton));
+        OnPropertyChanged(nameof(ShowSyncControls));
     }
 
     // Storage. StorageProgressValue is 0..100 for the ProgressBar.
@@ -92,6 +94,13 @@ public partial class PopoverViewModel : ObservableObject
     /// connection state. Suppressed when a prompt overlay is active
     /// so the underlying layout doesn't bleed through.</summary>
     public bool ShowEmptyState => !IpodConnected && !PromptActive;
+    public string EmptyStateTitle => FinishingSync ? "Finishing sync…" : "No iPod connected";
+    public string EmptyStateSubtitle => FinishingSync
+        ? "iPod disconnected. Finishing safely…"
+        : "Please connect your iPod to begin";
+    public string DisconnectedFooterText => FinishingSync
+        ? "Finishing safely…"
+        : "Looking for iPod on USB…";
 
     /// <summary>The normal connected layout (device row + storage /
     /// sync progress + full footer). Suppressed when a prompt overlay
@@ -106,7 +115,11 @@ public partial class PopoverViewModel : ObservableObject
 
     /// <summary>True when the footer should show the Sync Now button —
     /// connected AND idle AND no prompt in flight.</summary>
-    public bool ShowSyncNowButton => IpodConnected && !Syncing && !PromptActive;
+    public bool ShowSyncNowButton => IpodConnected && !Syncing && !PromptActive && !FinishingSync;
+    public bool CanControlActiveSync => ActiveSyncContext is not null &&
+        IpodConnected && Syncing && !FinishingSync;
+    public bool ShowSyncControls => CanControlActiveSync && !PromptActive;
+    public string SyncActionLabel => Paused ? "Resume sync" : "Sync now";
 
     /// <summary>True between sync start and the first SummaryEvent /
     /// TrackStart, so the popover's ProgressBar can render as
@@ -181,6 +194,7 @@ public partial class PopoverViewModel : ObservableObject
         OnPropertyChanged(nameof(EtaLabel));
         OnPropertyChanged(nameof(NoProgressYet));
         OnPropertyChanged(nameof(ShowSyncNowButton));
+        OnPropertyChanged(nameof(ShowSyncControls));
     }
     partial void OnHasStorageChanged(bool value)
     {
@@ -193,8 +207,18 @@ public partial class PopoverViewModel : ObservableObject
         OnPropertyChanged(nameof(ShowEmptyState));
         OnPropertyChanged(nameof(ShowConnectedContent));
         OnPropertyChanged(nameof(ShowSyncNowButton));
+        OnPropertyChanged(nameof(ShowSyncControls));
         OnPropertyChanged(nameof(ShowFooter));
     }
+    partial void OnFinishingSyncChanged(bool value)
+    {
+        OnPropertyChanged(nameof(EmptyStateTitle));
+        OnPropertyChanged(nameof(EmptyStateSubtitle));
+        OnPropertyChanged(nameof(DisconnectedFooterText));
+        OnPropertyChanged(nameof(ShowSyncNowButton));
+        OnPropertyChanged(nameof(ShowSyncControls));
+    }
+    partial void OnPausedChanged(bool value) => OnPropertyChanged(nameof(SyncActionLabel));
     partial void OnStorageUsedLabelChanged(string value) => OnPropertyChanged(nameof(StorageUsedDisplay));
     partial void OnStorageFreeLabelChanged(string value) => OnPropertyChanged(nameof(StorageFreeDisplay));
     partial void OnProgressCurrentChanged(int value)
@@ -213,6 +237,8 @@ public partial class PopoverViewModel : ObservableObject
 
     public void Update(StatusUpdateEvent s)
     {
+        FinishingSync = false;
+        Paused = false;
         Syncing = s.State == "syncing";
         IpodConnected = s.IpodConnected;
         ApplyStorage(s.Storage);
@@ -241,6 +267,30 @@ public partial class PopoverViewModel : ObservableObject
                 ? "Up to date · iPod connected"
                 : $"Up to date · last sync {RelativeTime(last.Timestamp)}";
             LastSyncedLabel = last is null ? "Never synced" : FormatLastSynced(last.Timestamp);
+        }
+    }
+
+    public void Update(DeviceSnapshot device)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        DisplayedDeviceSerial = device.Identity.Serial;
+        SetDeviceLabel(device.Identity.Name, device.Identity.ModelLabel);
+        Update(new StatusUpdateEvent(
+            State: device.Phase,
+            Configured: device.Configured,
+            IpodConnected: device.Connected,
+            LastSync: device.LatestAttempt ?? device.LatestSuccessfulSync,
+            NextScheduledUnixSecs: null,
+            Storage: device.Storage,
+            SyncedCount: device.SyncedCount,
+            LibraryCount: device.LibraryCount,
+            AcknowledgedRequestId: null));
+        Paused = device.Phase == "paused";
+        FinishingSync = device.SessionId is not null && !device.Connected;
+        if (FinishingSync)
+        {
+            StatusText = "Finishing sync…";
+            LastSyncedLabel = "iPod disconnected";
         }
     }
 
@@ -331,19 +381,6 @@ public partial class PopoverViewModel : ObservableObject
                 ClearPrompt();
                 break;
         }
-    }
-
-    /// <summary>Hide the prompt overlay and drop the option list.
-    /// Called both by the popover after the user picks an option
-    /// (the answer goes out via DecidePromptCommand) and defensively
-    /// on TrackStart / Finish in case the subprocess answered some
-    /// other way (e.g. internal Cancel from a tracker bail).</summary>
-    public void ClearPrompt()
-    {
-        PromptActive = false;
-        PromptMessage = "";
-        PromptId = 0;
-        PromptOptions.Clear();
     }
 
     private void ApplyStorage(StorageInfo? info)

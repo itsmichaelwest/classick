@@ -4,11 +4,9 @@ using System.Text.Json.Serialization;
 namespace Classick_UI.Ipc;
 
 /// <summary>
-/// Daemon-side events sent over the UI ↔ daemon named pipe. Augments
-/// (does not replace) the M1 <see cref="IpcEvent"/> hierarchy — sync-
-/// subprocess events (Header, Summary, Review, etc.) are forwarded by
-/// the daemon and arrive on the SAME pipe, deserialized via the M1
-/// IpcEvent polymorphic table.
+/// Daemon-side events sent over the UI ↔ daemon named pipe. Sync subprocess
+/// events are nested in <see cref="SyncEventEnvelope"/> so routing retains
+/// their device and session identity.
 /// </summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(StatusUpdateEvent), "status_update")]

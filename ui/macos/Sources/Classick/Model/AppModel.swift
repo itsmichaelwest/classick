@@ -63,6 +63,27 @@ struct DeviceConfigState: Equatable, Sendable {
     preview: nil)
 }
 
+enum DeviceConfigRequestIntent {
+  case read
+  case write
+}
+
+private struct PendingDeviceRequest {
+  var serial: DeviceSerial
+  var generation: UInt64
+  var configIntent: DeviceConfigRequestIntent?
+}
+
+enum DeviceCommandGate {
+  static func allows(
+    serial: DeviceSerial,
+    hasAuthoritativeInventory: Bool,
+    devices: [DeviceSerial: DeviceViewState]
+  ) -> Bool {
+    hasAuthoritativeInventory && devices[serial] != nil
+  }
+}
+
 @Observable
 @MainActor
 final class AppModel {
@@ -113,34 +134,36 @@ final class AppModel {
   /// Sidebar navigation selection. Plain (not `private(set)`) — the
   /// sidebar view binds to this directly.
   var selectedDestination: SidebarDestination?
-  /// `device_preview` carries no serial/correlation id on the wire (see
-  /// `DevicePreview`'s doc comment) — appended immediately before sending
-  /// `.previewDevice(serial:)` so each `devicePreview` reply can be
-  /// attached to the right `deviceConfigs` entry.
-  ///
-  /// A FIFO **queue**, not a single slot: navigating from one device's
-  /// page to another's inside the first page's 400ms debounce window
-  /// leaves that page's stale `saveTask` free to fire its own
-  /// `previewDevice(serial:)` after the new page has already sent its own
-  /// request. A single slot would let whichever request fires last win,
-  /// so the reply for the OTHER serial attaches to the wrong device. This
-  /// is safe as a queue only because the daemon services commands from
-  /// one connection strictly in the order they were sent, so its
-  /// `device_preview` replies arrive in the same order the requests were
-  /// sent — the reply at the front of the queue always belongs to the
-  /// oldest still-pending request.
-  private var pendingPreviewSerials: [String] = []
+  private var nextDeviceRequestGeneration: UInt64 = 0
+  private var deviceConfigRequests: [String: PendingDeviceRequest] = [:]
+  private var latestDeviceConfigGeneration: [DeviceSerial: UInt64] = [:]
+  private var devicePreviewRequests: [String: PendingDeviceRequest] = [:]
+  private var latestDevicePreviewGeneration: [DeviceSerial: UInt64] = [:]
+
+  private var lastInventoryRevision: UInt64?
+  private var hasAuthoritativeInventory = false
+  private var globalScanSessionID: UInt64?
+
+  /// Device commands are unsafe until the current daemon connection has
+  /// supplied its first authoritative inventory snapshot.
+  var deviceActionsAvailable: Bool {
+    hasAuthoritativeInventory
+  }
+
+  func canSendDeviceCommand(to serial: DeviceSerial) -> Bool {
+    DeviceCommandGate.allows(
+      serial: serial,
+      hasAuthoritativeInventory: hasAuthoritativeInventory,
+      devices: devices)
+  }
 
   // MARK: - Protocol 1.7.0: Add Songs picker track resolution
 
   /// Most recent `resolved_tracks` reply, tagged with the slug of the
   /// playlist editor that requested it (resolve-reply correlation
-  /// hardening). `resolved_tracks` carries no correlation id on the wire,
-  /// so `pendingResolveTracks` — a FIFO queue of slugs, mirroring
-  /// `pendingPreviewSerials`'s proven request-order invariant (see its doc
-  /// comment: the daemon services one connection's commands strictly in
-  /// send order, so replies arrive in the same order requests were sent)
-  /// — dequeues the front slug on each reply and tags it here.
+  /// hardening). `pendingResolveTracks` is a FIFO queue because the daemon
+  /// services one connection's commands in send order, so replies retain
+  /// that ordering. Each reply dequeues and is tagged with the front slug.
   ///
   /// This is a single slot, not per-slug storage: only one Add can be in
   /// flight at a time in practice (the sheet disables its Add button while
@@ -226,14 +249,36 @@ final class AppModel {
   func apply(_ ev: DaemonEvent) {
     switch ev {
     case .hello:
-      // A hello marks a fresh (re)connection. The reply-correlation
-      // FIFOs assume replies arrive in request order ON ONE
-      // CONNECTION — entries left over from a dead connection (a
-      // request whose send was dropped, or whose reply died with the
-      // socket) would misattribute the FIRST replies after
-      // reconnect. New pipe, clean slate (sweep finding #3).
-      pendingPreviewSerials.removeAll()
+      // Correlation and monotonic revisions are scoped to one connection.
+      // A reply left behind by a dead socket must not affect the new epoch.
+      nextDeviceRequestGeneration = 0
+      deviceConfigRequests.removeAll()
+      latestDeviceConfigGeneration.removeAll()
+      devicePreviewRequests.removeAll()
+      latestDevicePreviewGeneration.removeAll()
       pendingResolveTracks.removeAll()
+      lastInventoryRevision = nil
+      hasAuthoritativeInventory = false
+      globalScanSessionID = nil
+      isScanning = false
+      devices.removeAll()
+      device = nil
+      phase = .noDevice
+      lastSync = nil
+      pendingPrompt = nil
+      storageText = nil
+      config = nil
+      syncedCount = 0
+      libraryCount = nil
+      selectionPreview = nil
+      lastRunSkippedForSpace = nil
+      lastRunArtwork = nil
+      lastRunDbRestored = false
+      deviceStorage = nil
+      isIpodConnected = false
+      configuredSerial = nil
+      hasSeenConfig = false
+      statusConfigured = false
 
     case .unknown:
       break
@@ -257,7 +302,11 @@ final class AppModel {
     case .playlistDetail(let detail):
       playlistDetail = detail
 
-    case .deviceConfigUpdate(let serial, let selection, let subscriptions, let settings, _):
+    case .deviceConfigUpdate(
+      let serial, let selection, let subscriptions, let settings, let acknowledgedRequestID):
+      guard shouldApplyDeviceConfigResponse(serial: serial, requestID: acknowledgedRequestID) else {
+        break
+      }
       guard var deviceState = devices[serial] else { break }
       var config = deviceState.config ?? .defaultState
       config.selection = selection
@@ -268,9 +317,14 @@ final class AppModel {
 
     case .devicePreview(let preview):
       let serial = preview.serial
-      if pendingPreviewSerials.first == serial {
-        pendingPreviewSerials.removeFirst()
-      }
+      guard
+        shouldApplyDeviceResponse(
+          serial: serial,
+          requestID: preview.acknowledgedRequestID,
+          requests: devicePreviewRequests,
+          latestGeneration: latestDevicePreviewGeneration,
+          allowsUnsolicitedResponse: false)
+      else { break }
       guard var deviceState = devices[serial] else { break }
       deviceState.preview = preview
       if deviceState.config == nil {
@@ -313,7 +367,11 @@ final class AppModel {
       lastSync = info.lastSync
       syncedCount = info.syncedCount
       libraryCount = info.libraryCount
+      let wasScanning = isScanning
       isScanning = (info.state == .scanning)
+      if !isScanning || !wasScanning {
+        globalScanSessionID = nil
+      }
       let targetSyncing: Bool
       switch info.state {
       case .syncing: targetSyncing = true
@@ -322,6 +380,8 @@ final class AppModel {
       if info.state == .scanning {
         // Preserve in-flight scan progress across status rebroadcasts.
         if case .scanning = phase {} else { phase = .scanning(current: 0, total: 0) }
+      } else if hasAuthoritativeInventory {
+        refreshFocusedDeviceProjection()
       } else {
         phase = computePhase(targetSyncing: targetSyncing)
       }
@@ -339,6 +399,9 @@ final class AppModel {
       resolvedTracksRevision += 1
 
     case .deviceInventorySnapshot(let snapshot):
+      guard lastInventoryRevision.map({ snapshot.revision > $0 }) ?? true else { break }
+      lastInventoryRevision = snapshot.revision
+      hasAuthoritativeInventory = true
       devices = DeviceReducer.reduce(snapshot: snapshot, previous: devices)
       refreshFocusedDeviceProjection()
     }
@@ -350,11 +413,24 @@ final class AppModel {
     pendingPrompt = nil
   }
 
-  /// Call immediately before sending `.previewDevice(serial:)` — see
-  /// `pendingPreviewSerials`'s doc comment for why this bookkeeping is
-  /// necessary.
-  func willRequestDevicePreview(serial: String) {
-    pendingPreviewSerials.append(serial)
+  func willRequestDeviceConfig(
+    serial: DeviceSerial, requestID: String, intent: DeviceConfigRequestIntent
+  ) {
+    registerDeviceRequest(
+      serial: serial,
+      requestID: requestID,
+      configIntent: intent,
+      requests: &deviceConfigRequests,
+      latestGeneration: &latestDeviceConfigGeneration)
+  }
+
+  func willRequestDevicePreview(serial: DeviceSerial, requestID: String) {
+    registerDeviceRequest(
+      serial: serial,
+      requestID: requestID,
+      configIntent: nil,
+      requests: &devicePreviewRequests,
+      latestGeneration: &latestDevicePreviewGeneration)
   }
 
   /// Call immediately before sending `.resolveTracks(rules:)` — see
@@ -398,7 +474,8 @@ final class AppModel {
       let event = try? decoder.decode(SyncEvent.self, from: data)
     else { return }
 
-    if let serial, !devices.isEmpty {
+    if let serial {
+      guard hasAuthoritativeInventory else { return }
       guard var state = devices[serial], state.sessionID == sessionID else { return }
       state = DeviceReducer.reduce(syncEvent: event, into: state)
       devices[serial] = state
@@ -417,7 +494,57 @@ final class AppModel {
       return
     }
 
+    guard isScanning else { return }
+    if let globalScanSessionID {
+      guard globalScanSessionID == sessionID else { return }
+    } else {
+      globalScanSessionID = sessionID
+    }
     applyLegacySyncEvent(event)
+  }
+
+  private func registerDeviceRequest(
+    serial: DeviceSerial,
+    requestID: String,
+    configIntent: DeviceConfigRequestIntent?,
+    requests: inout [String: PendingDeviceRequest],
+    latestGeneration: inout [DeviceSerial: UInt64]
+  ) {
+    nextDeviceRequestGeneration += 1
+    let generation = nextDeviceRequestGeneration
+    requests[requestID] = PendingDeviceRequest(
+      serial: serial, generation: generation, configIntent: configIntent)
+    latestGeneration[serial] = generation
+  }
+
+  private func shouldApplyDeviceResponse(
+    serial: DeviceSerial,
+    requestID: String,
+    requests: [String: PendingDeviceRequest],
+    latestGeneration: [DeviceSerial: UInt64],
+    allowsUnsolicitedResponse: Bool
+  ) -> Bool {
+    guard let request = requests[requestID] else { return allowsUnsolicitedResponse }
+    return request.serial == serial && latestGeneration[serial] == request.generation
+  }
+
+  private func shouldApplyDeviceConfigResponse(serial: DeviceSerial, requestID: String) -> Bool {
+    guard let request = deviceConfigRequests[requestID] else {
+      invalidateLatestDeviceConfigRead(for: serial)
+      return true
+    }
+    return request.serial == serial
+      && latestDeviceConfigGeneration[serial] == request.generation
+  }
+
+  private func invalidateLatestDeviceConfigRead(for serial: DeviceSerial) {
+    guard let latestGeneration = latestDeviceConfigGeneration[serial],
+      deviceConfigRequests.values.contains(where: {
+        $0.serial == serial && $0.generation == latestGeneration && $0.configIntent == .read
+      })
+    else { return }
+    nextDeviceRequestGeneration += 1
+    latestDeviceConfigGeneration[serial] = nextDeviceRequestGeneration
   }
 
   private func applyLegacySyncEvent(_ event: SyncEvent) {

@@ -51,6 +51,35 @@ public class PopoverViewModelTests
     }
 
     [Fact]
+    public void Device_snapshot_updates_label_connection_and_storage_atomically()
+    {
+        var vm = new PopoverViewModel();
+        var device = new DeviceSnapshot(
+            new DeviceIdentitySnapshot("SERIAL-B", "iPod Classic", "Beta"),
+            Configured: true,
+            Connected: true,
+            Mount: "B:\\",
+            Phase: "idle",
+            SessionId: null,
+            Storage: new StorageInfo(TotalBytes: 1000, FreeBytes: 400),
+            SyncedCount: 12,
+            LibraryCount: 20,
+            LatestSuccessfulSync: null,
+            LatestAttempt: null,
+            LastTerminalError: null,
+            SelectionRevision: 1,
+            SettingsRevision: 1,
+            SubscriptionsRevision: 1);
+
+        vm.Update(device);
+
+        Assert.Equal("Beta", vm.DeviceLabel);
+        Assert.True(vm.IpodConnected);
+        Assert.False(vm.Syncing);
+        Assert.True(vm.HasStorage);
+    }
+
+    [Fact]
     public void PromptEvent_populates_overlay_state()
     {
         var vm = new PopoverViewModel();
@@ -65,6 +94,107 @@ public class PopoverViewModelTests
         Assert.Equal("Continue", vm.PromptOptions[0]);
         Assert.Equal("Use --no-delete", vm.PromptOptions[1]);
         Assert.Equal("Abort", vm.PromptOptions[2]);
+    }
+
+    [Fact]
+    public void Active_device_context_targets_cancel_pause_and_prompt_to_syncing_device()
+    {
+        var vm = new PopoverViewModel();
+        var context = new SyncEventContext(SessionId: 42, Serial: "SERIAL-B");
+        vm.SetActiveSyncSession(context);
+        vm.Update(Device("SERIAL-B", connected: true, phase: "syncing", sessionId: 42));
+
+        var cancel = vm.CreateCancelSyncCommand("cancel-request");
+        var pause = vm.CreatePauseCommand("pause-request");
+        vm.ApplySyncProgress(new RoutedSyncEvent(
+            context,
+            new PromptEvent(7, "Choose", ["Continue", "Abort"])));
+
+        var prompt = vm.CreatePromptDecisionCommand(choice: 1, "prompt-request");
+
+        Assert.Equal("SERIAL-B", cancel?.Serial);
+        Assert.Equal("SERIAL-B", pause?.Serial);
+        Assert.Equal("SERIAL-B", prompt?.Serial);
+        Assert.Equal(7UL, prompt?.Id);
+        Assert.Equal(1, prompt?.Choice);
+    }
+
+    [Fact]
+    public void Disconnected_drain_keeps_context_but_disables_device_controls()
+    {
+        var vm = new PopoverViewModel();
+        var context = new SyncEventContext(SessionId: 42, Serial: "SERIAL-B");
+        vm.SetActiveSyncSession(context);
+
+        vm.Update(Device("SERIAL-B", connected: false, phase: "disconnected", sessionId: 42));
+
+        Assert.Equal(context, vm.ActiveSyncContext);
+        Assert.False(vm.IpodConnected);
+        Assert.False(vm.Syncing);
+        Assert.True(vm.FinishingSync);
+        Assert.Equal("Finishing sync…", vm.EmptyStateTitle);
+        Assert.False(vm.ShowSyncControls);
+        Assert.Null(vm.CreateCancelSyncCommand("cancel"));
+        Assert.Null(vm.CreatePauseCommand("pause"));
+    }
+
+    [Fact]
+    public void Paused_device_exposes_resume_target_without_active_session()
+    {
+        var vm = new PopoverViewModel();
+
+        vm.Update(Device("SERIAL-B", connected: true, phase: "paused", sessionId: null));
+        var resume = vm.CreateTriggerSyncCommand("SERIAL-A", "resume-request");
+
+        Assert.Equal("SERIAL-B", vm.DisplayedDeviceSerial);
+        Assert.Equal("Resume sync", vm.SyncActionLabel);
+        Assert.True(vm.ShowSyncNowButton);
+        Assert.Equal("SERIAL-B", resume?.Serial);
+    }
+
+    [Fact]
+    public void Stale_session_progress_and_prompt_response_are_rejected()
+    {
+        var vm = new PopoverViewModel();
+        var stale = new SyncEventContext(SessionId: 41, Serial: "SERIAL-B");
+        var active = new SyncEventContext(SessionId: 42, Serial: "SERIAL-B");
+        vm.SetActiveSyncSession(stale);
+        vm.ApplySyncProgress(new RoutedSyncEvent(
+            stale,
+            new PromptEvent(7, "Old prompt", ["Continue"])));
+        vm.SetActiveSyncSession(active);
+
+        vm.ApplySyncProgress(new RoutedSyncEvent(
+            stale,
+            new TrackStartEvent(Current: 9, Total: 10, Label: "stale.flac")));
+
+        Assert.Equal(0, vm.ProgressCurrent);
+        Assert.False(vm.PromptActive);
+        Assert.Null(vm.CreatePromptDecisionCommand(choice: 0, "stale-request"));
+    }
+
+    private static DeviceSnapshot Device(
+        string serial,
+        bool connected,
+        string phase,
+        ulong? sessionId)
+    {
+        return new DeviceSnapshot(
+            new DeviceIdentitySnapshot(serial, "iPod Classic", serial),
+            Configured: true,
+            Connected: connected,
+            Mount: connected ? $"{serial}:\\" : null,
+            Phase: phase,
+            SessionId: sessionId,
+            Storage: null,
+            SyncedCount: 0,
+            LibraryCount: null,
+            LatestSuccessfulSync: null,
+            LatestAttempt: null,
+            LastTerminalError: null,
+            SelectionRevision: 1,
+            SettingsRevision: 1,
+            SubscriptionsRevision: 1);
     }
 
     [Fact]

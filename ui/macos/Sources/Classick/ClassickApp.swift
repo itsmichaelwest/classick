@@ -180,6 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// currently-detected iPod, if any) and clears any error banner from a
   /// prior failed handshake/save.
   func finishSetup(source: String, autoSync: Bool, serial: DeviceSerial) {
+    guard model.canSendDeviceCommand(to: serial) else { return }
     let daemon = Self.setupDaemonSettings(
       autoSync: autoSync,
       preservingRockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
@@ -200,14 +201,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
           serial: $0.identity.serial, model: $0.identity.modelLabel,
           name: $0.identity.name, drive: $0.mountPath ?? "")
       }, preservingCustomSelection: preserveCustomSelection)
-    Task {
-      await daemonClient.send(
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
         .saveConfig(
           source: source,
           daemon: daemon,
           ipod: ipod,
-          requestID: DaemonCommand.newRequestID()))
-    }
+          requestID: DaemonCommand.newRequestID())
+      ])
   }
 
   /// Settings window's debounced edits. `ipod` is omitted (nil) so an
@@ -225,10 +227,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   }
 
   func forgetIpod(serial: DeviceSerial) {
-    Task {
-      await daemonClient.send(
-        DeviceActionCommand.forget(serial: serial, requestID: DaemonCommand.newRequestID()))
-    }
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
+        DeviceActionCommand.forget(serial: serial, requestID: DaemonCommand.newRequestID())
+      ])
   }
 
   /// "Replace Library…" confirmation sheet's confirm action. The UI
@@ -237,22 +240,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// contract on the wire (see `DaemonCommand.replaceLibrary`'s doc
   /// comment): the daemon does not prompt.
   func replaceLibrary(serial: DeviceSerial) {
-    Task {
-      await daemonClient.send(
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
         DeviceActionCommand.replaceLibrary(
-          serial: serial, requestID: DaemonCommand.newRequestID()))
-    }
+          serial: serial, requestID: DaemonCommand.newRequestID())
+      ])
   }
 
   /// "Update existing library for Rockbox" button in Settings — asks the
   /// daemon to re-embed tags/art into already-synced tracks so an iPod
   /// running Rockbox (which doesn't read the iTunesDB) can display them.
   func backfillRockbox(serial: DeviceSerial) {
-    Task {
-      await daemonClient.send(
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
         DeviceActionCommand.backfillRockbox(
-          serial: serial, requestID: DaemonCommand.newRequestID()))
-    }
+          serial: serial, requestID: DaemonCommand.newRequestID())
+      ])
   }
 
   /// Surfaces `model.pendingPrompt` (set by the reducer from a relayed
@@ -263,14 +268,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     guard let serial = model.focusedDeviceSerial else { return }
     let choice = PromptAlert.present(prompt)
     model.clearPendingPrompt()
-    Task {
-      await daemonClient.send(
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
         .decidePrompt(
           id: prompt.id,
           choice: choice,
           serial: serial,
-          requestID: DaemonCommand.newRequestID()))
-    }
+          requestID: DaemonCommand.newRequestID())
+      ])
   }
 
   /// Sync Now / Cancel Sync menu actions. `DaemonClient.send` is async
@@ -278,27 +284,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// closures, so each hop through here spawns a detached-from-the-caller
   /// `Task` to bridge to the actor.
   func syncNow(serial: DeviceSerial) {
-    Task {
-      await daemonClient.send(
-        DeviceActionCommand.sync(serial: serial, requestID: DaemonCommand.newRequestID()))
-    }
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
+        DeviceActionCommand.sync(serial: serial, requestID: DaemonCommand.newRequestID())
+      ])
   }
 
   func cancelSync(serial: DeviceSerial) {
-    Task {
-      await daemonClient.send(
-        DeviceActionCommand.cancel(serial: serial, requestID: DaemonCommand.newRequestID()))
-    }
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
+        DeviceActionCommand.cancel(serial: serial, requestID: DaemonCommand.newRequestID())
+      ])
   }
 
   /// Pause / Resume menu actions. Pause requests a graceful drain +
   /// checkpoint on the daemon side; resume is just a normal sync trigger —
   /// the sync is diff-based, so it continues where it left off.
   func pause(serial: DeviceSerial) {
-    Task {
-      await daemonClient.send(
-        DeviceActionCommand.pause(serial: serial, requestID: DaemonCommand.newRequestID()))
-    }
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
+        DeviceActionCommand.pause(serial: serial, requestID: DaemonCommand.newRequestID())
+      ])
   }
 
   func resume(serial: DeviceSerial) {
@@ -309,8 +318,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// the wire — a fresh `get_status` forces the daemon to push a current
   /// `status_update`, which recomputes phase out of `.error` if whatever
   /// caused it has cleared.
-  func retry(serial _: DeviceSerial) {
-    Task { await daemonClient.send(.getStatus(requestID: DaemonCommand.newRequestID())) }
+  func retry(serial: DeviceSerial) {
+    sendDeviceCommands(
+      serial: serial,
+      commands: [.getStatus(requestID: DaemonCommand.newRequestID())])
   }
 
   /// Sidebar's "+ New Playlist" flow (Task 3). The daemon replies with an
@@ -372,45 +383,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// `requestLibraryAndSelection`'s window-appear batch since it's scoped
   /// to whichever device page is showing, not global app state.
   func loadDeviceConfig(serial: String) {
-    Task {
-      await daemonClient.send(
+    guard model.canSendDeviceCommand(to: serial) else { return }
+    let configRequestID = DaemonCommand.newRequestID()
+    let previewRequestID = DaemonCommand.newRequestID()
+    model.willRequestDeviceConfig(
+      serial: serial, requestID: configRequestID, intent: .read)
+    model.willRequestDevicePreview(serial: serial, requestID: previewRequestID)
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
         .getDeviceConfig(
           serial: serial,
-          requestID: DaemonCommand.newRequestID()))
-    }
-    previewDevice(serial: serial)
+          requestID: configRequestID),
+        .previewDevice(serial: serial, requestID: previewRequestID),
+      ])
   }
 
   /// Live capacity/skip preview for a candidate device selection/
-  /// subscription edit. `device_preview` carries no serial on the wire, so
-  /// `willRequestDevicePreview` bookkeeping (mirrors `previewSelection`
-  /// above) lets the reducer attach the reply to the right device.
+  /// subscription edit. Registering the exact request ID lets the reducer
+  /// reject an older preview that arrives after a newer request.
   func previewDevice(serial: String) {
-    model.willRequestDevicePreview(serial: serial)
-    Task {
-      await daemonClient.send(
+    guard model.canSendDeviceCommand(to: serial) else { return }
+    let requestID = DaemonCommand.newRequestID()
+    model.willRequestDevicePreview(serial: serial, requestID: requestID)
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
         .previewDevice(
           serial: serial,
-          requestID: DaemonCommand.newRequestID()))
-    }
+          requestID: requestID)
+      ])
   }
 
-  /// Device Music page's debounced auto-save (Task 5). `settings` is
-  /// always omitted (nil = "don't change") — this page only ever edits
-  /// `selection`/`subscriptions`; per-device settings are the device
-  /// Settings page's job (Task 6).
-  func saveDeviceConfig(
+  /// Device Music edits are one ordered socket batch: the daemon persists
+  /// the save before it evaluates the following preview.
+  func saveAndPreviewDeviceConfig(
     serial: String, selection: SelectionState?, subscriptions: SubscriptionsWire?
   ) {
-    Task {
-      await daemonClient.send(
+    guard model.canSendDeviceCommand(to: serial) else { return }
+    let saveRequestID = DaemonCommand.newRequestID()
+    let previewRequestID = DaemonCommand.newRequestID()
+    model.willRequestDeviceConfig(
+      serial: serial, requestID: saveRequestID, intent: .write)
+    model.willRequestDevicePreview(serial: serial, requestID: previewRequestID)
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
         .saveDeviceConfig(
           serial: serial,
           selection: selection,
           subscriptions: subscriptions,
           settings: nil,
-          requestID: DaemonCommand.newRequestID()))
-    }
+          requestID: saveRequestID),
+        .previewDevice(serial: serial, requestID: previewRequestID),
+      ])
   }
 
   /// Device Settings page's debounced auto-save (Task 6): the mirror image
@@ -418,12 +444,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// omitted (nil = "don't change") via `DeviceSettingsLogic.saveSettingsCommand`,
   /// so a toggle edit here can never disturb the Music page's sync intent.
   func saveDeviceSettings(serial: String, settings: DeviceSettingsWire) {
-    Task {
-      await daemonClient.send(
+    guard model.canSendDeviceCommand(to: serial) else { return }
+    let requestID = DaemonCommand.newRequestID()
+    model.willRequestDeviceConfig(serial: serial, requestID: requestID, intent: .write)
+    sendDeviceCommands(
+      serial: serial,
+      commands: [
         DeviceSettingsLogic.saveSettingsCommand(
           serial: serial,
           settings: settings,
-          requestID: DaemonCommand.newRequestID()))
+          requestID: requestID)
+      ])
+  }
+
+  private func sendDeviceCommands(serial: DeviceSerial, commands: [DaemonCommand]) {
+    guard model.canSendDeviceCommand(to: serial) else { return }
+    Task { [weak self] in
+      guard let self, self.model.canSendDeviceCommand(to: serial) else { return }
+      await self.daemonClient.send(commands)
     }
   }
 
@@ -539,9 +577,8 @@ struct ClassickApp: App {
         onDeletePlaylist: { slug in appDelegate.deletePlaylist(slug: slug) },
         onResolveTracks: { slug, rules in appDelegate.resolveTracks(slug: slug, rules: rules) },
         onLoadDeviceConfig: { serial in appDelegate.loadDeviceConfig(serial: serial) },
-        onPreviewDevice: { serial in appDelegate.previewDevice(serial: serial) },
-        onSaveDeviceConfig: { serial, selection, subscriptions in
-          appDelegate.saveDeviceConfig(
+        onSaveAndPreviewDeviceConfig: { serial, selection, subscriptions in
+          appDelegate.saveAndPreviewDeviceConfig(
             serial: serial, selection: selection, subscriptions: subscriptions)
         },
         onSaveDeviceSettings: { serial, settings in

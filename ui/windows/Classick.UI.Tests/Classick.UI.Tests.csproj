@@ -45,6 +45,8 @@
              Link="LinkedViewModels\WizardViewModel.cs" />
     <Compile Include="..\Classick.UI\ViewModels\PopoverViewModel.cs"
              Link="LinkedViewModels\PopoverViewModel.cs" />
+    <Compile Include="..\Classick.UI\ViewModels\PopoverViewModel.SyncSession.cs"
+             Link="LinkedViewModels\PopoverViewModel.SyncSession.cs" />
     <Compile Include="..\Classick.UI\ViewModels\HistoryEntryViewModel.cs"
              Link="LinkedViewModels\HistoryEntryViewModel.cs" />
     <Compile Include="..\Classick.UI\Notifications\NotificationDecision.cs"

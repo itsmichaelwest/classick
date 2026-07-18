@@ -23,8 +23,7 @@ struct DeviceMusicPage: View {
   var serial: String
   var onSyncNow: (DeviceSerial) -> Void
   var onLoadDeviceConfig: (String) -> Void
-  var onPreviewDevice: (String) -> Void
-  var onSaveDeviceConfig:
+  var onSaveAndPreviewDeviceConfig:
     (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> Void
   // Required (no no-op default) — see `MainWindow`'s doc comment on
   // `onSavePlaylist` for why a defaulted closure here would be exactly
@@ -56,6 +55,7 @@ struct DeviceMusicPage: View {
     DeviceSurfaceLogic.state(serial: serial, in: model.devices)
   }
   private var config: DeviceConfigState? { deviceState?.config }
+  private var canEditDevice: Bool { model.canSendDeviceCommand(to: serial) }
   private var isConnected: Bool { deviceState?.connected == true }
   private var surfacePhase: Phase {
     DeviceSurfaceLogic.phase(for: deviceState, globalPhase: model.phase)
@@ -95,7 +95,7 @@ struct DeviceMusicPage: View {
           // latched `userEdited`, blocked the real config from ever
           // seeding, and debounced-saved the wrong selection over
           // the persisted one.
-          .disabled(!seededFromModel)
+          .disabled(!seededFromModel || !canEditDevice)
           // HIDDEN (not disabled) while disconnected: a permanently
           // washed-out prominent capsule reads as broken chrome, and
           // the bottom device bar already explains "<name> not
@@ -115,8 +115,12 @@ struct DeviceMusicPage: View {
       // the reply arriving after this view appears. Mirrors the retired
       // LibraryView's onAppear+onChange dual-coverage comment.
       .task(id: serial) {
+        guard canEditDevice else { return }
         seedIfNeeded()
         onLoadDeviceConfig(serial)
+      }
+      .onChange(of: canEditDevice) { _, isAvailable in
+        handleDeviceAvailabilityChange(isAvailable)
       }
       .onChange(of: config?.selection) { _, _ in seedIfNeeded() }
       .onChange(of: config?.subscriptions) { _, _ in seedIfNeeded() }
@@ -131,16 +135,14 @@ struct DeviceMusicPage: View {
           isSeeding = false
           return
         }
+        guard canEditDevice else { return }
         userEdited = true
         scheduleSave(newDraft)
       }
-      // Belt-and-suspenders alongside the `pendingPreviewSerials` queue
-      // fix: cancels an in-flight debounce the instant this page is
-      // navigated away from, so a stale `saveTask` firing after teardown
-      // is minimized rather than merely tolerated. (A stale
-      // `save_device_config` itself is harmless — it's serial-keyed — it
-      // was only the paired `previewDevice` request that could
-      // misattribute without the queue fix.)
+      // Belt-and-suspenders alongside request-generation correlation:
+      // cancels an in-flight debounce the instant this page is
+      // navigated away from. Reconnects use the same cancellation path
+      // through `handleDeviceAvailabilityChange`.
       .onDisappear { saveTask?.cancel() }
   }
 
@@ -223,7 +225,7 @@ struct DeviceMusicPage: View {
   /// draft's checked set otherwise. `.cascading` style so a checked artist
   /// also covers future albums — see this view's doc comment.
   private var browserMode: LibraryBrowser.Mode {
-    guard draft.mode != .all else { return .browse }
+    guard canEditDevice, draft.mode != .all else { return .browse }
     return .select(
       checked: Binding(get: { draft.checked }, set: { draft.checked = $0 }), style: .cascading)
   }
@@ -306,6 +308,7 @@ struct DeviceMusicPage: View {
           ) { EmptyView() }
           .toggleStyle(.checkbox)
           .labelsHidden()
+          .disabled(!canEditDevice)
           Text(playlist.name)
             .lineLimit(1)
             .truncationMode(.tail)
@@ -375,14 +378,40 @@ struct DeviceMusicPage: View {
   private func scheduleSave(_ d: MusicDraft) {
     saveTask?.cancel()
     saveTask = Task {
-      try? await Task.sleep(for: .milliseconds(400))
-      guard !Task.isCancelled else { return }
-      onSaveDeviceConfig(
+      guard
+        await DeviceDraftSaveGate.waitUntilReady(
+          serial: serial, model: model)
+      else { return }
+      onSaveAndPreviewDeviceConfig(
         serial,
         SelectionState(mode: d.mode, rules: Array(d.checked)),
         SubscriptionsWire(playlists: Array(d.subscriptions).sorted()))
-      onPreviewDevice(serial)
     }
+  }
+
+  private func handleDeviceAvailabilityChange(_ isAvailable: Bool) {
+    guard isAvailable else {
+      saveTask?.cancel()
+      seededFromModel = false
+      userEdited = false
+      isSeeding = false
+      rememberedRules.removeAll()
+      return
+    }
+    seedIfNeeded()
+    onLoadDeviceConfig(serial)
+  }
+}
+
+@MainActor
+enum DeviceDraftSaveGate {
+  static func waitUntilReady(
+    delay: Duration = .milliseconds(400),
+    serial: DeviceSerial,
+    model: AppModel
+  ) async -> Bool {
+    try? await Task.sleep(for: delay)
+    return !Task.isCancelled && model.canSendDeviceCommand(to: serial)
   }
 }
 
@@ -438,8 +467,8 @@ enum DeviceSurfaceLogic {
     NavigationStack {
       DeviceMusicPage(
         model: model, serial: PreviewFixtures.pairedIpod.serial,
-        onSyncNow: { _ in }, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
-        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
+        onSyncNow: { _ in }, onLoadDeviceConfig: { _ in },
+        onSaveAndPreviewDeviceConfig: { _, _, _ in }, onScan: {})
     }
     .frame(width: 760, height: 560)
   }

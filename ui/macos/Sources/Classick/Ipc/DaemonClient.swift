@@ -61,11 +61,22 @@ actor DaemonClient {
   }
 
   func send(_ cmd: DaemonCommand) async {
+    sendCommands([cmd])
+  }
+
+  func send(_ commands: [DaemonCommand]) async {
+    sendCommands(commands)
+  }
+
+  private func sendCommands(_ commands: [DaemonCommand]) {
     guard fd >= 0 else {
-      logger.warning("send(\(String(describing: cmd), privacy: .public)) dropped — not connected")
+      logger.warning(
+        "send(\(String(describing: commands), privacy: .public)) dropped — not connected")
       return
     }
-    writeCommand(cmd, to: fd)
+    for command in commands {
+      writeCommand(command, to: fd)
+    }
   }
 
   // MARK: - Connect / reconnect loop

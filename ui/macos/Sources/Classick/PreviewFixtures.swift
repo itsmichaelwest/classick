@@ -343,7 +343,7 @@
           ),
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
           acknowledgedRequestID: requestID))
-      m.willRequestDevicePreview(serial: pairedIpod.serial)
+      m.willRequestDevicePreview(serial: pairedIpod.serial, requestID: requestID)
       m.apply(.devicePreview(devicePreviewFits))
       return m
     }
@@ -364,7 +364,7 @@
           subscriptions: SubscriptionsWire(playlists: [electronicEssentials.slug]),
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
           acknowledgedRequestID: requestID))
-      m.willRequestDevicePreview(serial: pairedIpod.serial)
+      m.willRequestDevicePreview(serial: pairedIpod.serial, requestID: requestID)
       m.apply(
         .devicePreview(
           DevicePreview(
@@ -407,7 +407,7 @@
           ]),
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
           acknowledgedRequestID: requestID))
-      m.willRequestDevicePreview(serial: pairedIpod.serial)
+      m.willRequestDevicePreview(serial: pairedIpod.serial, requestID: requestID)
       m.apply(.devicePreview(devicePreviewOverfull))
       m.apply(
         .deviceInventorySnapshot(

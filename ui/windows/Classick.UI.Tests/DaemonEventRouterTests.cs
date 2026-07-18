@@ -83,37 +83,46 @@ public class DaemonEventRouterTests
     }
 
     [Fact]
-    public async Task Sync_event_is_re_parsed_as_ipc_event_and_routed()
+    public async Task Sync_event_preserves_device_and_session_identity()
     {
         var channel = Channel.CreateUnbounded<object>();
-        IpcEvent? routed = null;
+        var received = new TaskCompletionSource<RoutedSyncEvent>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         var router = new DaemonEventRouter(channel.Reader);
-        router.IpcEventReceived += e => routed = e;
+        router.SyncEventReceived += received.SetResult;
 
         router.Start();
-        // Wrapped sync subprocess event:
-        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""track_done""}", "A", 11));
-        await Task.Delay(50);
+        await channel.Writer.WriteAsync(Inventory(
+            revision: 1,
+            ("A", "idle", null),
+            ("B", "syncing", 11)));
+        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""track_done""}", "b", 11));
 
-        Assert.NotNull(routed);
-        Assert.IsType<TrackDoneEvent>(routed);
-        router.Stop();
+        var routed = await received.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.IsType<TrackDoneEvent>(routed.Event);
+        Assert.Equal("B", routed.Context.Serial);
+        Assert.Equal(11UL, routed.Context.SessionId);
+        await router.StopAsync();
     }
 
     [Fact]
-    public async Task Paused_sync_event_is_re_parsed_and_routed()
+    public async Task Sync_event_from_stale_session_is_rejected()
     {
         var channel = Channel.CreateUnbounded<object>();
-        IpcEvent? routed = null;
+        var received = new TaskCompletionSource<RoutedSyncEvent>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         var router = new DaemonEventRouter(channel.Reader);
-        router.IpcEventReceived += item => routed = item;
+        router.SyncEventReceived += received.SetResult;
 
         router.Start();
-        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""paused""}", "A", 11));
-        await Task.Delay(50);
+        await channel.Writer.WriteAsync(Inventory(revision: 1, ("B", "syncing", 12)));
+        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""track_done""}", "B", 11));
+        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""paused""}", "B", 12));
 
-        Assert.IsType<PausedEvent>(routed);
-        router.Stop();
+        var routed = await received.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.IsType<PausedEvent>(routed.Event);
+        Assert.Equal(12UL, routed.Context.SessionId);
+        await router.StopAsync();
     }
 
     [Fact]
@@ -170,5 +179,29 @@ public class DaemonEventRouterTests
         var resolved = Assert.IsType<ResolvedTracksEvent>(received);
         Assert.Equal("resolve", resolved.AcknowledgedRequestId);
         router.Stop();
+    }
+
+    private static DeviceInventorySnapshotEvent Inventory(
+        ulong revision,
+        params (string Serial, string Phase, ulong? SessionId)[] devices)
+    {
+        return new DeviceInventorySnapshotEvent(
+            revision,
+            devices.Select(device => new DeviceSnapshot(
+                new DeviceIdentitySnapshot(device.Serial, "iPod"),
+                Configured: true,
+                Connected: true,
+                Mount: $"{device.Serial}:\\",
+                Phase: device.Phase,
+                SessionId: device.SessionId,
+                Storage: null,
+                SyncedCount: 0,
+                LibraryCount: null,
+                LatestSuccessfulSync: null,
+                LatestAttempt: null,
+                LastTerminalError: null,
+                SelectionRevision: 0,
+                SettingsRevision: 0,
+                SubscriptionsRevision: 0)).ToArray());
     }
 }

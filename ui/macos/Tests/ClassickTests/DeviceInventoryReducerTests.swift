@@ -162,6 +162,62 @@ final class DeviceInventoryReducerTests: XCTestCase {
     XCTAssertNil(model.focusedDeviceSerial)
   }
 
+  func testOlderOrDuplicateInventoryRevisionCannotRollBackSessionState() {
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(revision: 8, devices: [device("A", phase: .syncing, sessionID: 42)])))
+    model.apply(
+      .syncEvent(
+        line: #"{"type":"track_start","current":7,"total":20,"label":"Current"}"#,
+        serial: "A", sessionID: 42))
+
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(revision: 8, devices: [device("A", phase: .syncing, sessionID: 41)])))
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(revision: 7, devices: [device("A", phase: .syncing, sessionID: 41)])))
+    model.apply(
+      .syncEvent(
+        line: #"{"type":"track_start","current":19,"total":20,"label":"Stale"}"#,
+        serial: "A", sessionID: 41))
+
+    XCTAssertEqual(model.devices["A"]?.sessionID, 42)
+    XCTAssertEqual(model.devices["A"]?.syncProgress?.current, 7)
+    XCTAssertEqual(model.devices["A"]?.syncProgress?.label, "Current")
+  }
+
+  func testHelloStartsNewInventoryRevisionEpoch() {
+    let model = AppModel()
+    model.apply(.deviceInventorySnapshot(snapshot(revision: 8, devices: [device("A")])))
+
+    model.apply(.hello(protocolVersion: "2.0.0", coreVersion: "2.0.0"))
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(
+          revision: 1,
+          devices: [device("A", connected: false, mount: nil, phase: .disconnected)])))
+
+    XCTAssertEqual(model.devices["A"]?.phase, .disconnected)
+    XCTAssertFalse(model.devices["A"]?.connected ?? true)
+  }
+
+  func testReconnectDropsDeviceSyncEventsUntilFreshInventoryArrives() {
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(revision: 8, devices: [device("A", phase: .syncing, sessionID: 42)])))
+    model.apply(.hello(protocolVersion: "2.0.0", coreVersion: "2.0.0"))
+
+    model.apply(
+      .syncEvent(
+        line: #"{"type":"track_start","current":9,"total":20,"label":"Too early"}"#,
+        serial: "A", sessionID: 42))
+
+    XCTAssertNil(model.devices["A"]?.syncProgress)
+  }
+
   private func snapshot(revision: UInt64, devices: [DeviceSnapshotWire]) -> DeviceInventorySnapshot
   {
     DeviceInventorySnapshot(revision: revision, devices: devices)

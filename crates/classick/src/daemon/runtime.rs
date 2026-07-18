@@ -329,12 +329,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
         config_file::device_registry_path(&config_path),
         legacy_identity.as_ref(),
     )?;
-    if let Some(serial) = registry
-        .records()
-        .into_iter()
-        .find(|record| record.configured)
-        .map(|record| record.serial)
-    {
+    if let Some(serial) = unique_configured_serial(&registry) {
         history.migrate_legacy_entries(&serial)?;
     }
     let mut state = RuntimeState::new();
@@ -709,13 +704,16 @@ fn handle_internal_event(
                 );
                 return;
             }
+            let Some(name) = name else {
+                return;
+            };
             let Some(connected) = state.connected_device_mut(&serial) else {
                 return;
             };
-            if connected.name == name {
+            if connected.name.as_ref() == Some(&name) {
                 return;
             }
-            connected.name = name.clone();
+            connected.name = Some(name);
             let connected = connected.clone();
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -759,6 +757,21 @@ fn handle_internal_event(
             let serial = session
                 .serial
                 .expect("device sync session must carry its raw serial");
+
+            if let Some(detached) = state.take_detached_terminal_intent(session_id) {
+                if !detached.persisted {
+                    persist_terminal_entry(state, history, detached.entry);
+                }
+                broadcast_status(
+                    event_tx,
+                    state,
+                    registry,
+                    config_path,
+                    history,
+                    *library_count_cache,
+                );
+                return;
+            }
 
             let (history_outcome, error_message, summary, db_restored) = match outcome {
                 Ok(OrchestratorOutcome::Completed {
@@ -821,14 +834,7 @@ fn handle_internal_event(
                 session.started_at_unix_secs,
                 db_restored,
             );
-            match history.append(entry.clone()) {
-                Ok(()) => state.clear_retained_terminal_attempt(&serial),
-                Err(error) => {
-                    let message = format!("failed to persist sync history: {error:#}");
-                    tracing::error!("daemon: {message}");
-                    state.retain_terminal_attempt(entry, message);
-                }
-            }
+            persist_terminal_entry(state, history, entry);
             broadcast_status(
                 event_tx,
                 state,
@@ -999,7 +1005,7 @@ fn handle_device_event(
             }
         }
         DeviceEvent::Disconnected { serial } => {
-            state.disconnect(&serial);
+            let was_connected = state.disconnect(&serial).is_some();
             let _ = event_tx.send(DaemonEvent::DeviceDisconnected {
                 serial: serial.clone(),
             });
@@ -1008,14 +1014,18 @@ fn handle_device_event(
             // is still running — its SyncCompleted will arrive later and
             // be silently dropped (handle_internal_event checks for the
             // already-Idle case).
-            if let Some(s) = state.active_session().cloned() {
+            if let Some(s) = state.active_session().filter(|_| was_connected).cloned() {
                 if s.serial
                     .as_deref()
                     .is_some_and(|active| same_serial(active, &serial))
                 {
-                    state.cancel_and_finish(s.id);
-                    let _ = history.append(make_history_entry(
-                        serial.clone(),
+                    state.signal_cancel(s.id);
+                    let admitted_serial = s
+                        .serial
+                        .clone()
+                        .expect("device sync session must carry its raw serial");
+                    let entry = make_history_entry(
+                        admitted_serial,
                         s.id,
                         s.trigger.clone(),
                         SyncOutcome::Aborted,
@@ -1023,7 +1033,9 @@ fn handle_device_event(
                         None,
                         s.started_at_unix_secs,
                         false,
-                    ));
+                    );
+                    let persisted = persist_terminal_entry(state, history, entry.clone());
+                    state.record_detached_terminal_intent(s.id, entry, persisted);
                 }
             }
         }
@@ -1188,6 +1200,38 @@ fn make_history_entry(
     }
 }
 
+fn unique_configured_serial(registry: &DeviceRegistry) -> Option<String> {
+    let configured: Vec<_> = registry
+        .records()
+        .into_iter()
+        .filter(|record| record.configured)
+        .map(|record| record.serial)
+        .collect();
+    match configured.as_slice() {
+        [serial] => Some(serial.clone()),
+        _ => None,
+    }
+}
+
+fn persist_terminal_entry(
+    state: &mut RuntimeState,
+    history: &HistoryService,
+    entry: HistoryEntry,
+) -> bool {
+    match history.append(entry.clone()) {
+        Ok(()) => {
+            state.clear_retained_terminal_attempt(&entry.serial);
+            true
+        }
+        Err(error) => {
+            let message = format!("failed to persist sync history: {error:#}");
+            tracing::error!("daemon: {message}");
+            state.retain_terminal_attempt(entry, message);
+            false
+        }
+    }
+}
+
 /// Map the runtime state to the wire's `status_update.state`. A `Scan`
 /// session reports `Scanning`; a real sync reports `Syncing`.
 fn state_label(state: &RuntimeState) -> DaemonStateLabel {
@@ -1246,7 +1290,7 @@ fn build_status_update(
         .as_deref()
         .and_then(|serial| crate::daemon::library::selected_library_count(config_path, serial))
         .or(library_count);
-    let entries = history.read();
+    let entries = history.read_for_v2_wire();
     DaemonEvent::StatusUpdate {
         state: state_label(state),
         configured,
@@ -1580,7 +1624,7 @@ fn handle_client_command(
             }
         }
         DaemonCommand::GetHistory { limit, request_id } => {
-            let mut entries = history.read();
+            let mut entries = history.read_for_v2_wire();
             let start = entries.len().saturating_sub(limit);
             entries.drain(..start);
             let _ = reply.send(DaemonEvent::HistoryUpdate {
@@ -2451,6 +2495,52 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_ipod_name_does_not_erase_the_cached_registry_name() {
+        let mut named = detected("RAW-A");
+        named.name = Some("Michael's iPod".to_string());
+        let mut state = RuntimeState::new();
+        state.connect(named.clone());
+        let generation = state.connection_generation("RAW-A").unwrap();
+        let mut registry = registry(&["RAW-A"]);
+        registry.observe(&named, 1).unwrap();
+        let (event_tx, _) = broadcast::channel(8);
+        let history = HistoryService::new(std::env::temp_dir().join(format!(
+            "classick-unresolved-name-history-{}.json",
+            std::process::id()
+        )));
+        let config_path = std::env::temp_dir().join(format!(
+            "classick-unresolved-name-config-{}.toml",
+            std::process::id()
+        ));
+        let mut library_count = None;
+        let mut revision = ConfigRevision::default();
+
+        handle_internal_event(
+            InternalEvent::IpodNameResolved {
+                serial: "RAW-A".to_string(),
+                connection_generation: generation,
+                name: None,
+            },
+            &mut state,
+            &event_tx,
+            &history,
+            &mut registry,
+            &config_path,
+            &mut library_count,
+            &mut revision,
+        );
+
+        assert_eq!(
+            state.connected_device("RAW-A").unwrap().name.as_deref(),
+            Some("Michael's iPod")
+        );
+        assert_eq!(
+            registry.record("RAW-A").unwrap().name.as_deref(),
+            Some("Michael's iPod")
+        );
+    }
+
+    #[test]
     fn forget_only_targets_the_configured_device() {
         let command = DaemonCommand::ForgetIpod {
             serial: "RAW-B".to_string(),
@@ -2591,6 +2681,22 @@ mod tests {
 
         assert_eq!(entry.serial, " A ");
         assert_eq!(entry.session_id, Some(42));
+    }
+
+    #[test]
+    fn legacy_history_has_an_authority_only_with_one_configured_device() {
+        assert_eq!(
+            unique_configured_serial(&registry(&["RAW-A"])),
+            Some("RAW-A".to_string())
+        );
+        assert_eq!(
+            unique_configured_serial(&registry(&["RAW-A", "RAW-B"])),
+            None
+        );
+
+        let mut unconfigured = registry(&["RAW-A"]);
+        unconfigured.forget("RAW-A").unwrap();
+        assert_eq!(unique_configured_serial(&unconfigured), None);
     }
 
     fn manifest_with_track_count(count: usize) -> crate::manifest::Manifest {

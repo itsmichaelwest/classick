@@ -189,16 +189,28 @@ public sealed partial class PopoverWindow : Window
 
     private async void OnSyncNow(object sender, RoutedEventArgs e)
     {
-        if (App.ConfiguredSerial is not { } serial) return;
-        try { await _daemon.SendAsync(new TriggerSyncCommand("manual", serial, Guid.NewGuid().ToString("N"))); }
+        var command = ViewModel.CreateTriggerSyncCommand(
+            App.ConfiguredSerial,
+            Guid.NewGuid().ToString("N"));
+        if (command is null) return;
+        try { await _daemon.SendAsync(command); }
         catch (Exception ex) { Debug.WriteLine($"popover: trigger_sync failed: {ex}"); }
     }
 
     private async void OnCancelSync(object sender, RoutedEventArgs e)
     {
-        if (App.ConfiguredSerial is not { } serial) return;
-        try { await _daemon.SendAsync(new CancelSyncCommand(serial, Guid.NewGuid().ToString("N"))); }
+        var command = ViewModel.CreateCancelSyncCommand(Guid.NewGuid().ToString("N"));
+        if (command is null) return;
+        try { await _daemon.SendAsync(command); }
         catch (Exception ex) { Debug.WriteLine($"popover: cancel_sync failed: {ex}"); }
+    }
+
+    private async void OnPauseSync(object sender, RoutedEventArgs e)
+    {
+        var command = ViewModel.CreatePauseCommand(Guid.NewGuid().ToString("N"));
+        if (command is null) return;
+        try { await _daemon.SendAsync(command); }
+        catch (Exception ex) { Debug.WriteLine($"popover: pause failed: {ex}"); }
     }
 
     private void OnOpenSettings(object sender, RoutedEventArgs e)
@@ -232,8 +244,8 @@ public sealed partial class PopoverWindow : Window
             return;
         }
 
-        var id = ViewModel.PromptId;
-        if (App.ConfiguredSerial is not { } serial) return;
+        var command = ViewModel.CreatePromptDecisionCommand(index, Guid.NewGuid().ToString("N"));
+        if (command is null) return;
         // Optimistic dismiss — the daemon's response is fire-and-
         // forward; keeping the overlay up until a TrackStart arrives
         // would leave the user staring at the prompt while the
@@ -241,7 +253,7 @@ public sealed partial class PopoverWindow : Window
         ViewModel.ClearPrompt();
         try
         {
-            await _daemon.SendAsync(new DecidePromptCommand(id, index, serial, Guid.NewGuid().ToString("N")));
+            await _daemon.SendAsync(command);
         }
         catch (Exception ex)
         {

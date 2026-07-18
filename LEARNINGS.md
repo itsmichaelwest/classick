@@ -602,3 +602,11 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   idle/clean snapshot with no latest attempt hides a real durability failure;
   surface the retained attempt and persistence error until a later durable
   history append succeeds.
+- **A routed sync event must keep its serial and session attached to the inner
+  progress event.** Unwrapping only the subprocess payload makes Windows fall
+  back to the configured iPod for cancel, pause, and prompt replies; validate
+  the envelope against the authoritative inventory session before updating UI.
+- **An active session id does not imply that its iPod is still connected.** A
+  cancellation drain retains session ownership after unplug, so controls must
+  keep the context for stale-event filtering while rendering a disconnected,
+  non-interactive finishing state.

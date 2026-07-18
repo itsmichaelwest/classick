@@ -11,6 +11,31 @@ import XCTest
 /// picker). Every cell of the 3x3 `SelectionMode` transition truth table is
 /// covered explicitly below, per the plan's mandate.
 final class DeviceMusicLogicTests: XCTestCase {
+  @MainActor
+  func testDebouncedDeviceSaveScheduledBeforeHelloIsIgnored() async {
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 1,
+          devices: [
+            DeviceSnapshotWire(
+              identity: .init(serial: "0xA", modelLabel: "iPod Classic", name: nil),
+              configured: true, connected: true, mount: "/Volumes/IPOD", phase: .idle,
+              sessionID: nil, storage: nil, syncedCount: 0, libraryCount: nil,
+              latestSuccessfulSync: nil, latestAttempt: nil, lastTerminalError: nil,
+              selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0)
+          ])))
+
+    let pending = Task {
+      await DeviceDraftSaveGate.waitUntilReady(
+        delay: .milliseconds(10), serial: "0xA", model: model)
+    }
+    model.apply(.hello(protocolVersion: "2.0.0", coreVersion: "2.0.0"))
+
+    let shouldSend = await pending.value
+    XCTAssertFalse(shouldSend)
+  }
   private let radiohead = LibraryArtist(
     name: "Radiohead",
     albums: [

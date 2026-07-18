@@ -14,6 +14,11 @@ pub(crate) struct SessionControls {
     prompt: mpsc::UnboundedSender<(u64, i32)>,
 }
 
+pub(crate) struct DetachedTerminalIntent {
+    pub(crate) entry: crate::daemon::history::HistoryEntry,
+    pub(crate) persisted: bool,
+}
+
 impl SessionControls {
     pub(crate) fn new(
         cancel: oneshot::Sender<()>,
@@ -34,6 +39,7 @@ pub(crate) struct RuntimeState {
     connected: BTreeMap<String, DetectedIpod>,
     connection_generations: BTreeMap<String, u64>,
     next_connection_generation: u64,
+    detached_terminal_intents: BTreeMap<SessionId, DetachedTerminalIntent>,
     retained_terminal_attempts: BTreeMap<String, crate::daemon::history::HistoryEntry>,
     terminal_persistence_errors: BTreeMap<String, String>,
 }
@@ -46,6 +52,7 @@ impl RuntimeState {
             connected: BTreeMap::new(),
             connection_generations: BTreeMap::new(),
             next_connection_generation: 0,
+            detached_terminal_intents: BTreeMap::new(),
             retained_terminal_attempts: BTreeMap::new(),
             terminal_persistence_errors: BTreeMap::new(),
         }
@@ -85,11 +92,37 @@ impl RuntimeState {
         Some(session)
     }
 
-    pub(crate) fn cancel_and_finish(&mut self, id: SessionId) -> Option<SyncSession> {
+    pub(crate) fn signal_cancel(&mut self, id: SessionId) -> bool {
+        if self.admission.session(id).is_none() {
+            return false;
+        }
         if let Some(cancel) = self.take_cancel(id) {
             let _ = cancel.send(());
         }
-        self.finish(id)
+        true
+    }
+
+    pub(crate) fn record_detached_terminal_intent(
+        &mut self,
+        id: SessionId,
+        entry: crate::daemon::history::HistoryEntry,
+        persisted: bool,
+    ) {
+        assert!(
+            self.admission.session(id).is_some(),
+            "cannot detach an unknown session {id}"
+        );
+        let previous = self
+            .detached_terminal_intents
+            .insert(id, DetachedTerminalIntent { entry, persisted });
+        assert!(previous.is_none(), "session {id} was already detached");
+    }
+
+    pub(crate) fn take_detached_terminal_intent(
+        &mut self,
+        id: SessionId,
+    ) -> Option<DetachedTerminalIntent> {
+        self.detached_terminal_intents.remove(&id)
     }
 
     pub(crate) fn active_session(&self) -> Option<&SyncSession> {
@@ -234,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_and_finish_signals_before_removing_controls() {
+    fn cancelling_keeps_the_session_admitted_until_matching_completion() {
         let mut state = RuntimeState::new();
         let session = state
             .try_admit_device(SyncTrigger::Manual, "RAW-A", Path::new("/Volumes/A"))
@@ -242,7 +275,17 @@ mod tests {
         let (controls, mut cancel_rx) = controls();
         state.install_controls(session.id, controls);
 
-        assert_eq!(state.cancel_and_finish(session.id), Some(session));
+        assert!(state.signal_cancel(session.id));
         assert_eq!(cancel_rx.try_recv(), Ok(()));
+        assert_eq!(state.active_session(), Some(&session));
+        assert_eq!(
+            state.try_admit_device(SyncTrigger::Manual, "RAW-B", Path::new("/Volumes/B")),
+            Err(AdmissionRejection::AtCapacity {
+                active_session_id: session.id,
+            })
+        );
+
+        assert_eq!(state.finish(session.id), Some(session));
+        assert!(state.is_idle());
     }
 }

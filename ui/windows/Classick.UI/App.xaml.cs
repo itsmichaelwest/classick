@@ -30,31 +30,8 @@ public partial class App : Application
     /// <summary>Latest HistoryUpdate. Used to seed popover activity feed.</summary>
     public static HistoryUpdateEvent? LatestHistory { get; private set; }
 
-    /// <summary>Running snapshot of in-flight sync progress accumulated
-    /// from the daemon's SyncEvent stream. Survives popover open/close so
-    /// reopening mid-sync shows "Track N of M" instead of an
-    /// indefinitely-stuck "Preparing…". Cleared on FinishEvent and on
-    /// daemon-reported Idle transitions so a stale prior-sync snapshot
-    /// doesn't leak into the next session.</summary>
-    private static int _progressCurrent;
-    private static int _progressTotal;
-    private static string _currentTrackLabel = "";
-    /// <summary>Wall-clock time the action plan started executing (first
-    /// <see cref="SummaryEvent"/>). Held at App scope so a popover
-    /// opened mid-sync seeds the same start time as the popover that
-    /// was opened from the start, instead of restarting the ETA's
-    /// per-track average from the popover-open instant.</summary>
-    private static DateTimeOffset? _syncStartedAt;
-
-    /// <summary>Latest unanswered prompt from the sync subprocess, or
-    /// null if no prompt is in flight. Survives popover open/close so
-    /// reopening the tray when a prompt has been pending sees the
-    /// overlay immediately instead of just "Preparing…". Cleared on
-    /// FinishEvent and on the popover's own ClearPrompt path after
-    /// the user picks an option (the daemon's stdin write is
-    /// fire-and-forward).</summary>
-    private static PromptEvent? _pendingPrompt;
-
+    private static readonly PopoverViewModel _popoverState = new();
+    private static DeviceInventorySnapshotEvent? _latestInventory;
     private static PopoverWindow? _popover;
     private static SettingsWindow? _settings;
 
@@ -115,7 +92,8 @@ public partial class App : Application
         Router.HistoryUpdated += OnHistoryUpdated;
         Router.DeviceConnected += OnDeviceConnected;
         Router.DeviceDisconnected += OnDeviceDisconnected;
-        Router.IpcEventReceived += OnIpcEvent;
+        Router.DeviceInventorySnapshotReceived += OnDeviceInventorySnapshot;
+        Router.SyncEventReceived += OnSyncEvent;
         Router.Start();
 
         // Notification service subscribes to router internally.
@@ -181,21 +159,14 @@ public partial class App : Application
 
     private void OnStatusUpdated(StatusUpdateEvent s)
     {
-        // Idle transitions mean the previous sync has fully wound down;
-        // drop the cached progress so a re-opened popover doesn't show
-        // stale "Track 472 of 1275" from the previous run.
-        if (s.State != "syncing")
-        {
-            _progressCurrent = 0;
-            _progressTotal = 0;
-            _currentTrackLabel = "";
-            _syncStartedAt = null;
-        }
         LatestStatus = s;
         DispatcherQueue.TryEnqueue(() =>
         {
             UpdateTrayFromStatus(s);
-            _popover?.ViewModel.Update(s);
+            if (_latestInventory is null && _popoverState.ActiveSyncContext is null)
+            {
+                _popoverState.Update(s);
+            }
         });
     }
 
@@ -208,7 +179,10 @@ public partial class App : Application
         // friendly name without needing the user to reopen the flyout.
         DispatcherQueue.TryEnqueue(() =>
         {
-            _popover?.ViewModel.SetDeviceLabel(c.Ipod?.Name, c.Ipod?.ModelLabel);
+            if (_popoverState.ActiveSyncContext is null)
+            {
+                _popoverState.SetDeviceLabel(c.Ipod?.Name, c.Ipod?.ModelLabel);
+            }
             // Pair / forget transitions flip the tray's visibility
             // automatically — no separate notification needed.
             UpdateTrayVisibility();
@@ -217,23 +191,29 @@ public partial class App : Application
     private void OnHistoryUpdated(HistoryUpdateEvent h)
     {
         LatestHistory = h;
-        DispatcherQueue.TryEnqueue(() => _popover?.ViewModel.ApplyHistory(h));
+        DispatcherQueue.TryEnqueue(() => _popoverState.ApplyHistory(h));
     }
     private void OnDeviceConnected(DeviceConnectedEvent dc)
     {
         DispatcherQueue.TryEnqueue(() =>
         {
             Tray?.SetState(TrayState.Idle, $"iPod connected ({dc.Name ?? dc.ModelLabel})");
-            // The daemon re-broadcasts DeviceConnected with the resolved
-            // name after the async iTunesDB parse completes — keep the
-            // popover label in sync if it's open.
-            _popover?.ViewModel.SetDeviceLabel(dc.Name, dc.ModelLabel);
+            if (_latestInventory is null &&
+                _popoverState.ActiveSyncContext is null &&
+                string.Equals(dc.Serial, ConfiguredSerial, StringComparison.OrdinalIgnoreCase))
+            {
+                _popoverState.SetDeviceLabel(dc.Name, dc.ModelLabel);
+            }
         });
     }
-    private void OnDeviceDisconnected(DeviceDisconnectedEvent _)
+    private void OnDeviceDisconnected(DeviceDisconnectedEvent disconnected)
     {
-        DispatcherQueue.TryEnqueue(() =>
-            Tray?.SetState(TrayState.Offline, "iPod not connected"));
+        if (!string.Equals(disconnected.Serial, ConfiguredSerial, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        DispatcherQueue.TryEnqueue(() => Tray?.SetState(TrayState.Offline, "iPod not connected"));
     }
 
     private void UpdateTrayFromStatus(StatusUpdateEvent s)
@@ -241,55 +221,76 @@ public partial class App : Application
         if (Tray is null) return;
         var (state, tooltip) = (s.State, s.IpodConnected) switch
         {
-            ("syncing", _)   => (TrayState.Syncing, "Syncing iPod…"),
-            (_,    true)     => (TrayState.Idle,    "iPod connected · idle"),
-            _                => (TrayState.Offline, "iPod not connected"),
+            ("syncing", _) => (TrayState.Syncing, "Syncing iPod…"),
+            (_, true) => (TrayState.Idle, "iPod connected · idle"),
+            _ => (TrayState.Offline, "iPod not connected"),
         };
         Tray.SetState(state, tooltip);
     }
 
-    private void OnIpcEvent(IpcEvent e)
+    private void OnDeviceInventorySnapshot(DeviceInventorySnapshotEvent snapshot)
     {
-        // First, accumulate into App-level state so a popover opened
-        // mid-sync can be seeded with the latest progress instead of
-        // rendering "Preparing…" indefinitely.
-        switch (e)
+        _latestInventory = snapshot;
+        DispatcherQueue.TryEnqueue(() =>
         {
-            case SummaryEvent s:
-                _progressTotal = s.TotalPlanned;
-                _progressCurrent = 0;
-                _currentTrackLabel = "";
-                // Mirror PopoverViewModel: stamp the apply-loop start
-                // here so the ETA's per-track average excludes the
-                // variable prep phase. Set at App scope so reopening
-                // the popover mid-sync reuses the original timestamp.
-                _syncStartedAt = DateTimeOffset.Now;
-                break;
-            case TrackStartEvent t:
-                _progressCurrent = t.Current;
-                _progressTotal = t.Total;
-                _currentTrackLabel = t.Label;
-                // A TrackStart implies the subprocess moved past any
-                // pending prompt — clear the App-level snapshot so a
-                // popover opened after the answer doesn't re-render
-                // the stale prompt.
-                _pendingPrompt = null;
-                break;
-            case PromptEvent p:
-                // Hold the prompt so a popover opened during the wait
-                // can render the overlay immediately on activation.
-                _pendingPrompt = p;
-                break;
-            case FinishEvent:
-                _progressCurrent = 0;
-                _progressTotal = 0;
-                _currentTrackLabel = "";
-                _syncStartedAt = null;
-                _pendingPrompt = null;
-                break;
+            var activeDevices = snapshot.Devices
+                .Where(device => device.SessionId is not null)
+                .ToArray();
+            var focused = activeDevices.FirstOrDefault(device =>
+                _popoverState.ActiveSyncContext is { } current &&
+                string.Equals(
+                    device.Identity.Serial,
+                    current.Serial,
+                    StringComparison.OrdinalIgnoreCase) &&
+                device.SessionId == current.SessionId);
+            if (focused is null && activeDevices.Length == 1)
+            {
+                focused = activeDevices[0];
+            }
+
+            if (focused?.SessionId is { } sessionId)
+            {
+                _popoverState.SetActiveSyncSession(
+                    new SyncEventContext(sessionId, focused.Identity.Serial));
+                _popoverState.Update(focused);
+                return;
+            }
+
+            if (activeDevices.Length == 0)
+            {
+                var previousSerial = _popoverState.ActiveSyncContext?.Serial;
+                _popoverState.ClearActiveSyncSession();
+                var pausedDevices = snapshot.Devices
+                    .Where(device => device.Connected && device.Phase == "paused")
+                    .ToArray();
+                var destination = snapshot.Devices.FirstOrDefault(device =>
+                    string.Equals(
+                        device.Identity.Serial,
+                        previousSerial,
+                        StringComparison.OrdinalIgnoreCase));
+                destination ??= pausedDevices.Length == 1
+                    ? pausedDevices[0]
+                    : snapshot.Devices.FirstOrDefault(device =>
+                    string.Equals(
+                        device.Identity.Serial,
+                        ConfiguredSerial,
+                        StringComparison.OrdinalIgnoreCase));
+                if (destination is not null)
+                {
+                    _popoverState.Update(destination);
+                }
+            }
+        });
+    }
+
+    private void OnSyncEvent(RoutedSyncEvent routed)
+    {
+        if (!routed.Context.IsDeviceSession)
+        {
+            return;
         }
-        // Then forward to an open popover so it animates in real time.
-        DispatcherQueue.TryEnqueue(() => _popover?.ViewModel.ApplyIpcProgress(e));
+
+        DispatcherQueue.TryEnqueue(() => _popoverState.ApplySyncProgress(routed));
     }
 
     private void OnPopoverRequested()
@@ -320,33 +321,7 @@ public partial class App : Application
             // the tray intending to close.
             var sinceClose = DateTime.UtcNow.Ticks - _popoverClosedAtTicks;
             if (sinceClose < PopoverToggleDebounceTicks) return;
-            var vm = new PopoverViewModel();
-            vm.SetDeviceLabel(LatestConfig?.Ipod?.Name, LatestConfig?.Ipod?.ModelLabel);
-            if (LatestStatus is not null) vm.Update(LatestStatus);
-            if (LatestHistory is not null) vm.ApplyHistory(LatestHistory);
-            // Replay accumulated sync progress so the user doesn't see
-            // "Preparing sync…" when the subprocess is already mid-apply.
-            // Order matters: ProgressTotal sets NoProgressYet, which
-            // controls whether the indeterminate / "Preparing sync…"
-            // state still renders. SyncStartedAt is the App-scope
-            // stamp from SummaryEvent so the ETA carries continuity
-            // across popover open/close.
-            if (LatestStatus?.State == "syncing" && _progressTotal > 0)
-            {
-                vm.ProgressTotal = _progressTotal;
-                vm.ProgressCurrent = _progressCurrent;
-                vm.CurrentTrackLabel = _currentTrackLabel;
-                vm.SyncStartedAt = _syncStartedAt;
-            }
-            // Re-render any unanswered prompt so a popover opened
-            // mid-wait shows the overlay immediately instead of just
-            // "Preparing…". Re-using ApplyIpcProgress's PromptEvent
-            // arm keeps the seed path and live path in lock-step.
-            if (_pendingPrompt is not null)
-            {
-                vm.ApplyIpcProgress(_pendingPrompt);
-            }
-            _popover = new PopoverWindow(vm, Daemon!);
+            _popover = new PopoverWindow(_popoverState, Daemon!);
             _popover.Closed += (_, _) =>
             {
                 _popover = null;

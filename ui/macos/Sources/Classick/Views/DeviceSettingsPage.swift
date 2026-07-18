@@ -41,6 +41,7 @@ struct DeviceSettingsPage: View {
     DeviceSurfaceLogic.state(serial: serial, in: model.devices)
   }
   private var config: DeviceConfigState? { deviceState?.config }
+  private var canEditDevice: Bool { model.canSendDeviceCommand(to: serial) }
   private var isConnected: Bool { deviceState?.connected == true }
   private var surfacePhase: Phase {
     DeviceSurfaceLogic.phase(for: deviceState, globalPhase: model.phase)
@@ -83,7 +84,9 @@ struct DeviceSettingsPage: View {
           Toggle(
             "Sync automatically when connected",
             isOn: Binding(
-              get: { draft.autoSync }, set: { draft.autoSync = $0 }))
+              get: { draft.autoSync }, set: { draft.autoSync = $0 })
+          )
+          .disabled(!canEditDevice)
           // Disabled while disconnected (user decision, overriding
           // the earlier stays-editable rule for THIS toggle):
           // Rockbox mode implies an on-device format change, so
@@ -94,7 +97,7 @@ struct DeviceSettingsPage: View {
             isOn: Binding(
               get: { draft.rockboxCompat }, set: { draft.rockboxCompat = $0 })
           )
-          .disabled(!isConnected)
+          .disabled(!isConnected || !canEditDevice)
         } else {
           HStack(spacing: 8) {
             ProgressView().controlSize(.small)
@@ -105,7 +108,7 @@ struct DeviceSettingsPage: View {
           // Acts on the physically connected iPod immediately —
           // meaningless without one.
           Button("Update Now") { onBackfill(serial) }
-            .disabled(!isConnected)
+            .disabled(!isConnected || !canEditDevice)
         }
         .labeledContentStyle(.centerAligned)
       }
@@ -121,13 +124,14 @@ struct DeviceSettingsPage: View {
             .tint(.red)
             .disabled(
               DeviceSettingsLogic.isReplaceLibraryDisabled(
-                phase: surfacePhase, isConnected: isConnected))
+                phase: surfacePhase, isConnected: isConnected) || !canEditDevice)
         }
         .labeledContentStyle(.centerAligned)
       }
       Section {
         LabeledContent(DeviceSettingsLogic.removeCaption(deviceName: deviceName)) {
           Button("Remove iPod", role: .destructive) { onForgetIpod(serial) }
+            .disabled(!canEditDevice)
         }
         .labeledContentStyle(.centerAligned)
       }
@@ -139,8 +143,12 @@ struct DeviceSettingsPage: View {
     // (seed fires immediately); the `.onChange` covers the reply
     // arriving after this view appears.
     .task(id: serial) {
+      guard canEditDevice else { return }
       seedIfNeeded()
       onLoadDeviceConfig(serial)
+    }
+    .onChange(of: canEditDevice) { _, isAvailable in
+      handleDeviceAvailabilityChange(isAvailable)
     }
     .onChange(of: config?.settings) { _, _ in seedIfNeeded() }
     .onChange(of: draft) { _, newDraft in
@@ -151,6 +159,7 @@ struct DeviceSettingsPage: View {
         isSeeding = false
         return
       }
+      guard canEditDevice else { return }
       userEdited = true
       scheduleSave(newDraft)
     }
@@ -193,11 +202,26 @@ struct DeviceSettingsPage: View {
   private func scheduleSave(_ d: SettingsDraft) {
     saveTask?.cancel()
     saveTask = Task {
-      try? await Task.sleep(for: .milliseconds(400))
-      guard !Task.isCancelled else { return }
+      guard
+        await DeviceDraftSaveGate.waitUntilReady(
+          serial: serial, model: model)
+      else { return }
       onSaveDeviceSettings(
         serial, DeviceSettingsWire(autoSync: d.autoSync, rockboxCompat: d.rockboxCompat))
     }
+  }
+
+  private func handleDeviceAvailabilityChange(_ isAvailable: Bool) {
+    guard isAvailable else {
+      saveTask?.cancel()
+      showReplaceConfirm = false
+      seededFromModel = false
+      userEdited = false
+      isSeeding = false
+      return
+    }
+    seedIfNeeded()
+    onLoadDeviceConfig(serial)
   }
 }
 

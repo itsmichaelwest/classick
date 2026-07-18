@@ -2,7 +2,7 @@
 
 use classick::config_file::{DaemonSettings, IpodIdentity, PersistedConfig};
 use classick::daemon::device_watcher::{DeviceEvent, DeviceWatcher};
-use classick::daemon::history::{SyncOutcome, SyncSummary};
+use classick::daemon::history::{HistoryEntry, HistoryFile, SyncOutcome, SyncSummary, SyncTrigger};
 use classick::daemon::runtime::{run_daemon_with_deps, DaemonDeps, SpawnFn};
 use classick::daemon::session_admission::EventContext;
 use classick::daemon::sync_orchestrator::OrchestratorOutcome;
@@ -29,6 +29,7 @@ struct SpawnCall {
     serial: String,
     drive: String,
     context: EventContext,
+    cancel: oneshot::Receiver<()>,
     finish: oneshot::Sender<OrchestratorOutcome>,
 }
 
@@ -165,13 +166,14 @@ impl Sandbox {
         let (device_tx, device_rx) = mpsc::channel(8);
         let (spawn_tx, spawn_rx) = mpsc::unbounded_channel();
         let (scan_finish_tx, scan_finish_rx) = mpsc::unbounded_channel();
-        let spawn_sync: SpawnFn = Arc::new(move |serial, drive, _, _, _, context| {
+        let spawn_sync: SpawnFn = Arc::new(move |serial, drive, cancel, _, _, context| {
             let (finish, finished) = oneshot::channel();
             spawn_tx
                 .send(SpawnCall {
                     serial,
                     drive,
                     context,
+                    cancel,
                     finish,
                 })
                 .unwrap();
@@ -454,6 +456,165 @@ async fn exact_targeting_uses_b_drive_and_rejects_unknown_occupied_and_stale_tar
         snapshot_device(&completed_snapshot, "RAW-B")["phase"],
         "idle"
     );
+    sandbox.shutdown().await;
+}
+
+#[tokio::test]
+async fn detached_sync_drains_before_releasing_admission_and_records_one_aborted_attempt() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[("RAW-A", true), ("RAW-B", true)]).await;
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+    sandbox.attach("RAW-A", "/Volumes/A").await;
+    sandbox.attach("RAW-B", "/Volumes/B").await;
+    let _ = client
+        .next_snapshot_where(|snapshot| {
+            snapshot_device(snapshot, "RAW-A")["connected"] == true
+                && snapshot_device(snapshot, "RAW-B")["connected"] == true
+        })
+        .await;
+    sandbox.finish_startup_scan().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+
+    client
+        .send(json!({
+            "type": "trigger_sync",
+            "source": "manual",
+            "serial": "raw-a",
+            "request_id": "sync-a"
+        }))
+        .await;
+    let SpawnCall {
+        context,
+        mut cancel,
+        finish,
+        ..
+    } = sandbox.spawn_rx.recv().await.unwrap();
+    let history_tmp = sandbox.history_path.with_extension("json.tmp");
+    std::fs::create_dir(&history_tmp).unwrap();
+
+    sandbox.disconnect(" raw-a ").await;
+    tokio::time::timeout(Duration::from_secs(5), &mut cancel)
+        .await
+        .expect("detach signals cancellation")
+        .expect("cancel channel remains connected");
+    let detached = client
+        .next_snapshot_where(|snapshot| {
+            let a = snapshot_device(snapshot, "RAW-A");
+            a["connected"] == false && a["latest_attempt"].is_object()
+        })
+        .await;
+    let a = snapshot_device(&detached, "RAW-A");
+    assert_eq!(a["session_id"], context.session_id);
+    assert_eq!(a["latest_attempt"]["serial"], "RAW-A");
+    assert_eq!(a["latest_attempt"]["outcome"], "aborted");
+    assert_eq!(a["latest_attempt"]["error_message"], "device_detached");
+    assert!(a["last_terminal_error"]
+        .as_str()
+        .is_some_and(|message| message.contains("persist sync history")));
+
+    sandbox.disconnect("RAW-A").await;
+
+    client
+        .send(json!({
+            "type": "trigger_sync",
+            "source": "manual",
+            "serial": "RAW-B",
+            "request_id": "b-before-a-drains"
+        }))
+        .await;
+    let rejection = client.next_type("sync_rejected").await;
+    assert_eq!(rejection["reason"], "already_syncing");
+    assert!(sandbox.spawn_rx.try_recv().is_err());
+
+    std::fs::remove_dir(history_tmp).unwrap();
+    finish.send(completed(None)).unwrap();
+    let drained = client
+        .next_snapshot_where(|snapshot| {
+            let a = snapshot_device(snapshot, "RAW-A");
+            a["session_id"].is_null()
+                && a["latest_attempt"]["error_message"] == "device_detached"
+                && a["last_terminal_error"] == "device_detached"
+        })
+        .await;
+    assert_eq!(snapshot_device(&drained, "RAW-A")["phase"], "disconnected");
+
+    client
+        .send(json!({"type": "get_history", "limit": 50, "request_id": "history"}))
+        .await;
+    let history = client.next_type("history_update").await;
+    let entries = history["entries"].as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "detach must create one terminal history entry"
+    );
+    assert_eq!(entries[0]["serial"], "RAW-A");
+    assert_eq!(entries[0]["outcome"], "aborted");
+
+    client
+        .send(json!({
+            "type": "trigger_sync",
+            "source": "manual",
+            "serial": "RAW-B",
+            "request_id": "b-after-a-drains"
+        }))
+        .await;
+    let b = sandbox
+        .spawn_rx
+        .recv()
+        .await
+        .expect("B admitted after A drained");
+    assert_eq!(b.serial, "RAW-B");
+    b.finish.send(completed(None)).unwrap();
+    sandbox.shutdown().await;
+}
+
+#[tokio::test]
+async fn v2_history_replies_filter_legacy_entries_and_preserve_scoped_entries() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[]).await;
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+    let entry = |serial: &str, timestamp: &str| HistoryEntry {
+        serial: serial.to_string(),
+        session_id: None,
+        timestamp: timestamp.to_string(),
+        duration_secs: 1,
+        trigger: SyncTrigger::Manual,
+        outcome: SyncOutcome::Ok,
+        error_message: None,
+        summary: None,
+        db_restored: false,
+    };
+    std::fs::write(
+        &sandbox.history_path,
+        serde_json::to_vec_pretty(&HistoryFile {
+            version: 1,
+            entries: vec![
+                entry("", "2026-07-18T10:00:00Z"),
+                entry("RAW-A", "2026-07-18T10:01:00Z"),
+                entry("", "2026-07-18T10:02:00Z"),
+            ],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    client
+        .send(json!({"type": "get_history", "limit": 50, "request_id": "history"}))
+        .await;
+    let history = client.next_type("history_update").await;
+    assert_eq!(history["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(history["entries"][0]["serial"], "RAW-A");
+
+    client
+        .send(json!({"type": "get_status", "request_id": "status"}))
+        .await;
+    let status = client.next_type("status_update").await;
+    assert_eq!(status["last_sync"]["serial"], "RAW-A");
+
+    sandbox.finish_startup_scan().await;
     sandbox.shutdown().await;
 }
 

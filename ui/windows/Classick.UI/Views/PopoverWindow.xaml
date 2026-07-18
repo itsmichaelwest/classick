@@ -128,10 +128,12 @@
                        Stretch="Uniform" />
                 <StackPanel HorizontalAlignment="Center">
                     <TextBlock HorizontalAlignment="Center"
-                               Text="No iPod connected"
+                               Text="{x:Bind ViewModel.EmptyStateTitle, Mode=OneWay}"
                                Style="{StaticResource BodyStrongTextBlockStyle}" />
                     <TextBlock HorizontalAlignment="Center"
-                               Text="Please connect your iPod to begin"
+                               Text="{x:Bind ViewModel.EmptyStateSubtitle, Mode=OneWay}"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
@@ -162,25 +164,32 @@
                     Visibility="{x:Bind ViewModel.ShowSyncNowButton, Mode=OneWay}">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <FontIcon Glyph="&#xE895;" FontSize="16" />
-                    <TextBlock Text="Sync now" />
+                    <TextBlock Text="{x:Bind ViewModel.SyncActionLabel, Mode=OneWay}" />
                 </StackPanel>
             </Button>
-            <Button Grid.Column="0"
-                    MinWidth="120"
-                    HorizontalAlignment="Left"
-                    Click="OnCancelSync"
-                    Visibility="{x:Bind ViewModel.Syncing, Mode=OneWay}">
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                    <FontIcon Glyph="&#xE71A;" FontSize="16" />
-                    <TextBlock Text="Stop sync" />
-                </StackPanel>
-            </Button>
+            <StackPanel Grid.Column="0"
+                        HorizontalAlignment="Left"
+                        Orientation="Horizontal"
+                        Spacing="4"
+                        Visibility="{x:Bind ViewModel.ShowSyncControls, Mode=OneWay}">
+                <Button Click="OnPauseSync">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE769;" FontSize="16" />
+                        <TextBlock Text="Pause" />
+                    </StackPanel>
+                </Button>
+                <Button Click="OnCancelSync"
+                        Style="{StaticResource SubtleButtonStyle}"
+                        ToolTipService.ToolTip="Stop and cancel this sync">
+                    <TextBlock Text="Cancel" />
+                </Button>
+            </StackPanel>
 
             <!--  Empty state: status caption replacing Sync now.  -->
             <TextBlock Grid.Column="0"
                        Margin="8,0,0,0"
                        VerticalAlignment="Center"
-                       Text="Looking for iPod on USB…"
+                       Text="{x:Bind ViewModel.DisconnectedFooterText, Mode=OneWay}"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                        Visibility="{x:Bind ViewModel.ShowEmptyState, Mode=OneWay}" />

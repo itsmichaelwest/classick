@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Threading;
@@ -24,8 +25,11 @@ namespace Classick_UI.Ipc;
 public sealed class DaemonEventRouter : IDisposable
 {
     private readonly ChannelReader<object> _source;
+    private readonly Dictionary<string, (string RawSerial, ulong SessionId)> _activeDeviceSessions =
+        new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource? _cts;
     private Task? _readerTask;
+    private ulong? _inventoryRevision;
 
     public DaemonEventRouter(ChannelReader<object> source)
     {
@@ -40,7 +44,7 @@ public sealed class DaemonEventRouter : IDisposable
     public event Action<SyncRejectedEvent>? SyncRejected;
     public event Action<DeviceInventorySnapshotEvent>? DeviceInventorySnapshotReceived;
     public event Action<DaemonEvent>? DaemonEventReceived;
-    public event Action<IpcEvent>? IpcEventReceived;
+    public event Action<RoutedSyncEvent>? SyncEventReceived;
 
     public void Start()
     {
@@ -107,31 +111,76 @@ public sealed class DaemonEventRouter : IDisposable
                 SyncRejected?.Invoke(sr);
                 break;
             case DeviceInventorySnapshotEvent snapshot:
-                DeviceInventorySnapshotReceived?.Invoke(snapshot);
+                if (UpdateActiveSessions(snapshot))
+                {
+                    DeviceInventorySnapshotReceived?.Invoke(snapshot);
+                }
                 break;
             case SyncEventEnvelope env:
-                // Re-parse the wrapped line as an M1 IpcEvent and
-                // dispatch via the IpcEvent channel.
-                try
-                {
-                    var inner = JsonSerializer.Deserialize<IpcEvent>(env.Line);
-                    if (inner is not null) IpcEventReceived?.Invoke(inner);
-                }
-                catch (Exception e)
-                {
-                    Debug.WriteLine($"daemon-event-router: bad sync_event line `{env.Line}`: {e.Message}");
-                }
+                RouteSyncEvent(env);
                 break;
             case IpcEvent ie:
-                // M1 events that arrive directly (e.g. Hello during
-                // connect already consumed by DaemonClient; this
-                // covers daemon-forwarded events that the daemon
-                // happens to emit un-wrapped — defensive).
-                IpcEventReceived?.Invoke(ie);
+                Debug.WriteLine(
+                    $"daemon-event-router: rejected unscoped sync event {ie.GetType().Name}");
                 break;
             default:
                 Debug.WriteLine($"daemon-event-router: unrouted event type {evt.GetType().Name}");
                 break;
+        }
+    }
+
+    private bool UpdateActiveSessions(DeviceInventorySnapshotEvent snapshot)
+    {
+        if (_inventoryRevision is not null && snapshot.Revision < _inventoryRevision)
+        {
+            Debug.WriteLine(
+                $"daemon-event-router: ignored stale inventory revision {snapshot.Revision}");
+            return false;
+        }
+
+        _inventoryRevision = snapshot.Revision;
+        _activeDeviceSessions.Clear();
+        foreach (var device in snapshot.Devices)
+        {
+            if (device.SessionId is not { } sessionId)
+            {
+                continue;
+            }
+
+            _activeDeviceSessions[device.Identity.Serial] = (device.Identity.Serial, sessionId);
+        }
+
+        return true;
+    }
+
+    private void RouteSyncEvent(SyncEventEnvelope envelope)
+    {
+        var context = new SyncEventContext(envelope.SessionId, envelope.Serial);
+        if (envelope.Serial is { } serial)
+        {
+            if (!_activeDeviceSessions.TryGetValue(serial, out var active) ||
+                active.SessionId != envelope.SessionId)
+            {
+                Debug.WriteLine(
+                    $"daemon-event-router: ignored stale sync_event for {serial} session {envelope.SessionId}");
+                return;
+            }
+
+            context = new SyncEventContext(envelope.SessionId, active.RawSerial);
+        }
+
+        try
+        {
+            var inner = JsonSerializer.Deserialize<IpcEvent>(envelope.Line);
+            if (inner is not null)
+            {
+                SyncEventReceived?.Invoke(new RoutedSyncEvent(context, inner));
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.WriteLine(
+                $"daemon-event-router: bad sync_event line `{envelope.Line}`: {e.Message}");
         }
     }
 

@@ -18,9 +18,9 @@ namespace Classick_UI.Ipc;
 /// API contract:
 ///   - <see cref="ConnectAsync"/> opens the pipe, awaits the hello event,
 ///     validates protocol_version. Throws if daemon unreachable after retries.
-///   - <see cref="Events"/> is a ChannelReader of incoming events (both
-///     DaemonEvent and forwarded IpcEvent from the sync subprocess; consumers
-///     pattern-match on type).
+///   - <see cref="Events"/> is a ChannelReader of daemon events. Subprocess
+///     events arrive inside <see cref="SyncEventEnvelope"/> values so their
+///     device and session identity cannot be separated from the payload.
 ///   - <see cref="SendAsync"/> writes a command line. Returns when flushed.
 ///   - <see cref="DisposeAsync"/> closes the pipe; daemon stays running.
 /// </summary>
@@ -159,11 +159,9 @@ public sealed class DaemonClient : IAsyncDisposable
             }
             else
             {
-                // Everything else (hello, header, summary, review, prompt,
-                // form, track_start, track_done, log, error, finish) is
-                // an M1 IpcEvent forwarded by the daemon from the sync
-                // subprocess. Unknown discriminators land here too and
-                // produce a debug log instead of a thrown exception.
+                // Hello uses the subprocess event hierarchy for the handshake.
+                // Any direct subprocess event is retained only so the router can
+                // reject it as unscoped; v2 progress must use sync_event.
                 evt = JsonSerializer.Deserialize<IpcEvent>(line);
             }
             return evt is not null;

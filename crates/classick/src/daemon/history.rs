@@ -122,6 +122,15 @@ impl HistoryService {
         }
     }
 
+    pub(crate) fn read_for_v2_wire(&self) -> Vec<HistoryEntry> {
+        self.read()
+            .into_iter()
+            .filter(|entry| {
+                !crate::daemon::device_registry::canonical_serial_key(&entry.serial).is_empty()
+            })
+            .collect()
+    }
+
     pub fn append(&self, entry: HistoryEntry) -> Result<()> {
         let mut existing = self.read();
         existing.push(entry);
@@ -384,6 +393,45 @@ mod tests {
         let entries = svc.read();
         assert!(entries.iter().all(|entry| entry.serial == " A "));
         assert!(entries.iter().all(|entry| entry.session_id.is_none()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn v2_wire_history_filters_unscoped_entries_without_a_device_authority() {
+        let p = tmp_path("v2-filters-unscoped");
+        let _ = std::fs::remove_file(&p);
+        let svc = HistoryService::new(p.clone());
+        svc.append(make_entry("2026-07-18T10:00:00Z", SyncOutcome::Ok))
+            .unwrap();
+
+        assert_eq!(
+            svc.read().len(),
+            1,
+            "legacy entry remains available for migration"
+        );
+        assert!(svc.read_for_v2_wire().is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn v2_wire_history_preserves_valid_entries_when_legacy_entries_are_mixed_in() {
+        let p = tmp_path("v2-preserves-scoped");
+        let _ = std::fs::remove_file(&p);
+        let svc = HistoryService::new(p.clone());
+        svc.append(make_entry("2026-07-18T10:00:00Z", SyncOutcome::Ok))
+            .unwrap();
+        let mut scoped = make_entry("2026-07-18T10:01:00Z", SyncOutcome::Error);
+        scoped.serial = "RAW-A".to_string();
+        svc.append(scoped.clone()).unwrap();
+        svc.append(make_entry("2026-07-18T10:02:00Z", SyncOutcome::Aborted))
+            .unwrap();
+
+        assert_eq!(svc.read_for_v2_wire(), vec![scoped]);
+        assert_eq!(
+            svc.read().len(),
+            3,
+            "filtering the wire must not destroy migration input"
+        );
         let _ = std::fs::remove_file(&p);
     }
 
