@@ -283,10 +283,13 @@ async fn drive_child(
     let mut finish_success: Option<bool> = None;
     let mut finish_db_restored = false;
     let mut paused = false;
-    // Guards re-polling `pause_rx` after it has already fired once — a
-    // oneshot::Receiver panics if polled again past Ready. Once the pause
-    // is forwarded we just keep relaying lines until the subprocess exits.
-    let mut pause_requested = false;
+    // A one-shot receiver becomes ready for both an explicit signal and a
+    // dropped sender. Track closure separately so sender teardown disables
+    // the branch instead of being misread as a cancel/pause request or being
+    // re-polled after completion.
+    let mut cancel_channel_open = true;
+    let mut pause_channel_open = true;
+    let mut prompt_channel_open = true;
     // Armed the instant pause is requested; an ABSOLUTE deadline (not a
     // fresh relative sleep) so re-evaluating it on every loop iteration
     // still targets the same instant instead of restarting the clock.
@@ -357,26 +360,33 @@ async fn drive_child(
                     _ => {}
                 }
             }
-            _ = &mut cancel_rx => {
-                // User cancelled. Same teardown sequence as the >50% bail.
-                let _ = stdin.write_all(b"{\"type\":\"cancel\"}\n").await;
-                let _ = stdin.flush().await;
-                drop(stdin);
-                bounded_kill(&mut child, crate::daemon::SYNC_KILL_GRACE).await;
-                return Ok(OrchestratorOutcome::Aborted {
-                    reason: "user_cancelled".to_string(),
-                    summary: last_summary,
-                });
+            cancel_result = &mut cancel_rx, if cancel_channel_open => {
+                match classify_control_signal(cancel_result) {
+                    ControlSignal::Requested => {
+                        // User/runtime cancelled. Same teardown sequence as the >50% bail.
+                        let _ = stdin.write_all(b"{\"type\":\"cancel\"}\n").await;
+                        let _ = stdin.flush().await;
+                        drop(stdin);
+                        bounded_kill(&mut child, crate::daemon::SYNC_KILL_GRACE).await;
+                        return Ok(OrchestratorOutcome::Aborted {
+                            reason: "user_cancelled".to_string(),
+                            summary: last_summary,
+                        });
+                    }
+                    ControlSignal::Closed => cancel_channel_open = false,
+                }
             }
-            _ = &mut pause_rx, if !pause_requested => {
-                pause_requested = true;
-                let _ = stdin.write_all(b"{\"type\":\"pause\"}\n").await;
-                let _ = stdin.flush().await;
-                // No immediate force-kill: keep looping, relaying lines,
-                // trusting the subprocess to drain + checkpoint + emit
-                // "paused" + exit on its own. `pause_deadline` below is the
-                // bounded backstop in case that trust is misplaced.
-                pause_deadline = Some(Instant::now() + PAUSE_DRAIN_GRACE);
+            pause_result = &mut pause_rx, if pause_channel_open => {
+                pause_channel_open = false;
+                if classify_control_signal(pause_result) == ControlSignal::Requested {
+                    let _ = stdin.write_all(b"{\"type\":\"pause\"}\n").await;
+                    let _ = stdin.flush().await;
+                    // No immediate force-kill: keep looping, relaying lines,
+                    // trusting the subprocess to drain + checkpoint + emit
+                    // "paused" + exit on its own. `pause_deadline` below is the
+                    // bounded backstop in case that trust is misplaced.
+                    pause_deadline = Some(Instant::now() + PAUSE_DRAIN_GRACE);
+                }
             }
             // Backstop for a paused subprocess that never drains (e.g. a
             // libgpod/FS write wedged on a slow spinning-HDD + fskit FAT32
@@ -396,7 +406,11 @@ async fn drive_child(
                 bounded_kill(&mut child, crate::daemon::SYNC_KILL_GRACE).await;
                 return Ok(OrchestratorOutcome::Paused { summary: last_summary });
             }
-            Some((id, choice)) = prompt_decisions_rx.recv() => {
+            prompt_decision = prompt_decisions_rx.recv(), if prompt_channel_open => {
+                let Some((id, choice)) = prompt_decision else {
+                    prompt_channel_open = false;
+                    continue;
+                };
                 // User replied to a daemon-relayed prompt. Forward the
                 // decision to the subprocess via stdin so its
                 // apply_loop's await_prompt call returns. Errors
@@ -442,6 +456,21 @@ async fn drive_child(
         summary: last_summary,
         db_restored: finish_db_restored,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlSignal {
+    Requested,
+    Closed,
+}
+
+fn classify_control_signal(
+    result: std::result::Result<(), oneshot::error::RecvError>,
+) -> ControlSignal {
+    match result {
+        Ok(()) => ControlSignal::Requested,
+        Err(_) => ControlSignal::Closed,
+    }
 }
 
 fn summary_from_value(v: &Value) -> SyncSummary {
@@ -521,6 +550,28 @@ async fn bounded_kill(child: &mut Child, timeout: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropped_pause_sender_is_not_a_pause_request() {
+        let (pause_tx, pause_rx) = oneshot::channel();
+        drop(pause_tx);
+
+        assert_eq!(
+            classify_control_signal(pause_rx.await),
+            ControlSignal::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_cancel_signal_is_a_control_request() {
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        cancel_tx.send(()).unwrap();
+
+        assert_eq!(
+            classify_control_signal(cancel_rx.await),
+            ControlSignal::Requested
+        );
+    }
 
     // Exercises `pause_drain_deadline` directly rather than driving `run`
     // end-to-end. A real integration test would need a dummy subprocess

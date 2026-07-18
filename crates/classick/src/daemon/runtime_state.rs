@@ -73,6 +73,13 @@ impl RuntimeState {
         Some(session)
     }
 
+    pub(crate) fn cancel_and_finish(&mut self, id: SessionId) -> Option<SyncSession> {
+        if let Some(cancel) = self.take_cancel(id) {
+            let _ = cancel.send(());
+        }
+        self.finish(id)
+    }
+
     pub(crate) fn active_session(&self) -> Option<&SyncSession> {
         self.admission.active_session()
     }
@@ -146,5 +153,18 @@ mod tests {
             .send(())
             .expect("B receiver alive");
         assert_eq!(b_cancel_rx.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn cancel_and_finish_signals_before_removing_controls() {
+        let mut state = RuntimeState::new();
+        let session = state
+            .try_admit_device(SyncTrigger::Manual, "RAW-A", Path::new("/Volumes/A"))
+            .expect("A admitted");
+        let (controls, mut cancel_rx) = controls();
+        state.install_controls(session.id, controls);
+
+        assert_eq!(state.cancel_and_finish(session.id), Some(session));
+        assert_eq!(cancel_rx.try_recv(), Ok(()));
     }
 }

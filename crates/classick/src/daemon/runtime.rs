@@ -937,6 +937,7 @@ fn handle_device_event(
                     .as_deref()
                     .is_some_and(|active| same_serial(active, &serial))
                 {
+                    state.cancel_and_finish(s.id);
                     let _ = history.append(make_history_entry(
                         serial.clone(),
                         s.id,
@@ -947,7 +948,6 @@ fn handle_device_event(
                         s.started_at_unix_secs,
                         false,
                     ));
-                    state.finish(s.id);
                 }
             }
         }
