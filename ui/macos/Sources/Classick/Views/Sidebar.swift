@@ -10,7 +10,11 @@ import SwiftUI
 struct Sidebar: View {
     var model: AppModel
     @Binding var selection: SidebarDestination?
-    var onForgetIpod: () -> Void
+    /// TRUE disk eject (unmount so the iPod is safe to unplug) — NOT
+    /// forget-iPod, which lives on the device Settings page. These were
+    /// once conflated: the eject glyph used to call `onForgetIpod`, so
+    /// clicking it unpaired the device and never touched the volume.
+    var onEjectIpod: () -> Void
     var onSavePlaylist: (PlaylistPayload) -> Void
 
     /// Snapshot of playlist slugs taken the moment "+" is tapped, so the
@@ -35,11 +39,16 @@ struct Sidebar: View {
     @State private var deviceManuallyExpanded: Bool?
 
     var body: some View {
+        // Native system selection throughout — `List(selection:)` + `.tag`.
+        // On macOS 15 the selected row is accent-tinted while the sidebar
+        // has key focus and the subtle gray otherwise (standard platform
+        // behavior, same as Notes/Mail); on macOS 26 the system default is
+        // the subtle Liquid Glass highlight the design frames show. Don't
+        // replace this with custom highlight drawing — it costs arrow-key
+        // navigation and diverges from platform conventions.
         List(selection: $selection) {
-            Section("Library") {
-                Label("Music Library", systemImage: "music.note.list")
-                    .tag(SidebarDestination.library)
-            }
+            Label("Library", systemImage: "music.note.square.stack")
+                .tag(SidebarDestination.library)
 
             if let device = sidebarDevice {
                 Section("Devices") {
@@ -60,6 +69,12 @@ struct Sidebar: View {
                     }
                     .buttonStyle(.plain)
                     .help("New Playlist")
+                    // Section headers extend closer to the column edge than
+                    // row content does, so a Spacer-pushed accessory hugs
+                    // the scrollbar gutter. This aligns the "+" with the
+                    // rows' trailing content margin (design: uniform inset).
+                    // Tune in the preview canvas if the metrics shift.
+                    .padding(.trailing, 10)
                     // Review finding #2: without this guard, two quick taps
                     // send two `save_playlist` commands — the daemon's
                     // unique_slug disambiguates the second to
@@ -108,6 +123,11 @@ struct Sidebar: View {
         }
     }
 
+    private var isSyncing: Bool {
+        if case .syncing = model.phase { return true }
+        return false
+    }
+
     private func createPlaylist() {
         priorSlugsAwaitingNewPlaylist = Set(model.playlists.map(\.slug))
         newPlaylistRevisionsElapsed = 0
@@ -138,10 +158,8 @@ struct Sidebar: View {
         DisclosureGroup(isExpanded: expandedBinding) {
             Label("Music", systemImage: "music.note")
                 .tag(SidebarDestination.device(serial: device.serial, page: .music))
-                .padding(.leading, 12)
             Label("Settings", systemImage: "gear")
                 .tag(SidebarDestination.device(serial: device.serial, page: .settings))
-                .padding(.leading, 12)
         } label: {
             // Review finding #4: this used to be a Button wrapping the whole
             // label (including the eject Button below), which nests a Button
@@ -159,11 +177,14 @@ struct Sidebar: View {
                 Text(device.name)
                 Spacer()
                 if device.isConnected {
-                    Button(action: onForgetIpod) {
+                    Button(action: onEjectIpod) {
                         Image(systemName: "eject")
                     }
                     .buttonStyle(.plain)
-                    .help("Remove this iPod")
+                    .help("Eject")
+                    // Unmount would fail (volume busy) mid-sync anyway —
+                    // the daemon's subprocess holds the iTunesDB open.
+                    .disabled(isSyncing)
                 }
             }
             .contentShape(Rectangle())
@@ -196,7 +217,7 @@ private struct SidebarPreviewHost: View {
 
     var body: some View {
         NavigationSplitView {
-            Sidebar(model: model, selection: $selection, onForgetIpod: {}, onSavePlaylist: { _ in })
+            Sidebar(model: model, selection: $selection, onEjectIpod: {}, onSavePlaylist: { _ in })
         } detail: {
             Text("Detail").foregroundStyle(.secondary)
         }

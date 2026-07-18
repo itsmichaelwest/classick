@@ -9,8 +9,10 @@ import SwiftUI
 /// (`.select`, `.cascading` style — a device selection is meant to
 /// auto-follow future library growth, same intuition the retired
 /// `SelectionDraft`-based Library page had). The Playlists facet swaps the
-/// browser for a subscriptions checklist. A floating capacity bar reflects
-/// the live `preview_device` reply.
+/// browser for a subscriptions checklist. Capacity display lives in the
+/// app-wide floating `DeviceRow` (one bar, not two stacked bottom strips) —
+/// this page's debounced edits still drive it via `preview_device`, whose
+/// reply reaches `DeviceRow` through `deviceConfigs[serial].preview`.
 ///
 /// Edits a local draft and auto-saves it (debounced), mirroring the retired
 /// LibraryView's `SelectionDraft` pattern: seed once from the daemon's
@@ -35,25 +37,80 @@ struct DeviceMusicPage: View {
     }
 
     @State private var draft = MusicDraft()
+    /// Per-mode memory of checked sets, page-lifetime only: flipping modes
+    /// stashes the departing mode's checks and restores the target's, so
+    /// Selected → Entire → Selected round-trips the user's original picks
+    /// instead of re-seeding everything. First-ever entry to a mode (no
+    /// memory) keeps the zero-diff seeding behavior.
+    @State private var rememberedRules: [SelectionMode: Set<SelectionKey>] = [:]
     @State private var seededFromModel = false
     @State private var userEdited = false
+    /// True only for the seed's own draft assignment — see `.onChange(of:
+    /// draft)` and DeviceSettingsPage's identical guard.
+    @State private var isSeeding = false
     @State private var facet: LibraryBrowser.Facet = .artists
-    @State private var search = ""
     @State private var saveTask: Task<Void, Never>?
 
     private var config: DeviceConfigState? { model.deviceConfigs[serial] }
     private var isConnected: Bool { model.device?.serial == serial }
+    /// Whether this page's serial is the device the app-wide singleton state
+    /// (lastSync, syncedCount — persisted on disk, not connection-scoped)
+    /// actually describes: the connected device, or failing that the PAIRED
+    /// one. The original guards required a live connection, which wrongly
+    /// blanked known-on-disk facts like "Last synced" the moment the cable
+    /// came out; the only real misattribution risk is a DIFFERENT device.
+    private var isKnownDevice: Bool {
+        serial == (model.device?.serial ?? model.config?.ipod?.serial)
+    }
     private var deviceName: String {
         DeviceIdentityLogic.deviceName(serial: serial, isConnected: isConnected, connectedDevice: model.device, pairedIpod: model.config?.ipod)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            content
+        seededContent
+            .facetBarBelowToolbar { facetBar }
+        // Title/subtitle/actions live in the WINDOW chrome, not the page
+        // body: `navigationTitle` + the macOS-only `navigationSubtitle` put
+        // the device name and last-synced line in the titlebar, and the
+        // `.primaryAction` toolbar group puts the Sync mode picker + Sync
+        // Now in the trailing corner (design frame 3:3773). This page is
+        // the NavigationSplitView detail, so these land in the unified
+        // toolbar; on macOS 26+ the items pick up the glass capsule
+        // treatment automatically.
+        .navigationTitle(deviceName)
+        .navigationSubtitle(lastSyncedSubtitle)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Picker(selection: Binding(get: { draft.mode }, set: setMode)) {
+                    Text("Entire library").tag(SelectionMode.all)
+                    Text("Selected items").tag(SelectionMode.include)
+                    Text("All except selected").tag(SelectionMode.exclude)
+                } label: {
+                    Text("Sync")
+                }
+                .pickerStyle(.menu)
+                .help("What syncs to this iPod")
+                // Disabled until the persisted config seeds the draft
+                // (sweep finding #1): before that this picker shows the
+                // compiled-in `.all` default — and worse, touching it in
+                // that window ran the seeding fn against an EMPTY draft,
+                // latched `userEdited`, blocked the real config from ever
+                // seeding, and debounced-saved the wrong selection over
+                // the persisted one.
+                .disabled(!seededFromModel)
+                // HIDDEN (not disabled) while disconnected: a permanently
+                // washed-out prominent capsule reads as broken chrome, and
+                // the bottom device bar already explains "<name> not
+                // connected". Disabled is reserved for transient busy
+                // states (sync/scan in flight) where the button will
+                // shortly work again.
+                if isConnected {
+                    Button("Sync Now", action: onSyncNow)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(DeviceMusicLogic.isSyncNowDisabled(phase: model.phase, isConnected: isConnected))
+                }
+            }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) { capacityBar }
         // `.task(id:)` covers a config already cached from a prior visit
         // this launch (seed fires immediately); the `.onChange`s below cover
         // the reply arriving after this view appears. Mirrors the retired
@@ -65,10 +122,13 @@ struct DeviceMusicPage: View {
         .onChange(of: config?.selection) { _, _ in seedIfNeeded() }
         .onChange(of: config?.subscriptions) { _, _ in seedIfNeeded() }
         .onChange(of: draft) { _, newDraft in
-            // The one-time seed assignment also trips this (draft just
-            // changed from its default), but `seededFromModel` already
-            // blocks re-seeding by then — the resulting harmless re-save +
-            // preview is a cosmetic round-trip, not a clobber.
+            // The seed's own assignment lands here too — it must NOT count
+            // as a user edit or fire a save/preview round-trip (same
+            // `isSeeding` guard as DeviceSettingsPage; the old "harmless
+            // cosmetic round-trip" rationale also latched `userEdited`,
+            // which made the page ignore every later device_config_update
+            // for its lifetime).
+            if isSeeding { isSeeding = false; return }
             userEdited = true
             scheduleSave(newDraft)
         }
@@ -82,53 +142,27 @@ struct DeviceMusicPage: View {
         .onDisappear { saveTask?.cancel() }
     }
 
-    // MARK: - Header: title, Sync Now, mode picker, facet, caption
+    // MARK: - Facet bar (below the toolbar, scroll-edge-aware)
+    // (Title/subtitle and the Sync controls are toolbar chrome — see body.
+    // The search field and the caption line were removed per design; the
+    // caption copy survives in `DeviceMusicLogic.caption` + its tests
+    // should a home for it return.)
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(deviceName).font(.title2.bold())
-                    Text(lastSyncedSubtitle).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Sync Now", action: onSyncNow)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(DeviceMusicLogic.isSyncNowDisabled(phase: model.phase, isConnected: isConnected))
-            }
-            Picker("Sync", selection: Binding(get: { draft.mode }, set: setMode)) {
-                Text("Entire library").tag(SelectionMode.all)
-                Text("Selected items").tag(SelectionMode.include)
-                Text("All except selected").tag(SelectionMode.exclude)
-            }
-            .pickerStyle(.menu)
-            .frame(maxWidth: 260, alignment: .leading)
-            HStack {
-                Picker("", selection: $facet) {
-                    ForEach(LibraryBrowser.Facet.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 320)
-                if facet != .playlists {
-                    TextField("Search", text: $search)
-                        .textFieldStyle(.roundedBorder)
-                }
-            }
-            Text(captionLine).font(.caption).foregroundStyle(.secondary)
+    private var facetBar: some View {
+        Picker("", selection: $facet) {
+            ForEach(LibraryBrowser.Facet.allCases, id: \.self) { Text($0.rawValue).tag($0) }
         }
-        .padding(12)
-    }
-
-    private var captionLine: String {
-        facet == .playlists
-            ? "Subscribed playlists always sync to this iPod, shown on the iPod's Music app."
-            : DeviceMusicLogic.caption(mode: draft.mode, isConnected: isConnected)
+        .pickerStyle(.segmented)
+        .frame(width: 320)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity)
     }
 
     private var lastSyncedSubtitle: String {
-        // `model.lastSync` is the CONNECTED device's last sync — showing it
-        // on a different device's page would misattribute it (finding #2).
-        guard isConnected else { return DeviceIdentityLogic.placeholder }
+        // Shown for the KNOWN (paired) device even while disconnected —
+        // the last sync is a fact on disk, not a live connection property.
+        // Only a page for some OTHER device gets the placeholder.
+        guard isKnownDevice else { return DeviceIdentityLogic.placeholder }
         guard let last = model.lastSync else { return "Never synced" }
         return "Last synced \(shortDate(last.timestamp))"
     }
@@ -139,6 +173,25 @@ struct DeviceMusicPage: View {
     }
 
     // MARK: - Content: browser (browse/select) or subscriptions checklist
+
+    /// Renders the real content only once the persisted device config has
+    /// seeded the draft (sweep finding #1 — the flash class): before that,
+    /// `draft.mode` is the compiled-in `.all` default, so the page showed a
+    /// read-only browse list that snapped into checkbox mode a beat later.
+    @ViewBuilder
+    private var seededContent: some View {
+        if seededFromModel {
+            content
+        } else {
+            VStack(spacing: 8) {
+                Spacer()
+                ProgressView().controlSize(.small)
+                Text("Loading…").foregroundStyle(.secondary)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
 
     @ViewBuilder
     private var content: some View {
@@ -159,7 +212,7 @@ struct DeviceMusicPage: View {
                 deviceEmptyState
             case .browser:
                 if let library = model.library {
-                    LibraryBrowser(library: library, facet: facet, mode: browserMode, search: search)
+                    LibraryBrowser(library: library, facet: facet, mode: browserMode, search: "")
                 }
             }
         }
@@ -216,7 +269,7 @@ struct DeviceMusicPage: View {
     /// `DeviceMusicLogic.contentState`) — in Selected/Except modes the
     /// browser IS the primary interactive UI regardless of whether a first
     /// sync has happened yet, so it must keep rendering there. No duplicate
-    /// button here: "press Sync Now" refers to the header's existing button.
+    /// button here: "press Sync Now" refers to the toolbar's existing button.
     private var deviceEmptyState: some View {
         VStack(spacing: 12) {
             Spacer()
@@ -226,6 +279,9 @@ struct DeviceMusicPage: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// Same table pattern as the Artists/Albums/Genres facets: checkbox +
+    /// name leading, right-aligned count/size columns (identical 84pt
+    /// minimum widths so the columns rule up across facet switches).
     private var subscriptionsChecklist: some View {
         List {
             if model.playlists.isEmpty {
@@ -233,97 +289,71 @@ struct DeviceMusicPage: View {
                     .foregroundStyle(.secondary)
             }
             ForEach(model.playlists, id: \.slug) { playlist in
-                Toggle(isOn: Binding(
-                    get: { draft.subscriptions.contains(playlist.slug) },
-                    set: { on in
-                        if on { draft.subscriptions.insert(playlist.slug) }
-                        else { draft.subscriptions.remove(playlist.slug) }
-                    }
-                )) {
-                    HStack {
-                        Text(playlist.name)
-                        if let error = playlist.error {
-                            Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).help(error)
+                HStack(spacing: 8) {
+                    Toggle(isOn: Binding(
+                        get: { draft.subscriptions.contains(playlist.slug) },
+                        set: { on in
+                            if on { draft.subscriptions.insert(playlist.slug) }
+                            else { draft.subscriptions.remove(playlist.slug) }
                         }
-                        Spacer()
-                        Text("\(playlist.tracks) track\(playlist.tracks == 1 ? "" : "s") · \(formatBytes(playlist.bytes))")
-                            .font(.caption).foregroundStyle(.secondary)
+                    )) { EmptyView() }
+                        .toggleStyle(.checkbox)
+                        .labelsHidden()
+                    Text(playlist.name)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if let error = playlist.error {
+                        Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).help(error)
                     }
+                    Spacer(minLength: 12)
+                    Text("\(playlist.tracks) track\(playlist.tracks == 1 ? "" : "s")")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(minWidth: 84, alignment: .trailing)
+                    Text(formatBytes(playlist.bytes))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(minWidth: 84, alignment: .trailing)
                 }
-                .toggleStyle(.checkbox)
             }
             if let line = DeviceMusicLogic.unresolvedSubscriptionsLine(config?.preview?.unresolvedSubscriptions) {
                 Text(line).font(.caption).foregroundStyle(.orange)
             }
         }
         .listStyle(.inset)
-    }
-
-    // MARK: - Floating capacity bar
-
-    @ViewBuilder
-    private var capacityBar: some View {
-        // `model.deviceStorage` is the CONNECTED device's live capacity
-        // reading — on a different device's page it describes the wrong
-        // iPod entirely, so the bar simply doesn't render there (finding #2;
-        // the floating bar has no natural place for a text placeholder, so
-        // "omit" is the right call per the review, unlike the text fields
-        // above which use `DeviceIdentityLogic.placeholder`).
-        if isConnected, let bar = DeviceMusicLogic.capacityBar(storage: model.deviceStorage, preview: config?.preview) {
-            VStack(alignment: .leading, spacing: 4) {
-                GeometryReader { proxy in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 3).fill(.quaternary)
-                        RoundedRectangle(cornerRadius: 3).fill(.orange.opacity(0.55))
-                            .frame(width: proxy.size.width * bar.projectedFraction)
-                        RoundedRectangle(cornerRadius: 3).fill(Color.accentColor)
-                            .frame(width: proxy.size.width * bar.usedFraction)
-                    }
-                }
-                .frame(height: 6)
-                HStack {
-                    Text(DeviceMusicLogic.capacitySummary(bar))
-                    Spacer()
-                    if let line = DeviceRowFormatting.skippedForSpaceLine(syncedSummary: syncedSummary, skipped: model.lastRunSkippedForSpace) {
-                        Text(line)
-                    }
-                }
-                .font(.caption).foregroundStyle(.secondary)
-                if let artLine = DeviceRowFormatting.artworkMissingLine(model.lastRunArtwork) {
-                    Text(artLine).font(.caption).foregroundStyle(.orange)
-                }
-            }
-            .padding(10)
-            .background(.bar)
-            .overlay(alignment: .top) { Divider() }
-        }
-    }
-
-    private var syncedSummary: String {
-        if let total = model.libraryCount { return "\(model.syncedCount) of \(total)" }
-        return "\(model.syncedCount)"
+        .environment(\.defaultMinListRowHeight, LibraryBrowser.rowHeight)
     }
 
     // MARK: - Draft seeding + mode switch + debounced save
 
-    /// Seeds the local draft from the persisted device config exactly once,
-    /// and never after the user has started editing.
+    /// Seeds the draft from the persisted config — EDIT-gated, not
+    /// once-only: while the user hasn't touched anything, later
+    /// `device_config_update`s refresh the open page instead of
+    /// being ignored. The moment the user edits, their draft wins.
     private func seedIfNeeded() {
-        guard !seededFromModel, !userEdited, let config else { return }
-        draft = MusicDraft(
+        guard !userEdited, let config else { return }
+        let seeded = MusicDraft(
             mode: config.selection.mode,
             checked: Set(config.selection.rules),
             subscriptions: Set(config.subscriptions.playlists))
+        if seeded != draft {
+            isSeeding = true
+            draft = seeded
+        }
         seededFromModel = true
     }
 
-    /// The mode `Picker`'s edit path: recompute the checked set via the
-    /// trust-critical seeding function (see `DeviceMusicLogic.seededSelection`)
-    /// so an Entire->Selected switch is zero-diff, then apply the new mode.
+    /// The mode `Picker`'s edit path: stash the departing mode's checks in
+    /// `rememberedRules`, then recompute via the trust-critical seeding
+    /// function — which restores the target mode's remembered checks when
+    /// it has any, and only zero-diff-seeds on first entry.
     private func setMode(_ newMode: SelectionMode) {
+        rememberedRules[draft.mode] = draft.checked
         let seeded = DeviceMusicLogic.seededSelection(
             fromDeviceContents: model.library?.artists ?? [],
-            previousMode: draft.mode, newMode: newMode, current: Array(draft.checked))
+            previousMode: draft.mode, newMode: newMode,
+            current: Array(draft.checked),
+            remembered: rememberedRules[newMode].map(Array.init))
         draft.mode = newMode
         draft.checked = Set(seeded)
     }
@@ -347,213 +377,39 @@ struct DeviceMusicPage: View {
     }
 }
 
-/// Pure logic backing `DeviceMusicPage` — no SwiftUI, fully unit-testable.
-enum DeviceMusicLogic {
-    /// Caption line per the restructure plan's Global Constraints (exact
-    /// strings). Disconnected overrides the mode caption entirely — the
-    /// page stays editable, but changes won't reach the iPod until the next
-    /// sync (Global Constraints: "Disconnected device: … pages editable
-    /// with caption 'Not connected — changes apply on next sync'").
-    static func caption(mode: SelectionMode, isConnected: Bool) -> String {
-        guard isConnected else { return "Not connected — changes apply on next sync" }
-        switch mode {
-        case .all: return "Everything in your library syncs to this iPod."
-        case .include: return "Checked items sync to this iPod."
-        case .exclude: return "Checked items are left off this iPod."
-        }
+#if DEBUG
+/// Wrapped in a `NavigationStack` so the titlebar chrome this page declares
+/// (`navigationTitle`/`navigationSubtitle`/`.toolbar`) actually renders in
+/// the preview canvas — a bare view preview has no navigation context and
+/// would silently drop all three.
+@MainActor
+private func musicPagePreview(_ model: AppModel) -> some View {
+    NavigationStack {
+        DeviceMusicPage(
+            model: model, serial: PreviewFixtures.pairedIpod.serial,
+            onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
+            onSaveDeviceConfig: { _, _, _ in }, onScan: {})
     }
-
-    /// This page's four Global Constraints empty states, minus "no source
-    /// configured" (handled earlier, app-wide, by
-    /// `AppModel.needsFirstRunSetup` — see `LibraryContentLogic`'s doc
-    /// comment). Layers ONE more case, `.deviceEmpty`, onto
-    /// `LibraryContentLogic.state`'s three: Global Constraints' "device
-    /// empty → 'Nothing synced yet — press Sync Now.'" only when the mode
-    /// is Entire library (the browser is read-only there — nothing for the
-    /// user to configure before a first sync) AND this page's device is the
-    /// connected one AND it has never synced anything. In Selected/Except
-    /// modes the browser stays the primary interactive UI regardless of
-    /// sync history, so `.deviceEmpty` never overrides those.
-    enum MusicPageContentState: Equatable {
-        case needsScan
-        case scanning(current: Int, total: Int)
-        case libraryEmpty(path: String)
-        case deviceEmpty
-        case browser
-    }
-
-    static func contentState(
-        library: LibraryInfo?, phase: Phase, configuredSource: String?,
-        mode: SelectionMode, isConnected: Bool, syncedCount: Int
-    ) -> MusicPageContentState {
-        switch LibraryContentLogic.state(library: library, phase: phase, configuredSource: configuredSource) {
-        case .needsScan: return .needsScan
-        case let .scanning(current, total): return .scanning(current: current, total: total)
-        case let .libraryEmpty(path): return .libraryEmpty(path: path)
-        case .browse:
-            guard mode == .all, isConnected, syncedCount == 0 else { return .browser }
-            return .deviceEmpty
-        }
-    }
-
-    /// "prominent Sync Now (disabled while syncing/scanning/disconnected)"
-    /// — per the plan, only these three phase conditions disable it; idle,
-    /// paused, notConfigured, and error all leave it enabled. On top of
-    /// that (review finding #2), `isConnected` — whether THIS page's device
-    /// is the one `phase` actually describes — must also hold: `phase` is
-    /// global connected-device state, so a page for some OTHER (or no)
-    /// connected device must stay disabled regardless of how idle that
-    /// phase looks, or Sync Now would sync the wrong iPod.
-    static func isSyncNowDisabled(phase: Phase, isConnected: Bool) -> Bool {
-        guard isConnected else { return true }
-        switch phase {
-        case .syncing, .scanning, .noDevice: return true
-        default: return false
-        }
-    }
-
-    /// THE trust-critical function in this plan (see the plan's
-    /// self-review notes): reproduces the device's current contents exactly
-    /// on an Entire->Selected mode switch, so the switch is zero-diff —
-    /// nothing gets silently removed by merely changing the mode picker.
-    ///
-    /// **Wire-data gap**: the daemon doesn't expose a distinct "device's
-    /// current synced contents" — only `get_device_config` (mode + rules)
-    /// and `preview_device` (aggregate track/byte counts, no per-album
-    /// breakdown). When `previousMode == .all`, the device's current
-    /// contents ARE (by definition of Entire-library mode) the whole known
-    /// source library, so `fromDeviceContents` is fed `model.library?.artists`
-    /// at the call site — an exact proxy in the common case, but NOT
-    /// necessarily byte-for-byte identical to what's physically on the iPod
-    /// if a prior sync deferred some albums via the fit-pass
-    /// (`skipped_for_space`) or is otherwise still catching up. A
-    /// byte-for-byte-accurate seed would need a new wire event carrying the
-    /// manifest-backed synced set; out of scope here per the plan (flagged,
-    /// not silently faked).
-    ///
-    /// Full 3x3 `SelectionMode` transition table (same-mode pairs are a
-    /// no-op, kept rather than special-cased so every cell is testable
-    /// independently):
-    /// - `.all -> .include`: seed album-level include rules reproducing
-    ///   `fromDeviceContents` (the zero-diff case above). A snapshot, not an
-    ///   auto-following rule — deliberately album-level, not one `.artist`
-    ///   rule, so future library growth stays opt-in via Entire mode.
-    /// - `.all -> .exclude`: empty rules. An empty exclude set already means
-    ///   "exclude nothing" == the entire library, so this is zero-diff
-    ///   without seeding anything. Any rule dormant in `current` from an
-    ///   earlier selected/except session is discarded here — keeping it
-    ///   would reactivate it as a live removal the instant this switch
-    ///   fires, which is exactly the silent-removal bug zero-diff guards
-    ///   against.
-    /// - `.include <-> .exclude`: `current` kept verbatim. The same rule
-    ///   list is reinterpreted under the opposite mode's semantics
-    ///   (only-these vs. everything-but-these) — an explicit content flip
-    ///   the user asked for by picking a different mode, not something this
-    ///   function should mask.
-    /// - `* -> .all`: `current` kept verbatim ("dormant") — not cleared —
-    ///   so switching straight back to Selected/Except later restores the
-    ///   user's previous rules instead of starting from empty.
-    static func seededSelection(
-        fromDeviceContents artists: [LibraryArtist],
-        previousMode: SelectionMode,
-        newMode: SelectionMode,
-        current: [SelectionRule]
-    ) -> [SelectionRule] {
-        guard previousMode != newMode else { return current }
-        switch (previousMode, newMode) {
-        case (.all, .include):
-            return artists.flatMap { artist in
-                artist.albums.map { SelectionRule.album(artist: artist.name, album: $0.name) }
-            }
-        case (.all, .exclude):
-            return []
-        case (.include, .exclude), (.exclude, .include):
-            return current
-        case (_, .all):
-            return current
-        default:
-            return current
-        }
-    }
-
-    struct CapacityBar: Equatable {
-        var usedFraction: Double
-        var projectedFraction: Double
-        var usedBytes: UInt64
-        var projectedBytes: UInt64
-        var totalBytes: UInt64
-    }
-
-    /// `nil` until both a device-capacity reading and a live `preview_device`
-    /// reply are available — the bar simply doesn't render until then (see
-    /// `DeviceMusicPage.capacityBar`). "Used" is this edit's resulting sync
-    /// footprint (`selectedBytes` + `playlistExtraBytes`, both from the
-    /// live preview); "projected" layers in `projectedFreeBytes` when the
-    /// daemon supplies it (accounts for fit-pass deferrals), falling back to
-    /// the same used-bytes figure when it doesn't.
-    static func capacityBar(storage: (free: Int64, total: Int64)?, preview: DevicePreview?) -> CapacityBar? {
-        guard let storage, storage.total > 0, let preview else { return nil }
-        let total = UInt64(storage.total)
-        let used = preview.selectedBytes + preview.playlistExtraBytes
-        let projectedFree = preview.projectedFreeBytes ?? (total > used ? total - used : 0)
-        let projectedUsed = total > projectedFree ? total - projectedFree : total
-        return CapacityBar(
-            usedFraction: min(1, Double(used) / Double(total)),
-            projectedFraction: min(1, Double(projectedUsed) / Double(total)),
-            usedBytes: used, projectedBytes: projectedUsed, totalBytes: total)
-    }
-
-    static func capacitySummary(_ bar: CapacityBar) -> String {
-        "\(DeviceRowFormatting.gbString(bar.usedBytes)) of \(DeviceRowFormatting.gbString(bar.totalBytes)) used"
-    }
-
-    /// `nil` when there's nothing to report (absent or empty) — mirrors the
-    /// wire's own absent-means-nothing-to-flag convention for
-    /// `unresolvedSubscriptions`.
-    static func unresolvedSubscriptionsLine(_ unresolved: [String]?) -> String? {
-        guard let unresolved, !unresolved.isEmpty else { return nil }
-        return "\(unresolved.count) subscribed playlist\(unresolved.count == 1 ? "" : "s") couldn't be resolved"
-    }
+    .frame(width: 760, height: 560)
 }
 
-#if DEBUG
 #Preview("Entire library") {
-    DeviceMusicPage(
-        model: PreviewFixtures.connectedSyncedModel(), serial: PreviewFixtures.pairedIpod.serial,
-        onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
-        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
-        .frame(width: 760, height: 560)
+    musicPagePreview(PreviewFixtures.connectedSyncedModel())
 }
 
 #Preview("Selected items") {
-    DeviceMusicPage(
-        model: PreviewFixtures.connectedSelectedItemsModel(), serial: PreviewFixtures.pairedIpod.serial,
-        onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
-        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
-        .frame(width: 760, height: 560)
+    musicPagePreview(PreviewFixtures.connectedSelectedItemsModel())
 }
 
 #Preview("Disconnected") {
-    DeviceMusicPage(
-        model: PreviewFixtures.disconnectedModel(), serial: PreviewFixtures.pairedIpod.serial,
-        onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
-        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
-        .frame(width: 760, height: 560)
+    musicPagePreview(PreviewFixtures.disconnectedModel())
 }
 
 #Preview("Nothing synced") {
-    DeviceMusicPage(
-        model: PreviewFixtures.connectedNothingSyncedModel(), serial: PreviewFixtures.pairedIpod.serial,
-        onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
-        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
-        .frame(width: 760, height: 560)
+    musicPagePreview(PreviewFixtures.connectedNothingSyncedModel())
 }
 
 #Preview("Over-full preview") {
-    DeviceMusicPage(
-        model: PreviewFixtures.connectedOverfullModel(), serial: PreviewFixtures.pairedIpod.serial,
-        onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
-        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
-        .frame(width: 760, height: 560)
+    musicPagePreview(PreviewFixtures.connectedOverfullModel())
 }
 #endif

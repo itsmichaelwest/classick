@@ -40,12 +40,9 @@ final class LibraryBrowserLogicTests: XCTestCase {
         XCTAssertEqual(LibraryBrowser.orderedArtists(library), LibraryBrowser.orderedArtists(library.shuffled()))
     }
 
-    func testFlattenedAlbumsOrdersByAlbumNameAcrossArtists() {
-        let flat = LibraryBrowser.flattenedAlbums(library)
-        XCTAssertEqual(flat.map(\.album.name), ["Drukqs", "Go Plastic", "Hard Normal Daddy", "syro", ""],
-            "case-insensitive alpha order; empty/unknown album sorts last")
-        XCTAssertEqual(flat.first { $0.album.name == "syro" }?.artist, "aphex twin")
-    }
+    // (flattenedAlbums was removed: the Albums facet now groups albums
+    // under artist section headers, driven by the same `orderedArtists`
+    // ordering the Artists facet uses — covered above.)
 
     func testOrderedGenresIsCaseInsensitiveAlpha() {
         let genres = [
@@ -154,6 +151,84 @@ final class LibraryBrowserLogicTests: XCTestCase {
         let checked = LibraryBrowser.toggledGenre("Ambient", checked: [])
         XCTAssertEqual(checked, [.genre(name: "Ambient")])
         XCTAssertEqual(LibraryBrowser.toggledGenre("Ambient", checked: checked), [])
+    }
+
+    // MARK: - Tri-state genre checkbox
+
+    private let genreLibrary = [
+        LibraryArtist(name: "Aphex Twin", albums: [
+            LibraryAlbum(name: "SAW 85-92", genre: "Ambient", tracks: 13, bytes: 130),
+            LibraryAlbum(name: "Drukqs", genre: "IDM", tracks: 21, bytes: 210),
+        ]),
+        LibraryArtist(name: "Eno", albums: [
+            LibraryAlbum(name: "Music for Airports", genre: "Ambient", tracks: 4, bytes: 40),
+        ]),
+    ]
+
+    func testGenreCheckStateOffWhenNothingChecked() {
+        XCTAssertEqual(LibraryBrowser.genreCheckState("Ambient", artists: genreLibrary, checked: []), .off)
+    }
+
+    func testGenreCheckStateOnViaGenreRule() {
+        XCTAssertEqual(
+            LibraryBrowser.genreCheckState("Ambient", artists: genreLibrary, checked: [.genre(name: "ambient")]),
+            .on, "genre rule matches case-insensitively")
+    }
+
+    func testGenreCheckStateMixedWhenSomeAlbumsChecked() {
+        let checked: Set<SelectionKey> = [.album(artist: "Eno", album: "Music for Airports")]
+        XCTAssertEqual(LibraryBrowser.genreCheckState("Ambient", artists: genreLibrary, checked: checked), .mixed)
+    }
+
+    func testGenreCheckStateOnWhenAllAlbumsCoveredIncludingViaArtistRule() {
+        let checked: Set<SelectionKey> = [
+            .album(artist: "Aphex Twin", album: "SAW 85-92"),
+            .artist(name: "Eno"),
+        ]
+        XCTAssertEqual(LibraryBrowser.genreCheckState("Ambient", artists: genreLibrary, checked: checked), .on)
+    }
+
+    func testToggleGenreHeaderFromMixedChecksWholeGenre() {
+        let start: Set<SelectionKey> = [.album(artist: "Eno", album: "Music for Airports")]
+        let result = LibraryBrowser.toggledGenreHeader("Ambient", artists: genreLibrary, checked: start)
+        XCTAssertTrue(result.contains(.genre(name: "Ambient")))
+    }
+
+    func testToggleGenreHeaderFromOnExpandsBroadArtistRulesAndActuallyUnchecksGenre() {
+        let start: Set<SelectionKey> = [
+            .genre(name: "Ambient"),
+            .album(artist: "Aphex Twin", album: "SAW 85-92"),
+            .artist(name: "Aphex Twin"),
+            .artist(name: "Eno"),
+        ]
+        let result = LibraryBrowser.toggledGenreHeader("Ambient", artists: genreLibrary, checked: start)
+        XCTAssertEqual(result, [.album(artist: "Aphex Twin", album: "Drukqs")])
+        XCTAssertEqual(LibraryBrowser.genreCheckState("Ambient", artists: genreLibrary, checked: result), .off)
+    }
+
+    func testToggleGenreChildUnderGenreRuleExpandsGenreAndExcludesChild() {
+        let entries = LibraryBrowser.albums(inGenre: "Ambient", of: genreLibrary)
+        let aphex = try! XCTUnwrap(entries.first { $0.artistName == "Aphex Twin" })
+        let result = LibraryBrowser.toggledGenreAlbum(
+            entry: aphex, genre: "Ambient", genreEntries: entries,
+            checked: [.genre(name: "Ambient")], style: .cascading)
+
+        XCTAssertEqual(result, [.album(artist: "Eno", album: "Music for Airports")])
+        XCTAssertFalse(LibraryBrowser.containsCaseInsensitive(
+            .album(artist: "Aphex Twin", album: "SAW 85-92"), in: result))
+    }
+
+    func testToggleGenreChildUnderArtistAndGenreRulesExpandsBothWithoutReselectingChild() {
+        let entries = LibraryBrowser.albums(inGenre: "Ambient", of: genreLibrary)
+        let aphex = try! XCTUnwrap(entries.first { $0.artistName == "Aphex Twin" })
+        let result = LibraryBrowser.toggledGenreAlbum(
+            entry: aphex, genre: "Ambient", genreEntries: entries,
+            checked: [.genre(name: "Ambient"), .artist(name: "Aphex Twin")], style: .cascading)
+
+        XCTAssertEqual(result, [
+            .album(artist: "Aphex Twin", album: "Drukqs"),
+            .album(artist: "Eno", album: "Music for Airports"),
+        ])
     }
 
     // MARK: - Case-insensitive matching (fix: Set<SelectionRule> membership

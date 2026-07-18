@@ -5,6 +5,7 @@ import SwiftUI
 /// device row are filled in by later tasks; this establishes the shell.
 struct MainWindow: View {
     var model: AppModel
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     // Action closures injected from AppDelegate (wired in later tasks).
     var onSyncNow: () -> Void
     var onPause: () -> Void
@@ -15,6 +16,10 @@ struct MainWindow: View {
     var onSaveSelection: (SelectionMode, [SelectionRule]) -> Void
     var onScan: () -> Void
     var onForgetIpod: () -> Void
+    /// True disk eject (sidebar's eject glyph) — distinct from
+    /// `onForgetIpod` (Settings page's unpair action). Required, no no-op
+    /// default — the shipped-silently-dead lesson.
+    var onEjectIpod: () -> Void
     var onBackfill: () -> Void
     var onSetUp: () -> Void
     var onReplaceLibrary: () -> Void = {}
@@ -40,16 +45,28 @@ struct MainWindow: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        // Sidebar is collapsible via the system toggle — the native pattern
+        // (Music/Finder/Mail all allow it). An earlier pinned-open variant
+        // stripped the toggle from both toolbars, which left pages with no
+        // other toolbar items an unstable toolbar height (layout break on
+        // Settings/History); the standard leading toggle keeps the chrome
+        // consistent everywhere.
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             Sidebar(model: model, selection: selection,
-                    onForgetIpod: onForgetIpod, onSavePlaylist: onSavePlaylist)
+                    onEjectIpod: onEjectIpod, onSavePlaylist: onSavePlaylist)
         } detail: {
             detail
+                // Fill the pane BEFORE attaching the bottom inset: pages
+                // that hug their content (e.g. HistoryView's empty state)
+                // otherwise shrink the view the inset attaches to, and the
+                // floating DeviceRow renders mid-pane instead of pinned to
+                // the window's bottom edge.
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     DeviceRow(model: model,
                               onSyncNow: onSyncNow, onPause: onPause,
                               onCancelSync: onCancelSync, onResume: onResume,
-                              onRetry: onRetry)
+                              onRetry: onRetry, onSetUp: onSetUp)
                 }
         }
         .navigationTitle("Classick")
@@ -130,8 +147,15 @@ private extension MainWindow {
             model: model,
             onSyncNow: {}, onPause: {}, onCancelSync: {}, onResume: {}, onRetry: {},
             onPreview: { _, _ in }, onSaveSelection: { _, _ in }, onScan: {},
-            onForgetIpod: {}, onBackfill: {}, onSetUp: {}, onReplaceLibrary: {},
-            onAppearRequests: {}, onSavePlaylist: { _ in })
+            onForgetIpod: {}, onEjectIpod: {},
+            onBackfill: {}, onSetUp: {}, onReplaceLibrary: {},
+            onAppearRequests: {}, onSavePlaylist: { _ in },
+            // Answer get_playlist from fixture data — a no-op here left
+            // every playlist page in the canvas on "Loading…" forever,
+            // since the reply the page waits for can never arrive.
+            onGetPlaylist: { slug in
+                model.apply(.playlistDetail(PreviewFixtures.playlistDetail(forSlug: slug)))
+            })
     }
 }
 

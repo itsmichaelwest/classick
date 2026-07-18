@@ -38,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     // exposing it on AppModel) since notifications are a side effect of the
     // event stream, not UI state the reducer needs to track.
     private var pendingSyncAddCount = 0
+    /// Whether the subprocess stream currently in flight is a library scan
+    /// (latched at `header` — see `observeForNotification`).
+    private var currentStreamIsScan = false
+
     private let syncEventDecoder = JSONDecoder()
 
     /// Mirrors `daemonClient.lastFatalError` on the main actor. The actor's
@@ -47,6 +51,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @Published private(set) var daemonFatalError: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Xcode renders an app target's previews by launching the app as the
+        // preview host. Fixtures need none of the launch side effects.
+        guard !ProcessInfo.isRunningInXcodePreviews else { return }
+
         Notifier.requestAuth()
         daemonProcess.ensureRunning()
 
@@ -58,6 +66,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             await self.daemonClient.start()
             for await event in stream {
                 self.model.apply(event)
+                // `hello` marks a completed (re)handshake. The initial
+                // window-appear request batch races the first connect —
+                // `DaemonClient.send` DROPS commands while disconnected —
+                // so without this, `get_library`/`get_history`/
+                // `list_playlists` are silently lost at launch and the
+                // Library page sits on "needs scan" until the next
+                // ScanCompleted broadcast, even though the daemon serves
+                // the cached index from disk on request. Re-issuing here
+                // covers both launch and every daemon reconnect; the
+                // requests are idempotent reads, so overlapping with the
+                // window-appear batch is harmless.
+                if case .hello = event {
+                    self.requestLibraryAndSelection()
+                }
                 self.observeForNotification(event)
                 self.presentPromptIfNeeded()
                 self.autoPresentSetupIfNeeded()
@@ -93,6 +115,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// "Rescan Library" action for the main window's `LibraryView`.
     func rescan() {
         Task { await daemonClient.send(.scanLibrary) }
+    }
+
+    /// TRUE disk eject for the sidebar's eject glyph: unmounts the iPod's
+    /// volume via `NSWorkspace` (the native "safe to unplug" operation) —
+    /// deliberately NOT `forgetIpod`, which unpairs the device from Classick
+    /// and lives on the device Settings page. The daemon holds no volume
+    /// handles while idle (the sync subprocess only runs during a sync, and
+    /// the sidebar disables eject mid-sync), so the unmount normally
+    /// succeeds; when it doesn't (Finder/another app holding files open),
+    /// the system's error is surfaced in an alert rather than swallowed.
+    func ejectIpod() {
+        guard let drive = model.device?.drive else { return }
+        let url = URL(fileURLWithPath: drive)
+        do {
+            try NSWorkspace.shared.unmountAndEjectDevice(at: url)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't Eject iPod"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
     }
 
     /// Live preview of a candidate selection (mode + rules) as the user edits
@@ -140,32 +184,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         Task { await daemonClient.send(.saveConfig(source: source, daemon: daemon, ipod: ipod)) }
     }
 
-    /// The `IpodIdentity` the first-run/re-run wizard persists. SaveConfig
-    /// replaces the whole `ipod` blob, so `customSelection` — like
-    /// `rockboxCompat` above — must be threaded through from the caller
-    /// rather than silently reset to `false`. Static + pure so the
-    /// preservation is unit-testable (mirrors `setupDaemonSettings`).
-    static func setupIpodIdentity(device: DeviceState?, preservingCustomSelection customSelection: Bool) -> IpodIdentity? {
-        guard let device else { return nil }
-        return IpodIdentity(serial: device.serial, modelLabel: device.model, name: device.name, customSelection: customSelection)
-    }
-
-    /// The `DaemonSettings` the first-run wizard persists. SaveConfig replaces
-    /// the whole daemon blob, so any field not carried here gets reset to its
-    /// default when setup re-runs — hence `rockboxCompat` is threaded through
-    /// from the current config rather than silently flipped back off. Static +
-    /// pure so the preservation is unit-testable.
-    static func setupDaemonSettings(autoSync: Bool, preservingRockboxCompat rockboxCompat: Bool) -> DaemonSettings {
-        DaemonSettings(
-            enabled: autoSync,
-            autostartWithWindows: false,
-            firstSyncMode: "auto_apply",
-            subsequentSyncMode: "auto_apply",
-            scheduleMinutes: 0,
-            notifyOn: "all",
-            rockboxCompat: rockboxCompat)
-    }
-
     /// Settings window's debounced edits. `ipod` is omitted (nil) so an
     /// existing iPod pairing isn't disturbed by unrelated setting changes —
     /// only "Remove this iPod" (`forgetIpod()`) touches that.
@@ -175,19 +193,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func forgetIpod() {
         Task { await daemonClient.send(.forgetIpod) }
-    }
-
-    /// Pure identity-preserving update, kept for its dedicated coverage
-    /// (`AppModelReducerTests`) even though its former caller — the retired
-    /// `DeviceView`'s Shared/Custom Selection picker — was removed in Task 6
-    /// of the app restructure: per-device selection is now handled entirely
-    /// through `device_config` (Task 5's Music page), making a top-level
-    /// "shared vs. custom" toggle redundant. `IpodIdentity.customSelection`
-    /// itself stays alive via `setupIpodIdentity`/`finishSetup`, which still
-    /// need to preserve it across wizard re-runs.
-    static func withCustomSelection(_ customSelection: Bool, from existing: IpodIdentity?) -> IpodIdentity? {
-        guard let existing else { return nil }
-        return IpodIdentity(serial: existing.serial, modelLabel: existing.modelLabel, name: existing.name, customSelection: customSelection)
     }
 
     /// "Replace Library…" confirmation sheet's confirm action. The UI
@@ -338,16 +343,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             // whatever reason) arrives without an intervening `summary`
             // can't report a stale, previous-run count.
             pendingSyncAddCount = 0
+            // Latch "this stream is a scan" at stream START, when the
+            // daemon's scanning status_update has definitively preceded
+            // the subprocess's first line — reading `isScanning` at
+            // `finish` time instead raced the trailing idle status_update
+            // (sweep finding #7: if idle landed first, a scan fired a
+            // bogus "Sync complete" banner).
+            currentStreamIsScan = model.isScanning
         case let .summary(add, _, _, _, _, _):
             pendingSyncAddCount = add
         case let .finish(success, _, _, _):
             // Honor the user's notification-level preference (notify_on):
             // "all" fires always, "errors_only" only on failure, "none" never.
             if Notifier.shouldPostSyncFinished(
-                notifyOn: model.config?.daemon?.notifyOn, success: success) {
+                notifyOn: model.config?.daemon?.notifyOn, success: success,
+                isScanning: currentStreamIsScan) {
                 Notifier.syncFinished(success: success, added: pendingSyncAddCount)
             }
             pendingSyncAddCount = 0
+            currentStreamIsScan = false
         default:
             break
         }
@@ -407,6 +421,7 @@ struct ClassickApp: App {
                 onSaveSelection: { mode, rules in appDelegate.saveSelectionDirect(mode: mode, rules: rules) },
                 onScan: appDelegate.rescan,
                 onForgetIpod: appDelegate.forgetIpod,
+                onEjectIpod: appDelegate.ejectIpod,
                 onBackfill: appDelegate.backfillRockbox,
                 onSetUp: appDelegate.presentSetup,
                 onReplaceLibrary: appDelegate.replaceLibrary,
@@ -427,7 +442,11 @@ struct ClassickApp: App {
         }
         .windowResizability(.contentMinSize)
 
-        MenuBarExtra("Classick", systemImage: menuBarSystemImage(for: appDelegate.model.phase)) {
+        // `isInserted: false` in previews — the preview host runs this App
+        // body for real, and without the gate every canvas refresh planted
+        // a Classick item in the developer's actual menu bar.
+        MenuBarExtra("Classick", systemImage: menuBarSystemImage(for: appDelegate.model.phase),
+                     isInserted: .constant(!ProcessInfo.isRunningInXcodePreviews)) {
             MenuContent(
                 model: appDelegate.model,
                 daemonFatalError: appDelegate.daemonFatalError,
@@ -448,9 +467,7 @@ struct ClassickApp: App {
         Settings {
             SettingsView(
                 model: appDelegate.model,
-                onSave: appDelegate.saveSettings,
-                onForgetIpod: appDelegate.forgetIpod,
-                onBackfill: appDelegate.backfillRockbox
+                onSave: appDelegate.saveSettings
             )
         }
     }
@@ -467,20 +484,5 @@ struct ClassickApp: App {
     private func openMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
         openWindow(id: "main")
-    }
-}
-
-private func menuBarSystemImage(for phase: Phase) -> String {
-    switch phase {
-    case .noDevice, .notConfigured, .idle:
-        return "ipod"
-    case .syncing:
-        return "arrow.triangle.2.circlepath"
-    case .scanning:
-        return "magnifyingglass"
-    case .paused:
-        return "pause.circle"
-    case .error:
-        return "exclamationmark.triangle"
     }
 }

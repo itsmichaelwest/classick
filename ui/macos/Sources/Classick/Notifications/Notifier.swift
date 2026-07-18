@@ -24,7 +24,17 @@ enum Notifier {
     /// wire value ("all" | "errors_only" | "none"). Unknown/nil defaults to
     /// "all" so a missing preference still notifies — matching the daemon's
     /// `NotifyLevel::All` default. Pure so the policy is unit-testable.
-    static func shouldPostSyncFinished(notifyOn: String?, success: Bool) -> Bool {
+    ///
+    /// `isScanning`: the daemon drives `--scan-library` subprocesses through
+    /// the SAME sync-wire pipeline as a real sync, so a library scan also
+    /// emits a `finish` line — which used to fire a bogus "Sync complete /
+    /// N added" banner for tracks added to the INDEX, not the iPod. The
+    /// daemon's `status_update.state == "scanning"` (tracked as
+    /// `AppModel.isScanning`, set before the subprocess streams and cleared
+    /// only after it completes) is the authoritative discriminator: no
+    /// banner for scan finishes.
+    static func shouldPostSyncFinished(notifyOn: String?, success: Bool, isScanning: Bool) -> Bool {
+        guard !isScanning else { return false }
         switch notifyOn {
         case "none": return false
         case "errors_only": return !success
@@ -32,11 +42,21 @@ enum Notifier {
         }
     }
 
+    /// The banner body for a finished sync — pure for testability. A
+    /// playlists/settings-only sync adds zero tracks; "0 added" read like
+    /// the sync did nothing, which is exactly the wrong message for a run
+    /// that DID apply changes.
+    nonisolated static func successBody(added: Int) -> String {
+        added > 0
+            ? "\(added) track\(added == 1 ? "" : "s") added"
+            : "Your iPod is up to date — playlists and settings applied."
+    }
+
     static func syncFinished(success: Bool, added: Int) {
         let content = UNMutableNotificationContent()
         if success {
             content.title = "Sync complete"
-            content.body = "\(added) added"
+            content.body = successBody(added: added)
         } else {
             content.title = "Sync failed"
         }

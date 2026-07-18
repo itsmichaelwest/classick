@@ -160,7 +160,11 @@ final class AppModel {
     /// simply dropped rather than guessed at.
     private var pendingResolveTracks: [String] = []
 
-    private var isScanning = false
+    /// Whether the daemon's `status_update.state` currently reports a
+    /// library scan. Readable outside: the notification observer consults it
+    /// to suppress the "Sync complete" banner for `--scan-library` finishes
+    /// (which stream the same sync-wire `finish` a real sync does).
+    private(set) var isScanning = false
     /// Raw device capacity for the Choose Music footer's capacity bar
     /// (storageText is display-only). Set beside storageText in the
     /// deviceConnected arm from the same `storageFor(drive:)` call;
@@ -218,7 +222,17 @@ final class AppModel {
 
     func apply(_ ev: DaemonEvent) {
         switch ev {
-        case .hello, .unknown:
+        case .hello:
+            // A hello marks a fresh (re)connection. The reply-correlation
+            // FIFOs assume replies arrive in request order ON ONE
+            // CONNECTION — entries left over from a dead connection (a
+            // request whose send was dropped, or whose reply died with the
+            // socket) would misattribute the FIRST replies after
+            // reconnect. New pipe, clean slate (sweep finding #3).
+            pendingPreviewSerials.removeAll()
+            pendingResolveTracks.removeAll()
+
+        case .unknown:
             break
 
         case let .historyUpdate(entries):
@@ -390,6 +404,20 @@ final class AppModel {
                 lastRunArtwork = artwork
                 lastRunDbRestored = dbRestored
                 phase = .idle
+                // Post-sync truth refresh: `deviceStorage` was statfs'd at
+                // connect time and the preview's `projectedFreeBytes` was a
+                // PRE-sync projection — without this, the capacity bar keeps
+                // showing the old fill plus an orange "will use" overlay for
+                // a sync that already happened.
+                if let device {
+                    let storage = storageFor(drive: device.drive)
+                    deviceStorage = storage
+                    storageText = Self.formatStorage(storage)
+                    if var state = deviceConfigs[device.serial] {
+                        state.preview?.projectedFreeBytes = nil
+                        deviceConfigs[device.serial] = state
+                    }
+                }
             }
         case let .prompt(id, message, options):
             pendingPrompt = PendingPrompt(id: id, message: message, options: options)
@@ -426,11 +454,8 @@ final class AppModel {
 extension AppModel {
     /// Preview-only seam for `deviceStorage`/`storageText`. Every other field
     /// SwiftUI previews need can be reached through a synthetic `DaemonEvent`
-    /// fed to `apply(_:)` (see `PreviewFixtures.swift`), but these two can't:
-    /// `status_update.storage` is always `nil` on the macOS wire (see
-    /// `storageFor(drive:)`'s doc comment), so production code only ever
-    /// learns capacity by resolving a REAL mounted volume path from
-    /// `deviceConnected.drive`. A preview has no real iPod volume to resolve,
+    /// fed to `apply(_:)` (see `PreviewFixtures.swift`), but a preview has no
+    /// real iPod volume to resolve when exercising the mounted-volume fallback,
     /// and would otherwise show whichever disk happens to be at a given path
     /// on the machine running the canvas — not the deterministic, canned
     /// numbers a design review needs. `#if DEBUG`-gated (compiled out of

@@ -91,13 +91,13 @@ enum PreviewFixtures {
     // MARK: - History
 
     static let historyEntries: [HistoryEntry] = [
-        HistoryEntry(timestamp: "2026-07-10T09:15:00Z", durationSecs: 612, trigger: "plug_in", outcome: "success"),
-        HistoryEntry(timestamp: "2026-07-12T18:42:00Z", durationSecs: 305, trigger: "manual", outcome: "success"),
-        HistoryEntry(timestamp: "2026-07-14T08:03:00Z", durationSecs: 12, trigger: "scheduled", outcome: "failed"),
+        HistoryEntry(timestamp: "2026-07-10T09:15:00Z", durationSecs: 612, trigger: "plug_in", outcome: "ok"),
+        HistoryEntry(timestamp: "2026-07-12T18:42:00Z", durationSecs: 305, trigger: "manual", outcome: "ok"),
+        HistoryEntry(timestamp: "2026-07-14T08:03:00Z", durationSecs: 12, trigger: "scheduled", outcome: "error"),
         // The most recent run also restored the iTunesDB from Classick's own
         // backup — HistoryView needs at least one of these per the preview
         // brief, and it's this run's `lastSync` too (see `connectedSyncedModel`).
-        HistoryEntry(timestamp: "2026-07-16T21:11:00Z", durationSecs: 480, trigger: "manual", outcome: "success", dbRestored: true),
+        HistoryEntry(timestamp: "2026-07-16T21:11:00Z", durationSecs: 480, trigger: "manual", outcome: "ok", dbRestored: true),
     ]
 
     static var mostRecentSync: HistoryEntry { historyEntries.last! }
@@ -162,6 +162,10 @@ enum PreviewFixtures {
     static let brokenPlaylistDetail = PlaylistDetail(
         slug: brokenPlaylist.slug, name: nil, kind: nil, tracks: nil, rules: nil,
         error: brokenPlaylist.error)
+
+    /// History outcome strings on the wire are `ok`/`error`/`aborted`
+    /// (Rust `SyncOutcome`) — fixtures must use those, not invented values
+    /// (wire-audit finding M-1).
 
     // MARK: - Device capacity / preview
 
@@ -405,6 +409,28 @@ enum PreviewFixtures {
         let m = connectedSyncedModel()
         m.apply(.syncEvent(line: errorLine("iTunes is running \u{2014} quit it and try again.")))
         return m
+    }
+
+    /// Fixture stand-in for the daemon's `get_playlist` reply, so preview
+    /// hosts can answer `onGetPlaylist` and playlist pages actually load in
+    /// the canvas (a no-op closure left them on "Loading…" forever). Slugs
+    /// without a dedicated detail get a synthesized manual list rather than
+    /// an eternal spinner.
+    static func playlistDetail(forSlug slug: String) -> PlaylistDetail {
+        switch slug {
+        case roadTripMix.slug: return manualPlaylistDetail
+        case electronicEssentials.slug: return smartPlaylistDetail
+        case brokenPlaylist.slug: return brokenPlaylistDetail
+        case nightDrive.slug:
+            return PlaylistDetail(
+                slug: nightDrive.slug, name: nightDrive.name, kind: .manual,
+                tracks: Array(manualPlaylistDetail.tracks?.prefix(6) ?? []),
+                rules: nil, error: nil)
+        default:
+            return PlaylistDetail(
+                slug: slug, name: nil, kind: nil, tracks: nil, rules: nil,
+                error: "No fixture detail for slug “\(slug)”.")
+        }
     }
 
     /// Playlist editor pages: seeds `model.playlistDetail` with the given

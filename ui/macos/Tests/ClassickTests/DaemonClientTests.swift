@@ -57,6 +57,18 @@ private final class CommandSink: @unchecked Sendable {
 }
 
 final class DaemonClientTests: XCTestCase {
+    func testDelayedLineFromPreviousConnectionIsRejectedAfterReconnect() {
+        XCTAssertFalse(DaemonClient.isCurrentLine(
+            runGeneration: 4, currentRunGeneration: 4,
+            connectionGeneration: 8, currentConnectionGeneration: 9))
+        XCTAssertTrue(DaemonClient.isCurrentLine(
+            runGeneration: 4, currentRunGeneration: 4,
+            connectionGeneration: 9, currentConnectionGeneration: 9))
+        XCTAssertFalse(DaemonClient.isCurrentLine(
+            runGeneration: 3, currentRunGeneration: 4,
+            connectionGeneration: 9, currentConnectionGeneration: 9))
+    }
+
     /// Polls `collector` until it has at least `minCount` events or the
     /// deadline passes, so the test never hangs forever if the client stalls.
     private func waitForEvents(_ collector: EventCollector, minCount: Int, timeout: TimeInterval = 5) async {

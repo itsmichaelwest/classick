@@ -1,55 +1,5 @@
 import SwiftUI
 
-/// One row's selection identity — reuses the existing selection-rule shapes
-/// (`SelectionRule`'s `.artist`/`.album`/`.genre` cases, already `Hashable`)
-/// so a device's persisted `SelectionState.rules` array converts to/from
-/// `Set<SelectionKey>` with no new wire type.
-typealias SelectionKey = SelectionRule
-
-extension SelectionRule {
-    /// Case-insensitive equality of the artist/album/genre name(s), NOT the
-    /// synthesized `Hashable`/`Equatable` (which stays exact-case — the wire
-    /// contract). `LibraryBrowser`'s checkbox logic uses this instead of
-    /// `Set` membership directly, since a persisted rule's case need not
-    /// match the current library scan's (mirrors the Rust matcher —
-    /// `crates/classick/src/selection.rs` — and `SelectionDraft`'s
-    /// equivalent, array-based version of the same rule).
-    fileprivate func matchesCaseInsensitive(_ other: SelectionRule) -> Bool {
-        switch (self, other) {
-        case let (.artist(a), .artist(b)):
-            return a.lowercased() == b.lowercased()
-        case let (.album(a1, al1), .album(a2, al2)):
-            return a1.lowercased() == a2.lowercased() && al1.lowercased() == al2.lowercased()
-        case let (.genre(a), .genre(b)):
-            return a.lowercased() == b.lowercased()
-        default:
-            return false
-        }
-    }
-}
-
-/// How `.select` mode resolves a row toggle to `SelectionKey` edits.
-enum SelectStyle: Equatable, Sendable {
-    /// Checking an artist writes ONE `.artist` rule that also covers
-    /// future albums (iTunes intuition); unchecking one album under a
-    /// fully-checked artist expands that rule into explicit per-album keys
-    /// for the remaining albums. Mirrors `SelectionDraft`'s semantics,
-    /// INCLUDING its case-insensitive name matching (artist/album/genre
-    /// names compare via `.lowercased()`, mirroring the Rust matcher —
-    /// `crates/classick/src/selection.rs`'s `a.to_lowercase() ==
-    /// b.to_lowercase()` — since a persisted rule's case need not match the
-    /// current scan's) — this is the style the device Music page (Task 5)
-    /// binds to, since a sync selection is meant to auto-follow future
-    /// library growth.
-    case cascading
-    /// Each row is independent; an artist toggle checks/unchecks its
-    /// currently-known albums directly and never synthesizes an `.artist`
-    /// rule. For pickers that resolve to concrete, existing items — e.g.
-    /// the Add Songs picker (Task 7), where "future albums" has no
-    /// meaning against a fixed playlist track list.
-    case flat
-}
-
 /// Reusable library browser: renders the wire library aggregates
 /// (artists/albums/genres) as rows, either read-only (`.browse` — the
 /// Library page; canonical-surface rule: this mode renders ZERO checkbox
@@ -76,12 +26,12 @@ struct LibraryBrowser: View {
 
     enum CheckState: Equatable, Sendable { case off, on, mixed }
 
-    /// One row of the flat (ungrouped) Albums facet.
-    struct FlatAlbumRow: Equatable, Identifiable, Sendable {
-        var artist: String
-        var album: LibraryAlbum
-        var id: String { "\(artist)\u{0}\(album.name)" }
-    }
+    /// One row height for every list surface (artists/genres Lists, the
+    /// albums LazyVStack, the device playlists checklist, the playlist
+    /// editor's track list). List and the manual albums stack size rows by
+    /// different rules, so the height is pinned rather than inherited —
+    /// switching facets must not change the table rhythm.
+    nonisolated static let rowHeight: CGFloat = 32
 
     var library: LibraryInfo
     var facet: Facet
@@ -89,15 +39,19 @@ struct LibraryBrowser: View {
     var search: String = ""
 
     var body: some View {
+        if facet == .albums {
+            albumsTable
+        } else {
+            facetList
+        }
+    }
+
+    private var facetList: some View {
         List {
             switch facet {
             case .artists:
                 ForEach(Self.orderedArtists(Self.filteredArtists(library.artists, search: search)), id: \.name) { artist in
                     artistRow(artist)
-                }
-            case .albums:
-                ForEach(Self.filteredFlatAlbums(library.artists, search: search)) { row in
-                    flatAlbumRow(row)
                 }
             case .genres:
                 ForEach(Self.orderedGenres(Self.filteredGenres(library.genres, search: search)), id: \.name) { genre in
@@ -110,17 +64,72 @@ struct LibraryBrowser: View {
                 // this case in `.browse` mode (canonical-surface rule).
                 Text("Playlists sync from the Playlists section.")
                     .foregroundStyle(.secondary)
+            case .albums:
+                EmptyView() // rendered by albumsTable
             }
         }
         .listStyle(.inset)
+        .environment(\.defaultMinListRowHeight, Self.rowHeight)
+    }
+
+    /// The Albums facet (design frame 3:3773: albums grouped under artist
+    /// headers) lives in a `ScrollView` + `LazyVStack(pinnedViews:
+    /// [.sectionHeaders])` rather than a `List`: List section headers do
+    /// NOT stick on scroll on current macOS (verified on both toolbar- and
+    /// safeAreaBar-hosted pages), and pinned headers are the point of the
+    /// grouping. `pinnedViews` pins by contract.
+    private var albumsTable: some View {
+        ScrollView {
+            albumsTableContent
+        }
+        // A bare ScrollView isn't reliably picked up as the page's primary
+        // scroll view on current macOS (List is), so the toolbar never got
+        // its scroll-edge background and rows bled through the chrome above
+        // the pinned headers. Declaring the edge effect explicitly engages
+        // it — the hard style, per the design's own annotation.
+        .modifier(HardTopScrollEdgeIfAvailable())
+    }
+
+    private var albumsTableContent: some View {
+        LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+            ForEach(Self.orderedArtists(Self.filteredArtists(library.artists, search: search)), id: \.name) { artist in
+                Section {
+                    ForEach(artist.albums, id: \.name) { album in
+                        VStack(spacing: 0) {
+                            albumRow(artist: artist, album: album)
+                                .padding(.horizontal, 16)
+                                .frame(minHeight: Self.rowHeight)
+                            Divider()
+                                .padding(.leading, 16)
+                        }
+                    }
+                } header: {
+                    // Opaque background so rows disappear UNDER the
+                    // pinned header instead of showing through it.
+                    Text(artist.name.isEmpty ? "Unknown Artist" : artist.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 5)
+                        .background(.background)
+                }
+            }
+        }
     }
 
     // MARK: - Rows
 
+    /// Artist row: expandable to its album rows (restored by user decision
+    /// after a flat interlude). The artist checkbox shows the mixed
+    /// (intermediate) state when only some albums are checked; toggling it
+    /// checks/unchecks all of them, and the disclosure exposes per-album
+    /// checkboxes without leaving the Artists facet.
     @ViewBuilder
     private func artistRow(_ artist: LibraryArtist) -> some View {
         let title = artist.name.isEmpty ? "Unknown Artist" : artist.name
-        let subtitle = "\(artist.albums.count) album\(artist.albums.count == 1 ? "" : "s")"
+        let totalBytes = artist.albums.reduce(UInt64(0)) { $0 + $1.bytes }
+        let columns = ["\(artist.albums.count) album\(artist.albums.count == 1 ? "" : "s")", formatBytes(totalBytes)]
         DisclosureGroup {
             ForEach(artist.albums, id: \.name) { album in
                 albumRow(artist: artist, album: album)
@@ -128,10 +137,10 @@ struct LibraryBrowser: View {
         } label: {
             switch mode {
             case .browse:
-                rowLabel(title: title, subtitle: subtitle, isChecked: false, onToggle: nil)
+                rowLabel(title: title, columns: columns, isChecked: false, onToggle: nil)
             case let .select(checked, style):
                 let state = Self.checkState(for: artist, checked: checked.wrappedValue)
-                rowLabel(title: title, subtitle: subtitle, isChecked: state != .off, isMixed: state == .mixed) {
+                rowLabel(title: title, columns: columns, isChecked: state != .off, isMixed: state == .mixed) {
                     checked.wrappedValue = Self.toggledArtist(artist, checked: checked.wrappedValue, style: style)
                 }
             }
@@ -141,15 +150,15 @@ struct LibraryBrowser: View {
     @ViewBuilder
     private func albumRow(artist: LibraryArtist, album: LibraryAlbum) -> some View {
         let title = album.name.isEmpty ? "Unknown Album" : album.name
-        let subtitle = "\(album.tracks) track\(album.tracks == 1 ? "" : "s") · \(formatBytes(album.bytes))"
+        let columns = [trackCountText(album.tracks), formatBytes(album.bytes)]
         switch mode {
         case .browse:
-            rowLabel(title: title, subtitle: subtitle, isChecked: false, onToggle: nil)
+            rowLabel(title: title, columns: columns, isChecked: false, onToggle: nil)
         case let .select(checked, style):
             let key = SelectionKey.album(artist: artist.name, album: album.name)
             let isChecked = Self.containsCaseInsensitive(.artist(name: artist.name), in: checked.wrappedValue)
                 || Self.containsCaseInsensitive(key, in: checked.wrappedValue)
-            rowLabel(title: title, subtitle: subtitle, isChecked: isChecked) {
+            rowLabel(title: title, columns: columns, isChecked: isChecked) {
                 checked.wrappedValue = Self.toggledAlbum(
                     artist: artist.name, album: album.name,
                     siblingAlbums: artist.albums.map(\.name),
@@ -158,225 +167,131 @@ struct LibraryBrowser: View {
         }
     }
 
+    /// Genre row: expandable to the albums carrying that genre tag. The
+    /// header checkbox toggles the whole-genre rule; child album rows edit
+    /// album-level rules (and display as checked when covered by the genre
+    /// rule, their artist's rule, or their own).
     @ViewBuilder
-    private func flatAlbumRow(_ row: FlatAlbumRow) -> some View {
-        let title = row.album.name.isEmpty ? "Unknown Album" : row.album.name
-        let subtitle = "\(row.artist.isEmpty ? "Unknown Artist" : row.artist) · \(row.album.tracks) track\(row.album.tracks == 1 ? "" : "s") · \(formatBytes(row.album.bytes))"
-        switch mode {
-        case .browse:
-            rowLabel(title: title, subtitle: subtitle, isChecked: false, onToggle: nil)
-        case let .select(checked, style):
-            let key = SelectionKey.album(artist: row.artist, album: row.album.name)
-            let isChecked = Self.containsCaseInsensitive(.artist(name: row.artist), in: checked.wrappedValue)
-                || Self.containsCaseInsensitive(key, in: checked.wrappedValue)
-            rowLabel(title: title, subtitle: subtitle, isChecked: isChecked) {
-                let siblings = library.artists.first { $0.name == row.artist }?.albums.map(\.name) ?? [row.album.name]
-                checked.wrappedValue = Self.toggledAlbum(
-                    artist: row.artist, album: row.album.name,
-                    siblingAlbums: siblings, checked: checked.wrappedValue, style: style)
+    private func genreRow(_ genre: LibraryGenre) -> some View {
+        let title = genre.name.isEmpty ? "No Genre" : genre.name
+        let columns = [trackCountText(genre.tracks), formatBytes(genre.bytes)]
+        let entries = Self.albums(inGenre: genre.name, of: library.artists)
+        DisclosureGroup {
+            ForEach(entries, id: \.id) { entry in
+                genreAlbumRow(entry: entry, genre: genre.name, genreEntries: entries)
+            }
+        } label: {
+            switch mode {
+            case .browse:
+                rowLabel(title: title, columns: columns, isChecked: false, onToggle: nil)
+            case let .select(checked, _):
+                let state = Self.genreCheckState(genre.name, artists: library.artists, checked: checked.wrappedValue)
+                rowLabel(title: title, columns: columns, isChecked: state != .off, isMixed: state == .mixed) {
+                    checked.wrappedValue = Self.toggledGenreHeader(genre.name, artists: library.artists, checked: checked.wrappedValue)
+                }
             }
         }
     }
 
     @ViewBuilder
-    private func genreRow(_ genre: LibraryGenre) -> some View {
-        let title = genre.name.isEmpty ? "No Genre" : genre.name
-        let subtitle = "\(genre.tracks) track\(genre.tracks == 1 ? "" : "s") · \(formatBytes(genre.bytes))"
+    private func genreAlbumRow(entry: GenreAlbumEntry, genre: String, genreEntries: [GenreAlbumEntry]) -> some View {
+        let title = entry.album.name.isEmpty ? "Unknown Album" : entry.album.name
+        let subtitleArtist = entry.artistName.isEmpty ? "Unknown Artist" : entry.artistName
+        let columns = [trackCountText(entry.album.tracks), formatBytes(entry.album.bytes)]
         switch mode {
         case .browse:
-            rowLabel(title: title, subtitle: subtitle, isChecked: false, onToggle: nil)
-        case let .select(checked, _):
-            let key = SelectionKey.genre(name: genre.name)
-            rowLabel(title: title, subtitle: subtitle, isChecked: Self.containsCaseInsensitive(key, in: checked.wrappedValue)) {
-                checked.wrappedValue = Self.toggledGenre(genre.name, checked: checked.wrappedValue)
+            rowLabel(title: "\(title) — \(subtitleArtist)", columns: columns, isChecked: false, onToggle: nil)
+        case let .select(checked, style):
+            let key = SelectionKey.album(artist: entry.artistName, album: entry.album.name)
+            let isChecked = Self.containsCaseInsensitive(.genre(name: genre), in: checked.wrappedValue)
+                || Self.containsCaseInsensitive(.artist(name: entry.artistName), in: checked.wrappedValue)
+                || Self.containsCaseInsensitive(key, in: checked.wrappedValue)
+            rowLabel(title: "\(title) — \(subtitleArtist)", columns: columns, isChecked: isChecked) {
+                checked.wrappedValue = Self.toggledGenreAlbum(
+                    entry: entry, genre: genre, genreEntries: genreEntries,
+                    checked: checked.wrappedValue, style: style)
             }
         }
+    }
+
+    private func trackCountText(_ n: Int) -> String {
+        "\(n) track\(n == 1 ? "" : "s")"
     }
 
     /// Shared row chrome. `onToggle == nil` renders NO checkbox at all —
     /// that's the entire mechanism behind the canonical-surface rule: browse
     /// mode never passes a toggle closure, so it is structurally impossible
     /// for a checkbox to render there.
-    private func rowLabel(title: String, subtitle: String, isChecked: Bool, isMixed: Bool = false, onToggle: (() -> Void)? = nil) -> some View {
-        HStack {
+    ///
+    /// A partially-selected parent (some albums checked) renders the REAL
+    /// system mixed checkbox (blue square with a minus) via
+    /// `MixedStateCheckbox`, not a checked box with a dash bolted on.
+    ///
+    /// Trailing metadata renders as fixed-minimum-width, right-aligned
+    /// COLUMNS (tracks/albums count, then size) so values line up down the
+    /// list like a table — not one concatenated string ragged against the
+    /// row edge.
+    private func rowLabel(title: String, columns: [String], isChecked: Bool, isMixed: Bool = false, onToggle: (() -> Void)? = nil) -> some View {
+        HStack(spacing: 8) {
             if let onToggle {
-                Toggle(isOn: Binding(get: { isChecked }, set: { _ in onToggle() })) {
-                    EmptyView()
-                }
-                .toggleStyle(.checkbox)
-                .labelsHidden()
+                MixedStateCheckbox(
+                    state: isMixed ? .mixed : (isChecked ? .on : .off),
+                    onToggle: onToggle)
             }
             Text(title)
-            if isMixed {
-                Text("–").foregroundStyle(.tint)
-            }
-            Spacer()
-            Text(subtitle).font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    // MARK: - Pure helpers (exposed for tests)
-
-    nonisolated private static func sortKey(_ name: String) -> String {
-        name.isEmpty ? "\u{FFFF}" : name.lowercased()
-    }
-
-    /// Deterministic display order for the Artists facet: artists
-    /// case-insensitive alpha (empty/"Unknown Artist" sorts last), each
-    /// artist's own albums ordered the same way.
-    nonisolated static func orderedArtists(_ artists: [LibraryArtist]) -> [LibraryArtist] {
-        artists
-            .map { LibraryArtist(name: $0.name, albums: $0.albums.sorted { sortKey($0.name) < sortKey($1.name) }) }
-            .sorted { sortKey($0.name) < sortKey($1.name) }
-    }
-
-    nonisolated static func orderedGenres(_ genres: [LibraryGenre]) -> [LibraryGenre] {
-        genres.sorted { sortKey($0.name) < sortKey($1.name) }
-    }
-
-    /// Flat, ungrouped Albums facet: every album across every artist,
-    /// ordered by album name (not grouped by artist — that's what
-    /// distinguishes this facet from Artists).
-    nonisolated static func flattenedAlbums(_ artists: [LibraryArtist]) -> [FlatAlbumRow] {
-        artists
-            .flatMap { artist in artist.albums.map { FlatAlbumRow(artist: artist.name, album: $0) } }
-            .sorted { sortKey($0.album.name) < sortKey($1.album.name) }
-    }
-
-    /// Tri-state artist checkbox: `.on` when an `.artist` rule is present OR
-    /// every one of its albums is individually checked, `.off` when none
-    /// are, `.mixed` otherwise. Matching is case-insensitive (see
-    /// `containsCaseInsensitive`).
-    nonisolated static func checkState(for artist: LibraryArtist, checked: Set<SelectionKey>) -> CheckState {
-        if containsCaseInsensitive(.artist(name: artist.name), in: checked) { return .on }
-        guard !artist.albums.isEmpty else { return .off }
-        let checkedCount = artist.albums.filter { containsCaseInsensitive(.album(artist: artist.name, album: $0.name), in: checked) }.count
-        if checkedCount == 0 { return .off }
-        return checkedCount == artist.albums.count ? .on : .mixed
-    }
-
-    /// Toggling an artist checks/unchecks all of its albums, one pure `Set`
-    /// transform. `.cascading` collapses to/from a single `.artist` rule;
-    /// `.flat` checks/unchecks each currently-known album explicitly.
-    nonisolated static func toggledArtist(_ artist: LibraryArtist, checked: Set<SelectionKey>, style: SelectStyle) -> Set<SelectionKey> {
-        var checked = checked
-        let albumKeys = artist.albums.map { SelectionKey.album(artist: artist.name, album: $0.name) }
-        let state = checkState(for: artist, checked: checked)
-        switch style {
-        case .cascading:
-            switch state {
-            case .on:
-                removeCaseInsensitive(.artist(name: artist.name), from: &checked)
-                for key in albumKeys { removeCaseInsensitive(key, from: &checked) }
-            case .off, .mixed:
-                for key in albumKeys { removeCaseInsensitive(key, from: &checked) }
-                checked.insert(.artist(name: artist.name))
-            }
-        case .flat:
-            if state == .on {
-                for key in albumKeys { removeCaseInsensitive(key, from: &checked) }
-            } else {
-                for key in albumKeys where !containsCaseInsensitive(key, in: checked) {
-                    checked.insert(key)
-                }
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 12)
+            ForEach(Array(columns.enumerated()), id: \.offset) { _, column in
+                Text(column)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(minWidth: 84, alignment: .trailing)
             }
         }
-        return checked
     }
 
-    /// Toggling one album. `.cascading` mirrors `SelectionDraft`: unchecking
-    /// an album under a whole-artist rule expands it into explicit per-album
-    /// rules minus this one; checking the last unchecked sibling collapses
-    /// back to one `.artist` rule. `.flat` just flips that one album's key.
-    /// Matching (and the resulting removal) is case-insensitive — see
-    /// `containsCaseInsensitive`/`removeCaseInsensitive`.
-    nonisolated static func toggledAlbum(artist: String, album: String, siblingAlbums: [String], checked: Set<SelectionKey>, style: SelectStyle) -> Set<SelectionKey> {
-        var checked = checked
-        let albumKey = SelectionKey.album(artist: artist, album: album)
-        let artistKey = SelectionKey.artist(name: artist)
-        switch style {
-        case .flat:
-            if containsCaseInsensitive(albumKey, in: checked) {
-                removeCaseInsensitive(albumKey, from: &checked)
-            } else {
-                checked.insert(albumKey)
-            }
-        case .cascading:
-            if containsCaseInsensitive(artistKey, in: checked) {
-                removeCaseInsensitive(artistKey, from: &checked)
-                for sibling in siblingAlbums where sibling.lowercased() != album.lowercased() {
-                    checked.insert(.album(artist: artist, album: sibling))
-                }
-            } else if containsCaseInsensitive(albumKey, in: checked) {
-                removeCaseInsensitive(albumKey, from: &checked)
-            } else {
-                checked.insert(albumKey)
-                let allChecked = siblingAlbums.allSatisfy { containsCaseInsensitive(.album(artist: artist, album: $0), in: checked) }
-                if allChecked {
-                    for sibling in siblingAlbums { removeCaseInsensitive(.album(artist: artist, album: sibling), from: &checked) }
-                    checked.insert(artistKey)
-                }
-            }
-        }
-        return checked
-    }
-
-    nonisolated static func toggledGenre(_ name: String, checked: Set<SelectionKey>) -> Set<SelectionKey> {
-        var checked = checked
-        let key = SelectionKey.genre(name: name)
-        if containsCaseInsensitive(key, in: checked) {
-            removeCaseInsensitive(key, from: &checked)
-        } else {
-            checked.insert(key)
-        }
-        return checked
-    }
-
-    // MARK: - Case-insensitive Set<SelectionKey> matching
-
-    /// `Set<SelectionKey>` membership via the synthesized `Hashable` is
-    /// exact-case (it must stay wire-faithful — see `SelectionRule`'s doc
-    /// comment). Name comparisons here are case-insensitive to mirror the
-    /// Rust matcher (`crates/classick/src/selection.rs`'s
-    /// `a.to_lowercase() == b.to_lowercase()`) and `SelectionDraft`'s
-    /// equivalent: a persisted rule's case need not match the current
-    /// library scan's, and treating them as distinct would silently
-    /// disagree with what the core actually syncs.
-    nonisolated static func containsCaseInsensitive(_ key: SelectionKey, in set: Set<SelectionKey>) -> Bool {
-        set.contains { $0.matchesCaseInsensitive(key) }
-    }
-
-    /// Removes every entry in `set` that case-insensitively matches `key`
-    /// (not just an exact-case entry) — see `containsCaseInsensitive`.
-    nonisolated static func removeCaseInsensitive(_ key: SelectionKey, from set: inout Set<SelectionKey>) {
-        set = set.filter { !$0.matchesCaseInsensitive(key) }
-    }
-
-    // MARK: - Search filtering
-
-    nonisolated static func filteredArtists(_ artists: [LibraryArtist], search: String) -> [LibraryArtist] {
-        guard !search.isEmpty else { return artists }
-        let q = search.lowercased()
-        return artists.compactMap { artist in
-            if artist.name.lowercased().contains(q) { return artist }
-            let albums = artist.albums.filter { $0.name.lowercased().contains(q) }
-            return albums.isEmpty ? nil : LibraryArtist(name: artist.name, albums: albums)
-        }
-    }
-
-    nonisolated static func filteredGenres(_ genres: [LibraryGenre], search: String) -> [LibraryGenre] {
-        guard !search.isEmpty else { return genres }
-        let q = search.lowercased()
-        return genres.filter { $0.name.lowercased().contains(q) }
-    }
-
-    nonisolated static func filteredFlatAlbums(_ artists: [LibraryArtist], search: String) -> [FlatAlbumRow] {
-        flattenedAlbums(filteredArtists(artists, search: search))
-    }
 }
 
 func formatBytes(_ bytes: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+}
+
+/// The system checkbox with real mixed-state support — AppKit's `NSButton`
+/// (`allowsMixedState`), which SwiftUI's `Toggle` has never exposed. Not a
+/// custom control: this is the exact checkbox Finder/Mail render for
+/// partial selections. State is one-way from SwiftUI: a click calls
+/// `onToggle`, the model recomputes, and `updateNSView` writes the
+/// resulting state back — overriding whatever NSButton's own click cycle
+/// (which can pass THROUGH mixed) chose, so users can toggle but never
+/// manually park a row on "mixed".
+private struct MixedStateCheckbox: NSViewRepresentable {
+    var state: LibraryBrowser.CheckState
+    var onToggle: () -> Void
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(checkboxWithTitle: "", target: context.coordinator, action: #selector(Coordinator.clicked))
+        button.allowsMixedState = true
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.onToggle = onToggle
+        switch state {
+        case .on: button.state = .on
+        case .off: button.state = .off
+        case .mixed: button.state = .mixed
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var onToggle: () -> Void = {}
+        @objc func clicked(_ sender: NSButton) { onToggle() }
+    }
 }
 
 #if DEBUG
@@ -417,3 +332,15 @@ private struct LibraryBrowserSelectPreviewHost: View {
         .frame(width: 420, height: 500)
 }
 #endif
+
+/// Explicitly declares the hard top scroll-edge effect (macOS 26+). No-op on
+/// macOS 15, where the toolbar manages its own on-scroll background.
+private struct HardTopScrollEdgeIfAvailable: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.scrollEdgeEffectStyle(.hard, for: .top)
+        } else {
+            content
+        }
+    }
+}

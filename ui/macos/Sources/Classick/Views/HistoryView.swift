@@ -10,17 +10,20 @@ struct HistoryView: View {
     private struct Row: Identifiable { let id: Int; let entry: HistoryEntry }
 
     var body: some View {
-        if rows.isEmpty {
-            ContentUnavailableView("No syncs yet", systemImage: "clock.arrow.circlepath",
-                description: Text("Your sync history will appear here."))
-        } else {
-            Table(rows) {
-                TableColumn("When") { r in Text(when(r.entry.timestamp)) }
-                TableColumn("Trigger") { r in Text(trigger(r.entry.trigger)) }
-                TableColumn("Outcome") { r in Text(r.entry.outcome.capitalized) }
-                TableColumn("Duration") { r in Text(duration(r.entry.durationSecs)) }
+        Group {
+            if rows.isEmpty {
+                ContentUnavailableView("No syncs yet", systemImage: "clock.arrow.circlepath",
+                    description: Text("Your sync history will appear here."))
+            } else {
+                Table(rows) {
+                    TableColumn("When") { r in Text(when(r.entry.timestamp)) }
+                    TableColumn("Trigger") { r in Text(trigger(r.entry.trigger)) }
+                    TableColumn("Outcome") { r in Text(r.entry.outcome.capitalized) }
+                    TableColumn("Duration") { r in Text(duration(r.entry.durationSecs)) }
+                }
             }
         }
+        .navigationTitle("Sync History")
     }
 
     private func when(_ iso: String) -> String {

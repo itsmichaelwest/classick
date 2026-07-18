@@ -9,45 +9,83 @@ struct DeviceRow: View {
     var onCancelSync: () -> Void
     var onResume: () -> Void
     var onRetry: () -> Void
+    /// Opens the pairing/setup flow — the recovery path from `.notConfigured`.
+    var onSetUp: () -> Void
 
     var body: some View {
+        // Floating card per the design: uniform 20pt inset from the left,
+        // right, and bottom edges. Hosted via `safeAreaInset(edge: .bottom)`
+        // in MainWindow, so scroll content slides underneath the bar but is
+        // never permanently obscured. The glass-vs-material split lives
+        // entirely in `floatingBarBackground()` below — keep the layout
+        // shared across OS versions.
         HStack(spacing: 14) {
             content
         }
-        .padding(.horizontal, 14).padding(.vertical, 9)
+        .padding(.horizontal, 16).padding(.vertical, 10)
         .frame(maxWidth: .infinity)
-        .background(.bar)
-        .overlay(alignment: .top) { Divider() }
+        .floatingBarBackground()
+        .padding([.horizontal, .bottom], 20)
     }
 
     @ViewBuilder
     private var content: some View {
         switch model.phase {
         case .idle:
-            deviceIdentity
-            capacityBar
-            Spacer()
-            statusText("\(syncedSummary) synced", idleSubordinateLines)
-            Button("Sync Now", action: onSyncNow).buttonStyle(.borderedProminent)
+            // Idle card, two rows (user's mock): identity header — device
+            // image, name, "Last synced at …", prominent Sync Now trailing —
+            // over the full-width capacity bar with "X GB used" / "Y GB
+            // total" beneath. Falls back to the pre-redesign single row in
+            // the rare connected-but-no-capacity-reading window.
+            if let storage = model.deviceStorage, storage.total > 0 {
+                twoRowCard(subtitle: lastSyncedLine) {
+                    Button("Sync Now", action: onSyncNow)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                } bar: {
+                    capacityCard(storage: storage)
+                }
+            } else {
+                deviceIdentity
+                Spacer()
+                statusText("\(syncedSummary) synced", idleSubordinateLines)
+                Button("Sync Now", action: onSyncNow).buttonStyle(.borderedProminent)
+            }
 
         case let .syncing(current, total, label, etaSecs):
-            deviceIdentity
-            VStack(alignment: .leading, spacing: 4) {
-                ProgressView(value: total > 0 ? Double(current) / Double(total) : 0)
-                    .frame(maxWidth: 320)
-                Text("\(current) of \(total)\(label.isEmpty ? "" : " · \(label)")")
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            twoRowCard(subtitle: total > 0 ? "Adding \(total) track\(total == 1 ? "" : "s")" : "Preparing sync…") {
+                Button("Pause", action: onPause).controlSize(.large)
+                Button("Cancel", action: onCancelSync).controlSize(.large)
+            } bar: {
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: total > 0 ? Double(current) / Double(total) : 0)
+                    HStack {
+                        Text("\(current) of \(total)\(label.isEmpty ? "" : " · \(label)")")
+                            .lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        if let etaSecs {
+                            Text("~\(formatEta(etaSecs)) left").layoutPriority(1)
+                        }
+                    }
+                    .foregroundStyle(.secondary)
+                }
             }
-            Spacer()
-            statusText("Adding \(total) tracks", [etaSecs.map { "~\(formatEta($0)) left" }].compactMap { $0 })
-            Button("Pause", action: onPause)
-            Button("Cancel", action: onCancelSync)
 
         case let .paused(synced, total):
-            deviceIdentity
-            Spacer()
-            statusText("Paused", ["\(synced)\(total.map { " of \($0)" } ?? "") synced"])
-            Button("Resume", action: onResume).buttonStyle(.borderedProminent)
+            twoRowCard(subtitle: "Sync paused") {
+                Button("Resume", action: onResume)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+            } bar: {
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: total.map { $0 > 0 ? Double(synced) / Double($0) : 0 } ?? 0)
+                    HStack {
+                        Text("\(synced)\(total.map { " of \($0)" } ?? "") synced")
+                        Spacer()
+                    }
+                    .foregroundStyle(.secondary)
+                }
+            }
 
         case .scanning:
             deviceIdentity
@@ -58,8 +96,16 @@ struct DeviceRow: View {
         case .noDevice:
             Image(systemName: "ipod").font(.title2).foregroundStyle(.tertiary)
             VStack(alignment: .leading) {
-                Text("No iPod connected").foregroundStyle(.secondary)
-                Text("Plug in your iPod to sync").font(.caption).foregroundStyle(.tertiary)
+                // Name the PAIRED device when there is one — "Michael's
+                // iPod not connected" is actionable; "No iPod connected"
+                // reads like the app forgot it exists.
+                if let paired = model.config?.ipod {
+                    Text("\(paired.name ?? paired.modelLabel) not connected").foregroundStyle(.secondary)
+                    Text("Plug it in to sync").font(.caption).foregroundStyle(.tertiary)
+                } else {
+                    Text("No iPod connected").foregroundStyle(.secondary)
+                    Text("Plug in your iPod to sync").font(.caption).foregroundStyle(.tertiary)
+                }
             }
             Spacer()
             statusText("\(model.libraryCount ?? 0) tracks selected", [])
@@ -69,6 +115,10 @@ struct DeviceRow: View {
             Image(systemName: "ipod").font(.title2).foregroundStyle(.tertiary)
             Text("iPod not set up").foregroundStyle(.secondary)
             Spacer()
+            // Recovery path: without this, an unpaired iPod (e.g. after
+            // "Remove iPod") left the user with a dead-end status line and
+            // no way back except the menu-bar's Set Up row.
+            Button("Set Up…", action: onSetUp).buttonStyle(.borderedProminent)
 
         case let .error(message):
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.title3)
@@ -81,22 +131,93 @@ struct DeviceRow: View {
         }
     }
 
+    /// The one card shape every resting/active state shares (user decision:
+    /// consistent layouts): identity header — device image, name, one
+    /// subtitle line, trailing action buttons — over a full-width bar row.
+    /// Idle passes the capacity bar; syncing/paused pass a progress bar, so
+    /// the bar is always in the same place instead of jumping into the
+    /// header mid-sync.
+    private func twoRowCard(subtitle: String,
+                            @ViewBuilder actions: () -> some View,
+                            @ViewBuilder bar: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                DeviceIcon(drive: model.device?.drive, size: 40)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(deviceDisplayName)
+                        .font(.title3.bold())
+                    Text(subtitle)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                actions()
+            }
+            bar()
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var deviceDisplayName: String {
+        model.device?.name ?? model.device?.model ?? "iPod"
+    }
+
     private var deviceIdentity: some View {
         HStack(spacing: 9) {
-            Image(systemName: "ipod").font(.title2).foregroundStyle(.secondary)
+            DeviceIcon(drive: model.device?.drive, size: 26)
             VStack(alignment: .leading, spacing: 1) {
-                Text(model.device?.name ?? model.device?.model ?? "iPod").fontWeight(.semibold)
+                Text(deviceDisplayName).fontWeight(.semibold)
                 if let s = model.storageText { Text(s).font(.caption).foregroundStyle(.secondary) }
             }
         }
     }
 
-    @ViewBuilder private var capacityBar: some View {
-        if let storage = model.deviceStorage {
-            let used = Double(storage.total - storage.free)
-            ProgressView(value: used, total: Double(storage.total))
-                .frame(maxWidth: 260)
-                .tint(.accentColor)
+    /// The connected device's live `preview_device` reply, when the Music
+    /// page's edits have produced one — drives the projected (orange)
+    /// overlay so the bar tracks checkbox changes before a sync runs.
+    private var connectedPreview: DevicePreview? {
+        model.device.flatMap { model.deviceConfigs[$0.serial]?.preview }
+    }
+
+    /// The merged capacity readout (was the Music page's own bottom strip —
+    /// one floating bar now, not two stacked ones). Fill = actual disk
+    /// usage; the orange layer, when a live preview supplies
+    /// `projectedFreeBytes`, is the daemon's conservative projection of
+    /// usage after the current selection syncs.
+    private func capacityCard(storage: (free: Int64, total: Int64)) -> some View {
+        let total = Double(storage.total)
+        let usedBytes = UInt64(max(0, storage.total - storage.free))
+        let usedFraction = min(1, Double(usedBytes) / total)
+        let projectedFraction = connectedPreview?.projectedFreeBytes
+            .map { min(1, max(0, (total - Double($0)) / total)) }
+        return VStack(alignment: .leading, spacing: 6) {
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.quaternary)
+                    if let projected = projectedFraction, projected > usedFraction {
+                        Capsule().fill(.orange.opacity(0.55))
+                            .frame(width: proxy.size.width * projected)
+                    }
+                    Capsule().fill(Color.accentColor)
+                        .frame(width: proxy.size.width * usedFraction)
+                }
+            }
+            .frame(height: 6)
+            HStack {
+                Text("\(formatBytes(usedBytes)) used")
+                Spacer()
+                Text("\(formatBytes(UInt64(storage.total))) total")
+            }
+            .foregroundStyle(.secondary)
+            // The skipped-for-space / missing-art rollups keep their home on
+            // this card (trust surface — the user must see what a sync left
+            // behind). The last-sync line is deliberately NOT here anymore:
+            // it lives in the device page's titlebar subtitle.
+            if let line = DeviceRowFormatting.skippedForSpaceLine(syncedSummary: syncedSummary, skipped: model.lastRunSkippedForSpace) {
+                Text(line).font(.caption).foregroundStyle(.secondary)
+            }
+            if let artLine = DeviceRowFormatting.artworkMissingLine(model.lastRunArtwork) {
+                Text(artLine).font(.caption).foregroundStyle(.orange)
+            }
         }
     }
 
@@ -126,6 +247,10 @@ struct DeviceRow: View {
         return "\(model.syncedCount)"
     }
 
+    private var lastSyncedLine: String {
+        model.lastSync.map { "Last synced at \(shortDate($0.timestamp))" } ?? "Never synced"
+    }
+
     private func formatEta(_ secs: UInt64) -> String {
         let f = DateComponentsFormatter()
         f.allowedUnits = secs < 3600 ? [.minute, .second] : [.hour, .minute]
@@ -136,6 +261,27 @@ struct DeviceRow: View {
     private func shortDate(_ iso: String) -> String {
         guard let d = ISO8601DateFormatter().date(from: iso) else { return iso }
         return d.formatted(date: .omitted, time: .shortened)
+    }
+}
+
+private extension View {
+    /// The design's floating-bar surface. On macOS 26+ this is real Liquid
+    /// Glass (`glassEffect`, which brings its own edge treatment — no extra
+    /// shadow wanted). On macOS 15 the native equivalent is a material card:
+    /// `regularMaterial` in the same rounded rect, a hairline separator
+    /// stroke, and a soft shadow to lift it off the scroll content.
+    @ViewBuilder
+    func floatingBarBackground() -> some View {
+        if #available(macOS 26.0, *) {
+            self.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        } else {
+            self.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
+        }
     }
 }
 
@@ -178,7 +324,7 @@ enum DeviceRowFormatting {
 #if DEBUG
 @MainActor
 private func deviceRowPreview(_ model: AppModel) -> some View {
-    DeviceRow(model: model, onSyncNow: {}, onPause: {}, onCancelSync: {}, onResume: {}, onRetry: {})
+    DeviceRow(model: model, onSyncNow: {}, onPause: {}, onCancelSync: {}, onResume: {}, onRetry: {}, onSetUp: {})
         .frame(width: 820)
 }
 

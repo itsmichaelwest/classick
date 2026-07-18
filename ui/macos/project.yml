@@ -4,7 +4,12 @@
 # be opened without XcodeGen installed.
 name: Classick
 options:
-  bundleIdPrefix: com.classick
+  bundleIdPrefix: st.michaelwe
+  # THE deployment floor (user decision 2026-07-18: oldest supported Mac
+  # runs macOS 15). Single source of truth — Package.swift `platforms` and
+  # Info.plist LSMinimumSystemVersion must be kept in lockstep manually.
+  # Deliberately a pinned number, not $(RECOMMENDED_...), so the floor only
+  # ever changes on purpose.
   deploymentTarget:
     macOS: "15.0"
   createIntermediateGroups: true
@@ -13,6 +18,17 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
+    # Xcode "recommended settings" (accepted 2026-07-18), kept here so
+    # regeneration preserves them: project-level team (targets inherit),
+    # dead-code stripping, string-catalog symbol generation.
+    DEVELOPMENT_TEAM: 6CT58GRVAB
+    DEAD_CODE_STRIPPING: YES
+    STRING_CATALOG_GENERATE_SYMBOLS: YES
+    # Type-safe Color(.name)/Image(.name) symbols for asset-catalog entries.
+    # Inert until the project gains a real asset catalog (today only the
+    # Icon Composer app icon exists) — enabled so future assets (e.g. a real
+    # iPod illustration for the device card) get compile-checked names.
+    ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOL_FRAMEWORK_EXTENSIONS: YES
     SWIFT_STRICT_CONCURRENCY: complete
     MARKETING_VERSION: "0.4.0"
     CURRENT_PROJECT_VERSION: "6"
@@ -43,13 +59,20 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Classick
-        PRODUCT_BUNDLE_IDENTIFIER: com.classick.app
+        # Bundle ID + real-team automatic signing set by the user in Xcode
+        # (2026-07-18) and ported here — project.yml is xcodegen's source
+        # of truth; edits made only in the generated pbxproj are wiped by
+        # the next `xcodegen generate`.
+        PRODUCT_BUNDLE_IDENTIFIER: st.michaelwe.classick
         INFOPLIST_FILE: Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # Ad-hoc sign for dev; SP3 swaps in a Developer ID identity.
-        CODE_SIGN_IDENTITY: "-"
-        CODE_SIGN_STYLE: Manual
-        ENABLE_HARDENED_RUNTIME: NO
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.music
+        CODE_SIGN_IDENTITY: "Apple Development"
+        CODE_SIGN_STYLE: Automatic
+        # Hardened runtime ON (recommended-settings acceptance): required
+        # for notarization anyway, and fine here — it constrains library
+        # loading/injection, not spawning the embedded daemon subprocess.
+        ENABLE_HARDENED_RUNTIME: YES
         # Script phases write outside the sandbox (cargo target/, app bundle);
         # pin the sandbox off so a future Xcode default flip can't break them.
         ENABLE_USER_SCRIPT_SANDBOXING: NO
@@ -73,7 +96,20 @@ targets:
           if [ -f "$SRC" ]; then
             mkdir -p "$DST"
             cp "$SRC" "$DST/classick"
-            echo "embedded daemon from $SRC"
+            # RE-SIGN with the app's identity. Since the app is signed with
+            # a real certificate, macOS launch constraints SIGKILL any
+            # executable inside the bundle that only carries cargo's ad-hoc
+            # linker signature — every daemon spawn died instantly with no
+            # log (found live 2026-07-18: exit 137, same bytes ran fine
+            # outside the bundle). EXPANDED_CODE_SIGN_IDENTITY is provided
+            # by Xcode during signing; "-" keeps ad-hoc for unsigned builds.
+            # Deliberately NOT --options runtime: hardened-runtime library
+            # validation would block the daemon's Homebrew dylibs (glib,
+            # libgpod). Notarized release builds must add the
+            # com.apple.security.cs.disable-library-validation entitlement
+            # instead — release-macos.sh territory.
+            codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY:--}" "$DST/classick"
+            echo "embedded + signed daemon from $SRC"
           else
             echo "warning: $SRC not found — run 'cargo build --release' so the app can spawn the daemon"
           fi
@@ -87,8 +123,9 @@ targets:
       - target: Classick
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.classick.app.tests
+        PRODUCT_BUNDLE_IDENTIFIER: st.michaelwe.classick.tests
         GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
 
 schemes:
   Classick:

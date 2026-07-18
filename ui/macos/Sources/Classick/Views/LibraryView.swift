@@ -2,8 +2,10 @@ import SwiftUI
 
 /// The Library page: a browse-only view of the scanned music library — a
 /// facet picker (Artists/Albums/Genres; `.playlists` is device-page-only,
-/// see `LibraryBrowser.Facet`) and search, over the shared `LibraryBrowser`
-/// in `.browse` mode.
+/// see `LibraryBrowser.Facet`) centered in the toolbar, over the shared
+/// `LibraryBrowser` in `.browse` mode. No visible title, no search (removed
+/// per design; `LibraryBrowser`'s search plumbing remains for a future
+/// `.searchable` pass).
 ///
 /// Canonical-surface rule: sync intent (checkboxes, mode pickers) is
 /// displayed/edited ONLY on device pages (Task 5) — this page renders NO
@@ -15,29 +17,24 @@ struct LibraryView: View {
     var onScan: () -> Void
 
     @State private var facet: LibraryBrowser.Facet = .artists
-    @State private var search = ""
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            content
-        }
-    }
-
-    private var header: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Picker("", selection: $facet) {
-                    ForEach(browsableFacets, id: \.self) { Text($0.rawValue).tag($0) }
+        content
+            // Window still knows its name (app switcher, accessibility) but
+            // the toolbar doesn't render it — the centered facet control IS
+            // this page's chrome. `.principal` is the system's centered
+            // toolbar slot; `.toolbar(removing: .title)` (macOS 14+) is the
+            // supported way to suppress the visible title.
+            .navigationTitle("Library")
+            .toolbar(removing: .title)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Picker("", selection: $facet) {
+                        ForEach(browsableFacets, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 270)
-                TextField("Search", text: $search)
-                    .textFieldStyle(.roundedBorder)
             }
-        }
-        .padding(12)
     }
 
     /// `.playlists` is device-page-only (subscriptions checklist) — never
@@ -58,7 +55,7 @@ struct LibraryView: View {
             libraryEmptyState(path: path)
         case .browse:
             if let library = model.library {
-                LibraryBrowser(library: library, facet: facet, mode: .browse, search: search)
+                LibraryBrowser(library: library, facet: facet, mode: .browse, search: "")
             }
         }
     }
@@ -141,18 +138,25 @@ enum LibraryContentLogic {
 }
 
 #if DEBUG
+/// NavigationStack so the toolbar chrome (centered facet control, removed
+/// title) renders in the canvas — see `DeviceMusicPage`'s preview note.
+@MainActor
+private func libraryPreview(_ model: AppModel) -> some View {
+    NavigationStack {
+        LibraryView(model: model, onScan: {})
+    }
+    .frame(width: 760, height: 560)
+}
+
 #Preview("Browse") {
-    LibraryView(model: PreviewFixtures.connectedSyncedModel(), onScan: {})
-        .frame(width: 760, height: 560)
+    libraryPreview(PreviewFixtures.connectedSyncedModel())
 }
 
 #Preview("Empty") {
-    LibraryView(model: PreviewFixtures.emptyLibraryModel(), onScan: {})
-        .frame(width: 760, height: 560)
+    libraryPreview(PreviewFixtures.emptyLibraryModel())
 }
 
 #Preview("Scanning") {
-    LibraryView(model: PreviewFixtures.scanningModel(), onScan: {})
-        .frame(width: 760, height: 560)
+    libraryPreview(PreviewFixtures.scanningModel())
 }
 #endif

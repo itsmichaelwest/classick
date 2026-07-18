@@ -172,9 +172,21 @@ struct HistoryEntry: Codable, Equatable, Sendable {
 struct StatusInfo: Equatable, Sendable {
     enum State: String, Codable, Sendable { case idle, syncing, scanning }
 
+    /// Wire keys are `free_bytes`/`total_bytes` (Rust `StorageInfo`).
+    /// This struct once decoded bare `free`/`total`. When the macOS storage
+    /// implementation landed daemon-side, the mismatch made
+    /// EVERY `status_update` with a connected iPod fail to decode, so the
+    /// app silently dropped all status while a device was plugged in
+    /// (phase stuck at .notConfigured, sync state never shown). Keys are
+    /// pinned by `testDecodesStatusUpdateWithStorageFromLiveWireCapture`.
     struct Storage: Codable, Equatable, Sendable {
         var free: UInt64
         var total: UInt64
+
+        enum CodingKeys: String, CodingKey {
+            case free = "free_bytes"
+            case total = "total_bytes"
+        }
     }
 
     var state: State
@@ -182,7 +194,7 @@ struct StatusInfo: Equatable, Sendable {
     var ipodConnected: Bool
     var lastSync: HistoryEntry?
     var nextScheduledUnixSecs: UInt64?
-    var storage: Storage?            // always nil on macOS wire; see Storage.swift
+    var storage: Storage?
     var syncedCount: Int = 0          // X in "X of Y synced" — manifest track count
     var libraryCount: Int?            // Y — source-library track count; nil until known
 }

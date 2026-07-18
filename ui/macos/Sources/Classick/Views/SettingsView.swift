@@ -2,8 +2,11 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
-/// `Settings` scene body: General (music folder, auto-sync, schedule,
-/// launch-at-login, forget iPod) + About (version, license, GitHub link).
+/// `Settings` scene body: General (music folder, schedule, launch-at-login)
+/// + About (version, license, GitHub link). APP-level preferences only —
+/// everything device-specific (per-device auto-sync, Rockbox compatibility,
+/// artwork backfill, Replace Library, Remove iPod) lives on the sidebar's
+/// per-device Settings page (`DeviceSettingsPage`), not here.
 ///
 /// Current config is read from `AppModel.config`, populated by the daemon's
 /// `config_update` event (see `AppModel.apply`) — the daemon stays the store
@@ -11,12 +14,10 @@ import SwiftUI
 struct SettingsView: View {
     var model: AppModel
     var onSave: (_ source: String?, _ daemon: DaemonSettings) -> Void
-    var onForgetIpod: () -> Void
-    var onBackfill: () -> Void
 
     var body: some View {
         TabView {
-            GeneralTab(model: model, onSave: onSave, onForgetIpod: onForgetIpod, onBackfill: onBackfill)
+            GeneralTab(model: model, onSave: onSave)
                 .tabItem { Label("General", systemImage: "gearshape") }
             AboutTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
@@ -28,11 +29,8 @@ struct SettingsView: View {
 private struct GeneralTab: View {
     var model: AppModel
     var onSave: (_ source: String?, _ daemon: DaemonSettings) -> Void
-    var onForgetIpod: () -> Void
-    var onBackfill: () -> Void
 
     @State private var sourcePath: String?
-    @State private var enabled = true
     @State private var scheduleMinutes: UInt32 = 0
     @State private var launchAtLogin = false
     @State private var isPickingFolder = false
@@ -46,12 +44,6 @@ private struct GeneralTab: View {
         ("Every 12 hours", 720),
         ("Every 24 hours", 1440),
     ]
-
-    private var ipodLabel: String? {
-        if let device = model.device { return device.name ?? device.model }
-        if let ipod = model.config?.ipod { return ipod.name ?? ipod.modelLabel }
-        return nil
-    }
 
     var body: some View {
         Form {
@@ -68,13 +60,6 @@ private struct GeneralTab: View {
             Text("Classick backs up your iPod's database before every sync.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-
-            Toggle(
-                "Sync automatically on plug-in",
-                isOn: Binding(
-                    get: { enabled },
-                    set: { enabled = $0; scheduleSave() }
-                ))
 
             Picker(
                 "Scheduled sync",
@@ -99,24 +84,6 @@ private struct GeneralTab: View {
                     }
                 ))
 
-            Text("Rockbox compatibility mode moved to each iPod's own Settings page — select an iPod in the sidebar to change it.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            Button("Force update artwork and metadata") { onBackfill() }
-            Text("Refresh artwork + metadata for everything already on the iPod — both the Apple firmware and Rockbox — without re-copying audio. Use after retagging your library (e.g. in Lidarr).")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            if let ipodLabel {
-                LabeledContent("iPod") {
-                    HStack {
-                        Text(ipodLabel)
-                        Spacer()
-                        Button("Remove this iPod", role: .destructive, action: onForgetIpod)
-                    }
-                }
-            }
         }
         .formStyle(.grouped)
         .padding(20)
@@ -134,25 +101,26 @@ private struct GeneralTab: View {
         guard let config = model.config else { return }
         sourcePath = config.source
         if let daemon = config.daemon {
-            enabled = daemon.enabled
             scheduleMinutes = daemon.scheduleMinutes
             launchAtLogin = daemon.autostartWithWindows
         }
     }
 
-    /// Debounces edits (toggles/picker/re-pick) into a single `save_config`
+    /// Debounces edits (picker/re-pick/toggle) into a single `save_config`
     /// 400ms after the last change, so rapid toggling doesn't spam the wire.
-    /// `rockboxCompat` is no longer editable from this view (Task 6: moved
-    /// to the per-device Settings page) but is still read straight from
-    /// `model.config` here so a save from THIS view can't reset whatever
-    /// value is currently persisted.
+    /// `enabled` (plug-in auto-sync, superseded by the per-device
+    /// "Sync automatically when connected" toggle) and `rockboxCompat`
+    /// (moved to the per-device Settings page) are no longer editable from
+    /// this view, but both are read straight from `model.config` so a save
+    /// from THIS view can't reset whatever values are currently persisted —
+    /// the wizard-clobber lesson (see `IpodIdentity.customSelection`).
     private func scheduleSave() {
         saveTask?.cancel()
         saveTask = Task {
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled else { return }
             let daemon = DaemonSettings(
-                enabled: enabled,
+                enabled: model.config?.daemon?.enabled ?? true,
                 autostartWithWindows: launchAtLogin,
                 firstSyncMode: model.config?.daemon?.firstSyncMode ?? "auto_apply",
                 subsequentSyncMode: model.config?.daemon?.subsequentSyncMode ?? "auto_apply",
@@ -214,14 +182,14 @@ private struct AboutTab: View {
 #Preview("Configured") {
     SettingsView(
         model: PreviewFixtures.connectedSyncedModel(),
-        onSave: { _, _ in }, onForgetIpod: {}, onBackfill: {})
+        onSave: { _, _ in })
         .frame(width: 440, height: 380)
 }
 
 #Preview("First run") {
     SettingsView(
         model: PreviewFixtures.firstRunModel(),
-        onSave: { _, _ in }, onForgetIpod: {}, onBackfill: {})
+        onSave: { _, _ in })
         .frame(width: 440, height: 380)
 }
 #endif

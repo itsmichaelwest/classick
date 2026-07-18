@@ -50,17 +50,11 @@ struct MenuContent: View {
             if let device = model.device {
                 Text(device.name ?? device.model)
             }
-            if let syncedSummary {
-                Text(syncedSummary)
-            }
             if let storageText = model.storageText {
                 Text(storageText)
             }
             if let lastSync = model.lastSync {
                 Text("Last sync: \(formatLastSync(lastSync.timestamp))")
-            }
-            if model.selection.map({ $0.mode != .all }) ?? false {
-                Text("Selection active — \(model.libraryCount ?? 0) tracks")
             }
             Divider()
             Button("Sync Now", action: onSyncNow)
@@ -84,13 +78,6 @@ struct MenuContent: View {
             Text(message)
             Button("Retry", action: onRetry)
         }
-    }
-
-    /// "X of Y synced" when the library size is known, else just "X synced".
-    /// Hidden entirely when there's nothing to report yet (no counts seen).
-    private var syncedSummary: String? {
-        guard model.libraryCount != nil || model.syncedCount > 0 else { return nil }
-        return pausedSummary(synced: model.syncedCount, total: model.libraryCount) + " synced"
     }
 
     private func pausedSummary(synced: Int, total: Int?) -> String {

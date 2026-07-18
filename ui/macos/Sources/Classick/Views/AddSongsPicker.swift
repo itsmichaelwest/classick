@@ -40,9 +40,14 @@ struct AddSongsPicker: View {
             HStack {
                 Text("Add Songs").font(.headline)
                 Spacer()
+                // Cancel must NEVER be disabled: with it gated on
+                // `isResolving`, a lost `resolve_tracks` reply (daemon
+                // restart, dropped send) left BOTH buttons dead and the
+                // user sealed in the sheet until app quit (sweep finding
+                // #4). Escape is always available; the caller resets its
+                // in-flight flag.
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
-                    .disabled(isResolving)
                 Button(isResolving ? "Adding…" : "Add") { onAdd(checked) }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)

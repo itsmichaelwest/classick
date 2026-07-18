@@ -30,16 +30,28 @@ struct DeviceSettingsPage: View {
     @State private var draft = SettingsDraft()
     @State private var seededFromModel = false
     @State private var userEdited = false
+    /// True only for the seed's own draft assignment, so `.onChange(of:
+    /// draft)` can tell "the seed just landed" apart from a real user edit
+    /// — without this, merely opening the page fired a save.
+    @State private var isSeeding = false
     @State private var saveTask: Task<Void, Never>?
     @State private var showReplaceConfirm = false
 
     private var config: DeviceConfigState? { model.deviceConfigs[serial] }
     private var isConnected: Bool { model.device?.serial == serial }
+    /// See `DeviceMusicPage.isKnownDevice` — on-disk facts (last sync,
+    /// synced count) belong to the paired device regardless of connection;
+    /// only a page for some OTHER device must placeholder them.
+    private var isKnownDevice: Bool {
+        serial == (model.device?.serial ?? model.config?.ipod?.serial)
+    }
     private var deviceName: String {
         DeviceIdentityLogic.deviceName(serial: serial, isConnected: isConnected, connectedDevice: model.device, pairedIpod: model.config?.ipod)
     }
     private var syncedSummary: String {
-        DeviceIdentityLogic.syncedSummaryText(isConnected: isConnected, syncedCount: model.syncedCount, libraryCount: model.libraryCount)
+        // Keyed on isKnownDevice, not isConnected: the manifest count is a
+        // persisted per-paired-device fact, valid while unplugged.
+        DeviceIdentityLogic.syncedSummaryText(isConnected: isKnownDevice, syncedCount: model.syncedCount, libraryCount: model.libraryCount)
     }
 
     var body: some View {
@@ -50,14 +62,13 @@ struct DeviceSettingsPage: View {
                     LabeledContent("Capacity", value: capacity)
                 }
                 LabeledContent("Synced", value: syncedSummary)
-                // `model.lastSync` is the CONNECTED device's last sync —
-                // showing it on a different device's page would
-                // misattribute it (finding #2), so it collapses to the
-                // shared placeholder there instead of the real timestamp.
-                if isConnected {
-                    if let last = model.lastSync {
-                        LabeledContent("Last synced", value: shortDate(last.timestamp))
-                    }
+                // Shown for the KNOWN (paired) device even while
+                // disconnected — a fact on disk, not a connection property.
+                // Only some OTHER device's page placeholders it.
+                if isKnownDevice, let last = model.lastSync {
+                    LabeledContent("Last synced", value: shortDate(last.timestamp))
+                } else if isKnownDevice {
+                    LabeledContent("Last synced", value: "Never synced")
                 } else {
                     LabeledContent("Last synced", value: DeviceIdentityLogic.placeholder)
                 }
@@ -66,27 +77,60 @@ struct DeviceSettingsPage: View {
                 }
             }
             Section {
-                Toggle("Sync automatically when connected", isOn: Binding(
-                    get: { draft.autoSync }, set: { draft.autoSync = $0 }))
-                Toggle("Rockbox compatibility mode", isOn: Binding(
-                    get: { draft.rockboxCompat }, set: { draft.rockboxCompat = $0 }))
-                Button("Force update artwork and metadata", action: onBackfill)
+                // Toggles render ONLY once the draft is seeded from the
+                // daemon's reply. Rendering before that showed the draft's
+                // compiled-in defaults (autoSync=true), which visibly
+                // snapped to the persisted values a beat later — reported
+                // as "the toggle turns itself off when I open the page."
+                // A short placeholder is honest; a wrong toggle isn't.
+                if seededFromModel {
+                    Toggle("Sync automatically when connected", isOn: Binding(
+                        get: { draft.autoSync }, set: { draft.autoSync = $0 }))
+                    // Disabled while disconnected (user decision, overriding
+                    // the earlier stays-editable rule for THIS toggle):
+                    // Rockbox mode implies an on-device format change, so
+                    // flipping it with no iPod present promises work the
+                    // app can't start.
+                    Toggle("Rockbox compatibility mode", isOn: Binding(
+                        get: { draft.rockboxCompat }, set: { draft.rockboxCompat = $0 }))
+                        .disabled(!isConnected)
+                } else {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading settings…").foregroundStyle(.secondary)
+                    }
+                }
+                LabeledContent("Force update artwork and metadata") {
+                    // Acts on the physically connected iPod immediately —
+                    // meaningless without one.
+                    Button("Update Now", action: onBackfill)
+                        .disabled(!isConnected)
+                }
+                .labeledContentStyle(.centerAligned)
             }
             Section {
-                Button("Replace Library…", role: .destructive) { showReplaceConfirm = true }
-                    .disabled(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: model.phase, isConnected: isConnected))
-                Text("Erase iPod and re-sync current selection")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                LabeledContent("Erase iPod and re-sync current selection") {
+                    // `role: .destructive` alone doesn't colorize a bordered
+                    // button on macOS (role tinting applies in menus/alerts);
+                    // bordered + red tint is the System Settings idiom for
+                    // destructive form buttons. Role kept for semantics
+                    // (menus, accessibility, confirmation dialogs).
+                    Button("Replace Library…", role: .destructive) { showReplaceConfirm = true }
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                        .disabled(DeviceSettingsLogic.isReplaceLibraryDisabled(phase: model.phase, isConnected: isConnected))
+                }
+                .labeledContentStyle(.centerAligned)
             }
             Section {
-                Button("Remove iPod", role: .destructive, action: onForgetIpod)
-                Text(DeviceSettingsLogic.removeCaption(deviceName: deviceName))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                LabeledContent(DeviceSettingsLogic.removeCaption(deviceName: deviceName)) {
+                    Button("Remove iPod", role: .destructive, action: onForgetIpod)
+                }
+                .labeledContentStyle(.centerAligned)
             }
         }
         .formStyle(.grouped)
+        .navigationTitle(deviceName)
         // Same dual-coverage rationale as `DeviceMusicPage`: `.task(id:)`
         // covers a config already cached from a prior visit this launch
         // (seed fires immediately); the `.onChange` covers the reply
@@ -97,6 +141,10 @@ struct DeviceSettingsPage: View {
         }
         .onChange(of: config?.settings) { _, _ in seedIfNeeded() }
         .onChange(of: draft) { _, newDraft in
+            // The seed's own assignment lands here too — it must NOT count
+            // as a user edit or trigger a save (opening the page used to
+            // write device config for no reason).
+            if isSeeding { isSeeding = false; return }
             userEdited = true
             scheduleSave(newDraft)
         }
@@ -126,6 +174,7 @@ struct DeviceSettingsPage: View {
     /// once, and never after the user has started editing.
     private func seedIfNeeded() {
         guard !seededFromModel, !userEdited, let config else { return }
+        isSeeding = true
         draft = SettingsDraft(autoSync: config.settings.autoSync, rockboxCompat: config.settings.rockboxCompat)
         seededFromModel = true
     }
@@ -142,6 +191,28 @@ struct DeviceSettingsPage: View {
             onSaveDeviceSettings(serial, DeviceSettingsWire(autoSync: d.autoSync, rockboxCompat: d.rockboxCompat))
         }
     }
+}
+
+/// `LabeledContent`'s automatic style aligns label and content on
+/// `firstTextBaseline` — right for text-value rows, but a bordered Button's
+/// baseline is its TITLE's baseline, so the button chrome hangs below it and
+/// the button renders visually low in the row. This style keeps the standard
+/// structure (label leading, content trailing) and centers vertically.
+/// `LabeledContentStyle` is the system's own customization protocol — this
+/// is styling, not a custom control. Scoped to button rows only: text-value
+/// rows keep the automatic style (and its secondary-colored values).
+struct CenterAlignedLabeledContentStyle: LabeledContentStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .center) {
+            configuration.label
+            Spacer()
+            configuration.content
+        }
+    }
+}
+
+extension LabeledContentStyle where Self == CenterAlignedLabeledContentStyle {
+    static var centerAligned: CenterAlignedLabeledContentStyle { .init() }
 }
 
 /// Pure logic backing `DeviceSettingsPage` — no SwiftUI, fully

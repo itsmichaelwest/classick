@@ -33,40 +33,10 @@ final class PlaylistEditorLogicTests: XCTestCase {
         XCTAssertEqual(display.artist, "Artist")
     }
 
-    // MARK: - ManualPlaylistLogic.isLikelyMissing
-
-    func testIsLikelyMissingFalseWhenArtistKnown() {
-        let library = LibraryInfo(
-            sourceRoot: "/x", scannedAtUnixSecs: 1,
-            artists: [LibraryArtist(name: "Boards of Canada", albums: [LibraryAlbum(name: "Geogaddi", genre: nil, tracks: 1, bytes: 1)])],
-            genres: [], totalTracks: 1, totalBytes: 1)
-        XCTAssertFalse(ManualPlaylistLogic.isLikelyMissing(path: "Boards of Canada/Geogaddi/01.flac", library: library))
-    }
-
-    func testIsLikelyMissingTrueWhenArtistUnknown() {
-        let library = LibraryInfo(sourceRoot: "/x", scannedAtUnixSecs: 1, artists: [], genres: [], totalTracks: 0, totalBytes: 0)
-        XCTAssertTrue(ManualPlaylistLogic.isLikelyMissing(path: "Ghost Artist/Album/01.flac", library: library))
-    }
-
-    func testIsLikelyMissingTrueWhenAlbumUnknownUnderKnownArtist() {
-        let library = LibraryInfo(
-            sourceRoot: "/x", scannedAtUnixSecs: 1,
-            artists: [LibraryArtist(name: "Boards of Canada", albums: [LibraryAlbum(name: "Geogaddi", genre: nil, tracks: 1, bytes: 1)])],
-            genres: [], totalTracks: 1, totalBytes: 1)
-        XCTAssertTrue(ManualPlaylistLogic.isLikelyMissing(path: "Boards of Canada/Some Other Album/01.flac", library: library))
-    }
-
-    func testIsLikelyMissingCaseInsensitive() {
-        let library = LibraryInfo(
-            sourceRoot: "/x", scannedAtUnixSecs: 1,
-            artists: [LibraryArtist(name: "Boards Of Canada", albums: [LibraryAlbum(name: "Geogaddi", genre: nil, tracks: 1, bytes: 1)])],
-            genres: [], totalTracks: 1, totalBytes: 1)
-        XCTAssertFalse(ManualPlaylistLogic.isLikelyMissing(path: "boards of canada/geogaddi/01.flac", library: library))
-    }
-
-    func testIsLikelyMissingFalseWhenLibraryNotYetLoaded() {
-        XCTAssertFalse(ManualPlaylistLogic.isLikelyMissing(path: "Ghost Artist/Album/01.flac", library: nil), "no library data yet -- don't flag prematurely")
-    }
+    // (isLikelyMissing was removed: a path-derived artist/album heuristic
+    // false-flagged whole playlists for libraries whose folder layout
+    // doesn't mirror their tags. No client-side signal can do better — the
+    // wire has no per-file existence data.)
 
     // MARK: - ManualPlaylistLogic.appendingTracks (dedup, preserve order)
 
@@ -155,8 +125,12 @@ final class PlaylistEditorLogicTests: XCTestCase {
     }
 
     func testDeleteConfirmMessageMentionsSubscribedDeviceCount() {
-        XCTAssertEqual(PlaylistEditorLogic.deleteConfirmMessage(subscribedDeviceCount: 2), "Also unsubscribes 2 devices.")
-        XCTAssertEqual(PlaylistEditorLogic.deleteConfirmMessage(subscribedDeviceCount: 1), "Also unsubscribes 1 device.")
+        XCTAssertEqual(
+            PlaylistEditorLogic.deleteConfirmMessage(subscribedDeviceCount: 2),
+            "It will also be removed from 2 iPods that sync it. This can't be undone.")
+        XCTAssertEqual(
+            PlaylistEditorLogic.deleteConfirmMessage(subscribedDeviceCount: 1),
+            "It will also be removed from 1 iPod that syncs it. This can't be undone.")
     }
 
     func testDeleteConfirmMessageWhenNotSubscribedAnywhere() {
@@ -233,5 +207,36 @@ final class PlaylistEditorLogicTests: XCTestCase {
 
     func testPreviewLineWhenSummaryNotYetAvailable() {
         XCTAssertEqual(SmartRulesLogic.previewLine(summary: nil), "Calculating…")
+    }
+}
+
+/// Title-column cleanup: the table has artist/album columns, so the title
+/// must be JUST the song name — filename echoes of artist/album and track
+/// numbers stripped.
+extension PlaylistEditorLogicTests {
+    func testCleanedTitleTakesLastSegmentOfDashedFilename() {
+        XCTAssertEqual(
+            ManualPlaylistLogic.cleanedTitle("Birdy - Beautiful Lies - 01 - Growing Pains"),
+            "Growing Pains")
+    }
+
+    func testCleanedTitleStripsLeadingTrackNumberPrefix() {
+        XCTAssertEqual(ManualPlaylistLogic.cleanedTitle("03 Telephasic Workshop"), "Telephasic Workshop")
+        XCTAssertEqual(ManualPlaylistLogic.cleanedTitle("1 So What"), "So What")
+        XCTAssertEqual(ManualPlaylistLogic.cleanedTitle("07. Aquarius"), "Aquarius")
+    }
+
+    func testCleanedTitleKeepsNumericSongNames() {
+        // A song literally titled with digits survives — the prefix strip
+        // refuses to leave an empty title.
+        XCTAssertEqual(ManualPlaylistLogic.cleanedTitle("1979"), "1979")
+        XCTAssertEqual(ManualPlaylistLogic.cleanedTitle("Smashing Pumpkins - 1979"), "1979")
+    }
+
+    func testCleanedTitleSongNamedAfterAlbumSurvives() {
+        XCTAssertEqual(
+            ManualPlaylistLogic.cleanedTitle("Birdy - Beautiful Lies - 14 - Beautiful Lies"),
+            "Beautiful Lies",
+            "the last segment is the title by convention — protected even when it matches the album")
     }
 }

@@ -21,6 +21,7 @@ actor DaemonClient {
     private var fd: Int32 = -1
     private var isRunning = false
     private var generation = 0
+    private var connectionGeneration = 0
 
     /// Set once if the daemon's handshake fails the protocol-version check.
     /// Non-nil means the client has permanently stopped (no more reconnects).
@@ -52,6 +53,7 @@ actor DaemonClient {
     func stop() async {
         isRunning = false
         generation += 1
+        connectionGeneration += 1
         closeSocket()
         continuation?.finish()
     }
@@ -73,8 +75,13 @@ actor DaemonClient {
         while isRunning && generation == self.generation {
             if let connectedFd = connectSocket(path: socketPath) {
                 fd = connectedFd
+                connectionGeneration += 1
+                let currentConnectionGeneration = connectionGeneration
                 backoff = .milliseconds(250)
-                await readUntilDisconnected(connectionFd: connectedFd, generation: generation)
+                await readUntilDisconnected(
+                    connectionFd: connectedFd,
+                    runGeneration: generation,
+                    connectionGeneration: currentConnectionGeneration)
                 closeSocket()
             } else {
                 logger.debug("connect to \(self.socketPath, privacy: .public) failed")
@@ -104,7 +111,11 @@ actor DaemonClient {
     /// stream into newline-delimited lines, decodes each into a
     /// `DaemonEvent`, and reports it back onto the actor. Suspends until
     /// the thread observes EOF or a read error.
-    private func readUntilDisconnected(connectionFd: Int32, generation: Int) async {
+    private func readUntilDisconnected(
+        connectionFd: Int32,
+        runGeneration: Int,
+        connectionGeneration: Int
+    ) async {
         await withCheckedContinuation { (resume: CheckedContinuation<Void, Never>) in
             let thread = Thread { [weak self] in
                 var buffer = Data()
@@ -124,7 +135,12 @@ actor DaemonClient {
                         guard !lineData.isEmpty, let self else { continue }
                         let wasFirst = isFirstLine
                         isFirstLine = false
-                        Task { await self.handleLine(lineData, isFirstLine: wasFirst, generation: generation) }
+                        Task {
+                            await self.handleLine(
+                                lineData, isFirstLine: wasFirst,
+                                runGeneration: runGeneration,
+                                connectionGeneration: connectionGeneration)
+                        }
                     }
                 }
                 resume.resume()
@@ -134,14 +150,31 @@ actor DaemonClient {
         }
     }
 
-    private func handleLine(_ data: Data, isFirstLine: Bool, generation: Int) async {
-        guard generation == self.generation else { return }
+    private func handleLine(
+        _ data: Data,
+        isFirstLine: Bool,
+        runGeneration: Int,
+        connectionGeneration: Int
+    ) async {
+        guard Self.isCurrentLine(
+            runGeneration: runGeneration,
+            currentRunGeneration: generation,
+            connectionGeneration: connectionGeneration,
+            currentConnectionGeneration: self.connectionGeneration) else { return }
 
         let event: DaemonEvent
         do {
             event = try JSONDecoder().decode(DaemonEvent.self, from: data)
         } catch {
-            logger.error("failed to decode daemon line: \(error.localizedDescription, privacy: .public)")
+            // Log the FULL DecodingError (names the missing key/type and
+            // coding path — localizedDescription is just "data missing")
+            // plus a truncated raw line, so a wire-shape mismatch names
+            // itself instead of requiring a socket probe to diagnose. A
+            // dropped line here is silent data loss on the UI (the
+            // status_update storage-keys mismatch hid a connected iPod's
+            // entire status stream) — make it loud.
+            let raw = String(data: data.prefix(300), encoding: .utf8) ?? "<non-utf8>"
+            logger.error("failed to decode daemon line: \(String(describing: error), privacy: .public) line=\(raw, privacy: .public)")
             return
         }
 
@@ -152,6 +185,7 @@ actor DaemonClient {
                 logger.fault("\(message, privacy: .public)")
                 lastFatalError = message
                 isRunning = false
+                self.connectionGeneration += 1
                 closeSocket()
                 continuation?.finish()
                 return
@@ -172,6 +206,16 @@ actor DaemonClient {
         }
 
         continuation?.yield(event)
+    }
+
+    nonisolated static func isCurrentLine(
+        runGeneration: Int,
+        currentRunGeneration: Int,
+        connectionGeneration: Int,
+        currentConnectionGeneration: Int
+    ) -> Bool {
+        runGeneration == currentRunGeneration
+            && connectionGeneration == currentConnectionGeneration
     }
 
     // MARK: - Raw POSIX socket I/O

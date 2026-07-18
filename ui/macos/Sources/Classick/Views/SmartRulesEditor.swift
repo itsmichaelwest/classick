@@ -44,8 +44,6 @@ struct SmartRulesEditor: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
             Form {
                 Section("Match") {
                     Picker("", selection: Binding(get: { draft.matching }, set: { draft.matching = $0 })) {
@@ -85,6 +83,24 @@ struct SmartRulesEditor: View {
             }
             .formStyle(.grouped)
         }
+        // Same editable-titlebar treatment as `ManualPlaylistEditor` — see
+        // its doc comment; the old in-page header duplicated the titlebar.
+        .navigationTitle(Binding(get: { draft.name }, set: { draft.name = $0 }))
+        // See ManualPlaylistEditor: toolbarTitleMenu supplies the chevron,
+        // RenameButton triggers inline titlebar editing.
+        .toolbarTitleMenu {
+            RenameButton()
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    RenameButton()
+                    Button("Delete Playlist", role: .destructive) { showDeleteConfirm = true }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
         .task { seedIfNeeded() }
         .onChange(of: detail) { _, _ in seedIfNeeded() }
         .onChange(of: draft) { _, newDraft in
@@ -105,24 +121,6 @@ struct SmartRulesEditor: View {
                 subscribedDeviceCount: PlaylistEditorLogic.subscribedDeviceCount(
                     slug: slug, deviceConfigs: model.deviceConfigs)))
         }
-    }
-
-    private var header: some View {
-        HStack {
-            TextField("Playlist Name", text: Binding(get: { draft.name }, set: { draft.name = $0 }))
-                .textFieldStyle(.plain)
-                .font(.title2.bold())
-            Spacer()
-            Menu {
-                Button("Delete Playlist", role: .destructive) { showDeleteConfirm = true }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .frame(width: 24)
-        }
-        .padding(12)
     }
 
     @ViewBuilder

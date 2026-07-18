@@ -22,9 +22,25 @@ struct PlaylistPage: View {
         model.playlistDetail?.slug == slug ? model.playlistDetail : nil
     }
 
+    // No page-level `navigationTitle` here: the editors declare an EDITABLE
+    // titlebar title (`navigationTitle(Binding<String>)`, bound to their
+    // draft name) plus their action toolbar — a static title here would
+    // fight theirs, and the old in-page header row duplicated the titlebar.
+    // Loading/error states set a static title themselves so the titlebar
+    // isn't blank before the detail arrives.
     var body: some View {
         content
             .task(id: slug) { onGetPlaylist(slug) }
+    }
+
+    /// The sidebar summary usually has the display name before the
+    /// `get_playlist` reply lands, so the title doesn't flash "Playlist" →
+    /// name on navigation; the bare fallback only shows for a slug that's
+    /// in neither (e.g. just deleted elsewhere).
+    private var pageTitle: String {
+        detail?.name
+            ?? model.playlists.first(where: { $0.slug == slug })?.name
+            ?? "Playlist"
     }
 
     @ViewBuilder
@@ -34,6 +50,7 @@ struct PlaylistPage: View {
                 ContentUnavailableView(
                     "Can't Open Playlist", systemImage: "exclamationmark.triangle",
                     description: Text(error))
+                    .navigationTitle(pageTitle)
             } else if detail.kind == .manual {
                 ManualPlaylistEditor(
                     model: model, slug: slug, detail: detail,
@@ -53,6 +70,7 @@ struct PlaylistPage: View {
         } else {
             ProgressView("Loading…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .navigationTitle(pageTitle)
         }
     }
 }
@@ -79,20 +97,57 @@ private struct ManualPlaylistEditor: View {
     @State private var draft = ManualDraft()
     @State private var seededFromModel = false
     @State private var userEdited = false
+    /// Seed-assignment marker — see `.onChange(of: draft)`.
+    @State private var isSeeding = false
     @State private var saveTask: Task<Void, Never>?
     @State private var showAddSongs = false
     @State private var isResolvingAdd = false
     @State private var showDeleteConfirm = false
+    @State private var showRename = false
+    @State private var renameText = ""
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            trackList
+        trackList
+        // Editable titlebar title — `navigationTitle(Binding<String>)` is
+        // the system's document-rename affordance (click the title to
+        // edit), bound straight into the draft so renames flow through the
+        // same debounced save as every other edit. Replaces the old
+        // in-page header row, which duplicated the titlebar's title.
+        .navigationTitle(Binding(get: { draft.name }, set: { draft.name = $0 }))
+        // The binding-title alone only ENABLES renaming — the visible
+        // affordances are these: `toolbarTitleMenu` gives the title its
+        // chevron menu, and `RenameButton()` is the system control that
+        // begins inline titlebar editing (it finds the title binding by
+        // itself). One more RenameButton in the ellipsis menu for
+        // discoverability.
+        .toolbarTitleMenu {
+            RenameButton()
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button("Add Songs…") { showAddSongs = true }
+                Menu {
+                    // Explicit rename path: the system RenameButton /
+                    // title-menu affordance doesn't reliably begin editing
+                    // on the current OS (27 beta) — this alert always
+                    // works and writes through the same debounced save.
+                    Button("Rename…") {
+                        renameText = draft.name
+                        showRename = true
+                    }
+                    RenameButton()
+                    Button("Delete Playlist", role: .destructive) { showDeleteConfirm = true }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
         }
         .task { seedIfNeeded() }
         .onChange(of: detail) { _, _ in seedIfNeeded() }
         .onChange(of: draft) { _, newDraft in
+            // Seed assignments must not count as edits or fire saves —
+            // same isSeeding guard as the device pages.
+            if isSeeding { isSeeding = false; return }
             userEdited = true
             scheduleSave(newDraft)
         }
@@ -120,7 +175,22 @@ private struct ManualPlaylistEditor: View {
                     isResolvingAdd = true
                     onResolveTracks(slug, Array(rules))
                 },
-                onCancel: { showAddSongs = false })
+                onCancel: {
+                    // Escape hatch for a lost resolve reply (sweep finding
+                    // #4): cancel always works and clears the in-flight
+                    // flag, so reopening the sheet starts clean.
+                    isResolvingAdd = false
+                    showAddSongs = false
+                })
+        }
+        .alert("Rename Playlist", isPresented: $showRename) {
+            TextField("Name", text: $renameText)
+            Button("Rename") {
+                if PlaylistEditorLogic.isNameValid(renameText) {
+                    draft.name = renameText
+                }
+            }
+            Button("Cancel", role: .cancel) {}
         }
         .confirmationDialog(
             "Delete “\(draft.name)”?", isPresented: $showDeleteConfirm, titleVisibility: .visible
@@ -141,25 +211,6 @@ private struct ManualPlaylistEditor: View {
         }
     }
 
-    private var header: some View {
-        HStack {
-            TextField("Playlist Name", text: Binding(get: { draft.name }, set: { draft.name = $0 }))
-                .textFieldStyle(.plain)
-                .font(.title2.bold())
-            Spacer()
-            Button("Add Songs…") { showAddSongs = true }
-            Menu {
-                Button("Delete Playlist", role: .destructive) { showDeleteConfirm = true }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .frame(width: 24)
-        }
-        .padding(12)
-    }
-
     @ViewBuilder
     private var trackList: some View {
         if draft.tracks.isEmpty {
@@ -175,35 +226,54 @@ private struct ManualPlaylistEditor: View {
                 .onDelete { offsets in draft.tracks = ManualPlaylistLogic.removed(draft.tracks, at: offsets) }
             }
             .listStyle(.inset)
+            .environment(\.defaultMinListRowHeight, LibraryBrowser.rowHeight)
         }
     }
 
+    // Table-style columns: title (flexible) | artist | album, derived from
+    // the source-relative path (the wire carries no per-track tag data for
+    // playlist entries; length would need track durations in the library
+    // index — a Rust-side addition, not available today). A real SwiftUI
+    // `Table` is deliberately NOT used: it has no row-reordering, and
+    // drag-to-reorder is this editor's core interaction.
+    //
+    // Note: no per-track "missing" indicator — a path-derived heuristic
+    // false-flagged whole playlists when folder layout ≠ tags; the wire has
+    // no per-file existence data.
     private func trackRow(_ path: String) -> some View {
         let display = ManualPlaylistLogic.trackDisplay(path: path)
-        let missing = ManualPlaylistLogic.isLikelyMissing(path: path, library: model.library)
-        return HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(display.title)
-                if let artist = display.artist {
-                    Text(artist).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-            if missing {
-                Image(systemName: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
-                    .help("This file couldn't be found in your library.")
-            }
+        let album = ManualPlaylistLogic.albumComponent(path: path)
+        // The artist and album have their own columns — the title column
+        // shows ONLY the cleaned song title, with filename noise (leading
+        // track numbers, "Artist - Album - " prefixes) stripped.
+        let title = ManualPlaylistLogic.cleanedTitle(display.title)
+        return HStack(spacing: 8) {
+            Text(title)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 12)
+            Text(display.artist ?? "—")
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 150, alignment: .leading)
+            Text(album ?? "—")
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 180, alignment: .leading)
         }
-        .opacity(missing ? 0.5 : 1)
     }
 
-    /// Seeds the local draft from `get_playlist`'s reply exactly once, and
-    /// never after the user has started editing — same pattern as
-    /// `DeviceMusicPage.seedIfNeeded`.
+    /// Seeds the draft from `get_playlist`'s reply — EDIT-gated, not
+    /// once-only (same rationale as `DeviceMusicPage.seedIfNeeded`): while
+    /// unedited, a refreshed `playlist_detail` (e.g. after a sidebar
+    /// drag-drop appends tracks to THIS playlist) updates the open editor.
     private func seedIfNeeded() {
-        guard !seededFromModel, !userEdited else { return }
-        draft = ManualDraft(name: detail.name ?? "", tracks: detail.tracks ?? [])
+        guard !userEdited else { return }
+        let seeded = ManualDraft(name: detail.name ?? "", tracks: detail.tracks ?? [])
+        if seeded != draft {
+            isSeeding = true
+            draft = seeded
+        }
         seededFromModel = true
     }
 
@@ -228,6 +298,34 @@ enum ManualPlaylistLogic {
     /// are normalized first (mirrors `playlist::parse_m3u8`'s own
     /// normalization, so playlists authored/edited on Windows display the
     /// same here).
+    /// Strips filename noise from a track title for display in a table that
+    /// already has artist/album columns. The song title is conventionally
+    /// the LAST " - "-separated segment ("Artist - Album - NN - Title"), so
+    /// take that and protect it from all further stripping — which also
+    /// keeps songs named after their album ("… - Beautiful Lies") or named
+    /// with digits ("… - 1979") intact. A leading "NN " / "NN. " / "NN - "
+    /// track-number prefix is then removed, unless that would leave nothing.
+    nonisolated static func cleanedTitle(_ stem: String) -> String {
+        let segments = stem.components(separatedBy: " - ")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        var result = segments.last ?? stem
+        if let range = result.range(of: #"^\d{1,3}[\s.\-_]+"#, options: .regularExpression),
+           range.upperBound != result.endIndex {
+            result = String(result[range.upperBound...])
+        }
+        return result.isEmpty ? stem : result
+    }
+
+    /// The path's second component when it has ≥3 (Artist/Album/file) —
+    /// the same folder-layout-derived approximation `trackDisplay` uses for
+    /// artist. `nil` for flatter layouts, rendered as "—".
+    nonisolated static func albumComponent(path: String) -> String? {
+        let normalized = path.replacingOccurrences(of: "\\", with: "/")
+        let components = normalized.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        return components.count > 2 ? components[components.count - 2] : nil
+    }
+
     nonisolated static func trackDisplay(path: String) -> (title: String, artist: String?) {
         let normalized = path.replacingOccurrences(of: "\\", with: "/")
         let components = normalized.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
@@ -242,30 +340,6 @@ enum ManualPlaylistLogic {
         }
         let artist = components.count > 1 ? components[0] : nil
         return (title, artist)
-    }
-
-    /// Best-effort "is this track still in the library" proxy. The wire has
-    /// no per-file existence flag on `playlist_detail` (only
-    /// `playlists_update`'s resolved COUNT, which doesn't say which entries
-    /// resolved) — this checks whether the path's derived artist (and, when
-    /// present, album) is still known to the current library aggregate.
-    /// That's coarser than real file-existence (an artist can be known
-    /// while THIS specific track was deleted), but it's the finest signal
-    /// available client-side without walking the filesystem. `nil` library
-    /// (not yet loaded) never flags anything missing, to avoid a flash of
-    /// warning icons before the first `library_update` arrives.
-    nonisolated static func isLikelyMissing(path: String, library: LibraryInfo?) -> Bool {
-        guard let library else { return false }
-        let normalized = path.replacingOccurrences(of: "\\", with: "/")
-        let components = normalized.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        guard components.count > 1 else { return false }
-        let artistName = components[0]
-        guard let artist = library.artists.first(where: { $0.name.lowercased() == artistName.lowercased() }) else {
-            return true
-        }
-        guard components.count > 2 else { return false }
-        let albumName = components[1]
-        return !artist.albums.contains { $0.name.lowercased() == albumName.lowercased() }
     }
 
     /// Add Songs' append step: preserves the existing track order, appends
@@ -331,40 +405,44 @@ enum PlaylistEditorLogic {
 
     nonisolated static func deleteConfirmMessage(subscribedDeviceCount: Int) -> String {
         guard subscribedDeviceCount > 0 else { return "This can't be undone." }
-        return "Also unsubscribes \(subscribedDeviceCount) device\(subscribedDeviceCount == 1 ? "" : "s")."
+        return subscribedDeviceCount == 1
+            ? "It will also be removed from 1 iPod that syncs it. This can't be undone."
+            : "It will also be removed from \(subscribedDeviceCount) iPods that sync it. This can't be undone."
     }
 }
 
 #if DEBUG
+/// NavigationStack so the titlebar chrome (editable title, toolbar actions)
+/// renders in the canvas — see `DeviceMusicPage`'s preview note.
+@MainActor
+private func playlistPreview(_ model: AppModel, slug: String, height: CGFloat) -> some View {
+    NavigationStack {
+        PlaylistPage(model: model, slug: slug, onSavePlaylist: { _ in })
+    }
+    .frame(width: 640, height: height)
+}
+
 #Preview("Manual") {
-    PlaylistPage(
-        model: PreviewFixtures.playlistDetailModel(PreviewFixtures.manualPlaylistDetail),
-        slug: PreviewFixtures.manualPlaylistDetail.slug,
-        onSavePlaylist: { _ in })
-        .frame(width: 640, height: 520)
+    playlistPreview(
+        PreviewFixtures.playlistDetailModel(PreviewFixtures.manualPlaylistDetail),
+        slug: PreviewFixtures.manualPlaylistDetail.slug, height: 520)
 }
 
 #Preview("Smart") {
-    PlaylistPage(
-        model: PreviewFixtures.playlistDetailModel(PreviewFixtures.smartPlaylistDetail),
-        slug: PreviewFixtures.smartPlaylistDetail.slug,
-        onSavePlaylist: { _ in })
-        .frame(width: 640, height: 560)
+    playlistPreview(
+        PreviewFixtures.playlistDetailModel(PreviewFixtures.smartPlaylistDetail),
+        slug: PreviewFixtures.smartPlaylistDetail.slug, height: 560)
 }
 
 #Preview("Error") {
-    PlaylistPage(
-        model: PreviewFixtures.playlistDetailModel(PreviewFixtures.brokenPlaylistDetail),
-        slug: PreviewFixtures.brokenPlaylistDetail.slug,
-        onSavePlaylist: { _ in })
-        .frame(width: 640, height: 400)
+    playlistPreview(
+        PreviewFixtures.playlistDetailModel(PreviewFixtures.brokenPlaylistDetail),
+        slug: PreviewFixtures.brokenPlaylistDetail.slug, height: 400)
 }
 
 #Preview("Loading") {
-    PlaylistPage(
-        model: PreviewFixtures.playlistLoadingModel(),
-        slug: PreviewFixtures.roadTripMix.slug,
-        onSavePlaylist: { _ in })
-        .frame(width: 640, height: 400)
+    playlistPreview(
+        PreviewFixtures.playlistLoadingModel(),
+        slug: PreviewFixtures.roadTripMix.slug, height: 400)
 }
 #endif

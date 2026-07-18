@@ -19,6 +19,22 @@ final class WireCodecTests: XCTestCase {
         XCTAssertEqual(s.state, .idle); XCTAssertTrue(s.ipodConnected); XCTAssertNil(s.storage)
     }
 
+    /// Verbatim `status_update` captured from a LIVE daemon (2026-07-18)
+    /// with an iPod connected. Pins the `storage` wire keys
+    /// (`free_bytes`/`total_bytes` — Rust `StorageInfo`): Swift once
+    /// decoded bare `free`/`total`, so every status_update with a
+    /// connected device failed to decode and was silently dropped — the
+    /// app's phase sat on "iPod not set up" while paired and plugged in.
+    func testDecodesStatusUpdateWithStorageFromLiveWireCapture() throws {
+        let json = #"{"type":"status_update","state":"idle","configured":true,"ipod_connected":true,"last_sync":{"timestamp":"2026-07-18T11:27:01Z","duration_secs":3,"trigger":"manual","outcome":"ok","summary":{"add":0,"modify":0,"remove":0,"unchanged":51,"skipped":0,"metadata_only":0,"skipped_for_space_tracks":0,"skipped_for_space_bytes":0,"artwork_failed_sources":0}},"storage":{"total_bytes":159761891328,"free_bytes":158289281024},"synced_count":0,"library_count":33}"#
+        let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+        guard case let .statusUpdate(s) = ev else { return XCTFail() }
+        XCTAssertEqual(s.storage?.total, 159_761_891_328)
+        XCTAssertEqual(s.storage?.free, 158_289_281_024)
+        XCTAssertEqual(s.libraryCount, 33)
+        XCTAssertEqual(s.lastSync?.outcome, "ok")
+    }
+
     func testDecodesSyncEventWrappingSummary() throws {
         let inner = #"{\"type\":\"summary\",\"add\":0,\"modify\":0,\"metadata_only\":0,\"remove\":0,\"unchanged\":12,\"total_planned\":0}"#
         let json = "{\"type\":\"sync_event\",\"line\":\"\(inner)\"}"

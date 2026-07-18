@@ -301,3 +301,55 @@ final class DeviceMusicLogicTests: XCTestCase {
         XCTAssertEqual(DeviceMusicLogic.unresolvedSubscriptionsLine(["gym", "chill"]), "2 subscribed playlists couldn't be resolved")
     }
 }
+
+/// Mode-memory round-trips (`remembered` parameter): flipping
+/// Selected → Entire → Selected must restore the user's original picks —
+/// the unconditional zero-diff seed used to trample them.
+extension DeviceMusicLogicTests {
+    func testEntireToSelectedRestoresRememberedPicksOverSeeding() {
+        let artists = [LibraryArtist(name: "Beck", albums: [
+            LibraryAlbum(name: "Colors", genre: nil, tracks: 10, bytes: 1),
+            LibraryAlbum(name: "Hyperspace", genre: nil, tracks: 11, bytes: 1),
+        ])]
+        let originalPicks: [SelectionRule] = [.album(artist: "Beck", album: "Colors")]
+        let restored = DeviceMusicLogic.seededSelection(
+            fromDeviceContents: artists, previousMode: .all, newMode: .include,
+            current: originalPicks, remembered: originalPicks)
+        XCTAssertEqual(restored, originalPicks, "memory wins over seed-everything")
+    }
+
+    func testEntireToSelectedWithEmptyMemoryRestoresEmpty() {
+        let artists = [LibraryArtist(name: "Beck", albums: [
+            LibraryAlbum(name: "Colors", genre: nil, tracks: 10, bytes: 1),
+        ])]
+        XCTAssertEqual(DeviceMusicLogic.seededSelection(
+            fromDeviceContents: artists, previousMode: .all, newMode: .include,
+            current: [], remembered: []), [],
+            "a deliberately-emptied selection is memory too — not a trigger to reseed")
+    }
+
+    func testEntireToSelectedFirstEntryStillSeedsZeroDiff() {
+        let artists = [LibraryArtist(name: "Beck", albums: [
+            LibraryAlbum(name: "Colors", genre: nil, tracks: 10, bytes: 1),
+        ])]
+        XCTAssertEqual(DeviceMusicLogic.seededSelection(
+            fromDeviceContents: artists, previousMode: .all, newMode: .include,
+            current: [], remembered: nil),
+            [.album(artist: "Beck", album: "Colors")],
+            "nil memory = first entry keeps the zero-diff seed")
+    }
+
+    func testEntireToExceptRestoresRememberedExclusions() {
+        let exclusions: [SelectionRule] = [.artist(name: "Birdy")]
+        XCTAssertEqual(DeviceMusicLogic.seededSelection(
+            fromDeviceContents: [], previousMode: .all, newMode: .exclude,
+            current: [], remembered: exclusions), exclusions)
+    }
+
+    func testCrosswiseFlipPrefersTargetModesMemory() {
+        let excludeMemory: [SelectionRule] = [.genre(name: "Podcasts")]
+        XCTAssertEqual(DeviceMusicLogic.seededSelection(
+            fromDeviceContents: [], previousMode: .include, newMode: .exclude,
+            current: [.artist(name: "Beck")], remembered: excludeMemory), excludeMemory)
+    }
+}
