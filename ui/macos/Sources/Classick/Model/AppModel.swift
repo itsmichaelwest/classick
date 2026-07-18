@@ -28,6 +28,14 @@ struct PendingPrompt: Equatable, Sendable {
     var options: [String]
 }
 
+/// A `resolved_tracks` reply tagged with the slug of the playlist editor
+/// whose `resolve_tracks` request it answers — see
+/// `AppModel.latestResolvedTracks`'s doc comment.
+struct ResolvedTracksReply: Equatable, Sendable {
+    var slug: String
+    var tracks: [String]
+}
+
 /// The daemon's last-known persisted configuration, as pushed by
 /// `config_update`. Settings/Setup UI reads this to seed its controls and
 /// writes back via `save_config`; the daemon (not this app) remains the
@@ -122,23 +130,35 @@ final class AppModel {
 
     // MARK: - Protocol 1.7.0: Add Songs picker track resolution
 
-    /// Most recent `resolved_tracks` reply — the Add Songs picker's result.
-    /// Not scoped by request: only one Add can be in flight at a time (the
-    /// sheet disables its Add button while resolving), so this is a single
-    /// slot, not a queue.
-    private(set) var resolvedTracks: [String] = []
+    /// Most recent `resolved_tracks` reply, tagged with the slug of the
+    /// playlist editor that requested it (resolve-reply correlation
+    /// hardening). `resolved_tracks` carries no correlation id on the wire,
+    /// so `pendingResolveTracks` — a FIFO queue of slugs, mirroring
+    /// `pendingPreviewSerials`'s proven request-order invariant (see its doc
+    /// comment: the daemon services one connection's commands strictly in
+    /// send order, so replies arrive in the same order requests were sent)
+    /// — dequeues the front slug on each reply and tags it here.
+    ///
+    /// This is a single slot, not per-slug storage: only one Add can be in
+    /// flight at a time in practice (the sheet disables its Add button while
+    /// resolving, and `AddSongsPicker` is a window-modal `.sheet()`, so no
+    /// other editor can send a competing request while one is pending).
+    /// Tagging the reply is what makes that safe even if that modality
+    /// invariant weakens later — each `ManualPlaylistEditor` only consumes a
+    /// reply whose `slug` matches its own (see
+    /// `ManualPlaylistLogic.shouldConsumeResolvedTracks`), so a stale reply
+    /// meant for a different playlist can never be misattributed.
+    private(set) var latestResolvedTracks: ResolvedTracksReply?
     /// Bumped on every `resolved_tracks` reply, including an empty one — the
     /// same "revision, not content-equality" pattern as
     /// `playlistsUpdateRevision`, since an empty reply (no rule matched
     /// anything) is a valid outcome the Add Songs sheet must still notice to
     /// stop showing "Adding…".
     private(set) var resolvedTracksRevision = 0
-    /// `resolved_tracks` carries no correlation id on the wire — mirrors
-    /// `pendingPreviewSerials`'s bookkeeping discipline, simplified to a
-    /// counter since there's nothing to attach the reply TO (unlike
-    /// `device_preview`, which must pick the right serial): a reply with
-    /// nothing pending is simply dropped rather than guessed at.
-    private var pendingResolveTrackRequests = 0
+    /// FIFO queue of playlist slugs awaiting a `resolved_tracks` reply — see
+    /// `latestResolvedTracks`'s doc comment. A reply with nothing pending is
+    /// simply dropped rather than guessed at.
+    private var pendingResolveTracks: [String] = []
 
     private var isScanning = false
     /// Raw device capacity for the Choose Music footer's capacity bar
@@ -294,9 +314,9 @@ final class AppModel {
             phase = .error(Self.humanReadable(rejection: reason))
 
         case let .resolvedTracks(tracks):
-            guard pendingResolveTrackRequests > 0 else { break }
-            pendingResolveTrackRequests -= 1
-            resolvedTracks = tracks
+            guard !pendingResolveTracks.isEmpty else { break }
+            let slug = pendingResolveTracks.removeFirst()
+            latestResolvedTracks = ResolvedTracksReply(slug: slug, tracks: tracks)
             resolvedTracksRevision += 1
         }
     }
@@ -315,9 +335,11 @@ final class AppModel {
     }
 
     /// Call immediately before sending `.resolveTracks(rules:)` — see
-    /// `pendingResolveTrackRequests`'s doc comment.
-    func willRequestResolveTracks() {
-        pendingResolveTrackRequests += 1
+    /// `pendingResolveTracks`'s doc comment. `slug` is the requesting
+    /// playlist editor's own slug, tagged onto the eventual reply so it can
+    /// tell its own reply apart from another editor's.
+    func willRequestResolveTracks(slug: String) {
+        pendingResolveTracks.append(slug)
     }
 
     private var phaseIsSyncing: Bool {

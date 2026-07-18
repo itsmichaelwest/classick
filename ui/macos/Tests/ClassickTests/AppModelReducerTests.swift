@@ -495,6 +495,34 @@ final class AppModelReducerTests: XCTestCase {
             .playlist(slug: "alpha-mix"))
     }
 
+    // MARK: - Fix: sidebar bounded-wait for "+ New Playlist" (premature-clear regression)
+
+    /// An unrelated interleaved `playlists_update` (nothing new yet, e.g.
+    /// another client's own unrelated change) must not clear the pending
+    /// snapshot before the real creation reply arrives — the caller keeps
+    /// waiting (not yet at the bound) and a later matching update still
+    /// selects the new playlist.
+    func testShouldClearPendingNewPlaylistKeepsWaitingOnUnrelatedUpdateThenClearsOnMatch() {
+        XCTAssertFalse(
+            SidebarDestination.shouldClearPendingNewPlaylist(matched: false, revisionsElapsed: 1),
+            "an unrelated update before the bound must not clear pending")
+        XCTAssertTrue(
+            SidebarDestination.shouldClearPendingNewPlaylist(matched: true, revisionsElapsed: 2),
+            "a matching update must always clear pending, regardless of elapsed count")
+    }
+
+    /// Wedge-forever must remain impossible: once the bound is reached with
+    /// no match, pending clears anyway (re-enabling the "+" button), even
+    /// though no destination was selected.
+    func testShouldClearPendingNewPlaylistClearsOnceBoundIsExceededWithNoMatch() {
+        XCTAssertFalse(SidebarDestination.shouldClearPendingNewPlaylist(matched: false, revisionsElapsed: 1))
+        XCTAssertFalse(SidebarDestination.shouldClearPendingNewPlaylist(matched: false, revisionsElapsed: 2))
+        XCTAssertTrue(
+            SidebarDestination.shouldClearPendingNewPlaylist(
+                matched: false, revisionsElapsed: SidebarDestination.maxRevisionsToWaitForNewPlaylist),
+            "must clear once the bound is reached, so the '+' button can never wedge disabled forever")
+    }
+
     // MARK: - Task 3 review fix: playlists_update revision (finding #2)
 
     /// The sidebar's in-flight "+" guard must clear even when a
@@ -517,11 +545,12 @@ final class AppModelReducerTests: XCTestCase {
 
     /// Mirrors `testDevicePreviewAttachesToTheRequestedSerial`'s bookkeeping
     /// discipline: a request must be in flight for a reply to attach.
-    func testResolvedTracksStoresResultAndBumpsRevisionWhenRequestPending() {
+    func testResolvedTracksStoresResultTaggedWithSlugAndBumpsRevisionWhenRequestPending() {
         let m = AppModel()
-        m.willRequestResolveTracks()
+        m.willRequestResolveTracks(slug: "gym")
         m.apply(.resolvedTracks(tracks: ["Artist/Album/01.flac", "B/02.flac"]))
-        XCTAssertEqual(m.resolvedTracks, ["Artist/Album/01.flac", "B/02.flac"])
+        XCTAssertEqual(m.latestResolvedTracks?.slug, "gym")
+        XCTAssertEqual(m.latestResolvedTracks?.tracks, ["Artist/Album/01.flac", "B/02.flac"])
         XCTAssertEqual(m.resolvedTracksRevision, 1)
     }
 
@@ -531,9 +560,10 @@ final class AppModelReducerTests: XCTestCase {
     /// nothing having happened.
     func testResolvedTracksEmptyReplyStillBumpsRevision() {
         let m = AppModel()
-        m.willRequestResolveTracks()
+        m.willRequestResolveTracks(slug: "gym")
         m.apply(.resolvedTracks(tracks: []))
-        XCTAssertEqual(m.resolvedTracks, [])
+        XCTAssertEqual(m.latestResolvedTracks?.slug, "gym")
+        XCTAssertEqual(m.latestResolvedTracks?.tracks, [])
         XCTAssertEqual(m.resolvedTracksRevision, 1)
     }
 
@@ -543,6 +573,41 @@ final class AppModelReducerTests: XCTestCase {
         let m = AppModel()
         m.apply(.resolvedTracks(tracks: ["a.flac"]))
         XCTAssertEqual(m.resolvedTracksRevision, 0)
-        XCTAssertEqual(m.resolvedTracks, [])
+        XCTAssertNil(m.latestResolvedTracks)
+    }
+
+    /// Fix (resolve-reply correlation hardening): `pendingResolveTracks` is a
+    /// FIFO queue keyed by slug, mirroring `pendingPreviewSerials` — two
+    /// interleaved requests from different playlist editors must each attach
+    /// their reply to the right slug, in request order, not overwrite each
+    /// other or cross-attach.
+    func testResolvedTracksQueueAttachesInterleavedRepliesToTheRightSlugs() {
+        let m = AppModel()
+        m.willRequestResolveTracks(slug: "gym")
+        m.willRequestResolveTracks(slug: "chill")
+
+        m.apply(.resolvedTracks(tracks: ["gym1.flac"]))
+        XCTAssertEqual(m.latestResolvedTracks?.slug, "gym", "first reply must attach to the first (oldest) request")
+        XCTAssertEqual(m.latestResolvedTracks?.tracks, ["gym1.flac"])
+
+        m.apply(.resolvedTracks(tracks: ["chill1.flac"]))
+        XCTAssertEqual(m.latestResolvedTracks?.slug, "chill", "second reply must attach to the second request")
+        XCTAssertEqual(m.latestResolvedTracks?.tracks, ["chill1.flac"])
+    }
+
+    // MARK: - ManualPlaylistLogic.shouldConsumeResolvedTracks (editor-side correlation guard)
+
+    func testShouldConsumeResolvedTracksAcceptsMatchingSlug() {
+        let reply = ResolvedTracksReply(slug: "gym", tracks: ["a.flac"])
+        XCTAssertTrue(ManualPlaylistLogic.shouldConsumeResolvedTracks(reply: reply, forSlug: "gym"))
+    }
+
+    /// The editor showing playlist "chill" must never consume a reply tagged
+    /// for playlist "gym" — this is the actual regression fix: previously
+    /// ANY bump while `isResolvingAdd` was true was consumed, regardless of
+    /// which playlist actually requested it.
+    func testShouldConsumeResolvedTracksRejectsMismatchedSlug() {
+        let reply = ResolvedTracksReply(slug: "gym", tracks: ["a.flac"])
+        XCTAssertFalse(ManualPlaylistLogic.shouldConsumeResolvedTracks(reply: reply, forSlug: "chill"))
     }
 }

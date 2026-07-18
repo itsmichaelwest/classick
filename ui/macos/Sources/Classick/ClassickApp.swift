@@ -272,9 +272,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// Add Songs picker (Task 7, protocol 1.7.0): expands checked
     /// artist/album/genre rules into real track paths server-side — see
     /// `AppModel.willRequestResolveTracks`'s doc comment for why this
-    /// bookkeeping precedes the send (mirrors `previewDevice`).
-    func resolveTracks(rules: [SelectionRule]) {
-        model.willRequestResolveTracks()
+    /// bookkeeping precedes the send (mirrors `previewDevice`). `slug` is the
+    /// requesting playlist editor's own slug (no wire change — purely
+    /// client-side correlation bookkeeping, see `ResolvedTracksReply`).
+    func resolveTracks(slug: String, rules: [SelectionRule]) {
+        model.willRequestResolveTracks(slug: slug)
         Task { await daemonClient.send(.resolveTracks(rules: rules)) }
     }
 
@@ -412,7 +414,7 @@ struct ClassickApp: App {
                 onSavePlaylist: { payload in appDelegate.savePlaylist(payload) },
                 onGetPlaylist: { slug in appDelegate.getPlaylist(slug: slug) },
                 onDeletePlaylist: { slug in appDelegate.deletePlaylist(slug: slug) },
-                onResolveTracks: { rules in appDelegate.resolveTracks(rules: rules) },
+                onResolveTracks: { slug, rules in appDelegate.resolveTracks(slug: slug, rules: rules) },
                 onLoadDeviceConfig: { serial in appDelegate.loadDeviceConfig(serial: serial) },
                 onPreviewDevice: { serial in appDelegate.previewDevice(serial: serial) },
                 onSaveDeviceConfig: { serial, selection, subscriptions in

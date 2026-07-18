@@ -66,6 +66,29 @@ enum SidebarDestination: Hashable, Sendable {
         return .playlist(slug: chosen)
     }
 
+    /// Bound on how many `playlists_update` bumps the sidebar's "+ New
+    /// Playlist" flow waits through before giving up (Fix: premature-clear
+    /// regression). `Sidebar` used to clear `priorSlugsAwaitingNewPlaylist`
+    /// on the FIRST bump regardless of whether it matched — an unrelated
+    /// interleaved update (e.g. another connected client's own change)
+    /// would drop the pending snapshot before this client's own creation
+    /// reply arrived, so the new playlist would be created but never
+    /// auto-selected. Clearing only on a match risks wedging the "+" button
+    /// disabled forever if a reply is somehow lost, so a small bound caps
+    /// the wait either way.
+    static let maxRevisionsToWaitForNewPlaylist = 3
+
+    /// Whether the sidebar should drop `priorSlugsAwaitingNewPlaylist` after
+    /// observing one more `playlists_update` bump. `matched` is whether
+    /// `destinationForNewlyCreatedPlaylist` found a new slug on THIS bump;
+    /// `revisionsElapsed` is the count of bumps observed (including this
+    /// one) since the "+" was tapped. Clears on a match (the normal path) or
+    /// once the bound is exceeded (the wedge-forever guard) — never on an
+    /// unrelated, unmatched bump before the bound.
+    static func shouldClearPendingNewPlaylist(matched: Bool, revisionsElapsed: Int) -> Bool {
+        matched || revisionsElapsed >= maxRevisionsToWaitForNewPlaylist
+    }
+
     /// Mirrors the daemon's `PlaylistStore::slugify` (`crates/classick/src/
     /// playlist.rs`): lowercase, alphanumerics kept, runs of anything else
     /// collapse to a single `-`, leading/trailing `-` trimmed. Only used here

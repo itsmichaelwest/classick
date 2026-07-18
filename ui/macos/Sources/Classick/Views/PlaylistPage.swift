@@ -12,7 +12,7 @@ struct PlaylistPage: View {
     var onSavePlaylist: (PlaylistPayload) -> Void
     var onGetPlaylist: (String) -> Void = { _ in }
     var onDeletePlaylist: (String) -> Void = { _ in }
-    var onResolveTracks: ([SelectionRule]) -> Void = { _ in }
+    var onResolveTracks: (_ slug: String, _ rules: [SelectionRule]) -> Void = { _, _ in }
 
     /// `model.playlistDetail` is a single slot (not scoped by slug) — only
     /// meaningful once its own `slug` matches the page currently showing;
@@ -69,7 +69,7 @@ private struct ManualPlaylistEditor: View {
     var detail: PlaylistDetail
     var onSavePlaylist: (PlaylistPayload) -> Void
     var onDeletePlaylist: (String) -> Void
-    var onResolveTracks: ([SelectionRule]) -> Void
+    var onResolveTracks: (_ slug: String, _ rules: [SelectionRule]) -> Void
 
     private struct ManualDraft: Equatable {
         var name: String = ""
@@ -97,15 +97,20 @@ private struct ManualPlaylistEditor: View {
             scheduleSave(newDraft)
         }
         .onDisappear { saveTask?.cancel() }
-        // The Add Songs sheet has no correlation id of its own to watch for
-        // (see `AppModel.resolvedTracksRevision`'s doc comment) — this page
-        // is the only thing that could have a resolve request in flight
-        // (`isResolvingAdd`), so any revision bump while that's true belongs
-        // to this page's own request.
+        // `resolved_tracks` carries no correlation id of its own on the wire
+        // — `model.latestResolvedTracks` tags each reply with the requesting
+        // playlist's slug (see its doc comment), and this page only consumes
+        // a reply tagged with ITS OWN slug. This is what keeps a stale reply
+        // meant for a different playlist (e.g. one still in flight when the
+        // user somehow navigates away and back) from appending to the wrong
+        // draft — safe today only because `AddSongsPicker` is a window-modal
+        // `.sheet()`, but this guard makes correctness not depend on that.
         .onChange(of: model.resolvedTracksRevision) { _, _ in
-            guard isResolvingAdd else { return }
+            guard isResolvingAdd, let reply = model.latestResolvedTracks,
+                  ManualPlaylistLogic.shouldConsumeResolvedTracks(reply: reply, forSlug: slug)
+            else { return }
             isResolvingAdd = false
-            draft.tracks = ManualPlaylistLogic.appendingTracks(draft.tracks, adding: model.resolvedTracks)
+            draft.tracks = ManualPlaylistLogic.appendingTracks(draft.tracks, adding: reply.tracks)
             showAddSongs = false
         }
         .sheet(isPresented: $showAddSongs) {
@@ -113,7 +118,7 @@ private struct ManualPlaylistEditor: View {
                 library: model.library, isResolving: isResolvingAdd,
                 onAdd: { rules in
                     isResolvingAdd = true
-                    onResolveTracks(Array(rules))
+                    onResolveTracks(slug, Array(rules))
                 },
                 onCancel: { showAddSongs = false })
         }
@@ -264,16 +269,35 @@ enum ManualPlaylistLogic {
     }
 
     /// Add Songs' append step: preserves the existing track order, appends
-    /// newly resolved paths in reply order, and dedups both against the
-    /// existing list AND within the newly-added batch itself.
+    /// the newly resolved batch in natural (Finder-style) path order, and
+    /// dedups both against the existing list AND within the newly-added
+    /// batch itself.
+    ///
+    /// `resolve_tracks` deliberately returns paths in plain lexicographic
+    /// order server-side (the Rust side is unchanged) — fine for
+    /// zero-padded filenames, but a non-zero-padded album ("1.flac",
+    /// "10.flac", "2.flac") would sort 1, 10, 2 and append out of running
+    /// order. `localizedStandardCompare` (Finder's own sort) handles
+    /// embedded numeric segments correctly, and since it compares the whole
+    /// relative path, tracks stay grouped by their containing directory
+    /// (album) even across a multi-album batch.
     nonisolated static func appendingTracks(_ existing: [String], adding: [String]) -> [String] {
         var seen = Set(existing)
         var result = existing
-        for path in adding where !seen.contains(path) {
+        let naturallyOrdered = adding.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        for path in naturallyOrdered where !seen.contains(path) {
             result.append(path)
             seen.insert(path)
         }
         return result
+    }
+
+    /// Resolve-reply correlation guard: a `resolved_tracks` reply belongs to
+    /// this editor only when its tagged slug matches the editor's own. See
+    /// `AppModel.latestResolvedTracks`'s doc comment for why the reply is
+    /// tagged in the first place.
+    nonisolated static func shouldConsumeResolvedTracks(reply: ResolvedTracksReply, forSlug slug: String) -> Bool {
+        reply.slug == slug
     }
 
     nonisolated static func moved(_ tracks: [String], from: IndexSet, to: Int) -> [String] {

@@ -27,7 +27,7 @@ struct MainWindow: View {
     // Playlist editor pages (Task 7).
     var onGetPlaylist: (String) -> Void = { _ in }
     var onDeletePlaylist: (String) -> Void = { _ in }
-    var onResolveTracks: ([SelectionRule]) -> Void = { _ in }
+    var onResolveTracks: (_ slug: String, _ rules: [SelectionRule]) -> Void = { _, _ in }
     // Device Music page (Task 5).
     var onLoadDeviceConfig: (String) -> Void = { _ in }
     var onPreviewDevice: (String) -> Void = { _ in }

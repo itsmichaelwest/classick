@@ -18,6 +18,13 @@ struct Sidebar: View {
     /// daemon's `playlists_update` reply arrives. `nil` when no creation is
     /// in flight.
     @State private var priorSlugsAwaitingNewPlaylist: Set<String>?
+    /// Count of `playlists_update` bumps observed since `priorSlugsAwaitingNewPlaylist`
+    /// was snapshotted — feeds `SidebarDestination.shouldClearPendingNewPlaylist`'s
+    /// bound so an unrelated interleaved update can't clear pending before
+    /// this client's own creation reply arrives (Fix: premature-clear
+    /// regression), while still guaranteeing the "+" button can never wedge
+    /// disabled forever.
+    @State private var newPlaylistRevisionsElapsed = 0
 
     /// One device row's disclosure state. Only one iPod is ever paired at a
     /// time (see `AppModel.device`/`config.ipod`), so a single optional is
@@ -75,19 +82,35 @@ struct Sidebar: View {
         // list (e.g. the daemon's error path) — otherwise a plain
         // `onChange(of: playlists)` wouldn't fire and the "+" button would
         // wedge disabled forever (review finding #2).
+        //
+        // Fix (premature-clear regression): `priorSlugsAwaitingNewPlaylist`
+        // must NOT clear on the first bump regardless of match — an
+        // unrelated interleaved update (another connected client's own
+        // change) would otherwise drop the pending snapshot before this
+        // client's own creation reply arrives, so the new playlist gets
+        // created but never auto-selected. Clear only on a match, or once
+        // `SidebarDestination.shouldClearPendingNewPlaylist`'s bound is
+        // exceeded (wedge-forever guard).
         .onChange(of: model.playlistsUpdateRevision) { _, _ in
             guard let priorSlugs = priorSlugsAwaitingNewPlaylist else { return }
-            if let destination = SidebarDestination.destinationForNewlyCreatedPlaylist(
+            let destination = SidebarDestination.destinationForNewlyCreatedPlaylist(
                 priorSlugs: priorSlugs, updated: model.playlists)
-            {
+            if let destination {
                 selection = destination
             }
-            priorSlugsAwaitingNewPlaylist = nil
+            newPlaylistRevisionsElapsed += 1
+            if SidebarDestination.shouldClearPendingNewPlaylist(
+                matched: destination != nil, revisionsElapsed: newPlaylistRevisionsElapsed)
+            {
+                priorSlugsAwaitingNewPlaylist = nil
+                newPlaylistRevisionsElapsed = 0
+            }
         }
     }
 
     private func createPlaylist() {
         priorSlugsAwaitingNewPlaylist = Set(model.playlists.map(\.slug))
+        newPlaylistRevisionsElapsed = 0
         onSavePlaylist(.manual(slug: nil, name: SidebarDestination.newPlaylistDefaultName, tracks: []))
     }
 

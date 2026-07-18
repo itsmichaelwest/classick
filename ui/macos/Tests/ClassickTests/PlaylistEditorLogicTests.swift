@@ -85,6 +85,52 @@ final class PlaylistEditorLogicTests: XCTestCase {
         XCTAssertEqual(result, ["a.flac", "b.flac"])
     }
 
+    /// Fix (natural track order on Add): `resolve_tracks` returns
+    /// lexicographic path order server-side (deliberate, deterministic — the
+    /// Rust side is unchanged), so non-zero-padded filenames like
+    /// "1.flac", "10.flac", "2.flac" sort as 1, 10, 2 lexicographically. The
+    /// client must natural-sort the NEW batch before appending so the track
+    /// list matches the album's actual running order.
+    func testAppendingTracksOrdersNewBatchNaturallyNotLexicographically() {
+        let result = ManualPlaylistLogic.appendingTracks(
+            [], adding: ["Artist/Album/1.flac", "Artist/Album/10.flac", "Artist/Album/2.flac"])
+        XCTAssertEqual(result, ["Artist/Album/1.flac", "Artist/Album/2.flac", "Artist/Album/10.flac"])
+    }
+
+    /// The existing draft's order must never be disturbed by natural
+    /// sorting — only the newly added batch is reordered.
+    func testAppendingTracksLeavesExistingDraftOrderUntouched() {
+        let result = ManualPlaylistLogic.appendingTracks(
+            ["Z/Album/10.flac", "A/Album/2.flac"], adding: ["Artist/Album/10.flac", "Artist/Album/2.flac"])
+        XCTAssertEqual(result, ["Z/Album/10.flac", "A/Album/2.flac", "Artist/Album/2.flac", "Artist/Album/10.flac"])
+    }
+
+    /// A multi-album batch must stay grouped by album (directory), with each
+    /// album's own tracks in natural numeric order within that group — not
+    /// interleaved across albums by a global lexicographic sort.
+    func testAppendingTracksMultiAlbumBatchStaysAlbumGroupedInNaturalOrder() {
+        let result = ManualPlaylistLogic.appendingTracks(
+            [],
+            adding: [
+                "Artist/Album B/1.flac", "Artist/Album A/10.flac",
+                "Artist/Album A/2.flac", "Artist/Album B/2.flac", "Artist/Album A/1.flac",
+            ])
+        XCTAssertEqual(
+            result,
+            [
+                "Artist/Album A/1.flac", "Artist/Album A/2.flac", "Artist/Album A/10.flac",
+                "Artist/Album B/1.flac", "Artist/Album B/2.flac",
+            ])
+    }
+
+    /// Dedup (both against existing and within the batch) must still work
+    /// after natural sorting reorders the batch.
+    func testAppendingTracksDedupsWithinBatchAfterNaturalSort() {
+        let result = ManualPlaylistLogic.appendingTracks(
+            ["Artist/Album/1.flac"], adding: ["Artist/Album/10.flac", "Artist/Album/1.flac", "Artist/Album/10.flac"])
+        XCTAssertEqual(result, ["Artist/Album/1.flac", "Artist/Album/10.flac"])
+    }
+
     // MARK: - ManualPlaylistLogic.moved / removed
 
     func testMovedReordersTracks() {
