@@ -155,4 +155,80 @@ final class LibraryBrowserLogicTests: XCTestCase {
         XCTAssertEqual(checked, [.genre(name: "Ambient")])
         XCTAssertEqual(LibraryBrowser.toggledGenre("Ambient", checked: checked), [])
     }
+
+    // MARK: - Case-insensitive matching (fix: Set<SelectionRule> membership
+    // is exact-case via synthesized Hashable; the Rust matcher and the
+    // deleted SelectionDraft both compare names case-insensitively —
+    // `crates/classick/src/selection.rs`'s `a.to_lowercase() ==
+    // b.to_lowercase()`. A persisted rule's case need not match the current
+    // scan's, so these helpers must reconcile the two.)
+
+    private let radiohead = LibraryArtist(name: "Radiohead", albums: [
+        LibraryAlbum(name: "Kid A", genre: nil, tracks: 10, bytes: 100),
+        LibraryAlbum(name: "OK Computer", genre: nil, tracks: 12, bytes: 120),
+    ])
+
+    func testCheckStateIsCaseInsensitiveForArtistRule() {
+        let checked: Set<SelectionKey> = [.artist(name: "radiohead")]
+        XCTAssertEqual(LibraryBrowser.checkState(for: radiohead, checked: checked), .on,
+            "a lowercase-persisted artist rule must still register as checked for 'Radiohead'")
+    }
+
+    func testCheckStateIsCaseInsensitiveForAlbumRules() {
+        let checked: Set<SelectionKey> = [
+            .album(artist: "RADIOHEAD", album: "kid a"),
+            .album(artist: "radiohead", album: "OK COMPUTER"),
+        ]
+        XCTAssertEqual(LibraryBrowser.checkState(for: radiohead, checked: checked), .on)
+    }
+
+    func testToggleArtistOffWithDifferingCaseActuallyRemovesTheRule() {
+        // The library's canonical case is "Radiohead"; the persisted rule is
+        // lowercase. Toggling the artist off (cascading) must remove the
+        // existing differently-cased rule, not leave it behind alongside a
+        // no-op.
+        let checked: Set<SelectionKey> = [.artist(name: "radiohead")]
+        let result = LibraryBrowser.toggledArtist(radiohead, checked: checked, style: .cascading)
+        XCTAssertEqual(result, [], "toggling off must remove the differently-cased persisted rule")
+    }
+
+    func testToggleArtistOffFlatWithDifferingCaseRemovesAllAlbumRules() {
+        let checked: Set<SelectionKey> = [
+            .album(artist: "radiohead", album: "kid a"),
+            .album(artist: "Radiohead", album: "OK Computer"),
+        ]
+        let result = LibraryBrowser.toggledArtist(radiohead, checked: checked, style: .flat)
+        XCTAssertEqual(result, [], "flat toggle-off must remove differently-cased album rules too")
+    }
+
+    func testToggleAlbumOffWithDifferingCaseRemovesTheRuleNotDuplicates() {
+        let checked: Set<SelectionKey> = [.album(artist: "RADIOHEAD", album: "KID A")]
+        let result = LibraryBrowser.toggledAlbum(
+            artist: "Radiohead", album: "Kid A",
+            siblingAlbums: ["Kid A", "OK Computer"], checked: checked, style: .flat)
+        XCTAssertEqual(result, [], "toggling off must remove the differently-cased persisted rule, not insert a duplicate")
+    }
+
+    func testToggleAlbumCascadingCollapseIsCaseInsensitive() {
+        // "Kid A" already checked (uppercase artist/lowercase-ish album
+        // casing from a persisted rule); checking the last sibling must
+        // still collapse to a single artist rule.
+        let checked: Set<SelectionKey> = [.album(artist: "radiohead", album: "Kid A")]
+        let result = LibraryBrowser.toggledAlbum(
+            artist: "Radiohead", album: "OK Computer",
+            siblingAlbums: ["Kid A", "OK Computer"], checked: checked, style: .cascading)
+        XCTAssertEqual(result, [.artist(name: "Radiohead")])
+    }
+
+    func testToggleGenreOffWithDifferingCaseRemovesTheRule() {
+        let checked: Set<SelectionKey> = [.genre(name: "AMBIENT")]
+        let result = LibraryBrowser.toggledGenre("ambient", checked: checked)
+        XCTAssertEqual(result, [], "toggling off must remove the differently-cased persisted rule")
+    }
+
+    func testContainsCaseInsensitiveHelperDirectly() {
+        let checked: Set<SelectionKey> = [.artist(name: "radiohead")]
+        XCTAssertTrue(LibraryBrowser.containsCaseInsensitive(.artist(name: "Radiohead"), in: checked))
+        XCTAssertFalse(LibraryBrowser.containsCaseInsensitive(.artist(name: "Aphex Twin"), in: checked))
+    }
 }

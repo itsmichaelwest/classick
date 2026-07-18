@@ -6,14 +6,41 @@ import SwiftUI
 /// `Set<SelectionKey>` with no new wire type.
 typealias SelectionKey = SelectionRule
 
+extension SelectionRule {
+    /// Case-insensitive equality of the artist/album/genre name(s), NOT the
+    /// synthesized `Hashable`/`Equatable` (which stays exact-case — the wire
+    /// contract). `LibraryBrowser`'s checkbox logic uses this instead of
+    /// `Set` membership directly, since a persisted rule's case need not
+    /// match the current library scan's (mirrors the Rust matcher —
+    /// `crates/classick/src/selection.rs` — and `SelectionDraft`'s
+    /// equivalent, array-based version of the same rule).
+    fileprivate func matchesCaseInsensitive(_ other: SelectionRule) -> Bool {
+        switch (self, other) {
+        case let (.artist(a), .artist(b)):
+            return a.lowercased() == b.lowercased()
+        case let (.album(a1, al1), .album(a2, al2)):
+            return a1.lowercased() == a2.lowercased() && al1.lowercased() == al2.lowercased()
+        case let (.genre(a), .genre(b)):
+            return a.lowercased() == b.lowercased()
+        default:
+            return false
+        }
+    }
+}
+
 /// How `.select` mode resolves a row toggle to `SelectionKey` edits.
 enum SelectStyle: Equatable, Sendable {
     /// Checking an artist writes ONE `.artist` rule that also covers
     /// future albums (iTunes intuition); unchecking one album under a
     /// fully-checked artist expands that rule into explicit per-album keys
-    /// for the remaining albums. Mirrors `SelectionDraft`'s semantics —
-    /// this is the style the device Music page (Task 5) binds to, since a
-    /// sync selection is meant to auto-follow future library growth.
+    /// for the remaining albums. Mirrors `SelectionDraft`'s semantics,
+    /// INCLUDING its case-insensitive name matching (artist/album/genre
+    /// names compare via `.lowercased()`, mirroring the Rust matcher —
+    /// `crates/classick/src/selection.rs`'s `a.to_lowercase() ==
+    /// b.to_lowercase()` — since a persisted rule's case need not match the
+    /// current scan's) — this is the style the device Music page (Task 5)
+    /// binds to, since a sync selection is meant to auto-follow future
+    /// library growth.
     case cascading
     /// Each row is independent; an artist toggle checks/unchecks its
     /// currently-known albums directly and never synthesizes an `.artist`
@@ -120,7 +147,8 @@ struct LibraryBrowser: View {
             rowLabel(title: title, subtitle: subtitle, isChecked: false, onToggle: nil)
         case let .select(checked, style):
             let key = SelectionKey.album(artist: artist.name, album: album.name)
-            let isChecked = checked.wrappedValue.contains(.artist(name: artist.name)) || checked.wrappedValue.contains(key)
+            let isChecked = Self.containsCaseInsensitive(.artist(name: artist.name), in: checked.wrappedValue)
+                || Self.containsCaseInsensitive(key, in: checked.wrappedValue)
             rowLabel(title: title, subtitle: subtitle, isChecked: isChecked) {
                 checked.wrappedValue = Self.toggledAlbum(
                     artist: artist.name, album: album.name,
@@ -139,7 +167,8 @@ struct LibraryBrowser: View {
             rowLabel(title: title, subtitle: subtitle, isChecked: false, onToggle: nil)
         case let .select(checked, style):
             let key = SelectionKey.album(artist: row.artist, album: row.album.name)
-            let isChecked = checked.wrappedValue.contains(.artist(name: row.artist)) || checked.wrappedValue.contains(key)
+            let isChecked = Self.containsCaseInsensitive(.artist(name: row.artist), in: checked.wrappedValue)
+                || Self.containsCaseInsensitive(key, in: checked.wrappedValue)
             rowLabel(title: title, subtitle: subtitle, isChecked: isChecked) {
                 let siblings = library.artists.first { $0.name == row.artist }?.albums.map(\.name) ?? [row.album.name]
                 checked.wrappedValue = Self.toggledAlbum(
@@ -158,7 +187,7 @@ struct LibraryBrowser: View {
             rowLabel(title: title, subtitle: subtitle, isChecked: false, onToggle: nil)
         case let .select(checked, _):
             let key = SelectionKey.genre(name: genre.name)
-            rowLabel(title: title, subtitle: subtitle, isChecked: checked.wrappedValue.contains(key)) {
+            rowLabel(title: title, subtitle: subtitle, isChecked: Self.containsCaseInsensitive(key, in: checked.wrappedValue)) {
                 checked.wrappedValue = Self.toggledGenre(genre.name, checked: checked.wrappedValue)
             }
         }
@@ -216,11 +245,12 @@ struct LibraryBrowser: View {
 
     /// Tri-state artist checkbox: `.on` when an `.artist` rule is present OR
     /// every one of its albums is individually checked, `.off` when none
-    /// are, `.mixed` otherwise.
+    /// are, `.mixed` otherwise. Matching is case-insensitive (see
+    /// `containsCaseInsensitive`).
     nonisolated static func checkState(for artist: LibraryArtist, checked: Set<SelectionKey>) -> CheckState {
-        if checked.contains(.artist(name: artist.name)) { return .on }
+        if containsCaseInsensitive(.artist(name: artist.name), in: checked) { return .on }
         guard !artist.albums.isEmpty else { return .off }
-        let checkedCount = artist.albums.filter { checked.contains(.album(artist: artist.name, album: $0.name)) }.count
+        let checkedCount = artist.albums.filter { containsCaseInsensitive(.album(artist: artist.name, album: $0.name), in: checked) }.count
         if checkedCount == 0 { return .off }
         return checkedCount == artist.albums.count ? .on : .mixed
     }
@@ -236,17 +266,19 @@ struct LibraryBrowser: View {
         case .cascading:
             switch state {
             case .on:
-                checked.remove(.artist(name: artist.name))
-                for key in albumKeys { checked.remove(key) }
+                removeCaseInsensitive(.artist(name: artist.name), from: &checked)
+                for key in albumKeys { removeCaseInsensitive(key, from: &checked) }
             case .off, .mixed:
-                for key in albumKeys { checked.remove(key) }
+                for key in albumKeys { removeCaseInsensitive(key, from: &checked) }
                 checked.insert(.artist(name: artist.name))
             }
         case .flat:
             if state == .on {
-                for key in albumKeys { checked.remove(key) }
+                for key in albumKeys { removeCaseInsensitive(key, from: &checked) }
             } else {
-                for key in albumKeys { checked.insert(key) }
+                for key in albumKeys where !containsCaseInsensitive(key, in: checked) {
+                    checked.insert(key)
+                }
             }
         }
         return checked
@@ -256,30 +288,32 @@ struct LibraryBrowser: View {
     /// an album under a whole-artist rule expands it into explicit per-album
     /// rules minus this one; checking the last unchecked sibling collapses
     /// back to one `.artist` rule. `.flat` just flips that one album's key.
+    /// Matching (and the resulting removal) is case-insensitive — see
+    /// `containsCaseInsensitive`/`removeCaseInsensitive`.
     nonisolated static func toggledAlbum(artist: String, album: String, siblingAlbums: [String], checked: Set<SelectionKey>, style: SelectStyle) -> Set<SelectionKey> {
         var checked = checked
         let albumKey = SelectionKey.album(artist: artist, album: album)
         let artistKey = SelectionKey.artist(name: artist)
         switch style {
         case .flat:
-            if checked.contains(albumKey) {
-                checked.remove(albumKey)
+            if containsCaseInsensitive(albumKey, in: checked) {
+                removeCaseInsensitive(albumKey, from: &checked)
             } else {
                 checked.insert(albumKey)
             }
         case .cascading:
-            if checked.contains(artistKey) {
-                checked.remove(artistKey)
-                for sibling in siblingAlbums where sibling != album {
+            if containsCaseInsensitive(artistKey, in: checked) {
+                removeCaseInsensitive(artistKey, from: &checked)
+                for sibling in siblingAlbums where sibling.lowercased() != album.lowercased() {
                     checked.insert(.album(artist: artist, album: sibling))
                 }
-            } else if checked.contains(albumKey) {
-                checked.remove(albumKey)
+            } else if containsCaseInsensitive(albumKey, in: checked) {
+                removeCaseInsensitive(albumKey, from: &checked)
             } else {
                 checked.insert(albumKey)
-                let allChecked = siblingAlbums.allSatisfy { checked.contains(.album(artist: artist, album: $0)) }
+                let allChecked = siblingAlbums.allSatisfy { containsCaseInsensitive(.album(artist: artist, album: $0), in: checked) }
                 if allChecked {
-                    for sibling in siblingAlbums { checked.remove(.album(artist: artist, album: sibling)) }
+                    for sibling in siblingAlbums { removeCaseInsensitive(.album(artist: artist, album: sibling), from: &checked) }
                     checked.insert(artistKey)
                 }
             }
@@ -290,12 +324,32 @@ struct LibraryBrowser: View {
     nonisolated static func toggledGenre(_ name: String, checked: Set<SelectionKey>) -> Set<SelectionKey> {
         var checked = checked
         let key = SelectionKey.genre(name: name)
-        if checked.contains(key) {
-            checked.remove(key)
+        if containsCaseInsensitive(key, in: checked) {
+            removeCaseInsensitive(key, from: &checked)
         } else {
             checked.insert(key)
         }
         return checked
+    }
+
+    // MARK: - Case-insensitive Set<SelectionKey> matching
+
+    /// `Set<SelectionKey>` membership via the synthesized `Hashable` is
+    /// exact-case (it must stay wire-faithful — see `SelectionRule`'s doc
+    /// comment). Name comparisons here are case-insensitive to mirror the
+    /// Rust matcher (`crates/classick/src/selection.rs`'s
+    /// `a.to_lowercase() == b.to_lowercase()`) and `SelectionDraft`'s
+    /// equivalent: a persisted rule's case need not match the current
+    /// library scan's, and treating them as distinct would silently
+    /// disagree with what the core actually syncs.
+    nonisolated static func containsCaseInsensitive(_ key: SelectionKey, in set: Set<SelectionKey>) -> Bool {
+        set.contains { $0.matchesCaseInsensitive(key) }
+    }
+
+    /// Removes every entry in `set` that case-insensitively matches `key`
+    /// (not just an exact-case entry) — see `containsCaseInsensitive`.
+    nonisolated static func removeCaseInsensitive(_ key: SelectionKey, from set: inout Set<SelectionKey>) {
+        set = set.filter { !$0.matchesCaseInsensitive(key) }
     }
 
     // MARK: - Search filtering
