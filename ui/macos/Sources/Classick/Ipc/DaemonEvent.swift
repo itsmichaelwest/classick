@@ -39,7 +39,7 @@ struct IpodIdentity: Codable, Equatable, Sendable {
     serial = try container.decode(String.self, forKey: .serial)
     modelLabel = try container.decode(String.self, forKey: .modelLabel)
     name = try container.decodeIfPresent(String.self, forKey: .name)
-    customSelection = try container.decodeIfPresent(Bool.self, forKey: .customSelection) ?? false
+    customSelection = try container.decode(Bool.self, forKey: .customSelection)
   }
 }
 
@@ -88,7 +88,7 @@ struct DaemonSettings: Codable, Equatable, Sendable {
     subsequentSyncMode = try container.decode(String.self, forKey: .subsequentSyncMode)
     scheduleMinutes = try container.decode(UInt32.self, forKey: .scheduleMinutes)
     notifyOn = try container.decode(String.self, forKey: .notifyOn)
-    rockboxCompat = try container.decodeIfPresent(Bool.self, forKey: .rockboxCompat) ?? false
+    rockboxCompat = try container.decode(Bool.self, forKey: .rockboxCompat)
   }
 }
 
@@ -367,6 +367,16 @@ enum DaemonEvent: Decodable, Sendable {
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
+    func requirePresence(of keys: CodingKeys...) throws {
+      for key in keys where !container.contains(key) {
+        throw DecodingError.keyNotFound(
+          key,
+          DecodingError.Context(
+            codingPath: decoder.codingPath,
+            debugDescription: "Required nullable field '\(key.stringValue)' is missing"))
+      }
+    }
+
     let type = try container.decode(String.self, forKey: .type)
     switch type {
     case "hello":
@@ -385,7 +395,7 @@ enum DaemonEvent: Decodable, Sendable {
       let nextScheduledUnixSecs = try container.decodeIfPresent(
         UInt64.self, forKey: .nextScheduledUnixSecs)
       let storage = try container.decodeIfPresent(StatusInfo.Storage.self, forKey: .storage)
-      let syncedCount = try container.decodeIfPresent(Int.self, forKey: .syncedCount) ?? 0
+      let syncedCount = try container.decode(Int.self, forKey: .syncedCount)
       let libraryCount = try container.decodeIfPresent(Int.self, forKey: .libraryCount)
       let requestID = try container.decodeIfPresent(String.self, forKey: .acknowledgedRequestID)
       self = .statusUpdate(
@@ -400,6 +410,7 @@ enum DaemonEvent: Decodable, Sendable {
           libraryCount: libraryCount,
           acknowledgedRequestID: requestID))
     case "config_update":
+      try requirePresence(of: .source, .daemon, .ipod)
       let source = try container.decodeIfPresent(String.self, forKey: .source)
       let daemon = try container.decodeIfPresent(DaemonSettings.self, forKey: .daemon)
       let ipod = try container.decodeIfPresent(IpodIdentity.self, forKey: .ipod)
@@ -443,35 +454,35 @@ enum DaemonEvent: Decodable, Sendable {
           revision: try container.decode(UInt64.self, forKey: .revision),
           devices: try container.decode([DeviceSnapshotWire].self, forKey: .devices)))
     case "library_update":
+      try requirePresence(of: .sourceRoot, .scannedAtUnixSecs)
       self = .libraryUpdate(
         LibraryInfo(
           sourceRoot: try container.decodeIfPresent(String.self, forKey: .sourceRoot),
           scannedAtUnixSecs: try container.decodeIfPresent(UInt64.self, forKey: .scannedAtUnixSecs),
-          artists: try container.decodeIfPresent([LibraryArtist].self, forKey: .artists) ?? [],
-          genres: try container.decodeIfPresent([LibraryGenre].self, forKey: .genres) ?? [],
-          totalTracks: try container.decodeIfPresent(Int.self, forKey: .totalTracks) ?? 0,
-          totalBytes: try container.decodeIfPresent(UInt64.self, forKey: .totalBytes) ?? 0,
+          artists: try container.decode([LibraryArtist].self, forKey: .artists),
+          genres: try container.decode([LibraryGenre].self, forKey: .genres),
+          totalTracks: try container.decode(Int.self, forKey: .totalTracks),
+          totalBytes: try container.decode(UInt64.self, forKey: .totalBytes),
           acknowledgedRequestID: try container.decodeIfPresent(
             String.self, forKey: .acknowledgedRequestID)))
     case "selection_update":
       self = .selectionUpdate(
-        mode: try container.decodeIfPresent(SelectionMode.self, forKey: .mode) ?? .all,
-        rules: try container.decodeIfPresent([SelectionRule].self, forKey: .rules) ?? [],
+        mode: try container.decode(SelectionMode.self, forKey: .mode),
+        rules: try container.decode([SelectionRule].self, forKey: .rules),
         serial: try container.decodeIfPresent(String.self, forKey: .serial),
         acknowledgedRequestID: try container.decodeIfPresent(
           String.self, forKey: .acknowledgedRequestID))
     case "selection_preview":
       self = .selectionPreview(
         SelectionPreviewInfo(
-          selectedTracks: try container.decodeIfPresent(Int.self, forKey: .selectedTracks) ?? 0,
-          selectedBytes: try container.decodeIfPresent(UInt64.self, forKey: .selectedBytes) ?? 0,
-          adds: try container.decodeIfPresent(Int.self, forKey: .adds) ?? 0,
-          removes: try container.decodeIfPresent(Int.self, forKey: .removes) ?? 0,
+          selectedTracks: try container.decode(Int.self, forKey: .selectedTracks),
+          selectedBytes: try container.decode(UInt64.self, forKey: .selectedBytes),
+          adds: try container.decode(Int.self, forKey: .adds),
+          removes: try container.decode(Int.self, forKey: .removes),
           serial: try container.decode(String.self, forKey: .serial),
           acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID)))
     case "playlists_update":
-      let playlists =
-        try container.decodeIfPresent([PlaylistSummary].self, forKey: .playlists) ?? []
+      let playlists = try container.decode([PlaylistSummary].self, forKey: .playlists)
       self = .playlistsUpdate(
         playlists,
         acknowledgedRequestID: try container.decodeIfPresent(
@@ -494,15 +505,9 @@ enum DaemonEvent: Decodable, Sendable {
           acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID)))
     case "device_config_update":
       let serial = try container.decode(String.self, forKey: .serial)
-      let selection =
-        try container.decodeIfPresent(SelectionState.self, forKey: .selection)
-        ?? SelectionState(mode: .all, rules: [])
-      let subscriptions =
-        try container.decodeIfPresent(SubscriptionsWire.self, forKey: .subscriptions)
-        ?? SubscriptionsWire(playlists: [])
-      let settings =
-        try container.decodeIfPresent(DeviceSettingsWire.self, forKey: .settings)
-        ?? DeviceSettingsWire(autoSync: true, rockboxCompat: false)
+      let selection = try container.decode(SelectionState.self, forKey: .selection)
+      let subscriptions = try container.decode(SubscriptionsWire.self, forKey: .subscriptions)
+      let settings = try container.decode(DeviceSettingsWire.self, forKey: .settings)
       self = .deviceConfigUpdate(
         serial: serial,
         selection: selection,
@@ -510,22 +515,21 @@ enum DaemonEvent: Decodable, Sendable {
         settings: settings,
         acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID))
     case "device_preview":
+      try requirePresence(of: .projectedFreeBytes)
       self = .devicePreview(
         DevicePreview(
           serial: try container.decode(String.self, forKey: .serial),
-          selectedTracks: try container.decodeIfPresent(Int.self, forKey: .selectedTracks) ?? 0,
-          selectedBytes: try container.decodeIfPresent(UInt64.self, forKey: .selectedBytes) ?? 0,
-          playlistExtraTracks: try container.decodeIfPresent(Int.self, forKey: .playlistExtraTracks)
-            ?? 0,
-          playlistExtraBytes: try container.decodeIfPresent(
-            UInt64.self, forKey: .playlistExtraBytes) ?? 0,
+          selectedTracks: try container.decode(Int.self, forKey: .selectedTracks),
+          selectedBytes: try container.decode(UInt64.self, forKey: .selectedBytes),
+          playlistExtraTracks: try container.decode(Int.self, forKey: .playlistExtraTracks),
+          playlistExtraBytes: try container.decode(UInt64.self, forKey: .playlistExtraBytes),
           projectedFreeBytes: try container.decodeIfPresent(
             UInt64.self, forKey: .projectedFreeBytes),
           unresolvedSubscriptions: try container.decodeIfPresent(
             [String].self, forKey: .unresolvedSubscriptions),
           acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID)))
     case "resolved_tracks":
-      let tracks = try container.decodeIfPresent([String].self, forKey: .tracks) ?? []
+      let tracks = try container.decode([String].self, forKey: .tracks)
       self = .resolvedTracks(
         tracks: tracks,
         acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID))

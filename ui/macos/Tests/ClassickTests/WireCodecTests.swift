@@ -17,7 +17,8 @@ final class WireCodecTests: XCTestCase {
   }
 
   func testDecodesStatusUpdateMinimal() throws {
-    let json = #"{"type":"status_update","state":"idle","configured":false,"ipod_connected":true}"#
+    let json =
+      #"{"type":"status_update","state":"idle","configured":false,"ipod_connected":true,"synced_count":0}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
     guard case .statusUpdate(let s) = ev else { return XCTFail() }
     XCTAssertEqual(s.state, .idle)
@@ -124,11 +125,10 @@ final class WireCodecTests: XCTestCase {
     XCTAssertEqual(decoded, settings)
   }
 
-  func testDaemonSettingsDecodesMissingRockboxCompatAsFalse() throws {
+  func testDaemonSettingsRejectsMissingRockboxCompat() throws {
     let json =
       #"{"enabled":true,"autostart_with_windows":false,"first_sync_mode":"auto_apply","subsequent_sync_mode":"auto_apply","schedule_minutes":0,"notify_on":"all"}"#
-    let decoded = try JSONDecoder().decode(DaemonSettings.self, from: Data(json.utf8))
-    XCTAssertFalse(decoded.rockboxCompat)
+    XCTAssertThrowsError(try JSONDecoder().decode(DaemonSettings.self, from: Data(json.utf8)))
   }
 
   func testDecodesLibraryUpdate() throws {
@@ -237,12 +237,9 @@ final class WireCodecTests: XCTestCase {
     XCTAssertTrue(dbRestored)
   }
 
-  func testIpodIdentityDecodesMissingCustomSelectionAsFalse() throws {
+  func testIpodIdentityRejectsMissingCustomSelection() throws {
     let json = #"{"serial":"0xABC","model_label":"iPod Classic (3rd gen)"}"#
-    let identity = try JSONDecoder().decode(IpodIdentity.self, from: Data(json.utf8))
-    XCTAssertFalse(
-      identity.customSelection,
-      "older core/daemon omitting the field must default to shared selection")
+    XCTAssertThrowsError(try JSONDecoder().decode(IpodIdentity.self, from: Data(json.utf8)))
   }
 
   func testIpodIdentityRoundTripsCustomSelectionTrue() throws {
@@ -371,18 +368,49 @@ final class WireCodecTests: XCTestCase {
     XCTAssertFalse(settings.rockboxCompat)
   }
 
-  func testDecodesDeviceConfigUpdateWithoutSettingsDefaultsCleanly() throws {
-    // Absent-field tolerance: a `settings` object missing entirely must
-    // not crash the decode — old/newer daemon skew must never drop the
-    // whole device_config_update.
-    let json =
-      #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"acknowledged_request_id":"request-a"}"#
-    let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
-    guard case .deviceConfigUpdate(_, _, _, let settings, _) = ev else {
-      return XCTFail("expected deviceConfigUpdate")
+  func testDeviceConfigUpdateRejectsMissingRequiredPayloadFields() {
+    let fixtures = [
+      #"{"type":"device_config_update","serial":"0xABC","subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"all","rules":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"acknowledged_request_id":"request-a"}"#,
+    ]
+
+    for fixture in fixtures {
+      XCTAssertThrowsError(
+        try JSONDecoder().decode(DaemonEvent.self, from: Data(fixture.utf8)),
+        "expected incomplete device_config_update to be rejected: \(fixture)")
     }
-    XCTAssertTrue(settings.autoSync, "must default true, matching DeviceSettings::default()")
-    XCTAssertFalse(settings.rockboxCompat)
+  }
+
+  func testV2EventsRejectMissingRequiredAggregateFields() {
+    let fixtures = [
+      #"{"type":"status_update","state":"idle","configured":true,"ipod_connected":false}"#,
+      #"{"type":"library_update","scanned_at_unix_secs":null,"artists":[],"genres":[],"total_tracks":0,"total_bytes":0}"#,
+      #"{"type":"library_update","source_root":null,"artists":[],"genres":[],"total_tracks":0,"total_bytes":0}"#,
+      #"{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"genres":[],"total_tracks":0,"total_bytes":0}"#,
+      #"{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"total_tracks":0,"total_bytes":0}"#,
+      #"{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"genres":[],"total_bytes":0}"#,
+      #"{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"genres":[],"total_tracks":0}"#,
+      #"{"type":"selection_update","rules":[]}"#,
+      #"{"type":"selection_update","mode":"all"}"#,
+      #"{"type":"selection_preview","selected_bytes":0,"adds":0,"removes":0,"serial":"RAW-A","acknowledged_request_id":"request-a"}"#,
+      #"{"type":"selection_preview","selected_tracks":0,"adds":0,"removes":0,"serial":"RAW-A","acknowledged_request_id":"request-a"}"#,
+      #"{"type":"selection_preview","selected_tracks":0,"selected_bytes":0,"removes":0,"serial":"RAW-A","acknowledged_request_id":"request-a"}"#,
+      #"{"type":"selection_preview","selected_tracks":0,"selected_bytes":0,"adds":0,"serial":"RAW-A","acknowledged_request_id":"request-a"}"#,
+      #"{"type":"playlists_update"}"#,
+      #"{"type":"device_preview","serial":"RAW-A","selected_bytes":0,"playlist_extra_tracks":0,"playlist_extra_bytes":0,"projected_free_bytes":null,"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"device_preview","serial":"RAW-A","selected_tracks":0,"playlist_extra_tracks":0,"playlist_extra_bytes":0,"projected_free_bytes":null,"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"device_preview","serial":"RAW-A","selected_tracks":0,"selected_bytes":0,"playlist_extra_bytes":0,"projected_free_bytes":null,"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"device_preview","serial":"RAW-A","selected_tracks":0,"selected_bytes":0,"playlist_extra_tracks":0,"projected_free_bytes":null,"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"device_preview","serial":"RAW-A","selected_tracks":0,"selected_bytes":0,"playlist_extra_tracks":0,"playlist_extra_bytes":0,"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"resolved_tracks","acknowledged_request_id":"request-a"}"#,
+    ]
+
+    for fixture in fixtures {
+      XCTAssertThrowsError(
+        try JSONDecoder().decode(DaemonEvent.self, from: Data(fixture.utf8)),
+        "expected incomplete v2 event to be rejected: \(fixture)")
+    }
   }
 
   func testDecodesDevicePreviewWithProjection() throws {
@@ -594,6 +622,31 @@ final class WireCodecTests: XCTestCase {
     }
     XCTAssertEqual(revision, 7)
     XCTAssertEqual(requestID, "req-config")
+  }
+
+  func testConfigUpdateRequiresNullablePayloadFieldsToBePresent() throws {
+    let missingFieldFixtures = [
+      #"{"type":"config_update","daemon":null,"ipod":null,"config_revision":7}"#,
+      #"{"type":"config_update","source":null,"ipod":null,"config_revision":7}"#,
+      #"{"type":"config_update","source":null,"daemon":null,"config_revision":7}"#,
+    ]
+
+    for fixture in missingFieldFixtures {
+      XCTAssertThrowsError(
+        try JSONDecoder().decode(DaemonEvent.self, from: Data(fixture.utf8)),
+        "expected config_update missing a required nullable field to be rejected: \(fixture)")
+    }
+
+    let explicitNulls =
+      #"{"type":"config_update","source":null,"daemon":null,"ipod":null,"config_revision":7}"#
+    let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(explicitNulls.utf8))
+    guard case .configUpdate(let source, let daemon, let ipod, let revision, _) = event else {
+      return XCTFail("expected configUpdate")
+    }
+    XCTAssertNil(source)
+    XCTAssertNil(daemon)
+    XCTAssertNil(ipod)
+    XCTAssertEqual(revision, 7)
   }
 
   func testDecodesTwoDeviceInventorySnapshotRoundTrip() throws {
