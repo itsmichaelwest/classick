@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PortablePath(String);
 
+struct WindowsAbsolutePath {
+    anchor: String,
+    components: Vec<String>,
+}
+
 impl PortablePath {
     pub fn parse(value: &str) -> Result<Self> {
         if value.is_empty() {
@@ -29,6 +34,16 @@ impl PortablePath {
     }
 
     pub fn from_absolute(root: &Path, path: &Path) -> Result<Self> {
+        match (
+            WindowsAbsolutePath::parse(root)?,
+            WindowsAbsolutePath::parse(path)?,
+        ) {
+            (Some(root), Some(path)) => return Self::from_windows_absolute(&root, &path),
+            (Some(_), None) | (None, Some(_)) => {
+                bail!("source root and path use different path styles")
+            }
+            (None, None) => {}
+        }
         if !root.is_absolute() || !path.is_absolute() {
             bail!("source root and path must be absolute");
         }
@@ -53,6 +68,23 @@ impl PortablePath {
         Self::parse(&portable)
     }
 
+    fn from_windows_absolute(
+        root: &WindowsAbsolutePath,
+        path: &WindowsAbsolutePath,
+    ) -> Result<Self> {
+        let same_anchor = root.anchor.eq_ignore_ascii_case(&path.anchor);
+        let beneath_root = path.components.len() >= root.components.len()
+            && root
+                .components
+                .iter()
+                .zip(&path.components)
+                .all(|(root, path)| root.eq_ignore_ascii_case(path));
+        if !same_anchor || !beneath_root {
+            bail!("path is outside source root");
+        }
+        Self::parse(&path.components[root.components.len()..].join("/"))
+    }
+
     pub fn resolve(&self, root: &Path) -> PathBuf {
         root.join(&self.0)
     }
@@ -60,6 +92,54 @@ impl PortablePath {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+impl WindowsAbsolutePath {
+    fn parse(path: &Path) -> Result<Option<Self>> {
+        let value = path.to_str().context("source path is not valid UTF-8")?;
+        let normalized = value.replace('\\', "/");
+
+        if normalized.len() >= 3
+            && normalized.as_bytes()[0].is_ascii_alphabetic()
+            && normalized.as_bytes()[1] == b':'
+            && normalized.as_bytes()[2] == b'/'
+        {
+            return Ok(Some(Self {
+                anchor: normalized[..2].to_ascii_lowercase(),
+                components: split_windows_components(&normalized[3..]),
+            }));
+        }
+
+        if let Some(remainder) = normalized.strip_prefix("//") {
+            let mut components = remainder.split('/');
+            let host = components.next().unwrap_or_default();
+            let share = components.next().unwrap_or_default();
+            if host.is_empty() || share.is_empty() {
+                bail!("UNC path must include a host and share");
+            }
+            return Ok(Some(Self {
+                anchor: format!(
+                    "//{}/{}",
+                    host.to_ascii_lowercase(),
+                    share.to_ascii_lowercase()
+                ),
+                components: components
+                    .filter(|component| !component.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            }));
+        }
+
+        Ok(None)
+    }
+}
+
+fn split_windows_components(value: &str) -> Vec<String> {
+    value
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 impl Serialize for PortablePath {
@@ -128,6 +208,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(relative.as_str(), "Beck/Colors/01.flac");
+    }
+
+    #[test]
+    fn derives_from_windows_drive_paths_on_any_host_os() {
+        let relative = PortablePath::from_absolute(
+            Path::new(r"D:\Music"),
+            Path::new(r"d:\music\Beck\Colors\01.flac"),
+        )
+        .unwrap();
+
+        assert_eq!(relative.as_str(), "Beck/Colors/01.flac");
+    }
+
+    #[test]
+    fn derives_from_windows_unc_paths_on_any_host_os() {
+        let relative = PortablePath::from_absolute(
+            Path::new(r"\\JUPITER\Data\media\music"),
+            Path::new(r"\\jupiter\data\media\music\Birdy\Beautiful Lies\01.flac"),
+        )
+        .unwrap();
+
+        assert_eq!(relative.as_str(), "Birdy/Beautiful Lies/01.flac");
     }
 
     #[test]
