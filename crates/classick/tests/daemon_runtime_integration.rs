@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use classick::daemon::session_admission::EventContext;
 
 // The daemon binds a single global named-pipe per process, so these two
 // integration tests must run sequentially. A static mutex serialises
@@ -81,7 +82,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
     // oneshot the test awaits.
     let (spawn_seen_tx, spawn_seen_rx) = oneshot::channel::<String>();
     let spawn_seen_tx = std::sync::Mutex::new(Some(spawn_seen_tx));
-    let spawn_fn = move |_serial: String, drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+    let spawn_fn = move |_serial: String, drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>, _event_context: EventContext| {
         if let Some(s) = spawn_seen_tx.lock().unwrap().take() { let _ = s.send(drive.clone()); }
         Box::pin(async move {
             Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
@@ -102,7 +103,8 @@ async fn auto_sync_fires_when_configured_device_connects() {
              _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
-             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+             _event_context: EventContext| {
                 Box::pin(async move {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
@@ -118,7 +120,8 @@ async fn auto_sync_fires_when_configured_device_connects() {
              _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
-             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+             _event_context: EventContext| {
                 Box::pin(async move {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
@@ -134,7 +137,8 @@ async fn auto_sync_fires_when_configured_device_connects() {
              _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
-             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+             _event_context: EventContext| {
                 Box::pin(async move {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
@@ -187,7 +191,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
 
     let spawn_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let spawn_called_clone = spawn_called.clone();
-    let spawn_fn = move |_serial: String, _drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+    let spawn_fn = move |_serial: String, _drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>, _event_context: EventContext| {
         spawn_called_clone.store(true, std::sync::atomic::Ordering::Relaxed);
         Box::pin(async move {
             Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
@@ -208,7 +212,8 @@ async fn unknown_device_does_not_trigger_auto_sync() {
              _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
-             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+             _event_context: EventContext| {
                 Box::pin(async move {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
@@ -224,7 +229,8 @@ async fn unknown_device_does_not_trigger_auto_sync() {
              _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
-             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+             _event_context: EventContext| {
                 Box::pin(async move {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
@@ -240,7 +246,8 @@ async fn unknown_device_does_not_trigger_auto_sync() {
              _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
-             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+             _event_context: EventContext| {
                 Box::pin(async move {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
@@ -298,7 +305,7 @@ async fn runtime_stays_responsive_during_long_sync() {
     // future never resolves — simulates a long sync).
     let (spawn_entered_tx, spawn_entered_rx) = oneshot::channel::<()>();
     let spawn_entered_tx = std::sync::Mutex::new(Some(spawn_entered_tx));
-    let spawn_fn = move |_serial: String, _drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+    let spawn_fn = move |_serial: String, _drive: String, _cancel_rx: tokio::sync::oneshot::Receiver<()>, _pause_rx: tokio::sync::oneshot::Receiver<()>, _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>, _event_context: EventContext| {
         if let Some(s) = spawn_entered_tx.lock().unwrap().take() { let _ = s.send(()); }
         Box::pin(async move {
             std::future::pending::<()>().await;  // never resolves
@@ -321,7 +328,8 @@ async fn runtime_stays_responsive_during_long_sync() {
              _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
-             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+             _event_context: EventContext| {
                 Box::pin(async move {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
@@ -337,7 +345,8 @@ async fn runtime_stays_responsive_during_long_sync() {
              _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
-             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+             _event_context: EventContext| {
                 Box::pin(async move {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,
@@ -353,7 +362,8 @@ async fn runtime_stays_responsive_during_long_sync() {
              _drive: String,
              _cancel_rx: tokio::sync::oneshot::Receiver<()>,
              _pause_rx: tokio::sync::oneshot::Receiver<()>,
-             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>| {
+             _prompt_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+             _event_context: EventContext| {
                 Box::pin(async move {
                     Ok(classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
                         outcome: classick::daemon::history::SyncOutcome::Ok,

@@ -5,12 +5,12 @@
 //! `tracks_errored * 2 > total_planned`.
 
 use crate::daemon::history::{SyncOutcome, SyncSummary};
+use crate::daemon::session_admission::EventContext;
 use crate::ipc_daemon::DaemonEvent;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -24,45 +24,6 @@ use tokio::time::Instant;
 use crate::daemon::PAUSE_DRAIN_GRACE;
 #[cfg(test)]
 const PAUSE_DRAIN_GRACE: Duration = Duration::from_millis(150);
-
-static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncEventContext {
-    serial: Option<String>,
-    session_id: crate::ipc_device::SessionId,
-}
-
-impl SyncEventContext {
-    pub fn device(serial: String) -> Self {
-        Self::new(Some(serial))
-    }
-
-    pub fn global_scan() -> Self {
-        Self::new(None)
-    }
-
-    fn new(serial: Option<String>) -> Self {
-        let session_id = NEXT_SESSION_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1)
-            })
-            .expect("daemon session id space exhausted");
-        Self { serial, session_id }
-    }
-
-    pub fn session_id(&self) -> crate::ipc_device::SessionId {
-        self.session_id
-    }
-
-    fn wrap(&self, line: String) -> DaemonEvent {
-        DaemonEvent::SyncEvent {
-            line,
-            serial: self.serial.clone(),
-            session_id: self.session_id,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestratorOutcome {
@@ -203,7 +164,7 @@ pub async fn run(
     pause_rx: oneshot::Receiver<()>,
     prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
-    event_context: SyncEventContext,
+    event_context: EventContext,
 ) -> Result<OrchestratorOutcome> {
     let cmd = build_command(&exe, &drive, rockbox_compat);
     drive_child(
@@ -232,7 +193,7 @@ pub async fn run_backfill(
     pause_rx: oneshot::Receiver<()>,
     prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
-    event_context: SyncEventContext,
+    event_context: EventContext,
 ) -> Result<OrchestratorOutcome> {
     let cmd = build_backfill_command(&exe, &drive);
     drive_child(
@@ -262,7 +223,7 @@ pub async fn run_replace_library(
     pause_rx: oneshot::Receiver<()>,
     prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
-    event_context: SyncEventContext,
+    event_context: EventContext,
 ) -> Result<OrchestratorOutcome> {
     let cmd = build_replace_library_command(&exe, &drive);
     drive_child(
@@ -286,7 +247,7 @@ pub async fn run_scan(
     pause_rx: oneshot::Receiver<()>,
     prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
-    event_context: SyncEventContext,
+    event_context: EventContext,
 ) -> Result<OrchestratorOutcome> {
     let cmd = build_scan_command(&exe);
     drive_child(
@@ -308,7 +269,7 @@ async fn drive_child(
     mut pause_rx: oneshot::Receiver<()>,
     mut prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
-    event_context: SyncEventContext,
+    event_context: EventContext,
 ) -> Result<OrchestratorOutcome> {
     let mut child = cmd
         .spawn()
@@ -560,32 +521,6 @@ async fn bounded_kill(child: &mut Child, timeout: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn device_event_context_attributes_progress_with_unique_nonzero_sessions() {
-        let first = SyncEventContext::device("RAW-A".to_string());
-        let second = SyncEventContext::device("RAW-A".to_string());
-
-        assert_ne!(first.session_id(), 0);
-        assert_ne!(second.session_id(), 0);
-        assert_ne!(first.session_id(), second.session_id());
-        assert!(matches!(
-            first.wrap("{\"type\":\"track_done\"}".to_string()),
-            DaemonEvent::SyncEvent { serial: Some(serial), session_id, .. }
-                if serial == "RAW-A" && session_id == first.session_id()
-        ));
-    }
-
-    #[test]
-    fn global_scan_event_context_has_no_serial_but_a_nonzero_session() {
-        let context = SyncEventContext::global_scan();
-        assert_ne!(context.session_id(), 0);
-        assert!(matches!(
-            context.wrap("{\"type\":\"log\"}".to_string()),
-            DaemonEvent::SyncEvent { serial: None, session_id, .. }
-                if session_id == context.session_id()
-        ));
-    }
 
     // Exercises `pause_drain_deadline` directly rather than driving `run`
     // end-to-end. A real integration test would need a dummy subprocess

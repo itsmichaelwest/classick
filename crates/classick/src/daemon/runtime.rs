@@ -8,15 +8,18 @@
 //! a scripted device watcher and a fake spawn-fn.
 
 use crate::config_file::{self, PersistedConfig};
-use crate::daemon::device_registry::{canonical_serial_key, DeviceRegistry};
+use crate::daemon::command_handler::{same_serial, singleton_target_rejection};
+use crate::daemon::device_registry::DeviceRegistry;
 use crate::daemon::device_storage::{self, StorageInfo};
 #[cfg(not(target_os = "macos"))]
 use crate::daemon::device_watcher::PollingDeviceWatcher;
 use crate::daemon::device_watcher::{Debouncer, DeviceEvent, DeviceWatcher};
 use crate::daemon::history::{HistoryEntry, HistoryService, SyncOutcome, SyncSummary, SyncTrigger};
 use crate::daemon::ipc_server::ClientCommand;
+use crate::daemon::runtime_state::{RuntimeState, SessionControls};
 use crate::daemon::scheduler::SyncScheduler;
-use crate::daemon::state::{DaemonState, SessionKind, StateMachine, TriggerOutcome};
+use crate::daemon::session_admission::EventContext;
+use crate::daemon::state::SessionKind;
 use crate::daemon::sync_orchestrator::{self, OrchestratorOutcome};
 use crate::ipc_daemon::{
     DaemonCommand, DaemonEvent, DaemonStateLabel, PlaylistKind, SyncRejectReason, TriggerSource,
@@ -61,7 +64,7 @@ pub async fn run_daemon() -> Result<()> {
     // see `device_config::DeviceSettings::load_or_migrate`.
     let config_path_for_spawn = config_path.clone();
     let spawn_sync: SpawnFn = Arc::new(
-        move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
+        move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx, event_context| {
             let exe = exe.clone();
             let event_tx = event_tx_for_spawn.clone();
             let global = config_file::load(&config_path_for_spawn)
@@ -71,7 +74,6 @@ pub async fn run_daemon() -> Result<()> {
             let rockbox_compat =
                 crate::device_config::DeviceSettings::load_or_migrate(&serial, &global)
                     .rockbox_compat;
-            let event_context = sync_orchestrator::SyncEventContext::device(serial);
             Box::pin(async move {
                 sync_orchestrator::run(
                     exe,
@@ -91,10 +93,9 @@ pub async fn run_daemon() -> Result<()> {
     let exe_for_backfill = std::env::current_exe()?;
     let event_tx_for_backfill = event_tx.clone();
     let spawn_backfill: SpawnFn = Arc::new(
-        move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
+        move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx, event_context| {
             let exe = exe_for_backfill.clone();
             let event_tx = event_tx_for_backfill.clone();
-            let event_context = sync_orchestrator::SyncEventContext::device(serial);
             Box::pin(async move {
                 sync_orchestrator::run_backfill(
                     exe,
@@ -113,10 +114,9 @@ pub async fn run_daemon() -> Result<()> {
     let exe_for_replace = std::env::current_exe()?;
     let event_tx_for_replace = event_tx.clone();
     let spawn_replace_library: SpawnFn = Arc::new(
-        move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx| {
+        move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx, event_context| {
             let exe = exe_for_replace.clone();
             let event_tx = event_tx_for_replace.clone();
-            let event_context = sync_orchestrator::SyncEventContext::device(serial);
             Box::pin(async move {
                 sync_orchestrator::run_replace_library(
                     exe,
@@ -135,10 +135,9 @@ pub async fn run_daemon() -> Result<()> {
     let exe_for_scan = std::env::current_exe()?;
     let event_tx_for_scan = event_tx.clone();
     let spawn_scan: SpawnFn = Arc::new(
-        move |_serial: String, _drive: String, cancel_rx, pause_rx, prompt_rx| {
+        move |_serial: String, _drive: String, cancel_rx, pause_rx, prompt_rx, event_context| {
             let exe = exe_for_scan.clone();
             let event_tx = event_tx_for_scan.clone();
-            let event_context = sync_orchestrator::SyncEventContext::global_scan();
             Box::pin(async move {
                 sync_orchestrator::run_scan(
                     exe,
@@ -176,13 +175,14 @@ pub async fn run_daemon() -> Result<()> {
 /// runtime can clone it into a tokio::spawn'd task without consuming the
 /// daemon's only copy.
 ///
-/// Args: `(serial, drive, cancel_rx, pause_rx, prompt_decisions_rx)`. `serial`
-/// lets `spawn_sync` resolve per-device settings (Rockbox compat) at spawn
-/// time; closures that don't need it (backfill/replace/scan) ignore it. The
-/// prompt channel lets `DaemonCommand::DecidePrompt` ferry user replies
+/// Args: `(serial, drive, cancel_rx, pause_rx, prompt_decisions_rx,
+/// event_context)`. `serial` lets `spawn_sync` resolve per-device settings
+/// (Rockbox compat) at spawn time; closures that don't need it
+/// (backfill/replace/scan) ignore it. `event_context` is created by admission,
+/// so every forwarded line retains the admitted session ID and raw serial.
+/// The prompt channel lets `DaemonCommand::DecidePrompt` ferry user replies
 /// through to the running subprocess's stdin without blocking the runtime
-/// loop. The pause channel lets `DaemonCommand::Pause` request a graceful
-/// stop.
+/// loop. The pause channel lets `DaemonCommand::Pause` request a graceful stop.
 pub type SpawnFn = Arc<
     dyn Fn(
             String,
@@ -190,6 +190,7 @@ pub type SpawnFn = Arc<
             oneshot::Receiver<()>,
             oneshot::Receiver<()>,
             tokio::sync::mpsc::UnboundedReceiver<(u64, i32)>,
+            EventContext,
         )
             -> Pin<Box<dyn std::future::Future<Output = Result<OrchestratorOutcome>> + Send>>
         + Send
@@ -203,14 +204,14 @@ pub struct DaemonDeps {
     /// Same shape as `spawn_sync`, but drives a `--backfill-rockbox`
     /// subprocess (`sync_orchestrator::run_backfill` in production) instead
     /// of `--apply`. Used by the `DaemonCommand::BackfillRockbox` arm,
-    /// which reuses `start_sync_session` — the same state-machine guard,
+    /// which reuses `start_sync_session` — the same admission guard,
     /// cancel/pause/prompt channels, and event relay as a normal sync — so
     /// a backfill and a sync can never run concurrently.
     pub spawn_backfill: SpawnFn,
     /// Same shape as `spawn_sync`, but drives a `--replace-library --apply`
     /// subprocess (`sync_orchestrator::run_replace_library` in production)
     /// instead of plain `--apply`. Used by the `DaemonCommand::ReplaceLibrary`
-    /// arm, which reuses `start_sync_session` — the same state-machine
+    /// arm, which reuses `start_sync_session` — the same admission
     /// guard, cancel/pause/prompt channels, and event relay as a normal
     /// sync — so a replace and a sync (or backfill) can never run
     /// concurrently.
@@ -252,9 +253,7 @@ pub struct DaemonDeps {
 /// mutation + history persistence + broadcast.
 enum InternalEvent {
     SyncCompleted {
-        trigger: SyncTrigger,
-        serial: String,
-        started_at_unix_secs: u64,
+        session_id: crate::ipc_device::SessionId,
         outcome: Result<OrchestratorOutcome>,
     },
     /// Sent by the iPod-name reader task after itdb_parse completes on
@@ -274,6 +273,7 @@ enum InternalEvent {
     /// A --scan-library subprocess finished. No history entry — a scan is
     /// cache maintenance, not a sync.
     ScanCompleted {
+        session_id: crate::ipc_device::SessionId,
         outcome: Result<OrchestratorOutcome>,
     },
 }
@@ -302,10 +302,6 @@ impl ConfigRevision {
     }
 }
 
-fn same_serial(left: &str, right: &str) -> bool {
-    canonical_serial_key(left) == canonical_serial_key(right)
-}
-
 fn configured_connected_device<'a>(
     configured_serial: Option<&str>,
     connected: &'a Option<DetectedIpod>,
@@ -314,58 +310,6 @@ fn configured_connected_device<'a>(
         .zip(connected.as_ref())
         .filter(|(configured, device)| same_serial(configured, &device.serial))
         .map(|(_, device)| device)
-}
-
-fn singleton_target_rejection(
-    command: &DaemonCommand,
-    connected: &Option<DetectedIpod>,
-    configured_serial: Option<&str>,
-    state: &StateMachine,
-) -> Option<SyncRejectReason> {
-    let requested = command.target_serial()?;
-    let connected_serial = connected.as_ref().map(|device| device.serial.as_str());
-
-    if configured_serial
-        .zip(connected_serial)
-        .is_some_and(|(configured, connected)| !same_serial(configured, connected))
-    {
-        return Some(SyncRejectReason::NotConfigured);
-    }
-
-    let (expected, missing_or_mismatch) = match command {
-        DaemonCommand::CancelSync { .. }
-        | DaemonCommand::Pause { .. }
-        | DaemonCommand::DecidePrompt { .. } => {
-            let active_serial = match state.state() {
-                DaemonState::Syncing(session) if session.kind == SessionKind::Sync => {
-                    session.serial.as_deref()
-                }
-                _ => None,
-            };
-            (active_serial, SyncRejectReason::AlreadySyncing)
-        }
-        DaemonCommand::TriggerSync { .. }
-        | DaemonCommand::BackfillRockbox { .. }
-        | DaemonCommand::ReplaceLibrary { .. } => {
-            if configured_serial.is_none() {
-                return Some(SyncRejectReason::NotConfigured);
-            }
-            (connected_serial, SyncRejectReason::NoIpod)
-        }
-        DaemonCommand::ForgetIpod { .. }
-        | DaemonCommand::PreviewSelection { .. }
-        | DaemonCommand::GetDeviceConfig { .. }
-        | DaemonCommand::SaveDeviceConfig { .. }
-        | DaemonCommand::PreviewDevice { .. } => {
-            (configured_serial, SyncRejectReason::NotConfigured)
-        }
-        _ => return None,
-    };
-
-    match expected {
-        Some(actual) if same_serial(requested, actual) => None,
-        _ => Some(missing_or_mismatch),
-    }
 }
 
 /// Test-friendly entry. Production wraps real impls and calls this.
@@ -392,7 +336,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     {
         history.migrate_legacy_entries(&serial)?;
     }
-    let mut state = StateMachine::new();
+    let mut state = RuntimeState::new();
     let mut config_revision = ConfigRevision::default();
     let mut scheduler = SyncScheduler::new(deps.schedule_minutes);
     let mut debouncer = Debouncer::new(crate::daemon::DEVICE_DEBOUNCE_WINDOW);
@@ -432,20 +376,6 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let spawn_backfill = deps.spawn_backfill;
     let spawn_replace_library = deps.spawn_replace_library;
     let spawn_scan = deps.spawn_scan;
-    // Cancellation signal for the currently-running sync (if any). Set
-    // by start_sync_session; taken + sent by handle_client_command's
-    // CancelSync arm; cleared in handle_internal_event after completion.
-    let mut cancel_tx_holder: Option<oneshot::Sender<()>> = None;
-    // Prompt-decision relay: each DecidePrompt command sends its
-    // (id, choice) into this mpsc; the orchestrator's select loop
-    // reads it and writes the corresponding {"type":"prompt_decision",
-    // ...}\n line to the subprocess stdin. Set alongside cancel_tx
-    // at sync-start; cleared on completion.
-    let mut prompt_tx_holder: Option<mpsc::UnboundedSender<(u64, i32)>> = None;
-    // Pause signal for the currently-running sync (if any). Mirrors
-    // cancel_tx_holder, but the orchestrator's pause arm doesn't
-    // force-kill — see sync_orchestrator::run's doc comment.
-    let mut pause_tx_holder: Option<oneshot::Sender<()>> = None;
     // Cached source-library track count (Y in "X of Y synced"). Walking the
     // source on every status tick would stall the daemon loop, so it's cached:
     // filled by an off-thread walk at startup + after SaveConfig (see
@@ -475,9 +405,6 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
             &event_tx,
             &spawn_scan,
             &internal_tx,
-            &mut cancel_tx_holder,
-            &mut prompt_tx_holder,
-            &mut pause_tx_holder,
             &connected,
             &config_path,
             &history,
@@ -510,9 +437,6 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &spawn_replace_library,
                     &spawn_scan,
                     &internal_tx,
-                    &mut cancel_tx_holder,
-                    &mut prompt_tx_holder,
-                    &mut pause_tx_holder,
                     &mut configured_serial,
                     &mut scheduler,
                     &mut library_count_cache,
@@ -547,9 +471,6 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &history,
                     &spawn_sync,
                     &internal_tx,
-                    &mut cancel_tx_holder,
-                    &mut prompt_tx_holder,
-                    &mut pause_tx_holder,
                     configured_serial.as_deref(),
                     &config_path,
                     library_count_cache,
@@ -559,16 +480,6 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
             }
 
             Some(internal) = internal_rx.recv() => {
-                // Sync AND scan completions clear the sync-lifecycle holders
-                // (both occupy the shared guard). IpodNameResolved /
-                // LibraryCountComputed are unrelated to sync lifecycle.
-                let is_sync_completion = matches!(internal,
-                    InternalEvent::SyncCompleted { .. } | InternalEvent::ScanCompleted { .. });
-                if is_sync_completion {
-                    cancel_tx_holder = None;
-                    prompt_tx_holder = None;
-                    pause_tx_holder = None;
-                }
                 handle_internal_event(
                     internal,
                     &mut state,
@@ -612,9 +523,6 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                             &event_tx,
                             &spawn_sync,
                             &internal_tx,
-                            &mut cancel_tx_holder,
-                            &mut prompt_tx_holder,
-                            &mut pause_tx_holder,
                             library_count_cache,
                         );
                     }
@@ -649,7 +557,6 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     tracing::info!("daemon: library watcher fired a scan after debounce");
                     start_scan_session(
                         &mut state, &event_tx, &spawn_scan, &internal_tx,
-                        &mut cancel_tx_holder, &mut prompt_tx_holder, &mut pause_tx_holder,
                         &connected, &config_path, &history, library_count_cache,
                     );
                 } else {
@@ -672,17 +579,24 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     // the iPod's iTunesDB.
     match exit_reason {
         ExitReason::Shutdown => {
-            if cancel_tx_holder.is_none() && state.is_idle() {
+            let active_session_id = state.active_session().map(|session| session.id);
+            if active_session_id.is_none() {
                 tracing::info!("daemon: clean shutdown — no in-flight sync to drain");
             } else {
-                if let Some(tx) = cancel_tx_holder.take() {
+                if let Some(tx) = active_session_id.and_then(|id| state.take_cancel(id)) {
                     let _ = tx.send(());
                     tracing::info!("daemon: signalled in-flight sync to cancel before exit");
                 }
                 let drain = tokio::time::timeout(crate::daemon::SHUTDOWN_DRAIN_BUDGET, async {
                     while let Some(internal) = internal_rx.recv().await {
-                        if matches!(internal, InternalEvent::SyncCompleted { .. }) {
-                            return;
+                        match internal {
+                            InternalEvent::SyncCompleted { session_id, .. }
+                            | InternalEvent::ScanCompleted { session_id, .. }
+                                if Some(session_id) == active_session_id =>
+                            {
+                                return;
+                            }
+                            _ => {}
                         }
                     }
                 })
@@ -713,7 +627,7 @@ enum ExitReason {
 /// the spawned orchestrator task has finished.
 fn handle_internal_event(
     event: InternalEvent,
-    state: &mut StateMachine,
+    state: &mut RuntimeState,
     event_tx: &broadcast::Sender<DaemonEvent>,
     history: &HistoryService,
     connected: &mut Option<DetectedIpod>,
@@ -778,19 +692,16 @@ fn handle_internal_event(
             return;
         }
         InternalEvent::SyncCompleted {
-            trigger,
-            serial,
-            started_at_unix_secs,
+            session_id,
             outcome,
         } => {
-            // If the device was detached mid-sync, the Disconnected handler
-            // already wrote an Aborted history entry and called finish_sync.
-            // In that case state is Idle and serial != this sync's serial —
-            // silently drop this completion to avoid a duplicate history entry.
-            if state.is_idle() {
-                tracing::debug!("daemon: sync completion arrived but state is already Idle (likely device-detached mid-sync); ignoring");
+            let Some(session) = state.finish(session_id) else {
+                tracing::debug!("daemon: stale sync completion for session {session_id}; ignoring");
                 return;
-            }
+            };
+            let serial = session
+                .serial
+                .expect("device sync session must carry its raw serial");
 
             let (history_outcome, error_message, summary, db_restored) = match outcome {
                 Ok(OrchestratorOutcome::Completed {
@@ -845,16 +756,16 @@ fn handle_internal_event(
 
             let entry = make_history_entry(
                 serial.clone(),
-                trigger,
+                session.id,
+                session.trigger,
                 history_outcome,
                 error_message,
                 summary,
-                started_at_unix_secs,
+                session.started_at_unix_secs,
                 db_restored,
             );
             let last_sync = Some(entry.clone());
             let _ = history.append(entry);
-            state.finish_sync();
 
             let _ = event_tx.send(DaemonEvent::StatusUpdate {
                 state: DaemonStateLabel::Idle,
@@ -868,11 +779,17 @@ fn handle_internal_event(
                 acknowledged_request_id: None,
             });
         }
-        InternalEvent::ScanCompleted { outcome } => {
+        InternalEvent::ScanCompleted {
+            session_id,
+            outcome,
+        } => {
+            if state.finish(session_id).is_none() {
+                tracing::debug!("daemon: stale scan completion for session {session_id}; ignoring");
+                return;
+            }
             if let Err(e) = &outcome {
                 tracing::warn!("daemon: library scan failed: {e:#}");
             }
-            state.finish_sync();
             // Fresh index on disk: rebroadcast the library and a status
             // update (selection-aware count may have changed).
             let _ = event_tx.send(crate::daemon::library::build_library_update(config_path));
@@ -924,13 +841,10 @@ fn handle_device_event(
     event: DeviceEvent,
     connected: &mut Option<DetectedIpod>,
     event_tx: &broadcast::Sender<DaemonEvent>,
-    state: &mut StateMachine,
+    state: &mut RuntimeState,
     history: &HistoryService,
     spawn_sync: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
-    cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
-    prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
-    pause_tx_holder: &mut Option<oneshot::Sender<()>>,
     configured_serial: Option<&str>,
     config_path: &std::path::Path,
     library_count_cache: Option<usize>,
@@ -1004,9 +918,6 @@ fn handle_device_event(
                     event_tx,
                     spawn_sync,
                     internal_tx,
-                    cancel_tx_holder,
-                    prompt_tx_holder,
-                    pause_tx_holder,
                     library_count_cache,
                 );
             }
@@ -1021,13 +932,14 @@ fn handle_device_event(
             // is still running — its SyncCompleted will arrive later and
             // be silently dropped (handle_internal_event checks for the
             // already-Idle case).
-            if let DaemonState::Syncing(s) = state.state() {
+            if let Some(s) = state.active_session().cloned() {
                 if s.serial
                     .as_deref()
                     .is_some_and(|active| same_serial(active, &serial))
                 {
                     let _ = history.append(make_history_entry(
                         serial.clone(),
+                        s.id,
                         s.trigger.clone(),
                         SyncOutcome::Aborted,
                         Some("device_detached".to_string()),
@@ -1035,7 +947,7 @@ fn handle_device_event(
                         s.started_at_unix_secs,
                         false,
                     ));
-                    state.finish_sync();
+                    state.finish(s.id);
                 }
             }
         }
@@ -1051,23 +963,14 @@ fn start_sync_session(
     trigger: SyncTrigger,
     serial: String,
     drive: String,
-    state: &mut StateMachine,
+    state: &mut RuntimeState,
     event_tx: &broadcast::Sender<DaemonEvent>,
     spawn_sync: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
-    cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
-    prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
-    pause_tx_holder: &mut Option<oneshot::Sender<()>>,
     library_count_cache: Option<usize>,
 ) {
-    if state.try_start_sync_for_device(trigger.clone(), serial.clone(), drive.clone())
-        != TriggerOutcome::Accepted
-    {
+    let Ok(session) = state.try_admit_device(trigger, &serial, std::path::Path::new(&drive)) else {
         return;
-    }
-    let started_at_unix_secs = match state.state() {
-        DaemonState::Syncing(s) => s.started_at_unix_secs,
-        _ => 0,
     };
     let _ = event_tx.send(DaemonEvent::StatusUpdate {
         state: DaemonStateLabel::Syncing,
@@ -1085,27 +988,28 @@ fn start_sync_session(
     // CancelSync IPC command can wake the orchestrator; Receiver
     // passed into the spawn closure.
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-    *cancel_tx_holder = Some(cancel_tx);
 
     // Per-sync prompt-decision channel. Sender held by the runtime
     // so DaemonCommand::DecidePrompt can ferry user replies through
     // to the subprocess. Receiver passed into the spawn closure for
     // the orchestrator's select loop to read.
     let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<(u64, i32)>();
-    *prompt_tx_holder = Some(prompt_tx);
 
     // Per-sync pause channel. Sender held by the runtime so the Pause
     // IPC command can wake the orchestrator; Receiver passed into the
     // spawn closure.
     let (pause_tx, pause_rx) = oneshot::channel::<()>();
-    *pause_tx_holder = Some(pause_tx);
+    state.install_controls(
+        session.id,
+        SessionControls::new(cancel_tx, pause_tx, prompt_tx),
+    );
 
     let spawn_sync = spawn_sync.clone();
     let internal_tx = internal_tx.clone();
     let drive_for_task = drive.clone();
-    let trigger_for_task = trigger.clone();
-    let serial_for_task = serial.clone();
     let serial_for_spawn = serial;
+    let event_context = EventContext::from(&session);
+    let session_id = session.id;
     tokio::spawn(async move {
         let outcome = (spawn_sync)(
             serial_for_spawn,
@@ -1113,12 +1017,11 @@ fn start_sync_session(
             cancel_rx,
             pause_rx,
             prompt_rx,
+            event_context,
         )
         .await;
         let _ = internal_tx.send(InternalEvent::SyncCompleted {
-            trigger: trigger_for_task,
-            serial: serial_for_task,
-            started_at_unix_secs,
+            session_id,
             outcome,
         });
     });
@@ -1130,21 +1033,18 @@ fn start_sync_session(
 /// relay, so a scan and a sync can never run concurrently.
 #[allow(clippy::too_many_arguments)]
 fn start_scan_session(
-    state: &mut StateMachine,
+    state: &mut RuntimeState,
     event_tx: &broadcast::Sender<DaemonEvent>,
     spawn_scan: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
-    cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
-    prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
-    pause_tx_holder: &mut Option<oneshot::Sender<()>>,
     connected: &Option<DetectedIpod>,
     config_path: &std::path::Path,
     history: &HistoryService,
     library_count_cache: Option<usize>,
 ) {
-    if state.try_start_scan() != TriggerOutcome::Accepted {
+    let Ok(session) = state.try_admit_scan() else {
         return;
-    }
+    };
     broadcast_status(
         event_tx,
         state,
@@ -1155,23 +1055,37 @@ fn start_scan_session(
     );
 
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-    *cancel_tx_holder = Some(cancel_tx);
     let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<(u64, i32)>();
-    *prompt_tx_holder = Some(prompt_tx);
     let (pause_tx, pause_rx) = oneshot::channel::<()>();
-    *pause_tx_holder = Some(pause_tx);
+    state.install_controls(
+        session.id,
+        SessionControls::new(cancel_tx, pause_tx, prompt_tx),
+    );
 
     let spawn_scan = spawn_scan.clone();
     let internal_tx = internal_tx.clone();
+    let event_context = EventContext::from(&session);
+    let session_id = session.id;
     tokio::spawn(async move {
-        let outcome =
-            (spawn_scan)(String::new(), String::new(), cancel_rx, pause_rx, prompt_rx).await;
-        let _ = internal_tx.send(InternalEvent::ScanCompleted { outcome });
+        let outcome = (spawn_scan)(
+            String::new(),
+            String::new(),
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+            event_context,
+        )
+        .await;
+        let _ = internal_tx.send(InternalEvent::ScanCompleted {
+            session_id,
+            outcome,
+        });
     });
 }
 
 fn make_history_entry(
     serial: String,
+    session_id: crate::ipc_device::SessionId,
     trigger: SyncTrigger,
     outcome: SyncOutcome,
     error_message: Option<String>,
@@ -1186,7 +1100,7 @@ fn make_history_entry(
     let duration = now.saturating_sub(started_at_unix_secs);
     HistoryEntry {
         serial,
-        session_id: None,
+        session_id: Some(session_id),
         timestamp: crate::daemon::format::rfc3339(now),
         duration_secs: duration,
         trigger,
@@ -1197,19 +1111,19 @@ fn make_history_entry(
     }
 }
 
-/// Map the state machine to the wire's `status_update.state`. A `Scan`
+/// Map the runtime state to the wire's `status_update.state`. A `Scan`
 /// session reports `Scanning`; a real sync reports `Syncing`.
-fn state_label(state: &StateMachine) -> DaemonStateLabel {
-    match state.state() {
-        DaemonState::Idle => DaemonStateLabel::Idle,
-        DaemonState::Syncing(s) if s.kind == SessionKind::Scan => DaemonStateLabel::Scanning,
-        DaemonState::Syncing(_) => DaemonStateLabel::Syncing,
+fn state_label(state: &RuntimeState) -> DaemonStateLabel {
+    match state.active_session() {
+        None => DaemonStateLabel::Idle,
+        Some(session) if session.kind == SessionKind::Scan => DaemonStateLabel::Scanning,
+        Some(_) => DaemonStateLabel::Syncing,
     }
 }
 
 fn broadcast_status(
     event_tx: &broadcast::Sender<DaemonEvent>,
-    state: &StateMachine,
+    state: &RuntimeState,
     connected: &Option<DetectedIpod>,
     config_path: &std::path::Path,
     history: &HistoryService,
@@ -1368,7 +1282,7 @@ fn handle_client_command(
     }: ClientCommand,
     history: &HistoryService,
     config_path: &std::path::Path,
-    state: &mut StateMachine,
+    state: &mut RuntimeState,
     event_tx: &broadcast::Sender<DaemonEvent>,
     connected: &Option<DetectedIpod>,
     spawn_sync: &SpawnFn,
@@ -1376,9 +1290,6 @@ fn handle_client_command(
     spawn_replace_library: &SpawnFn,
     spawn_scan: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
-    cancel_tx_holder: &mut Option<oneshot::Sender<()>>,
-    prompt_tx_holder: &mut Option<mpsc::UnboundedSender<(u64, i32)>>,
-    pause_tx_holder: &mut Option<oneshot::Sender<()>>,
     configured_serial: &mut Option<String>,
     scheduler: &mut SyncScheduler,
     library_count_cache: &mut Option<usize>,
@@ -1632,9 +1543,6 @@ fn handle_client_command(
                 event_tx,
                 spawn_sync,
                 internal_tx,
-                cancel_tx_holder,
-                prompt_tx_holder,
-                pause_tx_holder,
                 *library_count_cache,
             );
         }
@@ -1642,7 +1550,7 @@ fn handle_client_command(
             // Mirrors TriggerSync's guard + spawn + relay path exactly,
             // just pointed at `spawn_backfill` (a `--backfill-rockbox`
             // subprocess) instead of `spawn_sync` (`--apply`).
-            // `start_sync_session`'s state-machine check is what makes a
+            // `start_sync_session`'s admission check is what makes a
             // backfill and a sync mutually exclusive — whichever gets
             // there first flips state to Syncing and the other is
             // dropped/no-op.
@@ -1670,9 +1578,6 @@ fn handle_client_command(
                 event_tx,
                 spawn_backfill,
                 internal_tx,
-                cancel_tx_holder,
-                prompt_tx_holder,
-                pause_tx_holder,
                 *library_count_cache,
             );
         }
@@ -1680,7 +1585,7 @@ fn handle_client_command(
             // Mirrors BackfillRockbox's arm exactly, just pointed at
             // `spawn_replace_library` (a `--replace-library --apply`
             // subprocess) instead of `spawn_backfill`. `start_sync_session`'s
-            // state-machine check is what makes a replace mutually exclusive
+            // admission check is what makes a replace mutually exclusive
             // with a sync/backfill — whichever gets there first flips state
             // to Syncing and the other is dropped/no-op. The UI does its own
             // typed confirmation before ever sending this command, so there's
@@ -1724,9 +1629,6 @@ fn handle_client_command(
                 event_tx,
                 spawn_replace_library,
                 internal_tx,
-                cancel_tx_holder,
-                prompt_tx_holder,
-                pause_tx_holder,
                 *library_count_cache,
             );
         }
@@ -1735,7 +1637,8 @@ fn handle_client_command(
             // writes a Cancel command to subprocess stdin and force-kills
             // after 5s; the SyncCompleted internal event arrives shortly
             // with outcome = Aborted{reason="user_cancelled"}.
-            if let Some(tx) = cancel_tx_holder.take() {
+            let active_session_id = state.active_session().map(|session| session.id);
+            if let Some(tx) = active_session_id.and_then(|id| state.take_cancel(id)) {
                 let _ = tx.send(());
                 tracing::info!("daemon: client {client_id} cancelled the running sync");
             } else {
@@ -1749,7 +1652,8 @@ fn handle_client_command(
             // is graceful — no force-kill; the SyncCompleted internal
             // event arrives once the subprocess has drained, checkpointed,
             // emitted "paused", and exited on its own.
-            if let Some(tx) = pause_tx_holder.take() {
+            let active_session_id = state.active_session().map(|session| session.id);
+            if let Some(tx) = active_session_id.and_then(|id| state.take_pause(id)) {
                 let _ = tx.send(());
                 tracing::info!("daemon: client {client_id} requested pause of the running sync");
             } else {
@@ -1761,7 +1665,8 @@ fn handle_client_command(
             // The orchestrator writes the prompt_decision line to
             // stdin; the apply loop's await_prompt then returns the
             // chosen PromptOutcome and the sync proceeds.
-            if let Some(tx) = prompt_tx_holder.as_ref() {
+            let active_session_id = state.active_session().map(|session| session.id);
+            if let Some(tx) = active_session_id.and_then(|id| state.prompt_sender(id)) {
                 if tx.send((id, choice)).is_err() {
                     tracing::warn!(
                         "daemon: client {client_id} sent decide_prompt id={id} choice={choice} \
@@ -1825,9 +1730,6 @@ fn handle_client_command(
                 event_tx,
                 spawn_scan,
                 internal_tx,
-                cancel_tx_holder,
-                prompt_tx_holder,
-                pause_tx_holder,
                 connected,
                 config_path,
                 history,
@@ -2312,7 +2214,7 @@ mod tests {
             serial: "RAW-B".to_string(),
             request_id: "replace-b".to_string(),
         };
-        let state = StateMachine::new();
+        let state = RuntimeState::new();
         let connected = Some(detected(" raw-a "));
 
         assert_eq!(
@@ -2324,12 +2226,14 @@ mod tests {
 
     #[test]
     fn active_controls_only_target_the_syncing_device() {
-        let mut state = StateMachine::new();
-        state.try_start_sync_for_device(
-            SyncTrigger::Manual,
-            "0xRAW-A".to_string(),
-            "/Volumes/IPOD".to_string(),
-        );
+        let mut state = RuntimeState::new();
+        state
+            .try_admit_device(
+                SyncTrigger::Manual,
+                "0xRAW-A",
+                std::path::Path::new("/Volumes/IPOD"),
+            )
+            .unwrap();
         let connected = Some(detected("0xRAW-A"));
         let wrong = DaemonCommand::CancelSync {
             serial: "RAW-B".to_string(),
@@ -2358,7 +2262,7 @@ mod tests {
         };
 
         assert_eq!(
-            singleton_target_rejection(&command, &None, Some("RAW-A"), &StateMachine::new()),
+            singleton_target_rejection(&command, &None, Some("RAW-A"), &RuntimeState::new()),
             Some(SyncRejectReason::NotConfigured)
         );
     }
@@ -2419,12 +2323,14 @@ mod tests {
                 request_id: "11".into(),
             },
         ];
-        let mut state = StateMachine::new();
-        state.try_start_sync_for_device(
-            SyncTrigger::Manual,
-            "RAW-A".into(),
-            "/Volumes/IPOD".into(),
-        );
+        let mut state = RuntimeState::new();
+        state
+            .try_admit_device(
+                SyncTrigger::Manual,
+                "RAW-A",
+                std::path::Path::new("/Volumes/IPOD"),
+            )
+            .unwrap();
         let connected = Some(detected("RAW-A"));
 
         for command in commands {
@@ -2485,6 +2391,7 @@ mod tests {
     fn history_entries_keep_the_syncing_devices_raw_serial() {
         let entry = make_history_entry(
             " A ".to_string(),
+            42,
             SyncTrigger::Manual,
             SyncOutcome::Ok,
             None,
@@ -2494,7 +2401,7 @@ mod tests {
         );
 
         assert_eq!(entry.serial, " A ");
-        assert_eq!(entry.session_id, None);
+        assert_eq!(entry.session_id, Some(42));
     }
 
     fn manifest_with_track_count(count: usize) -> crate::manifest::Manifest {
@@ -2561,12 +2468,17 @@ mod tests {
 
     #[test]
     fn state_label_maps_scan_sessions_to_scanning() {
-        let mut sm = StateMachine::new();
+        let mut sm = RuntimeState::new();
         assert!(matches!(state_label(&sm), DaemonStateLabel::Idle));
-        sm.try_start_scan();
+        let scan = sm.try_admit_scan().unwrap();
         assert!(matches!(state_label(&sm), DaemonStateLabel::Scanning));
-        sm.finish_sync();
-        sm.try_start_sync(SyncTrigger::Manual);
+        sm.finish(scan.id);
+        sm.try_admit_device(
+            SyncTrigger::Manual,
+            "RAW-A",
+            std::path::Path::new("/Volumes/IPOD"),
+        )
+        .unwrap();
         assert!(matches!(state_label(&sm), DaemonStateLabel::Syncing));
     }
 

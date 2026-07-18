@@ -2,6 +2,7 @@
 //! scheduling, sync orchestration, history persistence, and IPC server.
 //! See `docs/superpowers/specs/2026-05-24-phase-6-daemon-model-design.md`.
 
+pub mod command_handler;
 pub mod device_registry;
 pub mod device_watcher;
 pub mod device_storage;
@@ -13,7 +14,9 @@ pub mod iokit_watcher;
 pub mod ipc_server;
 pub mod library_watcher;
 pub mod runtime;
+pub mod runtime_state;
 pub mod scheduler;
+pub mod session_admission;
 pub mod state;
 pub mod sync_orchestrator;
 
