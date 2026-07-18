@@ -33,8 +33,8 @@ public sealed record StatusUpdateEvent(
     [property: JsonRequired, JsonPropertyName("state")] string State,
     [property: JsonRequired, JsonPropertyName("configured")] bool Configured,
     [property: JsonRequired, JsonPropertyName("ipod_connected")] bool IpodConnected,
-    [property: JsonRequired, JsonPropertyName("last_sync")] HistoryEntry? LastSync,
-    [property: JsonRequired, JsonPropertyName("next_scheduled_unix_secs")] long? NextScheduledUnixSecs,
+    [property: JsonPropertyName("last_sync")] HistoryEntry? LastSync,
+    [property: JsonPropertyName("next_scheduled_unix_secs")] long? NextScheduledUnixSecs,
     [property: JsonPropertyName("storage")] StorageInfo? Storage,
     [property: JsonRequired, JsonPropertyName("synced_count")] int SyncedCount,
     [property: JsonPropertyName("library_count")] int? LibraryCount,
@@ -42,42 +42,42 @@ public sealed record StatusUpdateEvent(
 ) : DaemonEvent;
 
 public sealed record StorageInfo(
-    [property: JsonPropertyName("total_bytes")] ulong TotalBytes,
-    [property: JsonPropertyName("free_bytes")] ulong FreeBytes
+    [property: JsonRequired, JsonPropertyName("total_bytes")] ulong TotalBytes,
+    [property: JsonRequired, JsonPropertyName("free_bytes")] ulong FreeBytes
 );
 
 public sealed record ConfigUpdateEvent(
-    [property: JsonPropertyName("source")] string? Source,
-    [property: JsonPropertyName("daemon")] DaemonSettings? Daemon,
-    [property: JsonPropertyName("ipod")] IpodIdentity? Ipod,
+    [property: JsonRequired, JsonPropertyName("source")] string? Source,
+    [property: JsonRequired, JsonPropertyName("daemon")] DaemonSettings? Daemon,
+    [property: JsonRequired, JsonPropertyName("ipod")] IpodIdentity? Ipod,
     [property: JsonRequired, JsonPropertyName("config_revision")] ulong ConfigRevision,
     [property: JsonPropertyName("acknowledged_request_id")] string? AcknowledgedRequestId = null
 ) : DaemonEvent;
 
 public sealed record HistoryUpdateEvent(
-    [property: JsonPropertyName("entries")] IReadOnlyList<HistoryEntry> Entries,
+    [property: JsonRequired, JsonPropertyName("entries")] IReadOnlyList<HistoryEntry> Entries,
     [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId
 ) : DaemonEvent;
 
 public sealed record DeviceConnectedEvent(
-    [property: JsonPropertyName("serial")] string Serial,
-    [property: JsonPropertyName("model_label")] string ModelLabel,
-    [property: JsonPropertyName("drive")] string Drive,
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("model_label")] string ModelLabel,
+    [property: JsonRequired, JsonPropertyName("drive")] string Drive,
     [property: JsonPropertyName("name")] string? Name = null
 ) : DaemonEvent;
 
 public sealed record DeviceDisconnectedEvent(
-    [property: JsonPropertyName("serial")] string Serial
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial
 ) : DaemonEvent;
 
 public sealed record SyncRejectedEvent(
-    [property: JsonPropertyName("reason")] string Reason,
+    [property: JsonRequired, JsonPropertyName("reason")] string Reason,
     [property: JsonRequired, JsonPropertyName("serial")] string Serial,
     [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId
 ) : DaemonEvent;
 
 public sealed record SyncEventEnvelope(
-    [property: JsonPropertyName("line")] string Line,
+    [property: JsonRequired, JsonPropertyName("line")] string Line,
     [property: JsonPropertyName("serial")] string? Serial,
     [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId
 ) : DaemonEvent;
@@ -112,36 +112,36 @@ public sealed record DeviceIdentitySnapshot(
 );
 
 public sealed record LibraryUpdateEvent(
-    [property: JsonPropertyName("source_root")] string? SourceRoot,
-    [property: JsonPropertyName("scanned_at_unix_secs")] ulong? ScannedAtUnixSecs,
-    [property: JsonPropertyName("artists")] IReadOnlyList<LibraryArtist> Artists,
-    [property: JsonPropertyName("genres")] IReadOnlyList<LibraryGenre> Genres,
-    [property: JsonPropertyName("total_tracks")] int TotalTracks,
-    [property: JsonPropertyName("total_bytes")] ulong TotalBytes,
+    [property: JsonRequired, JsonPropertyName("source_root")] string? SourceRoot,
+    [property: JsonRequired, JsonPropertyName("scanned_at_unix_secs")] ulong? ScannedAtUnixSecs,
+    [property: JsonRequired, JsonPropertyName("artists")] IReadOnlyList<LibraryArtist> Artists,
+    [property: JsonRequired, JsonPropertyName("genres")] IReadOnlyList<LibraryGenre> Genres,
+    [property: JsonRequired, JsonPropertyName("total_tracks")] int TotalTracks,
+    [property: JsonRequired, JsonPropertyName("total_bytes")] ulong TotalBytes,
     [property: JsonPropertyName("acknowledged_request_id")] string? AcknowledgedRequestId = null
 ) : DaemonEvent;
 
 public sealed record LibraryArtist(
-    [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("albums")] IReadOnlyList<LibraryAlbum> Albums
+    [property: JsonRequired, JsonPropertyName("name")] string Name,
+    [property: JsonRequired, JsonPropertyName("albums")] IReadOnlyList<LibraryAlbum> Albums
 );
 
 public sealed record LibraryAlbum(
-    [property: JsonPropertyName("name")] string Name,
+    [property: JsonRequired, JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("genre")] string? Genre,
-    [property: JsonPropertyName("tracks")] int Tracks,
-    [property: JsonPropertyName("bytes")] ulong Bytes
+    [property: JsonRequired, JsonPropertyName("tracks")] int Tracks,
+    [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes
 );
 
 public sealed record LibraryGenre(
-    [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("tracks")] int Tracks,
-    [property: JsonPropertyName("bytes")] ulong Bytes
+    [property: JsonRequired, JsonPropertyName("name")] string Name,
+    [property: JsonRequired, JsonPropertyName("tracks")] int Tracks,
+    [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes
 );
 
 public sealed record SelectionUpdateEvent(
-    [property: JsonPropertyName("mode")] SelectionMode Mode,
-    [property: JsonPropertyName("rules")] IReadOnlyList<SelectionRule> Rules,
+    [property: JsonRequired, JsonPropertyName("mode")] SelectionMode Mode,
+    [property: JsonRequired, JsonPropertyName("rules")] IReadOnlyList<SelectionRule> Rules,
     [property: JsonPropertyName("serial")] string? Serial = null,
     [property: JsonPropertyName("acknowledged_request_id")] string? AcknowledgedRequestId = null
 ) : DaemonEvent;
@@ -156,7 +156,7 @@ public sealed record SelectionPreviewEvent(
 ) : DaemonEvent;
 
 public sealed record PlaylistsUpdateEvent(
-    [property: JsonPropertyName("playlists")] IReadOnlyList<PlaylistSummary> Playlists,
+    [property: JsonRequired, JsonPropertyName("playlists")] IReadOnlyList<PlaylistSummary> Playlists,
     [property: JsonPropertyName("acknowledged_request_id")] string? AcknowledgedRequestId = null
 ) : DaemonEvent;
 
@@ -184,7 +184,7 @@ public sealed record DevicePreviewEvent(
     [property: JsonRequired, JsonPropertyName("selected_bytes")] ulong SelectedBytes,
     [property: JsonRequired, JsonPropertyName("playlist_extra_tracks")] int PlaylistExtraTracks,
     [property: JsonRequired, JsonPropertyName("playlist_extra_bytes")] ulong PlaylistExtraBytes,
-    [property: JsonPropertyName("projected_free_bytes")] ulong? ProjectedFreeBytes,
+    [property: JsonRequired, JsonPropertyName("projected_free_bytes")] ulong? ProjectedFreeBytes,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("unresolved_subscriptions")] IReadOnlyList<string>? UnresolvedSubscriptions,
     [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId
 ) : DaemonEvent;
@@ -195,27 +195,27 @@ public sealed record ResolvedTracksEvent(
 ) : DaemonEvent;
 
 public sealed record DaemonSettings(
-    [property: JsonPropertyName("enabled")] bool Enabled,
-    [property: JsonPropertyName("autostart_with_windows")] bool AutostartWithWindows,
-    [property: JsonPropertyName("first_sync_mode")] string FirstSyncMode,
-    [property: JsonPropertyName("subsequent_sync_mode")] string SubsequentSyncMode,
-    [property: JsonPropertyName("schedule_minutes")] uint ScheduleMinutes,
-    [property: JsonPropertyName("notify_on")] string NotifyOn,
-    [property: JsonPropertyName("rockbox_compat")] bool RockboxCompat
+    [property: JsonRequired, JsonPropertyName("enabled")] bool Enabled,
+    [property: JsonRequired, JsonPropertyName("autostart_with_windows")] bool AutostartWithWindows,
+    [property: JsonRequired, JsonPropertyName("first_sync_mode")] string FirstSyncMode,
+    [property: JsonRequired, JsonPropertyName("subsequent_sync_mode")] string SubsequentSyncMode,
+    [property: JsonRequired, JsonPropertyName("schedule_minutes")] uint ScheduleMinutes,
+    [property: JsonRequired, JsonPropertyName("notify_on")] string NotifyOn,
+    [property: JsonRequired, JsonPropertyName("rockbox_compat")] bool RockboxCompat
 );
 
 public sealed record IpodIdentity(
-    [property: JsonPropertyName("serial")] string Serial,
-    [property: JsonPropertyName("model_label")] string ModelLabel,
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("model_label")] string ModelLabel,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("name")] string? Name,
-    [property: JsonPropertyName("custom_selection")] bool CustomSelection
+    [property: JsonRequired, JsonPropertyName("custom_selection")] bool CustomSelection
 );
 
 public sealed record HistoryEntry(
-    [property: JsonPropertyName("timestamp")] string Timestamp,
-    [property: JsonPropertyName("duration_secs")] ulong DurationSecs,
-    [property: JsonPropertyName("trigger")] string Trigger,
-    [property: JsonPropertyName("outcome")] string Outcome,
+    [property: JsonRequired, JsonPropertyName("timestamp")] string Timestamp,
+    [property: JsonRequired, JsonPropertyName("duration_secs")] ulong DurationSecs,
+    [property: JsonRequired, JsonPropertyName("trigger")] string Trigger,
+    [property: JsonRequired, JsonPropertyName("outcome")] string Outcome,
     [property: JsonPropertyName("error_message")] string? ErrorMessage,
     [property: JsonPropertyName("summary")] SyncSummary? Summary,
     [property: JsonRequired, JsonPropertyName("serial")] string Serial,
@@ -224,11 +224,11 @@ public sealed record HistoryEntry(
 );
 
 public sealed record SyncSummary(
-    [property: JsonPropertyName("add")] int Add,
-    [property: JsonPropertyName("modify")] int Modify,
-    [property: JsonPropertyName("remove")] int Remove,
-    [property: JsonPropertyName("unchanged")] int Unchanged,
-    [property: JsonPropertyName("skipped")] int Skipped,
+    [property: JsonRequired, JsonPropertyName("add")] int Add,
+    [property: JsonRequired, JsonPropertyName("modify")] int Modify,
+    [property: JsonRequired, JsonPropertyName("remove")] int Remove,
+    [property: JsonRequired, JsonPropertyName("unchanged")] int Unchanged,
+    [property: JsonRequired, JsonPropertyName("skipped")] int Skipped,
     [property: JsonRequired, JsonPropertyName("metadata_only")] int MetadataOnly,
     [property: JsonRequired, JsonPropertyName("skipped_for_space_tracks")] int SkippedForSpaceTracks,
     [property: JsonRequired, JsonPropertyName("skipped_for_space_bytes")] ulong SkippedForSpaceBytes,

@@ -153,6 +153,48 @@ public class DaemonClientWireFormatTests
         Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<DaemonEvent>("""{"type":"config_update","source":null,"daemon":null,"ipod":null}"""));
     }
 
+    [Theory]
+    [InlineData("""{"type":"config_update","daemon":null,"ipod":null,"config_revision":5}""")]
+    [InlineData("""{"type":"config_update","source":null,"ipod":null,"config_revision":5}""")]
+    [InlineData("""{"type":"config_update","source":null,"daemon":null,"config_revision":5}""")]
+    public void V2_config_update_rejects_each_missing_required_nullable_field(string json)
+    {
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<DaemonEvent>(json));
+    }
+
+    [Theory]
+    [InlineData("""{"type":"history_update","acknowledged_request_id":"history"}""")]
+    [InlineData("""{"type":"sync_rejected","serial":"A","acknowledged_request_id":"reject"}""")]
+    [InlineData("""{"type":"sync_event","session_id":1}""")]
+    [InlineData("""{"type":"device_connected","model_label":"iPod","drive":"G:\\"}""")]
+    [InlineData("""{"type":"device_disconnected"}""")]
+    [InlineData("""{"type":"library_update","scanned_at_unix_secs":null,"artists":[],"genres":[],"total_tracks":0,"total_bytes":0}""")]
+    [InlineData("""{"type":"library_update","source_root":null,"artists":[],"genres":[],"total_tracks":0,"total_bytes":0}""")]
+    [InlineData("""{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"genres":[],"total_tracks":0,"total_bytes":0}""")]
+    [InlineData("""{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"total_tracks":0,"total_bytes":0}""")]
+    [InlineData("""{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"genres":[],"total_bytes":0}""")]
+    [InlineData("""{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"genres":[],"total_tracks":0}""")]
+    [InlineData("""{"type":"selection_update","rules":[]}""")]
+    [InlineData("""{"type":"selection_update","mode":"all"}""")]
+    [InlineData("""{"type":"playlists_update"}""")]
+    [InlineData("""{"type":"device_preview","serial":"A","selected_tracks":1,"selected_bytes":2,"playlist_extra_tracks":3,"playlist_extra_bytes":4,"acknowledged_request_id":"preview"}""")]
+    public void V2_events_reject_missing_non_optional_wire_fields(string json)
+    {
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<DaemonEvent>(json));
+    }
+
+    [Fact]
+    public void Status_update_accepts_omitted_domain_optional_fields()
+    {
+        const string json = """{"type":"status_update","state":"idle","configured":true,"ipod_connected":false,"synced_count":0}""";
+
+        var evt = JsonSerializer.Deserialize<DaemonEvent>(json);
+
+        var status = Assert.IsType<StatusUpdateEvent>(evt);
+        Assert.Null(status.LastSync);
+        Assert.Null(status.NextScheduledUnixSecs);
+    }
+
     [Fact]
     public void V2_config_and_history_decode_complete_nested_wire_shapes()
     {
