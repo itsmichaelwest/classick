@@ -11,30 +11,34 @@ import SwiftUI
 /// unconfigured, and reused for the manual "Set Up Classick…" menu action.
 @MainActor
 final class SetupWindowController {
-    private var window: NSWindow?
+  private var window: NSWindow?
 
-    /// Shows the setup window (creating it on first use), bringing this
-    /// `LSUIElement` accessory app to the front so the window can't open
-    /// behind whatever currently has focus.
-    func show(model: AppModel, onDone: @escaping (_ source: String, _ autoSync: Bool) -> Void) {
-        NSApp.activate(ignoringOtherApps: true)
+  /// Shows the setup window (creating it on first use), bringing this
+  /// `LSUIElement` accessory app to the front so the window can't open
+  /// behind whatever currently has focus.
+  func show(
+    model: AppModel, preferredSerial: DeviceSerial?,
+    onDone: @escaping (_ source: String, _ autoSync: Bool, _ serial: DeviceSerial) -> Void
+  ) {
+    NSApp.activate(ignoringOtherApps: true)
 
-        if let window {
-            window.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        let root = SetupWindow(
-            model: model,
-            onDone: onDone,
-            onClose: { [weak self] in self?.window?.close() })
-        let hosting = NSHostingController(rootView: root)
-        let win = NSWindow(contentViewController: hosting)
-        win.title = "Set Up Classick"
-        win.styleMask = [.titled, .closable]
-        win.isReleasedWhenClosed = false
-        win.center()
-        window = win
-        win.makeKeyAndOrderFront(nil)
+    if let window {
+      window.makeKeyAndOrderFront(nil)
+      return
     }
+
+    let root = SetupWindow(
+      model: model,
+      preferredSerial: preferredSerial,
+      onDone: onDone,
+      onClose: { [weak self] in self?.window?.close() })
+    let hosting = NSHostingController(rootView: root)
+    let win = NSWindow(contentViewController: hosting)
+    win.title = "Set Up Classick"
+    win.styleMask = [.titled, .closable]
+    win.isReleasedWhenClosed = false
+    win.center()
+    window = win
+    win.makeKeyAndOrderFront(nil)
+  }
 }

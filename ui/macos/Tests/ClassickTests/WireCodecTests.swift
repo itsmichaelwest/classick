@@ -686,6 +686,24 @@ final class WireCodecTests: XCTestCase {
     }
   }
 
+  func testDeviceActionCommandPinsRequestedSerial() throws {
+    let commands = [
+      DeviceActionCommand.sync(serial: "RAW-B", requestID: "sync"),
+      DeviceActionCommand.cancel(serial: "RAW-B", requestID: "cancel"),
+      DeviceActionCommand.pause(serial: "RAW-B", requestID: "pause"),
+      DeviceActionCommand.forget(serial: "RAW-B", requestID: "forget"),
+      DeviceActionCommand.replaceLibrary(serial: "RAW-B", requestID: "replace"),
+      DeviceActionCommand.backfillRockbox(serial: "RAW-B", requestID: "backfill"),
+    ]
+
+    for command in commands {
+      let data = try JSONEncoder().encode(command)
+      let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+      XCTAssertEqual(object["serial"] as? String, "RAW-B")
+      XCTAssertNotNil(object["request_id"] as? String)
+    }
+  }
+
   func testSaveConfigEncodesExactRequestCorrelation() throws {
     let command = DaemonCommand.saveConfig(
       source: "/music", daemon: nil, ipod: nil, requestID: "req-config")

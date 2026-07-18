@@ -24,6 +24,22 @@ final class DeviceMusicLogicTests: XCTestCase {
     ])
   private var library: [LibraryArtist] { [radiohead, aphex] }
 
+  @MainActor
+  func testSelectedDeviceSurfaceRemainsPinnedWhenAnotherDeviceConnects() throws {
+    let model = AppModel()
+    let a = deviceSnapshot(serial: "A", name: "Alpha")
+    model.apply(.deviceInventorySnapshot(.init(revision: 1, devices: [a])))
+    model.selectedDestination = .device(serial: "A", page: .music)
+
+    let b = deviceSnapshot(serial: "B", name: "Beta")
+    model.apply(.deviceInventorySnapshot(.init(revision: 2, devices: [a, b])))
+
+    let surface = try XCTUnwrap(DeviceSurfaceLogic.state(serial: "A", in: model.devices))
+    XCTAssertEqual(surface.identity.serial, "A")
+    XCTAssertEqual(surface.identity.name, "Alpha")
+    XCTAssertEqual(model.selectedDestination, .device(serial: "A", page: .music))
+  }
+
   // MARK: - seededSelection: full 3x3 truth table
 
   func testSeed_allToAll_isNoOpKeepsCurrent() {
@@ -31,6 +47,15 @@ final class DeviceMusicLogicTests: XCTestCase {
     let result = DeviceMusicLogic.seededSelection(
       fromDeviceContents: library, previousMode: .all, newMode: .all, current: current)
     XCTAssertEqual(result, current)
+  }
+
+  private func deviceSnapshot(serial: String, name: String) -> DeviceSnapshotWire {
+    DeviceSnapshotWire(
+      identity: .init(serial: serial, modelLabel: "iPod Classic", name: name),
+      configured: true, connected: true, mount: "/Volumes/\(serial)", phase: .idle,
+      sessionID: nil, storage: .init(free: 75, total: 100), syncedCount: 5, libraryCount: 10,
+      latestSuccessfulSync: nil, latestAttempt: nil, lastTerminalError: nil,
+      selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1)
   }
 
   func testSeed_allToInclude_reproducesCurrentContentsAtAlbumGranularity() {

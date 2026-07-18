@@ -800,6 +800,44 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertFalse(ManualPlaylistLogic.shouldConsumeResolvedTracks(reply: reply, forSlug: "chill"))
   }
 
+  func testSidebarInventorySortsByNameAndPreservesRememberedDevices() {
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 1,
+          devices: [
+            DeviceSnapshotWire(
+              identity: .init(serial: "B", modelLabel: "iPod Classic", name: "Zebra"),
+              configured: false, connected: true, mount: "/Volumes/B", phase: .unconfigured,
+              sessionID: nil, storage: nil, syncedCount: 0, libraryCount: nil,
+              latestSuccessfulSync: nil, latestAttempt: nil, lastTerminalError: nil,
+              selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0),
+            DeviceSnapshotWire(
+              identity: .init(serial: "A", modelLabel: "iPod Classic", name: "Alpha"),
+              configured: true, connected: false, mount: nil, phase: .disconnected,
+              sessionID: nil, storage: nil, syncedCount: 12, libraryCount: 12,
+              latestSuccessfulSync: nil, latestAttempt: nil, lastTerminalError: nil,
+              selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1),
+          ])))
+
+    let rows = SidebarInventory.rows(from: model.devices)
+
+    XCTAssertEqual(rows.map(\.serial), ["A", "B"])
+    XCTAssertEqual(rows.map(\.connected), [false, true])
+    XCTAssertEqual(rows.map(\.configured), [true, false])
+  }
+
+  func testMenuDoesNotChooseSyncTargetWhenTwoDevicesAreConnectedWithoutFocus() {
+    let model = AppModel()
+    seedDevices(["A", "B"], in: model)
+
+    XCTAssertNil(model.focusedDeviceSerial)
+    XCTAssertNil(
+      MenuContentLogic.actionTarget(
+        focusedSerial: model.focusedDeviceSerial, devices: model.devices))
+  }
+
   private func seedDevices(_ serials: [String], in model: AppModel) {
     let devices = serials.map { serial in
       DeviceSnapshotWire(

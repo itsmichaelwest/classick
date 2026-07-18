@@ -6,86 +6,114 @@ import SwiftUI
 /// settings window, live sync control) wire the closures to real commands
 /// without touching this file's layout.
 struct MenuContent: View {
-    var model: AppModel
-    var daemonFatalError: String?
+  var model: AppModel
+  var daemonFatalError: String?
 
-    var onSetUp: () -> Void = { print("TODO: open setup window") }
-    var onOpenMain: () -> Void = { print("TODO: open main window") }
-    var onOpenSettings: () -> Void = { print("TODO: open settings window") }
-    var onSyncNow: () -> Void = { print("TODO: send(.triggerSync(source: .manual))") }
-    var onRescan: () -> Void = { print("TODO: send(.scanLibrary)") }
-    var onCancelSync: () -> Void = { print("TODO: send(.cancelSync)") }
-    var onPause: () -> Void = { print("TODO: send(.pause)") }
-    var onResume: () -> Void = { print("TODO: send(.triggerSync(source: .manual))") }
-    var onRetry: () -> Void = { print("TODO: retry after error") }
-    var onCheckForUpdates: () -> Void = { print("TODO: check for updates") }
+  var onSetUp: (DeviceSerial) -> Void = { _ in print("TODO: open setup window") }
+  var onOpenMain: () -> Void = { print("TODO: open main window") }
+  var onOpenSettings: () -> Void = { print("TODO: open settings window") }
+  var onSyncNow: (DeviceSerial) -> Void = { _ in print("TODO: send(.triggerSync(source: .manual))")
+  }
+  var onRescan: () -> Void = { print("TODO: send(.scanLibrary)") }
+  var onCancelSync: (DeviceSerial) -> Void = { _ in print("TODO: send(.cancelSync)") }
+  var onPause: (DeviceSerial) -> Void = { _ in print("TODO: send(.pause)") }
+  var onResume: (DeviceSerial) -> Void = { _ in print("TODO: send(.triggerSync(source: .manual))") }
+  var onRetry: (DeviceSerial) -> Void = { _ in print("TODO: retry after error") }
+  var onCheckForUpdates: () -> Void = { print("TODO: check for updates") }
 
-    var body: some View {
-        if let daemonFatalError {
-            Text(daemonFatalError)
-            Divider()
-        }
-
-        Button("Open Classick", action: onOpenMain)
-        Divider()
-        phaseContent
-        Divider()
-        Button("Rescan Library", action: onRescan)
-        Button("Settings…", action: onOpenSettings)
-        Button("Check for Updates…", action: onCheckForUpdates)
-        Button("Quit Classick") { NSApplication.shared.terminate(nil) }
+  var body: some View {
+    if let daemonFatalError {
+      Text(daemonFatalError)
+      Divider()
     }
 
-    @ViewBuilder
-    private var phaseContent: some View {
-        switch model.phase {
-        case .noDevice:
-            Text("No iPod connected")
-                .disabled(true)
+    Button("Open Classick", action: onOpenMain)
+    Divider()
+    phaseContent
+    Divider()
+    Button("Rescan Library", action: onRescan)
+    Button("Settings…", action: onOpenSettings)
+    Button("Check for Updates…", action: onCheckForUpdates)
+    Button("Quit Classick") { NSApplication.shared.terminate(nil) }
+  }
 
-        case .notConfigured:
-            Button("Set Up Classick…", action: onSetUp)
-
-        case .idle:
-            if let device = model.device {
-                Text(device.name ?? device.model)
-            }
-            if let storageText = model.storageText {
-                Text(storageText)
-            }
-            if let lastSync = model.lastSync {
-                Text("Last sync: \(formatLastSync(lastSync.timestamp))")
-            }
-            Divider()
-            Button("Sync Now", action: onSyncNow)
-
-        case let .syncing(current, total, label, _):
-            Text("Syncing… \(current) of \(total)")
-            if !label.isEmpty {
-                Text(label)
-            }
-            Button("Pause", action: onPause)
-            Button("Cancel Sync", action: onCancelSync)
-
-        case let .scanning(current, total):
-            Text("Scanning library… \(current) of \(total)")
-
-        case let .paused(synced, total):
-            Text("Paused — \(pausedSummary(synced: synced, total: total)) synced")
-            Button("Resume", action: onResume)
-
-        case let .error(message):
-            Text(message)
-            Button("Retry", action: onRetry)
-        }
+  @ViewBuilder
+  private var phaseContent: some View {
+    if case .scanning(let current, let total) = model.phase {
+      Text("Scanning library… \(current) of \(total)")
+    } else if let serial = MenuContentLogic.actionTarget(
+      focusedSerial: model.focusedDeviceSerial, devices: model.devices),
+      let state = model.devices[serial]
+    {
+      deviceContent(serial: serial, state: state)
+    } else if model.devices.values.filter(\.connected).count > 1 {
+      Text("Select an iPod in Classick")
+        .disabled(true)
+    } else {
+      Text("No iPod connected")
+        .disabled(true)
     }
+  }
 
-    private func pausedSummary(synced: Int, total: Int?) -> String {
-        if let total {
-            return "\(synced) of \(total)"
-        }
-        return "\(synced)"
+  @ViewBuilder
+  private func deviceContent(serial: DeviceSerial, state: DeviceViewState) -> some View {
+    switch DeviceSurfaceLogic.phase(for: state, globalPhase: model.phase) {
+    case .noDevice:
+      Text("No iPod connected")
+        .disabled(true)
+
+    case .notConfigured:
+      Button("Set Up Classick…") { onSetUp(serial) }
+
+    case .idle:
+      Text(state.identity.name ?? state.identity.modelLabel)
+      if let storageText = DeviceSurfaceLogic.storageText(state) {
+        Text(storageText)
+      }
+      if let lastSync = state.latestSuccessfulSync {
+        Text("Last sync: \(formatLastSync(lastSync.timestamp))")
+      }
+      Divider()
+      Button("Sync Now") { onSyncNow(serial) }
+
+    case .syncing(let current, let total, let label, _):
+      Text("Syncing… \(current) of \(total)")
+      if !label.isEmpty {
+        Text(label)
+      }
+      Button("Pause") { onPause(serial) }
+      Button("Cancel Sync") { onCancelSync(serial) }
+
+    case .scanning(let current, let total):
+      Text("Scanning library… \(current) of \(total)")
+
+    case .paused(let synced, let total):
+      Text("Paused — \(pausedSummary(synced: synced, total: total)) synced")
+      Button("Resume") { onResume(serial) }
+
+    case .error(let message):
+      Text(message)
+      Button("Retry") { onRetry(serial) }
     }
+  }
+
+  private func pausedSummary(synced: Int, total: Int?) -> String {
+    if let total {
+      return "\(synced) of \(total)"
+    }
+    return "\(synced)"
+  }
+}
+
+enum MenuContentLogic {
+  static func actionTarget(
+    focusedSerial: DeviceSerial?, devices: [DeviceSerial: DeviceViewState]
+  ) -> DeviceSerial? {
+    guard let focusedSerial, let state = devices[focusedSerial], state.connected else {
+      return nil
+    }
+    return focusedSerial
+  }
 }
 
 /// The daemon sends `HistoryEntry.timestamp` as an ISO-8601/RFC-3339 string
@@ -93,39 +121,39 @@ struct MenuContent: View {
 /// instead of dumping the raw UTC string into the menu. Falls back to the raw
 /// value if it somehow doesn't parse.
 private func formatLastSync(_ iso: String) -> String {
-    let parser = ISO8601DateFormatter()
-    guard let date = parser.date(from: iso) else { return iso }
-    return date.formatted(date: .abbreviated, time: .shortened)
+  let parser = ISO8601DateFormatter()
+  guard let date = parser.date(from: iso) else { return iso }
+  return date.formatted(date: .abbreviated, time: .shortened)
 }
 
 #if DEBUG
-#Preview("Idle") {
+  #Preview("Idle") {
     MenuContent(model: PreviewFixtures.connectedSyncedModel())
-        .frame(width: 280)
-}
+      .frame(width: 280)
+  }
 
-#Preview("Syncing") {
+  #Preview("Syncing") {
     MenuContent(model: PreviewFixtures.syncingModel())
-        .frame(width: 280)
-}
+      .frame(width: 280)
+  }
 
-#Preview("Paused") {
+  #Preview("Paused") {
     MenuContent(model: PreviewFixtures.pausedModel())
-        .frame(width: 280)
-}
+      .frame(width: 280)
+  }
 
-#Preview("No device") {
+  #Preview("No device") {
     MenuContent(model: PreviewFixtures.noDeviceModel())
-        .frame(width: 280)
-}
+      .frame(width: 280)
+  }
 
-#Preview("Not configured") {
+  #Preview("Not configured") {
     MenuContent(model: PreviewFixtures.notConfiguredModel())
-        .frame(width: 280)
-}
+      .frame(width: 280)
+  }
 
-#Preview("Error") {
+  #Preview("Error") {
     MenuContent(model: PreviewFixtures.errorModel())
-        .frame(width: 280)
-}
+      .frame(width: 280)
+  }
 #endif

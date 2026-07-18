@@ -99,6 +99,40 @@
       serial: pairedIpod.serial, model: pairedIpod.modelLabel,
       name: pairedIpod.name, drive: "/Volumes/Michael's iPod")
 
+    private static func deviceSnapshot(
+      identity: IpodIdentity = pairedIpod,
+      configured: Bool = true,
+      connected: Bool = true,
+      phase: DevicePhaseLabel = .idle,
+      sessionID: UInt64? = nil,
+      storage: (free: Int64, total: Int64)? = nil,
+      syncedCount: Int = 0,
+      libraryCount: Int? = nil,
+      latestSuccessfulSync: HistoryEntry? = nil,
+      latestAttempt: HistoryEntry? = nil,
+      lastTerminalError: String? = nil
+    ) -> DeviceSnapshotWire {
+      DeviceSnapshotWire(
+        identity: .init(
+          serial: identity.serial, modelLabel: identity.modelLabel, name: identity.name),
+        configured: configured,
+        connected: connected,
+        mount: connected ? connectedDevice.drive : nil,
+        phase: phase,
+        sessionID: sessionID,
+        storage: storage.map {
+          .init(free: UInt64(clamping: $0.free), total: UInt64(clamping: $0.total))
+        },
+        syncedCount: syncedCount,
+        libraryCount: libraryCount,
+        latestSuccessfulSync: latestSuccessfulSync,
+        latestAttempt: latestAttempt,
+        lastTerminalError: lastTerminalError,
+        selectionRevision: 1,
+        settingsRevision: 1,
+        subscriptionsRevision: 1)
+    }
+
     static let secondPairedIpod = IpodIdentity(
       serial: "T4U5V6W7X8Y9", modelLabel: "iPod Classic (5th gen, 80GB)",
       name: "Old iPod", customSelection: false)
@@ -279,6 +313,15 @@
             state: .idle, configured: true, ipodConnected: true,
             lastSync: lastSync, nextScheduledUnixSecs: nil, storage: nil,
             syncedCount: syncedCount, libraryCount: libraryCount)))
+      m.apply(
+        .deviceInventorySnapshot(
+          .init(
+            revision: 1,
+            devices: [
+              deviceSnapshot(
+                storage: storage, syncedCount: syncedCount, libraryCount: libraryCount,
+                latestSuccessfulSync: lastSync, latestAttempt: lastSync)
+            ])))
       if let library {
         m.apply(.libraryUpdate(library))
       }
@@ -366,7 +409,28 @@
           acknowledgedRequestID: requestID))
       m.willRequestDevicePreview(serial: pairedIpod.serial)
       m.apply(.devicePreview(devicePreviewOverfull))
+      m.apply(
+        .deviceInventorySnapshot(
+          .init(
+            revision: 2,
+            devices: [
+              deviceSnapshot(
+                phase: .syncing, sessionID: 1,
+                storage: (free: 1_000_000_000, total: 6_000_000_000),
+                syncedCount: 77, libraryCount: 91,
+                latestSuccessfulSync: mostRecentSync, latestAttempt: mostRecentSync)
+            ])))
       m.apply(.syncEvent(line: finishOverfullLine, serial: pairedIpod.serial, sessionID: 1))
+      m.apply(
+        .deviceInventorySnapshot(
+          .init(
+            revision: 3,
+            devices: [
+              deviceSnapshot(
+                storage: (free: 1_000_000_000, total: 6_000_000_000),
+                syncedCount: 77, libraryCount: 91,
+                latestSuccessfulSync: mostRecentSync, latestAttempt: mostRecentSync)
+            ])))
       return m
     }
 
@@ -381,6 +445,15 @@
       m.apply(.libraryUpdate(richLibrary))
       m.apply(.historyUpdate(entries: historyEntries, acknowledgedRequestID: requestID))
       m.apply(.playlistsUpdate(playlistSummaries, acknowledgedRequestID: requestID))
+      m.apply(
+        .deviceInventorySnapshot(
+          .init(
+            revision: 1,
+            devices: [
+              deviceSnapshot(
+                connected: false, phase: .disconnected, syncedCount: 91, libraryCount: 91,
+                latestSuccessfulSync: mostRecentSync, latestAttempt: mostRecentSync)
+            ])))
       m.apply(
         .deviceConfigUpdate(
           serial: pairedIpod.serial,
@@ -404,6 +477,11 @@
         .deviceConnected(
           serial: pairedIpod.serial, modelLabel: pairedIpod.modelLabel,
           drive: connectedDevice.drive, name: pairedIpod.name))
+      m.apply(
+        .deviceInventorySnapshot(
+          .init(
+            revision: 1,
+            devices: [deviceSnapshot(configured: false, phase: .unconfigured)])))
       return m
     }
 
@@ -473,6 +551,17 @@
     static func syncingModel() -> AppModel {
       let m = connectedSyncedModel()
       m.apply(
+        .deviceInventorySnapshot(
+          .init(
+            revision: 2,
+            devices: [
+              deviceSnapshot(
+                phase: .syncing, sessionID: 1,
+                storage: (free: 42_000_000_000, total: 160_000_000_000),
+                syncedCount: 91, libraryCount: 91,
+                latestSuccessfulSync: mostRecentSync, latestAttempt: mostRecentSync)
+            ])))
+      m.apply(
         .syncEvent(
           line: trackStartLine(
             current: 34, total: 91,
@@ -485,16 +574,36 @@
     static func pausedModel() -> AppModel {
       let m = syncingModel()
       m.apply(.syncEvent(line: pausedLine, serial: pairedIpod.serial, sessionID: 1))
+      m.apply(
+        .deviceInventorySnapshot(
+          .init(
+            revision: 3,
+            devices: [
+              deviceSnapshot(
+                phase: .paused,
+                storage: (free: 42_000_000_000, total: 160_000_000_000),
+                syncedCount: 34, libraryCount: 91,
+                latestSuccessfulSync: mostRecentSync, latestAttempt: mostRecentSync)
+            ])))
       return m
     }
 
     /// A rejected/failed sync — `Phase.error`.
     static func errorModel() -> AppModel {
       let m = connectedSyncedModel()
+      let message = "iTunes is running \u{2014} quit it and try again."
       m.apply(
-        .syncEvent(
-          line: errorLine("iTunes is running \u{2014} quit it and try again."),
-          serial: pairedIpod.serial, sessionID: 1))
+        .deviceInventorySnapshot(
+          .init(
+            revision: 2,
+            devices: [
+              deviceSnapshot(
+                phase: .error,
+                storage: (free: 42_000_000_000, total: 160_000_000_000),
+                syncedCount: 91, libraryCount: 91,
+                latestSuccessfulSync: mostRecentSync, latestAttempt: mostRecentSync,
+                lastTerminalError: message)
+            ])))
       return m
     }
 

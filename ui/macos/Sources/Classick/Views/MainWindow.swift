@@ -4,116 +4,121 @@ import SwiftUI
 /// detail area, and a persistent bottom device row. Detail views and the
 /// device row are filled in by later tasks; this establishes the shell.
 struct MainWindow: View {
-    var model: AppModel
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
-    // Action closures injected from AppDelegate (wired in later tasks).
-    var onSyncNow: () -> Void
-    var onPause: () -> Void
-    var onCancelSync: () -> Void
-    var onResume: () -> Void
-    var onRetry: () -> Void
-    var onPreview: (SelectionMode, [SelectionRule]) -> Void
-    var onSaveSelection: (SelectionMode, [SelectionRule]) -> Void
-    var onScan: () -> Void
-    var onForgetIpod: () -> Void
-    /// True disk eject (sidebar's eject glyph) — distinct from
-    /// `onForgetIpod` (Settings page's unpair action). Required, no no-op
-    /// default — the shipped-silently-dead lesson.
-    var onEjectIpod: () -> Void
-    var onBackfill: () -> Void
-    var onSetUp: () -> Void
-    var onReplaceLibrary: () -> Void = {}
-    var onAppearRequests: () -> Void = {}
-    // Required (no no-op default): a defaulted `{ _ in }` here is exactly how
-    // the "+" New Playlist button shipped silently dead (review finding #1)
-    // — the call site can compile clean while never actually wiring the
-    // daemon send path. See `ClassickApp`'s `MainWindow(...)` call site.
-    var onSavePlaylist: (PlaylistPayload) -> Void
-    // Playlist editor pages (Task 7).
-    var onGetPlaylist: (String) -> Void = { _ in }
-    var onDeletePlaylist: (String) -> Void = { _ in }
-    var onResolveTracks: (_ slug: String, _ rules: [SelectionRule]) -> Void = { _, _ in }
-    // Device Music page (Task 5).
-    var onLoadDeviceConfig: (String) -> Void = { _ in }
-    var onPreviewDevice: (String) -> Void = { _ in }
-    var onSaveDeviceConfig: (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> Void = { _, _, _ in }
-    // Device Settings page (Task 6).
-    var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> Void = { _, _ in }
+  var model: AppModel
+  @State private var columnVisibility: NavigationSplitViewVisibility = .all
+  // Action closures injected from AppDelegate (wired in later tasks).
+  var onSyncNow: (DeviceSerial) -> Void
+  var onPause: (DeviceSerial) -> Void
+  var onCancelSync: (DeviceSerial) -> Void
+  var onResume: (DeviceSerial) -> Void
+  var onRetry: (DeviceSerial) -> Void
+  var onScan: () -> Void
+  var onForgetIpod: (DeviceSerial) -> Void
+  /// True disk eject (sidebar's eject glyph) — distinct from
+  /// `onForgetIpod` (Settings page's unpair action). Required, no no-op
+  /// default — the shipped-silently-dead lesson.
+  var onEjectIpod: (DeviceSerial) -> Void
+  var onBackfill: (DeviceSerial) -> Void
+  var onSetUp: (DeviceSerial?) -> Void
+  var onReplaceLibrary: (DeviceSerial) -> Void = { _ in }
+  var onAppearRequests: () -> Void = {}
+  // Required (no no-op default): a defaulted `{ _ in }` here is exactly how
+  // the "+" New Playlist button shipped silently dead (review finding #1)
+  // — the call site can compile clean while never actually wiring the
+  // daemon send path. See `ClassickApp`'s `MainWindow(...)` call site.
+  var onSavePlaylist: (PlaylistPayload) -> Void
+  // Playlist editor pages (Task 7).
+  var onGetPlaylist: (String) -> Void = { _ in }
+  var onDeletePlaylist: (String) -> Void = { _ in }
+  var onResolveTracks: (_ slug: String, _ rules: [SelectionRule]) -> Void = { _, _ in }
+  // Device Music page (Task 5).
+  var onLoadDeviceConfig: (String) -> Void = { _ in }
+  var onPreviewDevice: (String) -> Void = { _ in }
+  var onSaveDeviceConfig:
+    (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> Void =
+      { _, _, _ in }
+  // Device Settings page (Task 6).
+  var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> Void = { _, _ in }
 
-    private var selection: Binding<SidebarDestination?> {
-        Binding(get: { model.selectedDestination }, set: { model.selectedDestination = $0 })
-    }
+  private var selection: Binding<SidebarDestination?> {
+    Binding(get: { model.selectedDestination }, set: { model.selectedDestination = $0 })
+  }
 
-    var body: some View {
-        // Sidebar is collapsible via the system toggle — the native pattern
-        // (Music/Finder/Mail all allow it). An earlier pinned-open variant
-        // stripped the toggle from both toolbars, which left pages with no
-        // other toolbar items an unstable toolbar height (layout break on
-        // Settings/History); the standard leading toggle keeps the chrome
-        // consistent everywhere.
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            Sidebar(model: model, selection: selection,
-                    onEjectIpod: onEjectIpod, onSavePlaylist: onSavePlaylist)
-        } detail: {
-            detail
-                // Fill the pane BEFORE attaching the bottom inset: pages
-                // that hug their content (e.g. HistoryView's empty state)
-                // otherwise shrink the view the inset attaches to, and the
-                // floating DeviceRow renders mid-pane instead of pinned to
-                // the window's bottom edge.
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    DeviceRow(model: model,
-                              onSyncNow: onSyncNow, onPause: onPause,
-                              onCancelSync: onCancelSync, onResume: onResume,
-                              onRetry: onRetry, onSetUp: onSetUp)
-                }
-        }
-        .navigationTitle("Classick")
-        .frame(minWidth: 860, minHeight: 560)
-        .task { onAppearRequests() }
-        .onAppear {
-            // Default to Library on first show — `selectedDestination` starts
-            // `nil` (AppModel has no opinion on initial navigation), and an
-            // empty NavigationSplitView selection would render a blank
-            // detail pane.
-            if model.selectedDestination == nil {
-                model.selectedDestination = .library
-            }
+  var body: some View {
+    // Sidebar is collapsible via the system toggle — the native pattern
+    // (Music/Finder/Mail all allow it). An earlier pinned-open variant
+    // stripped the toggle from both toolbars, which left pages with no
+    // other toolbar items an unstable toolbar height (layout break on
+    // Settings/History); the standard leading toggle keeps the chrome
+    // consistent everywhere.
+    NavigationSplitView(columnVisibility: $columnVisibility) {
+      Sidebar(
+        model: model, selection: selection,
+        onEjectIpod: onEjectIpod, onSavePlaylist: onSavePlaylist)
+    } detail: {
+      detail
+        // Fill the pane BEFORE attaching the bottom inset: pages
+        // that hug their content (e.g. HistoryView's empty state)
+        // otherwise shrink the view the inset attaches to, and the
+        // floating DeviceRow renders mid-pane instead of pinned to
+        // the window's bottom edge.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+          DeviceRow(
+            model: model,
+            onSyncNow: onSyncNow, onPause: onPause,
+            onCancelSync: onCancelSync, onResume: onResume,
+            onRetry: onRetry, onSetUp: onSetUp)
         }
     }
-
-    @ViewBuilder
-    private var detail: some View {
-        if model.needsFirstRunSetup {
-            SetupCallToActionView(onSetUp: onSetUp)
-        } else {
-            switch model.selectedDestination {
-            case .library, nil:
-                LibraryView(model: model, onScan: onScan)
-            case let .device(serial, .music):
-                DeviceMusicPage(
-                    model: model, serial: serial, onSyncNow: onSyncNow,
-                    onLoadDeviceConfig: onLoadDeviceConfig, onPreviewDevice: onPreviewDevice,
-                    onSaveDeviceConfig: onSaveDeviceConfig, onScan: onScan)
-                    .id(serial)
-            case let .device(serial, .settings):
-                DeviceSettingsPage(
-                    model: model, serial: serial,
-                    onLoadDeviceConfig: onLoadDeviceConfig, onSaveDeviceSettings: onSaveDeviceSettings,
-                    onForgetIpod: onForgetIpod, onBackfill: onBackfill, onReplaceLibrary: onReplaceLibrary)
-                    .id(serial)
-            case let .playlist(slug):
-                PlaylistPage(
-                    model: model, slug: slug, onSavePlaylist: onSavePlaylist,
-                    onGetPlaylist: onGetPlaylist, onDeletePlaylist: onDeletePlaylist,
-                    onResolveTracks: onResolveTracks)
-                    .id(slug)
-            case .history:
-                HistoryView(model: model)
-            }
-        }
+    .navigationTitle("Classick")
+    .frame(minWidth: 860, minHeight: 560)
+    .task { onAppearRequests() }
+    .onAppear {
+      // Default to Library on first show — `selectedDestination` starts
+      // `nil` (AppModel has no opinion on initial navigation), and an
+      // empty NavigationSplitView selection would render a blank
+      // detail pane.
+      if model.selectedDestination == nil {
+        model.selectedDestination = .library
+      }
     }
+  }
+
+  @ViewBuilder
+  private var detail: some View {
+    if model.needsFirstRunSetup {
+      SetupCallToActionView { onSetUp(model.focusedDeviceSerial) }
+    } else {
+      switch model.selectedDestination {
+      case .library, nil:
+        LibraryView(model: model, onScan: onScan)
+      case .device(let serial, .music):
+        DeviceMusicPage(
+          model: model, serial: serial, onSyncNow: onSyncNow,
+          onLoadDeviceConfig: onLoadDeviceConfig, onPreviewDevice: onPreviewDevice,
+          onSaveDeviceConfig: onSaveDeviceConfig, onScan: onScan
+        )
+        .id(serial)
+      case .device(let serial, .settings):
+        DeviceSettingsPage(
+          model: model, serial: serial,
+          onLoadDeviceConfig: onLoadDeviceConfig, onSaveDeviceSettings: onSaveDeviceSettings,
+          onForgetIpod: onForgetIpod, onBackfill: onBackfill, onReplaceLibrary: onReplaceLibrary
+        )
+        .id(serial)
+      case .playlist(let slug):
+        PlaylistPage(
+          model: model, slug: slug, onSavePlaylist: onSavePlaylist,
+          onGetPlaylist: onGetPlaylist, onDeletePlaylist: onDeletePlaylist,
+          onResolveTracks: onResolveTracks
+        )
+        .id(slug)
+      case .history:
+        HistoryView(model: model)
+      }
+    }
+  }
 }
 
 /// Shown in the detail area on a fresh, unconfigured install — this IS
@@ -125,47 +130,47 @@ struct MainWindow: View {
 /// source has been configured, since `needsFirstRunSetup` only flips back
 /// to `true` if the source is cleared, which would route back here too.
 struct SetupCallToActionView: View {
-    var onSetUp: () -> Void
-    var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "ipod").font(.system(size: 48)).foregroundStyle(.secondary)
-            Text("Welcome to Classick").font(.title2.bold())
-            Button("Choose your music folder…", action: onSetUp)
-                .keyboardShortcut(.defaultAction)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+  var onSetUp: () -> Void
+  var body: some View {
+    VStack(spacing: 14) {
+      Image(systemName: "ipod").font(.system(size: 48)).foregroundStyle(.secondary)
+      Text("Welcome to Classick").font(.title2.bold())
+      Button("Choose your music folder…", action: onSetUp)
+        .keyboardShortcut(.defaultAction)
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
 }
 
 #if DEBUG
-private extension MainWindow {
+  extension MainWindow {
     /// Every closure the real call site (`ClassickApp`) wires up, defaulted
     /// to no-ops — previews render state, they don't need live daemon
     /// plumbing.
-    init(previewModel model: AppModel) {
-        self.init(
-            model: model,
-            onSyncNow: {}, onPause: {}, onCancelSync: {}, onResume: {}, onRetry: {},
-            onPreview: { _, _ in }, onSaveSelection: { _, _ in }, onScan: {},
-            onForgetIpod: {}, onEjectIpod: {},
-            onBackfill: {}, onSetUp: {}, onReplaceLibrary: {},
-            onAppearRequests: {}, onSavePlaylist: { _ in },
-            // Answer get_playlist from fixture data — a no-op here left
-            // every playlist page in the canvas on "Loading…" forever,
-            // since the reply the page waits for can never arrive.
-            onGetPlaylist: { slug in
-                model.apply(.playlistDetail(PreviewFixtures.playlistDetail(forSlug: slug)))
-            })
+    fileprivate init(previewModel model: AppModel) {
+      self.init(
+        model: model,
+        onSyncNow: { _ in }, onPause: { _ in }, onCancelSync: { _ in },
+        onResume: { _ in }, onRetry: { _ in }, onScan: {},
+        onForgetIpod: { _ in }, onEjectIpod: { _ in },
+        onBackfill: { _ in }, onSetUp: { _ in }, onReplaceLibrary: { _ in },
+        onAppearRequests: {}, onSavePlaylist: { _ in },
+        // Answer get_playlist from fixture data — a no-op here left
+        // every playlist page in the canvas on "Loading…" forever,
+        // since the reply the page waits for can never arrive.
+        onGetPlaylist: { slug in
+          model.apply(.playlistDetail(PreviewFixtures.playlistDetail(forSlug: slug)))
+        })
     }
-}
+  }
 
-#Preview("Full app") {
+  #Preview("Full app") {
     MainWindow(previewModel: PreviewFixtures.connectedSyncedModel())
-        .frame(width: 1000, height: 640)
-}
+      .frame(width: 1000, height: 640)
+  }
 
-#Preview("First run") {
+  #Preview("First run") {
     MainWindow(previewModel: PreviewFixtures.firstRunModel())
-        .frame(width: 1000, height: 640)
-}
+      .frame(width: 1000, height: 640)
+  }
 #endif

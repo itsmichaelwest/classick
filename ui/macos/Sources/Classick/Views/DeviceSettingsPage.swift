@@ -18,9 +18,9 @@ struct DeviceSettingsPage: View {
   var serial: String
   var onLoadDeviceConfig: (String) -> Void
   var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> Void
-  var onForgetIpod: () -> Void
-  var onBackfill: () -> Void
-  var onReplaceLibrary: () -> Void
+  var onForgetIpod: (DeviceSerial) -> Void
+  var onBackfill: (DeviceSerial) -> Void
+  var onReplaceLibrary: (DeviceSerial) -> Void
 
   private struct SettingsDraft: Equatable {
     var autoSync = true
@@ -37,45 +37,36 @@ struct DeviceSettingsPage: View {
   @State private var saveTask: Task<Void, Never>?
   @State private var showReplaceConfirm = false
 
-  private var config: DeviceConfigState? { model.deviceConfigs[serial] }
-  private var isConnected: Bool { model.device?.serial == serial }
-  /// See `DeviceMusicPage.isKnownDevice` — on-disk facts (last sync,
-  /// synced count) belong to the paired device regardless of connection;
-  /// only a page for some OTHER device must placeholder them.
-  private var isKnownDevice: Bool {
-    serial == (model.device?.serial ?? model.config?.ipod?.serial)
+  private var deviceState: DeviceViewState? {
+    DeviceSurfaceLogic.state(serial: serial, in: model.devices)
+  }
+  private var config: DeviceConfigState? { deviceState?.config }
+  private var isConnected: Bool { deviceState?.connected == true }
+  private var surfacePhase: Phase {
+    DeviceSurfaceLogic.phase(for: deviceState, globalPhase: model.phase)
   }
   private var deviceName: String {
-    DeviceIdentityLogic.deviceName(
-      serial: serial, isConnected: isConnected, connectedDevice: model.device,
-      pairedIpod: model.config?.ipod)
+    deviceState?.identity.name ?? deviceState?.identity.modelLabel ?? serial
   }
   private var syncedSummary: String {
-    // Keyed on isKnownDevice, not isConnected: the manifest count is a
-    // persisted per-paired-device fact, valid while unplugged.
-    DeviceIdentityLogic.syncedSummaryText(
-      isConnected: isKnownDevice, syncedCount: model.syncedCount, libraryCount: model.libraryCount)
+    if let total = deviceState?.libraryCount {
+      return "\(deviceState?.syncedCount ?? 0) of \(total)"
+    }
+    return "\(deviceState?.syncedCount ?? 0)"
   }
 
   var body: some View {
     Form {
       Section {
         LabeledContent("Name", value: deviceName)
-        if let capacity = DeviceIdentityLogic.capacityText(
-          isConnected: isConnected, storageText: model.storageText)
-        {
+        if let capacity = DeviceSurfaceLogic.storageText(deviceState) {
           LabeledContent("Capacity", value: capacity)
         }
         LabeledContent("Synced", value: syncedSummary)
-        // Shown for the KNOWN (paired) device even while
-        // disconnected — a fact on disk, not a connection property.
-        // Only some OTHER device's page placeholders it.
-        if isKnownDevice, let last = model.lastSync {
+        if let last = deviceState?.latestSuccessfulSync {
           LabeledContent("Last synced", value: shortDate(last.timestamp))
-        } else if isKnownDevice {
-          LabeledContent("Last synced", value: "Never synced")
         } else {
-          LabeledContent("Last synced", value: DeviceIdentityLogic.placeholder)
+          LabeledContent("Last synced", value: "Never synced")
         }
         if let caption = DeviceSettingsLogic.caption(isConnected: isConnected) {
           Text(caption).font(.caption).foregroundStyle(.secondary)
@@ -113,7 +104,7 @@ struct DeviceSettingsPage: View {
         LabeledContent("Force update artwork and metadata") {
           // Acts on the physically connected iPod immediately —
           // meaningless without one.
-          Button("Update Now", action: onBackfill)
+          Button("Update Now") { onBackfill(serial) }
             .disabled(!isConnected)
         }
         .labeledContentStyle(.centerAligned)
@@ -130,13 +121,13 @@ struct DeviceSettingsPage: View {
             .tint(.red)
             .disabled(
               DeviceSettingsLogic.isReplaceLibraryDisabled(
-                phase: model.phase, isConnected: isConnected))
+                phase: surfacePhase, isConnected: isConnected))
         }
         .labeledContentStyle(.centerAligned)
       }
       Section {
         LabeledContent(DeviceSettingsLogic.removeCaption(deviceName: deviceName)) {
-          Button("Remove iPod", role: .destructive, action: onForgetIpod)
+          Button("Remove iPod", role: .destructive) { onForgetIpod(serial) }
         }
         .labeledContentStyle(.centerAligned)
       }
@@ -170,9 +161,9 @@ struct DeviceSettingsPage: View {
     .sheet(isPresented: $showReplaceConfirm) {
       ReplaceLibraryConfirmationSheet(
         deviceName: deviceName,
-        syncedCount: model.syncedCount,
+        syncedCount: deviceState?.syncedCount ?? 0,
         onConfirm: {
-          onReplaceLibrary()
+          onReplaceLibrary(serial)
           showReplaceConfirm = false
         },
         onCancel: { showReplaceConfirm = false }
@@ -347,7 +338,7 @@ private struct ReplaceLibraryConfirmationSheet: View {
     DeviceSettingsPage(
       model: PreviewFixtures.connectedSyncedModel(), serial: PreviewFixtures.pairedIpod.serial,
       onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in },
-      onForgetIpod: {}, onBackfill: {}, onReplaceLibrary: {}
+      onForgetIpod: { _ in }, onBackfill: { _ in }, onReplaceLibrary: { _ in }
     )
     .frame(width: 520, height: 520)
   }
@@ -356,7 +347,7 @@ private struct ReplaceLibraryConfirmationSheet: View {
     DeviceSettingsPage(
       model: PreviewFixtures.disconnectedModel(), serial: PreviewFixtures.pairedIpod.serial,
       onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in },
-      onForgetIpod: {}, onBackfill: {}, onReplaceLibrary: {}
+      onForgetIpod: { _ in }, onBackfill: { _ in }, onReplaceLibrary: { _ in }
     )
     .frame(width: 520, height: 520)
   }

@@ -2,6 +2,32 @@ import AppKit
 import SwiftUI
 import os
 
+enum DeviceActionCommand {
+  static func sync(serial: DeviceSerial, requestID: String) -> DaemonCommand {
+    .triggerSync(source: .manual, serial: serial, requestID: requestID)
+  }
+
+  static func cancel(serial: DeviceSerial, requestID: String) -> DaemonCommand {
+    .cancelSync(serial: serial, requestID: requestID)
+  }
+
+  static func pause(serial: DeviceSerial, requestID: String) -> DaemonCommand {
+    .pause(serial: serial, requestID: requestID)
+  }
+
+  static func forget(serial: DeviceSerial, requestID: String) -> DaemonCommand {
+    .forgetIpod(serial: serial, requestID: requestID)
+  }
+
+  static func replaceLibrary(serial: DeviceSerial, requestID: String) -> DaemonCommand {
+    .replaceLibrary(serial: serial, requestID: requestID)
+  }
+
+  static func backfillRockbox(serial: DeviceSerial, requestID: String) -> DaemonCommand {
+    .backfillRockbox(serial: serial, requestID: requestID)
+  }
+}
+
 /// Owns the pieces that must persist for the whole app lifetime and outlive
 /// any individual SwiftUI scene: the daemon connection, the daemon
 /// subprocess, and the reducer that turns daemon events into UI state.
@@ -43,10 +69,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   private var currentStreamIsScan = false
 
   private let syncEventDecoder = JSONDecoder()
-
-  private var targetSerial: String? {
-    model.device?.serial ?? model.config?.ipod?.serial
-  }
 
   /// Mirrors `daemonClient.lastFatalError` on the main actor. The actor's
   /// own property can't be read synchronously from a SwiftUI `body`, so
@@ -94,8 +116,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
   /// Shows first-run setup. Wired to the "Set Up Classick…" menu row and
   /// reused by `autoPresentSetupIfNeeded`.
-  func presentSetup() {
-    setupWindowController.show(model: model, onDone: finishSetup)
+  func presentSetup(serial: DeviceSerial? = nil) {
+    setupWindowController.show(
+      model: model, preferredSerial: serial, onDone: finishSetup)
   }
 
   /// Requests a fresh library + selection + sync-history snapshot from the
@@ -128,8 +151,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// the sidebar disables eject mid-sync), so the unmount normally
   /// succeeds; when it doesn't (Finder/another app holding files open),
   /// the system's error is surfaced in an alert rather than swallowed.
-  func ejectIpod() {
-    guard let drive = model.device?.drive else { return }
+  func ejectIpod(serial: DeviceSerial) {
+    guard let drive = model.devices[serial]?.mountPath else { return }
     let url = URL(fileURLWithPath: drive)
     do {
       try NSWorkspace.shared.unmountAndEjectDevice(at: url)
@@ -142,37 +165,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
   }
 
-  /// Live preview of a candidate selection (mode + rules) as the user edits
-  /// it in the main window's `LibraryView`.
-  func previewSelection(mode: SelectionMode, rules: [SelectionRule]) {
-    guard let serial = targetSerial else { return }
-    Task {
-      await daemonClient.send(
-        .previewSelection(
-          mode: mode,
-          rules: rules,
-          serial: serial,
-          requestID: DaemonCommand.newRequestID()))
-    }
-  }
-
-  /// Persist a selection. The persistent `LibraryView` auto-saves on every
-  /// debounced edit; the always-visible Sync Now button in the device row
-  /// (rather than a modal "Sync now?" prompt on every save) is the
-  /// affordance for applying a selection change to the connected iPod.
-  func saveSelectionDirect(mode: SelectionMode, rules: [SelectionRule]) {
-    guard let serial = targetSerial else { return }
-    Task {
-      await daemonClient.send(
-        .saveDeviceConfig(
-          serial: serial,
-          selection: SelectionState(mode: mode, rules: rules),
-          subscriptions: nil,
-          settings: nil,
-          requestID: DaemonCommand.newRequestID()))
-    }
-  }
-
   /// Auto-presents setup the first time the daemon confirms (post-handshake)
   /// that the user has no configured music library. Gated on
   /// `needsFirstRunSetup`, which stays false until the `get_config` reply
@@ -181,13 +173,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   private func autoPresentSetupIfNeeded() {
     guard !didAutoPresentSetup, model.needsFirstRunSetup else { return }
     didAutoPresentSetup = true
-    presentSetup()
+    presentSetup(serial: model.focusedDeviceSerial)
   }
 
   /// Sends the setup window's `save_config` (folder + auto-sync + the
   /// currently-detected iPod, if any) and clears any error banner from a
   /// prior failed handshake/save.
-  func finishSetup(source: String, autoSync: Bool) {
+  func finishSetup(source: String, autoSync: Bool, serial: DeviceSerial) {
     let daemon = Self.setupDaemonSettings(
       autoSync: autoSync,
       preservingRockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
@@ -198,11 +190,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     // default.
     let existingIpod = model.config?.ipod
     let preserveCustomSelection =
-      existingIpod?.serial == model.device?.serial
+      existingIpod?.serial == serial
       ? (existingIpod?.customSelection ?? false)
       : false
+    let state = model.devices[serial]
     let ipod = Self.setupIpodIdentity(
-      device: model.device, preservingCustomSelection: preserveCustomSelection)
+      device: state.map {
+        DeviceState(
+          serial: $0.identity.serial, model: $0.identity.modelLabel,
+          name: $0.identity.name, drive: $0.mountPath ?? "")
+      }, preservingCustomSelection: preserveCustomSelection)
     Task {
       await daemonClient.send(
         .saveConfig(
@@ -227,13 +224,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
   }
 
-  func forgetIpod() {
-    guard let serial = targetSerial else { return }
+  func forgetIpod(serial: DeviceSerial) {
     Task {
       await daemonClient.send(
-        .forgetIpod(
-          serial: serial,
-          requestID: DaemonCommand.newRequestID()))
+        DeviceActionCommand.forget(serial: serial, requestID: DaemonCommand.newRequestID()))
     }
   }
 
@@ -242,26 +236,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// confirmation before calling this — mirrors `replace_library`'s own
   /// contract on the wire (see `DaemonCommand.replaceLibrary`'s doc
   /// comment): the daemon does not prompt.
-  func replaceLibrary() {
-    guard let serial = targetSerial else { return }
+  func replaceLibrary(serial: DeviceSerial) {
     Task {
       await daemonClient.send(
-        .replaceLibrary(
-          serial: serial,
-          requestID: DaemonCommand.newRequestID()))
+        DeviceActionCommand.replaceLibrary(
+          serial: serial, requestID: DaemonCommand.newRequestID()))
     }
   }
 
   /// "Update existing library for Rockbox" button in Settings — asks the
   /// daemon to re-embed tags/art into already-synced tracks so an iPod
   /// running Rockbox (which doesn't read the iTunesDB) can display them.
-  func backfillRockbox() {
-    guard let serial = targetSerial else { return }
+  func backfillRockbox(serial: DeviceSerial) {
     Task {
       await daemonClient.send(
-        .backfillRockbox(
-          serial: serial,
-          requestID: DaemonCommand.newRequestID()))
+        DeviceActionCommand.backfillRockbox(
+          serial: serial, requestID: DaemonCommand.newRequestID()))
     }
   }
 
@@ -270,7 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// with the chosen option and clears it so it isn't re-shown.
   private func presentPromptIfNeeded() {
     guard let prompt = model.pendingPrompt else { return }
-    guard let serial = targetSerial else { return }
+    guard let serial = model.focusedDeviceSerial else { return }
     let choice = PromptAlert.present(prompt)
     model.clearPendingPrompt()
     Task {
@@ -287,49 +277,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// (actor-isolated socket write); the menu's `Button` actions are sync
   /// closures, so each hop through here spawns a detached-from-the-caller
   /// `Task` to bridge to the actor.
-  func syncNow() {
-    guard let serial = targetSerial else { return }
+  func syncNow(serial: DeviceSerial) {
     Task {
       await daemonClient.send(
-        .triggerSync(
-          source: .manual,
-          serial: serial,
-          requestID: DaemonCommand.newRequestID()))
+        DeviceActionCommand.sync(serial: serial, requestID: DaemonCommand.newRequestID()))
     }
   }
 
-  func cancelSync() {
-    guard let serial = targetSerial else { return }
+  func cancelSync(serial: DeviceSerial) {
     Task {
       await daemonClient.send(
-        .cancelSync(
-          serial: serial,
-          requestID: DaemonCommand.newRequestID()))
+        DeviceActionCommand.cancel(serial: serial, requestID: DaemonCommand.newRequestID()))
     }
   }
 
   /// Pause / Resume menu actions. Pause requests a graceful drain +
   /// checkpoint on the daemon side; resume is just a normal sync trigger —
   /// the sync is diff-based, so it continues where it left off.
-  func pause() {
-    guard let serial = targetSerial else { return }
+  func pause(serial: DeviceSerial) {
     Task {
       await daemonClient.send(
-        .pause(
-          serial: serial,
-          requestID: DaemonCommand.newRequestID()))
+        DeviceActionCommand.pause(serial: serial, requestID: DaemonCommand.newRequestID()))
     }
   }
 
-  func resume() {
-    syncNow()
+  func resume(serial: DeviceSerial) {
+    syncNow(serial: serial)
   }
 
   /// "Retry" from the error phase. There's no dedicated retry command on
   /// the wire — a fresh `get_status` forces the daemon to push a current
   /// `status_update`, which recomputes phase out of `.error` if whatever
   /// caused it has cleared.
-  func retry() {
+  func retry(serial _: DeviceSerial) {
     Task { await daemonClient.send(.getStatus(requestID: DaemonCommand.newRequestID())) }
   }
 
@@ -547,14 +527,11 @@ struct ClassickApp: App {
         onCancelSync: appDelegate.cancelSync,
         onResume: appDelegate.resume,
         onRetry: appDelegate.retry,
-        onPreview: { mode, rules in appDelegate.previewSelection(mode: mode, rules: rules) },
-        onSaveSelection: { mode, rules in appDelegate.saveSelectionDirect(mode: mode, rules: rules)
-        },
         onScan: appDelegate.rescan,
         onForgetIpod: appDelegate.forgetIpod,
         onEjectIpod: appDelegate.ejectIpod,
         onBackfill: appDelegate.backfillRockbox,
-        onSetUp: appDelegate.presentSetup,
+        onSetUp: { serial in appDelegate.presentSetup(serial: serial) },
         onReplaceLibrary: appDelegate.replaceLibrary,
         onAppearRequests: appDelegate.requestLibraryAndSelection,
         onSavePlaylist: { payload in appDelegate.savePlaylist(payload) },
@@ -584,7 +561,7 @@ struct ClassickApp: App {
       MenuContent(
         model: appDelegate.model,
         daemonFatalError: appDelegate.daemonFatalError,
-        onSetUp: appDelegate.presentSetup,
+        onSetUp: { serial in appDelegate.presentSetup(serial: serial) },
         onOpenMain: openMainWindow,
         onOpenSettings: openSettingsWindow,
         onSyncNow: appDelegate.syncNow,
