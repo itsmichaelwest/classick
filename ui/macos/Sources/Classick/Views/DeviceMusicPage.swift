@@ -515,3 +515,45 @@ enum DeviceMusicLogic {
         return "\(unresolved.count) subscribed playlist\(unresolved.count == 1 ? "" : "s") couldn't be resolved"
     }
 }
+
+#if DEBUG
+#Preview("Entire library") {
+    DeviceMusicPage(
+        model: PreviewFixtures.connectedSyncedModel(), serial: PreviewFixtures.pairedIpod.serial,
+        onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
+        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
+        .frame(width: 760, height: 560)
+}
+
+#Preview("Selected items") {
+    DeviceMusicPage(
+        model: PreviewFixtures.connectedSelectedItemsModel(), serial: PreviewFixtures.pairedIpod.serial,
+        onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
+        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
+        .frame(width: 760, height: 560)
+}
+
+#Preview("Disconnected") {
+    DeviceMusicPage(
+        model: PreviewFixtures.disconnectedModel(), serial: PreviewFixtures.pairedIpod.serial,
+        onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
+        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
+        .frame(width: 760, height: 560)
+}
+
+#Preview("Nothing synced") {
+    DeviceMusicPage(
+        model: PreviewFixtures.connectedNothingSyncedModel(), serial: PreviewFixtures.pairedIpod.serial,
+        onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
+        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
+        .frame(width: 760, height: 560)
+}
+
+#Preview("Over-full preview") {
+    DeviceMusicPage(
+        model: PreviewFixtures.connectedOverfullModel(), serial: PreviewFixtures.pairedIpod.serial,
+        onSyncNow: {}, onLoadDeviceConfig: { _ in }, onPreviewDevice: { _ in },
+        onSaveDeviceConfig: { _, _, _ in }, onScan: {})
+        .frame(width: 760, height: 560)
+}
+#endif

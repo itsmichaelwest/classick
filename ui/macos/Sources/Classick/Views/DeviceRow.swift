@@ -174,3 +174,43 @@ enum DeviceRowFormatting {
         return "Art missing for \(count) track\(count == 1 ? "" : "s")"
     }
 }
+
+#if DEBUG
+@MainActor
+private func deviceRowPreview(_ model: AppModel) -> some View {
+    DeviceRow(model: model, onSyncNow: {}, onPause: {}, onCancelSync: {}, onResume: {}, onRetry: {})
+        .frame(width: 820)
+}
+
+#Preview("Idle") {
+    deviceRowPreview(PreviewFixtures.connectedSyncedModel())
+}
+
+#Preview("Syncing") {
+    deviceRowPreview(PreviewFixtures.syncingModel())
+}
+
+#Preview("Paused") {
+    deviceRowPreview(PreviewFixtures.pausedModel())
+}
+
+#Preview("Scanning") {
+    deviceRowPreview(PreviewFixtures.scanningModel())
+}
+
+#Preview("No device") {
+    deviceRowPreview(PreviewFixtures.noDeviceModel())
+}
+
+#Preview("Not configured") {
+    deviceRowPreview(PreviewFixtures.notConfiguredModel())
+}
+
+#Preview("Error") {
+    deviceRowPreview(PreviewFixtures.errorModel())
+}
+
+#Preview("Skipped for space + missing art") {
+    deviceRowPreview(PreviewFixtures.connectedOverfullModel())
+}
+#endif

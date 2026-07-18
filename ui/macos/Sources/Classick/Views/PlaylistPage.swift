@@ -334,3 +334,37 @@ enum PlaylistEditorLogic {
         return "Also unsubscribes \(subscribedDeviceCount) device\(subscribedDeviceCount == 1 ? "" : "s")."
     }
 }
+
+#if DEBUG
+#Preview("Manual") {
+    PlaylistPage(
+        model: PreviewFixtures.playlistDetailModel(PreviewFixtures.manualPlaylistDetail),
+        slug: PreviewFixtures.manualPlaylistDetail.slug,
+        onSavePlaylist: { _ in })
+        .frame(width: 640, height: 520)
+}
+
+#Preview("Smart") {
+    PlaylistPage(
+        model: PreviewFixtures.playlistDetailModel(PreviewFixtures.smartPlaylistDetail),
+        slug: PreviewFixtures.smartPlaylistDetail.slug,
+        onSavePlaylist: { _ in })
+        .frame(width: 640, height: 560)
+}
+
+#Preview("Error") {
+    PlaylistPage(
+        model: PreviewFixtures.playlistDetailModel(PreviewFixtures.brokenPlaylistDetail),
+        slug: PreviewFixtures.brokenPlaylistDetail.slug,
+        onSavePlaylist: { _ in })
+        .frame(width: 640, height: 400)
+}
+
+#Preview("Loading") {
+    PlaylistPage(
+        model: PreviewFixtures.playlistLoadingModel(),
+        slug: PreviewFixtures.roadTripMix.slug,
+        onSavePlaylist: { _ in })
+        .frame(width: 640, height: 400)
+}
+#endif

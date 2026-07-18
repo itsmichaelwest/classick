@@ -421,3 +421,24 @@ final class AppModel {
         }
     }
 }
+
+#if DEBUG
+extension AppModel {
+    /// Preview-only seam for `deviceStorage`/`storageText`. Every other field
+    /// SwiftUI previews need can be reached through a synthetic `DaemonEvent`
+    /// fed to `apply(_:)` (see `PreviewFixtures.swift`), but these two can't:
+    /// `status_update.storage` is always `nil` on the macOS wire (see
+    /// `storageFor(drive:)`'s doc comment), so production code only ever
+    /// learns capacity by resolving a REAL mounted volume path from
+    /// `deviceConnected.drive`. A preview has no real iPod volume to resolve,
+    /// and would otherwise show whichever disk happens to be at a given path
+    /// on the machine running the canvas — not the deterministic, canned
+    /// numbers a design review needs. `#if DEBUG`-gated (compiled out of
+    /// Release entirely) rather than relaxing `deviceStorage`'s
+    /// `private(set)` for the whole module.
+    func seedPreviewStorage(free: Int64, total: Int64) {
+        deviceStorage = (free, total)
+        storageText = Self.formatStorage(deviceStorage)
+    }
+}
+#endif

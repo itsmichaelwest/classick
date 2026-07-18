@@ -186,3 +186,33 @@ struct Sidebar: View {
         .tag(SidebarDestination.playlist(slug: summary.slug))
     }
 }
+
+#if DEBUG
+/// `Sidebar.selection` is a `Binding`, which `#Preview` can't hand in
+/// directly — this host owns the `@State` the binding needs.
+private struct SidebarPreviewHost: View {
+    var model: AppModel
+    @State private var selection: SidebarDestination?
+
+    var body: some View {
+        NavigationSplitView {
+            Sidebar(model: model, selection: $selection, onForgetIpod: {}, onSavePlaylist: { _ in })
+        } detail: {
+            Text("Detail").foregroundStyle(.secondary)
+        }
+        .frame(width: 500, height: 480)
+    }
+}
+
+#Preview("Populated") {
+    SidebarPreviewHost(model: PreviewFixtures.connectedSyncedModel())
+}
+
+#Preview("Device disconnected") {
+    SidebarPreviewHost(model: PreviewFixtures.disconnectedModel())
+}
+
+#Preview("Playlist error badge") {
+    SidebarPreviewHost(model: PreviewFixtures.noDeviceModel())
+}
+#endif

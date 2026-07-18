@@ -209,3 +209,19 @@ private struct AboutTab: View {
         .padding(24)
     }
 }
+
+#if DEBUG
+#Preview("Configured") {
+    SettingsView(
+        model: PreviewFixtures.connectedSyncedModel(),
+        onSave: { _, _ in }, onForgetIpod: {}, onBackfill: {})
+        .frame(width: 440, height: 380)
+}
+
+#Preview("First run") {
+    SettingsView(
+        model: PreviewFixtures.firstRunModel(),
+        onSave: { _, _ in }, onForgetIpod: {}, onBackfill: {})
+        .frame(width: 440, height: 380)
+}
+#endif

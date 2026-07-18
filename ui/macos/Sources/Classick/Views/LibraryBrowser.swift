@@ -378,3 +378,42 @@ struct LibraryBrowser: View {
 func formatBytes(_ bytes: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
 }
+
+#if DEBUG
+/// `.select` mode's `checked` is a `Binding<Set<SelectionKey>>` — this host
+/// owns the `@State` a preview needs to hand one in, seeded with a few rows
+/// pre-checked so the tri-state artist checkbox (`.mixed`) is visible too.
+private struct LibraryBrowserSelectPreviewHost: View {
+    var style: SelectStyle
+    @State private var checked: Set<SelectionKey> = [
+        .artist(name: PreviewFixtures.boardsOfCanada.name),
+        .album(artist: PreviewFixtures.radiohead.name, album: "OK Computer"),
+    ]
+
+    var body: some View {
+        LibraryBrowser(
+            library: PreviewFixtures.richLibrary, facet: .artists,
+            mode: .select(checked: $checked, style: style))
+    }
+}
+
+#Preview("Browse artists") {
+    LibraryBrowser(library: PreviewFixtures.richLibrary, facet: .artists, mode: .browse)
+        .frame(width: 420, height: 500)
+}
+
+#Preview("Select cascading") {
+    LibraryBrowserSelectPreviewHost(style: .cascading)
+        .frame(width: 420, height: 500)
+}
+
+#Preview("Select flat") {
+    LibraryBrowserSelectPreviewHost(style: .flat)
+        .frame(width: 420, height: 500)
+}
+
+#Preview("Genres") {
+    LibraryBrowser(library: PreviewFixtures.richLibrary, facet: .genres, mode: .browse)
+        .frame(width: 420, height: 500)
+}
+#endif

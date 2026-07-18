@@ -76,3 +76,13 @@ struct SetupWindow: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Device found") {
+    SetupWindow(model: PreviewFixtures.notConfiguredModel(), onDone: { _, _ in }, onClose: {})
+}
+
+#Preview("No device") {
+    SetupWindow(model: PreviewFixtures.firstRunModel(), onDone: { _, _ in }, onClose: {})
+}
+#endif

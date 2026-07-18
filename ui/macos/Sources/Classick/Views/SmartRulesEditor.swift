@@ -252,3 +252,26 @@ enum SmartRulesLogic {
         return "\(summary.tracks) track\(summary.tracks == 1 ? "" : "s") · \(formatBytes(summary.bytes))"
     }
 }
+
+#if DEBUG
+#Preview("Rules configured") {
+    SmartRulesEditor(
+        model: PreviewFixtures.playlistDetailModel(PreviewFixtures.smartPlaylistDetail),
+        slug: PreviewFixtures.smartPlaylistDetail.slug,
+        detail: PreviewFixtures.smartPlaylistDetail,
+        onSavePlaylist: { _ in }, onDeletePlaylist: { _ in })
+        .frame(width: 640, height: 560)
+}
+
+#Preview("No rules") {
+    let detail = PlaylistDetail(
+        slug: "fresh-smart-playlist", name: "New Smart Playlist", kind: .smart,
+        tracks: nil,
+        rules: SmartRulesWire(matching: .all, rules: [], limit: nil, order: .alpha, seed: 0),
+        error: nil)
+    SmartRulesEditor(
+        model: PreviewFixtures.playlistDetailModel(detail), slug: detail.slug, detail: detail,
+        onSavePlaylist: { _ in }, onDeletePlaylist: { _ in })
+        .frame(width: 640, height: 560)
+}
+#endif

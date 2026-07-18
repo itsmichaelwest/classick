@@ -22,6 +22,7 @@
 		2C0AB6F4D69794C6AF0B69C7 /* DeviceMusicLogicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2027E7A77B12C98BEA1CB81 /* DeviceMusicLogicTests.swift */; };
 		2C3FE03490909F6CB32075D0 /* SmartRulesEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB7728BC7FA457FF41968C65 /* SmartRulesEditor.swift */; };
 		3012B574C1CDDEF574BE97C9 /* WireCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 088D7817D297D30A5DEB28B4 /* WireCodecTests.swift */; };
+		306A6B283268D1F9F320404E /* PreviewFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = F581F460ECC403025CE75D24 /* PreviewFixtures.swift */; };
 		323700F7CDAEA8A69F46AF4D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F6E6E19F0CC4A565F756B34 /* SettingsView.swift */; };
 		34B045E46CB1FFA37A665FA4 /* Storage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61DE80657A5644ED21E4873A /* Storage.swift */; };
 		3BE072B94276C28F1575F44A /* WireModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60A2D7EA38BF7099CA882E0C /* WireModels.swift */; };
@@ -100,6 +101,7 @@
 		DD34388BC51EFD2420DCC244 /* DaemonProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonProcess.swift; sourceTree = "<group>"; };
 		DE25169AF5227F47112B49D2 /* PlaylistPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistPage.swift; sourceTree = "<group>"; };
 		E3811F67C341FB1F6143D67B /* DeviceIdentityLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentityLogicTests.swift; sourceTree = "<group>"; };
+		F581F460ECC403025CE75D24 /* PreviewFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewFixtures.swift; sourceTree = "<group>"; };
 		F96332DE24D3C875F50522D3 /* DeviceIdentityLogic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentityLogic.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -232,6 +234,7 @@
 			isa = PBXGroup;
 			children = (
 				18857CE62529C7150D78B6EA /* ClassickApp.swift */,
+				F581F460ECC403025CE75D24 /* PreviewFixtures.swift */,
 				462F667BF2363CE6CEEDC689 /* Daemon */,
 				1EC9BCC71957F50F2A7DA3F5 /* Ipc */,
 				4B26220FE0CFF1E677C328B6 /* Model */,
@@ -421,6 +424,7 @@
 				A6E2CFE58A8D14C39D2AFBB8 /* MenuContent.swift in Sources */,
 				4FB908A351CF502DE07174A1 /* Notifier.swift in Sources */,
 				C1D2B216C33F513ACF890A24 /* PlaylistPage.swift in Sources */,
+				306A6B283268D1F9F320404E /* PreviewFixtures.swift in Sources */,
 				7DB96D9B60B910D9CADBF471 /* PromptAlert.swift in Sources */,
 				7185921B45D7FB0EE69E8AB9 /* SelectionDraft.swift in Sources */,
 				323700F7CDAEA8A69F46AF4D /* SettingsView.swift in Sources */,

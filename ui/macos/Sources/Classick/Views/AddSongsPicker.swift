@@ -77,3 +77,17 @@ struct AddSongsPicker: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Library loaded") {
+    AddSongsPicker(library: PreviewFixtures.richLibrary, isResolving: false, onAdd: { _ in }, onCancel: {})
+}
+
+#Preview("Adding…") {
+    AddSongsPicker(library: PreviewFixtures.richLibrary, isResolving: true, onAdd: { _ in }, onCancel: {})
+}
+
+#Preview("No library") {
+    AddSongsPicker(library: nil, isResolving: false, onAdd: { _ in }, onCancel: {})
+}
+#endif

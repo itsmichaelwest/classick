@@ -119,3 +119,29 @@ struct SetupCallToActionView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
+
+#if DEBUG
+private extension MainWindow {
+    /// Every closure the real call site (`ClassickApp`) wires up, defaulted
+    /// to no-ops — previews render state, they don't need live daemon
+    /// plumbing.
+    init(previewModel model: AppModel) {
+        self.init(
+            model: model,
+            onSyncNow: {}, onPause: {}, onCancelSync: {}, onResume: {}, onRetry: {},
+            onPreview: { _, _ in }, onSaveSelection: { _, _ in }, onScan: {},
+            onForgetIpod: {}, onBackfill: {}, onSetUp: {}, onReplaceLibrary: {},
+            onAppearRequests: {}, onSavePlaylist: { _ in })
+    }
+}
+
+#Preview("Full app") {
+    MainWindow(previewModel: PreviewFixtures.connectedSyncedModel())
+        .frame(width: 1000, height: 640)
+}
+
+#Preview("First run") {
+    MainWindow(previewModel: PreviewFixtures.firstRunModel())
+        .frame(width: 1000, height: 640)
+}
+#endif

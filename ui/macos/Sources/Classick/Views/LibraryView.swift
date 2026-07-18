@@ -139,3 +139,20 @@ enum LibraryContentLogic {
         return .browse
     }
 }
+
+#if DEBUG
+#Preview("Browse") {
+    LibraryView(model: PreviewFixtures.connectedSyncedModel(), onScan: {})
+        .frame(width: 760, height: 560)
+}
+
+#Preview("Empty") {
+    LibraryView(model: PreviewFixtures.emptyLibraryModel(), onScan: {})
+        .frame(width: 760, height: 560)
+}
+
+#Preview("Scanning") {
+    LibraryView(model: PreviewFixtures.scanningModel(), onScan: {})
+        .frame(width: 760, height: 560)
+}
+#endif

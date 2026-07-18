@@ -35,3 +35,15 @@ struct HistoryView: View {
         return f.string(from: TimeInterval(secs)) ?? "\(secs)s"
     }
 }
+
+#if DEBUG
+#Preview("Populated") {
+    HistoryView(model: PreviewFixtures.connectedSyncedModel())
+        .frame(width: 640, height: 360)
+}
+
+#Preview("Empty") {
+    HistoryView(model: PreviewFixtures.firstRunModel())
+        .frame(width: 640, height: 360)
+}
+#endif

@@ -110,3 +110,35 @@ private func formatLastSync(_ iso: String) -> String {
     guard let date = parser.date(from: iso) else { return iso }
     return date.formatted(date: .abbreviated, time: .shortened)
 }
+
+#if DEBUG
+#Preview("Idle") {
+    MenuContent(model: PreviewFixtures.connectedSyncedModel())
+        .frame(width: 280)
+}
+
+#Preview("Syncing") {
+    MenuContent(model: PreviewFixtures.syncingModel())
+        .frame(width: 280)
+}
+
+#Preview("Paused") {
+    MenuContent(model: PreviewFixtures.pausedModel())
+        .frame(width: 280)
+}
+
+#Preview("No device") {
+    MenuContent(model: PreviewFixtures.noDeviceModel())
+        .frame(width: 280)
+}
+
+#Preview("Not configured") {
+    MenuContent(model: PreviewFixtures.notConfiguredModel())
+        .frame(width: 280)
+}
+
+#Preview("Error") {
+    MenuContent(model: PreviewFixtures.errorModel())
+        .frame(width: 280)
+}
+#endif

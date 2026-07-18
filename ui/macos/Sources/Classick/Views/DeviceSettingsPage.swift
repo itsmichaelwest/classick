@@ -243,3 +243,21 @@ private struct ReplaceLibraryConfirmationSheet: View {
         .frame(width: 380)
     }
 }
+
+#if DEBUG
+#Preview("Connected") {
+    DeviceSettingsPage(
+        model: PreviewFixtures.connectedSyncedModel(), serial: PreviewFixtures.pairedIpod.serial,
+        onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in },
+        onForgetIpod: {}, onBackfill: {}, onReplaceLibrary: {})
+        .frame(width: 520, height: 520)
+}
+
+#Preview("Disconnected") {
+    DeviceSettingsPage(
+        model: PreviewFixtures.disconnectedModel(), serial: PreviewFixtures.pairedIpod.serial,
+        onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in },
+        onForgetIpod: {}, onBackfill: {}, onReplaceLibrary: {})
+        .frame(width: 520, height: 520)
+}
+#endif
