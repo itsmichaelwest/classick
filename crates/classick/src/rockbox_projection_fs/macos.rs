@@ -2,30 +2,7 @@ use std::ffi::CString;
 use std::io;
 use std::os::fd::RawFd;
 
-pub(super) use super::unix_common::{EntryIdentity, EntryKind, ManagedDirectory};
-
-pub(super) fn exchange_atomic_at(
-    directory: RawFd,
-    source: &str,
-    destination: &str,
-) -> io::Result<()> {
-    let source = c_name(source)?;
-    let destination = c_name(destination)?;
-    let result = unsafe {
-        libc::renameatx_np(
-            directory,
-            source.as_ptr(),
-            directory,
-            destination.as_ptr(),
-            libc::RENAME_SWAP,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
+pub(super) use super::unix_common::{EntryKind, ManagedDirectory};
 
 pub(super) fn rename_atomic_at(
     directory: RawFd,

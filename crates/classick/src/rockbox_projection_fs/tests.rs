@@ -23,6 +23,10 @@ fn fixture() -> DeviceProjectionFs {
     fs
 }
 
+fn hash(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
 #[test]
 fn durable_write_has_exact_bytes_and_leaves_no_temp() {
     let fs = fixture();
@@ -90,7 +94,7 @@ fn foreign_collision_is_classified_and_never_replaced() {
 }
 
 #[test]
-fn replacement_requires_an_existing_authorized_regular_file() {
+fn in_place_replacement_is_rejected_before_staging() {
     let fs = fixture();
     let name = "Mix--0123456789.m3u8";
     let authorized = HashSet::from([name.to_string()]);
@@ -100,8 +104,13 @@ fn replacement_requires_an_existing_authorized_regular_file() {
         fs.target_state(name, &authorized).unwrap(),
         TargetState::RecordedFile
     );
-    fs.write_durable(name, b"new", &authorized, true).unwrap();
-    assert_eq!(std::fs::read(fs.root().join(name)).unwrap(), b"new");
+    assert!(fs.write_durable(name, b"new", &authorized, true).is_err());
+    assert_eq!(std::fs::read(fs.root().join(name)).unwrap(), b"old");
+    assert!(std::fs::read_dir(fs.root()).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .contains(".classick-")));
 }
 
 #[test]
@@ -122,7 +131,9 @@ fn differently_cased_directory_entry_never_receives_recorded_authority() {
     assert!(fs
         .write_durable(recorded, b"classick", &authorized, true)
         .is_err());
-    assert!(fs.remove_recorded(recorded, &authorized).is_err());
+    assert!(fs
+        .remove_recorded(recorded, &hash(b"foreign"), &authorized)
+        .is_err());
     assert_eq!(
         std::fs::read(fs.root().join(foreign_variant)).unwrap(),
         b"foreign"
@@ -148,27 +159,6 @@ fn injected_publish_failure_preserves_old_file_and_removes_temp() {
 
 #[cfg(unix)]
 #[test]
-fn target_swap_between_validation_and_mutation_cannot_touch_escape() {
-    let mount = temp_dir("target-swap-mount");
-    let fs = DeviceProjectionFs::new(mount.clone());
-    fs.validate_managed_root().unwrap();
-    let name = "Mix--0123456789.m3u8";
-    std::fs::write(fs.root().join(name), b"recorded").unwrap();
-    let outside = temp_dir("target-swap-outside").join("outside.m3u8");
-    std::fs::write(&outside, b"outside").unwrap();
-    DeviceProjectionFs::swap_target_before_mutation_once(mount, name.to_string(), outside.clone());
-    let authorized = HashSet::from([name.to_string()]);
-
-    assert!(fs
-        .write_durable(name, b"replacement", &authorized, true)
-        .is_err());
-
-    assert_eq!(std::fs::read(outside).unwrap(), b"outside");
-    assert_eq!(std::fs::read(fs.root().join(name)).unwrap(), b"outside");
-}
-
-#[cfg(unix)]
-#[test]
 fn target_swap_between_validation_and_delete_cannot_touch_escape() {
     let mount = temp_dir("target-delete-swap-mount");
     let fs = DeviceProjectionFs::new(mount.clone());
@@ -180,7 +170,9 @@ fn target_swap_between_validation_and_delete_cannot_touch_escape() {
     DeviceProjectionFs::swap_target_before_mutation_once(mount, name.to_string(), outside.clone());
     let authorized = HashSet::from([name.to_string()]);
 
-    assert!(fs.remove_recorded(name, &authorized).is_err());
+    assert!(fs
+        .remove_recorded(name, &hash(b"recorded"), &authorized)
+        .is_err());
 
     assert_eq!(std::fs::read(outside).unwrap(), b"outside");
     assert_eq!(std::fs::read(fs.root().join(name)).unwrap(), b"outside");
@@ -192,11 +184,13 @@ fn authorization_and_filename_validation_fail_closed() {
     let name = "Mix--0123456789.m3u8";
     let none = HashSet::new();
     assert!(fs.write_durable(name, b"x", &none, false).is_err());
-    assert!(fs.remove_recorded(name, &none).is_err());
+    assert!(fs.remove_recorded(name, &hash(b"x"), &none).is_err());
     for invalid in ["", "..", "../foreign.m3u8", "a/b.m3u8", "a\\b.m3u8"] {
         let authorized = HashSet::from([invalid.to_string()]);
         assert!(fs.write_durable(invalid, b"x", &authorized, false).is_err());
-        assert!(fs.remove_recorded(invalid, &authorized).is_err());
+        assert!(fs
+            .remove_recorded(invalid, &hash(b"x"), &authorized)
+            .is_err());
     }
 }
 
@@ -242,7 +236,9 @@ fn symlink_target_is_foreign_and_escape_is_untouched() {
     assert!(fs
         .write_durable(name, b"classick", &authorized, true)
         .is_err());
-    assert!(fs.remove_recorded(name, &authorized).is_err());
+    assert!(fs
+        .remove_recorded(name, &hash(b"classick"), &authorized)
+        .is_err());
     assert_eq!(std::fs::read(outside).unwrap(), b"foreign");
 }
 
@@ -254,7 +250,47 @@ fn recorded_delete_is_idempotent_and_preserves_foreign_files() {
     std::fs::write(fs.root().join(owned), b"owned").unwrap();
     std::fs::write(fs.root().join(foreign), b"foreign").unwrap();
     let authorized = HashSet::from([owned.to_string()]);
-    assert!(fs.remove_recorded(owned, &authorized).unwrap());
-    assert!(!fs.remove_recorded(owned, &authorized).unwrap());
+    assert!(fs
+        .remove_recorded(owned, &hash(b"owned"), &authorized)
+        .unwrap());
+    assert!(!fs
+        .remove_recorded(owned, &hash(b"owned"), &authorized)
+        .unwrap());
     assert_eq!(std::fs::read(fs.root().join(foreign)).unwrap(), b"foreign");
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_failure_retains_only_the_deterministic_authorized_quarantine() {
+    let mount = temp_dir("delete-cleanup-retry");
+    let fs = DeviceProjectionFs::new(mount.clone());
+    fs.validate_managed_root().unwrap();
+    let name = "Gym--0123456789.m3u8";
+    let expected_hash = hash(b"owned");
+    std::fs::write(fs.root().join(name), b"owned").unwrap();
+    let authorized = HashSet::from([name.to_string()]);
+    DeviceProjectionFs::fail_once_for_mount(mount, super::ProjectionFailurePoint::DeleteCleanup);
+
+    assert!(fs
+        .remove_recorded(name, &expected_hash, &authorized)
+        .is_err());
+
+    let quarantine = super::deletion_quarantine_name(name, &expected_hash).unwrap();
+    assert!(!fs.root().join(name).exists());
+    assert_eq!(
+        std::fs::read(fs.root().join(&quarantine)).unwrap(),
+        b"owned"
+    );
+    assert_eq!(
+        std::fs::read_dir(fs.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        vec![quarantine.clone()]
+    );
+
+    assert!(fs
+        .remove_recorded(name, &expected_hash, &authorized)
+        .unwrap());
+    assert!(!fs.root().join(quarantine).exists());
 }

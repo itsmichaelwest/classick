@@ -1,6 +1,5 @@
 use crate::rockbox_playlist::validate_recorded_filename;
 use anyhow::{bail, Context, Result};
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
@@ -11,6 +10,14 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(unix)]
 #[path = "rockbox_projection_fs/unix_common.rs"]
 mod unix_common;
+
+#[path = "rockbox_projection_fs/common.rs"]
+mod common;
+#[cfg(unix)]
+use common::deletion_quarantine_name;
+use common::{
+    entry_content_matches, recorded_entry_state, sync_after_delete, validate_recorded_hash,
+};
 
 #[cfg(target_os = "macos")]
 #[path = "rockbox_projection_fs/macos.rs"]
@@ -35,6 +42,7 @@ pub enum ProjectionFailurePoint {
     Write,
     Rename,
     Delete,
+    DeleteCleanup,
 }
 
 fn injected_failures() -> &'static Mutex<HashMap<PathBuf, ProjectionFailurePoint>> {
@@ -65,7 +73,12 @@ pub trait ProjectionIo {
         replace_recorded: bool,
     ) -> Result<()>;
 
-    fn remove_recorded(&self, name: &str, authorized: &HashSet<String>) -> Result<bool>;
+    fn remove_recorded(
+        &self,
+        name: &str,
+        expected_hash: &str,
+        authorized: &HashSet<String>,
+    ) -> Result<bool>;
 
     fn content_matches(
         &self,
@@ -204,6 +217,98 @@ impl DeviceProjectionFs {
     fn run_mutation_swap(&self) -> Result<()> {
         Ok(())
     }
+
+    #[cfg(unix)]
+    fn remove_recorded_unix(
+        &self,
+        directory: &platform::ManagedDirectory,
+        name: &str,
+        expected_hash: &str,
+    ) -> Result<bool> {
+        let quarantine = deletion_quarantine_name(name, expected_hash)?;
+        let target_state = recorded_entry_state(directory, name)?;
+        let quarantine_state = recorded_entry_state(directory, &quarantine)?;
+
+        if quarantine_state != platform::EntryKind::Missing {
+            if target_state != platform::EntryKind::Missing
+                || quarantine_state != platform::EntryKind::Regular
+                || !entry_content_matches(directory, &quarantine, expected_hash)?
+            {
+                bail!("recorded deletion quarantine {quarantine:?} is not recoverable");
+            }
+            self.inject(ProjectionFailurePoint::DeleteCleanup)?;
+            directory
+                .remove_file(&quarantine)
+                .with_context(|| format!("remove recorded deletion quarantine {quarantine:?}"))?;
+            sync_after_delete(directory, name)?;
+            return Ok(true);
+        }
+
+        match target_state {
+            platform::EntryKind::Missing => return Ok(false),
+            platform::EntryKind::Other => {
+                bail!("recorded projection target {name:?} is not an exact regular file")
+            }
+            platform::EntryKind::Regular => {}
+        }
+        if !entry_content_matches(directory, name, expected_hash)? {
+            bail!("recorded projection target {name:?} no longer matches its recorded hash");
+        }
+        let expected_identity = directory
+            .entry_identity(name)?
+            .ok_or_else(|| anyhow::anyhow!("recorded projection target {name:?} disappeared"))?;
+        self.run_mutation_swap()?;
+        directory
+            .ensure_path_identity()
+            .with_context(|| format!("confirm managed root before deleting projection {name:?}"))?;
+        self.inject(ProjectionFailurePoint::Delete)?;
+        directory
+            .rename_atomic(name, &quarantine, false)
+            .with_context(|| format!("quarantine recorded projection {name:?}"))?;
+
+        let quarantined_as_expected = recorded_entry_state(directory, &quarantine)?
+            == platform::EntryKind::Regular
+            && directory.entry_identity(&quarantine)? == Some(expected_identity)
+            && entry_content_matches(directory, &quarantine, expected_hash)?;
+        if !quarantined_as_expected {
+            let rollback = directory.rename_atomic(&quarantine, name, false);
+            return Err(match rollback {
+                Ok(()) => anyhow::anyhow!("recorded projection changed during quarantine"),
+                Err(error) => anyhow::anyhow!(
+                    "recorded projection changed during quarantine; rollback failed: {error}"
+                ),
+            });
+        }
+        self.inject(ProjectionFailurePoint::DeleteCleanup)?;
+        directory
+            .remove_file(&quarantine)
+            .with_context(|| format!("remove recorded deletion quarantine {quarantine:?}"))?;
+        sync_after_delete(directory, name)?;
+        Ok(true)
+    }
+
+    #[cfg(not(unix))]
+    fn remove_recorded_non_unix(
+        &self,
+        directory: &platform::ManagedDirectory,
+        name: &str,
+        expected_hash: &str,
+    ) -> Result<bool> {
+        match recorded_entry_state(directory, name)? {
+            platform::EntryKind::Missing => return Ok(false),
+            platform::EntryKind::Other => {
+                bail!("recorded projection target {name:?} is not an exact regular file")
+            }
+            platform::EntryKind::Regular => {}
+        }
+        if !entry_content_matches(directory, name, expected_hash)? {
+            bail!("recorded projection target {name:?} no longer matches its recorded hash");
+        }
+        self.inject(ProjectionFailurePoint::Delete)?;
+        directory.remove_recorded_handle(name, expected_hash)?;
+        sync_after_delete(directory, name)?;
+        Ok(true)
+    }
 }
 
 impl ProjectionIo for DeviceProjectionFs {
@@ -238,31 +343,24 @@ impl ProjectionIo for DeviceProjectionFs {
         replace_recorded: bool,
     ) -> Result<()> {
         self.require_authorized(name, authorized)?;
+        if replace_recorded {
+            bail!("in-place projection replacement is forbidden; publish a new collision name");
+        }
         let directory = self.open_managed_directory()?;
         directory.ensure_path_identity()?;
         validate_write_target(&directory, name, replace_recorded)?;
         let (temporary, mut file) = create_unique_temporary(&directory, name)?;
-        let cleanup_temporary = Cell::new(true);
         let result = (|| {
             self.inject(ProjectionFailurePoint::Write)?;
             file.write_all(bytes)
                 .with_context(|| format!("write projection temp {temporary:?}"))?;
             file.sync_all()
                 .with_context(|| format!("sync projection temp {temporary:?}"))?;
-            drop(file);
 
             directory.ensure_path_identity().with_context(|| {
                 format!("revalidate managed root before publishing projection {name:?}")
             })?;
             validate_write_target(&directory, name, replace_recorded)?;
-            #[cfg(unix)]
-            let expected_target = if replace_recorded {
-                Some(directory.entry_identity(name)?.ok_or_else(|| {
-                    anyhow::anyhow!("recorded replacement target {name:?} disappeared")
-                })?)
-            } else {
-                None
-            };
             self.run_mutation_swap()?;
             directory.ensure_path_identity().with_context(|| {
                 format!("confirm managed root before publishing projection {name:?}")
@@ -273,24 +371,15 @@ impl ProjectionIo for DeviceProjectionFs {
             if self.fail_before_rename.as_deref() == Some(name) {
                 bail!("injected failure before projection rename for {name:?}");
             }
-            #[cfg(unix)]
-            if let Some(expected_target) = expected_target {
-                cleanup_temporary.set(false);
-                directory
-                    .replace_if_identity(&temporary, name, expected_target)
-                    .with_context(|| {
-                        format!("publish Rockbox projection {name:?} from {temporary:?}")
-                    })?;
-            } else {
-                directory
-                    .rename_atomic(&temporary, name, false)
-                    .with_context(|| {
-                        format!("publish Rockbox projection {name:?} from {temporary:?}")
-                    })?;
-            }
-            #[cfg(not(unix))]
+            #[cfg(windows)]
             directory
-                .rename_atomic(&temporary, name, replace_recorded)
+                .rename_open_file(&file, &temporary, name)
+                .with_context(|| {
+                    format!("publish Rockbox projection {name:?} from {temporary:?}")
+                })?;
+            #[cfg(not(windows))]
+            directory
+                .rename_atomic(&temporary, name, false)
                 .with_context(|| {
                     format!("publish Rockbox projection {name:?} from {temporary:?}")
                 })?;
@@ -302,60 +391,30 @@ impl ProjectionIo for DeviceProjectionFs {
             })?;
             Ok(())
         })();
-        if result.is_err() && cleanup_temporary.get() {
+        if result.is_err() {
             let _ = directory.remove_file(&temporary);
         }
         result
     }
 
-    fn remove_recorded(&self, name: &str, authorized: &HashSet<String>) -> Result<bool> {
+    fn remove_recorded(
+        &self,
+        name: &str,
+        expected_hash: &str,
+        authorized: &HashSet<String>,
+    ) -> Result<bool> {
         self.require_authorized(name, authorized)?;
+        validate_recorded_hash(expected_hash)?;
         let directory = match self.open_existing_managed_directory() {
             Ok(directory) => directory,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error).context("open existing managed playlist root"),
         };
-        directory.ensure_path_identity()?;
-        match recorded_entry_state(&directory, name)? {
-            platform::EntryKind::Missing => return Ok(false),
-            platform::EntryKind::Regular => {}
-            platform::EntryKind::Other => {
-                bail!("recorded projection target {name:?} is not an exact regular file")
-            }
-        }
-        directory.ensure_path_identity().with_context(|| {
-            format!("revalidate managed root before deleting projection {name:?}")
-        })?;
-        if recorded_entry_state(&directory, name)? != platform::EntryKind::Regular {
-            bail!("recorded projection target {name:?} changed before deletion");
-        }
         #[cfg(unix)]
-        let expected_target = directory
-            .entry_identity(name)?
-            .ok_or_else(|| anyhow::anyhow!("recorded projection target {name:?} disappeared"))?;
-        self.run_mutation_swap()?;
-        directory
-            .ensure_path_identity()
-            .with_context(|| format!("confirm managed root before deleting projection {name:?}"))?;
+        let removed = self.remove_recorded_unix(&directory, name, expected_hash)?;
         #[cfg(not(unix))]
-        if recorded_entry_state(&directory, name)? != platform::EntryKind::Regular {
-            bail!("recorded projection target {name:?} changed before deletion");
-        }
-        self.inject(ProjectionFailurePoint::Delete)?;
-        #[cfg(unix)]
-        remove_identity_bound(&directory, name, expected_target)
-            .with_context(|| format!("remove recorded projection {name:?}"))?;
-        #[cfg(not(unix))]
-        directory
-            .remove_file(name)
-            .with_context(|| format!("remove recorded projection {name:?}"))?;
-        directory
-            .sync()
-            .context("sync managed projection directory")?;
-        directory.ensure_path_identity().with_context(|| {
-            format!("revalidate managed root after deleting projection {name:?}")
-        })?;
-        Ok(true)
+        let removed = self.remove_recorded_non_unix(&directory, name, expected_hash)?;
+        Ok(removed)
     }
 
     fn content_matches(
@@ -399,17 +458,6 @@ fn validate_write_target(
     }
 }
 
-fn recorded_entry_state(
-    directory: &platform::ManagedDirectory,
-    name: &str,
-) -> Result<platform::EntryKind> {
-    let kind = directory.entry_kind(name)?;
-    if kind == platform::EntryKind::Regular && !directory.has_exact_entry(name)? {
-        return Ok(platform::EntryKind::Other);
-    }
-    Ok(kind)
-}
-
 fn create_unique_temporary(
     directory: &platform::ManagedDirectory,
     name: &str,
@@ -428,28 +476,6 @@ fn create_unique_temporary(
         }
     }
     bail!("could not allocate a unique projection temp for {name:?}")
-}
-
-#[cfg(unix)]
-fn remove_identity_bound(
-    directory: &platform::ManagedDirectory,
-    name: &str,
-    expected: platform::EntryIdentity,
-) -> Result<()> {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    for _ in 0..128 {
-        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let quarantine = format!(
-            ".{name}.classick-delete-{}-{sequence}.tmp",
-            std::process::id()
-        );
-        match directory.remove_if_identity(name, &quarantine, expected) {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    bail!("could not allocate a unique deletion quarantine for {name:?}")
 }
 
 #[cfg(test)]

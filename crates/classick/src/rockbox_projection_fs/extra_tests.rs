@@ -45,6 +45,12 @@ fn directory_targets_are_foreign_and_never_mutated() {
     assert!(fs
         .write_durable(name, b"classick", &authorized, true)
         .is_err());
-    assert!(fs.remove_recorded(name, &authorized).is_err());
+    assert!(fs
+        .remove_recorded(
+            name,
+            blake3::hash(b"classick").to_hex().as_ref(),
+            &authorized
+        )
+        .is_err());
     assert!(fs.root().join(name).is_dir());
 }

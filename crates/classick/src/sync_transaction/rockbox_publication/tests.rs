@@ -100,7 +100,12 @@ impl ProjectionIo for RecordingIo {
         Ok(())
     }
 
-    fn remove_recorded(&self, name: &str, authorized: &HashSet<String>) -> Result<bool> {
+    fn remove_recorded(
+        &self,
+        name: &str,
+        _expected_hash: &str,
+        authorized: &HashSet<String>,
+    ) -> Result<bool> {
         if !authorized.contains(name) {
             bail!("unauthorized delete")
         }
@@ -296,6 +301,33 @@ fn same_name_missing_target_uses_no_replace() {
         io.events.borrow().as_slice(),
         ["write:New--0123456789.m3u8:false"]
     );
+}
+
+#[test]
+fn legacy_same_name_mismatch_fails_without_replacement() {
+    let (store, mut journal, ownership, io, verified) = prepared_rename(false);
+    let desired = journal.pending_rockbox_ops["stable"]
+        .desired
+        .clone()
+        .unwrap();
+    journal
+        .pending_rockbox_ops
+        .get_mut("stable")
+        .unwrap()
+        .previous = Some(desired.clone());
+    io.files
+        .borrow_mut()
+        .insert(desired.relative_filename.clone(), b"corrupt".to_vec());
+    io.events.borrow_mut().clear();
+    store.save(&journal).unwrap();
+
+    assert!(
+        publish_playlist_finalization(&store, &mut journal, &ownership, &io, &verified).is_err()
+    );
+
+    assert_eq!(io.files.borrow()[&desired.relative_filename], b"corrupt");
+    assert!(io.events.borrow().is_empty());
+    assert_eq!(journal.phase, PendingPhase::PlaylistOwnershipPublished);
 }
 
 #[test]

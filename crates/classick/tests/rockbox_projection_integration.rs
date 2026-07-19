@@ -176,6 +176,49 @@ fn failed_delete_recovery_retries_exact_old_path_without_new_apple_id() {
     assert!(h.journal().is_none());
 }
 
+#[cfg(unix)]
+#[test]
+fn delete_cleanup_restart_consumes_the_journal_derived_quarantine() {
+    let mut h = Harness::new();
+    let first = h.sync(true, vec![playlist("stable", "Old", &[0])]).unwrap();
+    let old = first.ownership.playlists["stable"].rockbox.clone().unwrap();
+    h.fail_once(FailurePoint::ProjectionDeleteCleanup);
+
+    assert!(h.sync(true, vec![playlist("stable", "New", &[0])]).is_err());
+
+    assert!(!h.projection_exists(&old));
+    assert!(h.journal().is_some());
+    let managed_root = h.mount.join("Playlists/Classick");
+    assert_eq!(
+        std::fs::read_dir(&managed_root)
+            .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".classick-delete-"))
+            .count(),
+        1
+    );
+
+    let recovered = h.recover().unwrap();
+    assert!(recovered.completed);
+    assert!(h.journal().is_none());
+    assert_eq!(
+        std::fs::read_dir(managed_root)
+            .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".classick-"))
+            .count(),
+        0
+    );
+}
+
 #[test]
 fn corrupt_record_fails_closed_without_foreign_mutation() {
     for bad in ["../x.m3u8", "/x.m3u8", "a/b.m3u8", "a\\b.m3u8"] {

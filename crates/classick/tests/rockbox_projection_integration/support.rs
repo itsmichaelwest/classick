@@ -41,6 +41,7 @@ pub enum FailurePoint {
     ProjectionWrite,
     ProjectionRename,
     ProjectionDelete,
+    ProjectionDeleteCleanup,
 }
 
 pub struct SyncResult {
@@ -216,6 +217,13 @@ impl Harness {
                 DeviceProjectionFs::fail_once_for_mount(
                     self.mount.clone(),
                     ProjectionFailurePoint::Delete,
+                );
+                None
+            }
+            Some(FailurePoint::ProjectionDeleteCleanup) => {
+                DeviceProjectionFs::fail_once_for_mount(
+                    self.mount.clone(),
+                    ProjectionFailurePoint::DeleteCleanup,
                 );
                 None
             }

@@ -62,7 +62,7 @@ pub fn plan_projection(
             .playlists
             .get(&slug)
             .and_then(|entry| entry.rockbox.clone());
-        let (desired_record, target_state) = choose_record(
+        let (desired_record, target_state, target_content_matches) = choose_record(
             &slug,
             &item.display_name,
             &item.content_hash,
@@ -81,18 +81,7 @@ pub fn plan_projection(
 
         let already_settled = previous.as_ref() == Some(&desired_record)
             && target_state == TargetState::RecordedFile
-            && io
-                .content_matches(
-                    &desired_record.relative_filename,
-                    &desired_record.content_hash,
-                    &authorized,
-                )
-                .with_context(|| {
-                    format!(
-                        "verify settled projection content for {:?}",
-                        desired_record.relative_filename
-                    )
-                })?;
+            && target_content_matches;
         if !already_settled {
             operations.insert(
                 slug,
@@ -207,7 +196,7 @@ fn choose_record(
     recorded_owners: &BTreeMap<String, BTreeSet<String>>,
     selected_names: &BTreeSet<String>,
     io: &dyn ProjectionIo,
-) -> Result<(RockboxProjectionRecord, TargetState)> {
+) -> Result<(RockboxProjectionRecord, TargetState, bool)> {
     for collision_index in 0..256 {
         let relative_filename = candidate_filename(display_name, slug, collision_index);
         if selected_names.contains(&relative_filename)
@@ -231,12 +220,24 @@ fn choose_record(
         {
             continue;
         }
+        let content_matches = if state == TargetState::RecordedFile {
+            io.content_matches(&relative_filename, content_hash, authorized)
+                .with_context(|| {
+                    format!("verify recorded projection content for {relative_filename:?}")
+                })?
+        } else {
+            false
+        };
+        if state == TargetState::RecordedFile && !content_matches {
+            continue;
+        }
         return Ok((
             RockboxProjectionRecord {
                 relative_filename,
                 content_hash: content_hash.to_string(),
             },
             state,
+            content_matches,
         ));
     }
     bail!("could not select a collision-free Rockbox filename for playlist {slug:?}")

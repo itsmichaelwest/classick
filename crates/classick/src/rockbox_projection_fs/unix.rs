@@ -2,40 +2,7 @@ use std::ffi::CString;
 use std::io;
 use std::os::fd::RawFd;
 
-pub(super) use super::unix_common::{EntryIdentity, EntryKind, ManagedDirectory};
-
-pub(super) fn exchange_atomic_at(
-    directory: RawFd,
-    source: &str,
-    destination: &str,
-) -> io::Result<()> {
-    let source = c_name(source)?;
-    let destination = c_name(destination)?;
-
-    #[cfg(target_os = "linux")]
-    {
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                directory,
-                source.as_ptr(),
-                directory,
-                destination.as_ptr(),
-                2_u32,
-            )
-        };
-        if result == 0 {
-            return Ok(());
-        }
-        return Err(io::Error::last_os_error());
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "atomic projection target exchange is unavailable",
-    ))
-}
+pub(super) use super::unix_common::{EntryKind, ManagedDirectory};
 
 pub(super) fn rename_atomic_at(
     directory: RawFd,

@@ -7,9 +7,10 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileInformationByHandle, MoveFileExW, BY_HANDLE_FILE_INFORMATION,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    FileDispositionInfo, FileRenameInfo, GetFileInformationByHandle, SetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,11 +35,9 @@ pub(super) struct ManagedDirectory {
     identity: DirectoryIdentity,
 }
 
-// Windows exposes these leaf operations through paths, not the held directory handle.
-// The held mount/parent/root handles deny delete sharing, so an attacker cannot redirect
-// the managed tree outside the validated root. A concurrent same-name leaf replacement
-// can still race replacement, deletion, or content reads between validation and the path
-// syscall; callers revalidate around each operation, but that narrow race is not atomic.
+// Held mount/parent/root handles deny delete sharing so the validated tree cannot be
+// redirected. Publication and deletion mutate opened file handles; exact-name discovery
+// still relies on the single-writer finalization contract documented in Plan 6B.
 
 impl ManagedDirectory {
     pub(super) fn open_existing(mount: &Path) -> io::Result<Self> {
@@ -139,8 +138,9 @@ impl ManagedDirectory {
     pub(super) fn create_new(&self, name: &str) -> io::Result<File> {
         self.ensure_path_identity()?;
         OpenOptions::new()
-            .write(true)
+            .access_mode(FILE_GENERIC_WRITE | DELETE)
             .create_new(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(self.root.join(name))
     }
@@ -157,40 +157,88 @@ impl ManagedDirectory {
         Ok(bytes)
     }
 
-    pub(super) fn rename_atomic(
+    pub(super) fn rename_open_file(
         &self,
+        source_file: &File,
         source: &str,
         destination: &str,
-        replace: bool,
     ) -> io::Result<()> {
         self.ensure_path_identity()?;
-        let source = self.root.join(source);
+        if !self.has_exact_entry(source)? {
+            return Err(io::Error::other("projection temp spelling changed"));
+        }
         let destination = self.root.join(destination);
-        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-        let destination: Vec<u16> = destination
+        let destination = destination
             .as_os_str()
             .encode_wide()
             .chain(Some(0))
-            .collect();
-        let flags = MOVEFILE_WRITE_THROUGH
-            | if replace {
-                MOVEFILE_REPLACE_EXISTING
-            } else {
-                0
-            };
-
-        // MoveFileExW preserves atomic no-replace publication, while the held ancestor
-        // handles enforce the tree boundary described above.
-        let moved = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) };
-        if moved == 0 {
+            .collect::<Vec<_>>();
+        let header_len = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+        let byte_len = header_len + destination.len() * std::mem::size_of::<u16>();
+        let word_len = byte_len.div_ceil(std::mem::size_of::<usize>());
+        let mut storage = vec![0usize; word_len];
+        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        unsafe {
+            (*info).Anonymous.ReplaceIfExists = 0;
+            (*info).RootDirectory = std::ptr::null_mut();
+            (*info).FileNameLength = ((destination.len() - 1) * std::mem::size_of::<u16>()) as u32;
+            std::ptr::copy_nonoverlapping(
+                destination.as_ptr(),
+                std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+                destination.len(),
+            );
+        }
+        let renamed = unsafe {
+            SetFileInformationByHandle(
+                source_file.as_raw_handle() as HANDLE,
+                FileRenameInfo,
+                info.cast(),
+                byte_len as u32,
+            )
+        };
+        if renamed == 0 {
             return Err(io::Error::last_os_error());
         }
         self.ensure_path_identity()
     }
 
+    pub(super) fn remove_recorded_handle(&self, name: &str, expected_hash: &str) -> io::Result<()> {
+        self.ensure_path_identity()?;
+        if !self.has_exact_entry(name)? {
+            return Err(io::Error::other("recorded projection spelling changed"));
+        }
+        let mut file = OpenOptions::new()
+            .access_mode(FILE_GENERIC_READ | DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.root.join(name))?;
+        let (_, attributes) = identity(&file)?;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::other(
+                "recorded projection became a reparse point",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        if blake3::hash(&bytes).to_hex().as_str() != expected_hash {
+            return Err(io::Error::other(
+                "recorded projection changed before handle-bound deletion",
+            ));
+        }
+        mark_delete(&file)?;
+        drop(file);
+        self.ensure_path_identity()
+    }
+
     pub(super) fn remove_file(&self, name: &str) -> io::Result<()> {
         self.ensure_path_identity()?;
-        fs::remove_file(self.root.join(name))?;
+        let file = OpenOptions::new()
+            .access_mode(DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.root.join(name))?;
+        mark_delete(&file)?;
+        drop(file);
         self.ensure_path_identity()
     }
 
@@ -200,6 +248,23 @@ impl ManagedDirectory {
             &self.playlists_directory,
             &self.directory,
         );
+        Ok(())
+    }
+}
+
+fn mark_delete(file: &File) -> io::Result<()> {
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: 1 };
+    let deleted = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            FileDispositionInfo,
+            std::ptr::addr_of!(disposition).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if deleted == 0 {
+        Err(io::Error::last_os_error())
+    } else {
         Ok(())
     }
 }

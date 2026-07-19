@@ -63,7 +63,12 @@ impl ProjectionIo for MemoryIo {
         panic!("pure planner must not write")
     }
 
-    fn remove_recorded(&self, _name: &str, _authorized: &HashSet<String>) -> Result<bool> {
+    fn remove_recorded(
+        &self,
+        _name: &str,
+        _expected_hash: &str,
+        _authorized: &HashSet<String>,
+    ) -> Result<bool> {
         panic!("pure planner must not delete")
     }
 
@@ -280,12 +285,11 @@ fn unchanged_record_with_modified_bytes_stages_repair_without_writing() {
 
     let plan = plan_projection("SERIAL", true, &desired, &settled, &candidate, &io).unwrap();
 
+    let operation = &plan.operations["mix"];
+    assert_eq!(operation.previous, Some(exact));
     assert_eq!(
-        plan.operations["mix"],
-        PendingRockboxOp {
-            previous: Some(exact.clone()),
-            desired: Some(exact),
-        }
+        operation.desired.as_ref().unwrap().relative_filename,
+        candidate_filename("Mix", "mix", 1)
     );
 }
 
@@ -310,7 +314,9 @@ fn rename_update_unsubscribe_and_toggle_off_have_exact_pairs() {
     settled.playlists.get_mut("update").unwrap().rockbox = Some(update_old.clone());
     settled.playlists.get_mut("gone").unwrap().rockbox = Some(gone_old.clone());
     let candidate = ownership("SERIAL", [("rename".into(), 1), ("update".into(), 2)]);
-    let io = MemoryIo::recorded([rename_old.clone(), update_old.clone(), gone_old.clone()]);
+    let mut io = MemoryIo::recorded([rename_old.clone(), update_old.clone(), gone_old.clone()]);
+    io.content_matches
+        .insert(update_old.relative_filename.clone(), false);
 
     let plan = plan_projection("SERIAL", true, &desired, &settled, &candidate, &io).unwrap();
     assert_eq!(plan.operations["rename"].previous, Some(rename_old.clone()));
@@ -323,7 +329,7 @@ fn rename_update_unsubscribe_and_toggle_off_have_exact_pairs() {
         rename_old.relative_filename
     );
     assert_eq!(plan.operations["update"].previous, Some(update_old.clone()));
-    assert_eq!(
+    assert_ne!(
         plan.operations["update"]
             .desired
             .as_ref()

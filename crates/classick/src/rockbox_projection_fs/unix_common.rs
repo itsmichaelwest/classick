@@ -204,59 +204,6 @@ impl ManagedDirectory {
         super::platform::rename_atomic_at(self.raw_fd(), source, destination, replace)
     }
 
-    pub(super) fn replace_if_identity(
-        &self,
-        source: &str,
-        destination: &str,
-        expected_destination: EntryIdentity,
-    ) -> io::Result<()> {
-        let source_identity = self.entry_identity(source)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "projection temp disappeared")
-        })?;
-        super::platform::exchange_atomic_at(self.raw_fd(), source, destination)?;
-
-        let verification: io::Result<bool> = (|| {
-            Ok(self.entry_identity(source)? == Some(expected_destination)
-                && self.has_exact_entry(destination)?
-                && self.entry_identity(destination)? == Some(source_identity))
-        })();
-        match verification {
-            Ok(true) => self.remove_file(source),
-            Ok(false) => Err(self.rollback_exchange_error(
-                source,
-                destination,
-                "replacement target changed after authorization",
-            )),
-            Err(error) => Err(self.rollback_exchange_error(
-                source,
-                destination,
-                &format!("verify exchanged replacement target: {error}"),
-            )),
-        }
-    }
-
-    pub(super) fn remove_if_identity(
-        &self,
-        name: &str,
-        quarantine: &str,
-        expected: EntryIdentity,
-    ) -> io::Result<()> {
-        self.rename_atomic(name, quarantine, false)?;
-        let verification = self.entry_identity(quarantine);
-        if !matches!(verification, Ok(Some(actual)) if actual == expected) {
-            let rollback = self.rename_atomic(quarantine, name, false);
-            let reason = match verification {
-                Ok(_) => "deletion target changed after authorization".to_string(),
-                Err(error) => format!("verify quarantined deletion target: {error}"),
-            };
-            return Err(match rollback {
-                Ok(()) => io::Error::other(reason),
-                Err(error) => io::Error::other(format!("{reason}; rollback failed: {error}")),
-            });
-        }
-        self.remove_file(quarantine)
-    }
-
     pub(super) fn remove_file(&self, name: &str) -> io::Result<()> {
         let name = c_string(name.as_bytes(), "projection filename")?;
         let result = unsafe { libc::unlinkat(self.raw_fd(), name.as_ptr(), 0) };
@@ -273,13 +220,6 @@ impl ManagedDirectory {
 
     pub(super) fn raw_fd(&self) -> RawFd {
         self.directory.as_raw_fd()
-    }
-
-    fn rollback_exchange_error(&self, source: &str, destination: &str, message: &str) -> io::Error {
-        match super::platform::exchange_atomic_at(self.raw_fd(), source, destination) {
-            Ok(()) => io::Error::other(message),
-            Err(error) => io::Error::other(format!("{message}; rollback failed: {error}")),
-        }
     }
 }
 

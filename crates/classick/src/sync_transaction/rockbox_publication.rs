@@ -184,17 +184,7 @@ pub fn execute_projection_ops(
             if blake3::hash(&bytes).to_hex().as_str() != desired.content_hash {
                 bail!("verified playlist {slug:?} content differs from prepared projection hash");
             }
-            let replace_recorded = operation
-                .previous
-                .as_ref()
-                .is_some_and(|previous| previous.relative_filename == desired.relative_filename);
-            publish_desired(
-                projection_io,
-                desired,
-                &bytes,
-                &authorized,
-                replace_recorded,
-            )?;
+            publish_desired(projection_io, desired, &bytes, &authorized)?;
         }
         if let Some(previous) = &operation.previous {
             let desired_name = operation
@@ -202,7 +192,11 @@ pub fn execute_projection_ops(
                 .as_ref()
                 .map(|record| record.relative_filename.as_str());
             if desired_name != Some(previous.relative_filename.as_str()) {
-                projection_io.remove_recorded(&previous.relative_filename, &authorized)?;
+                projection_io.remove_recorded(
+                    &previous.relative_filename,
+                    &previous.content_hash,
+                    &authorized,
+                )?;
             }
         }
     }
@@ -214,7 +208,6 @@ fn publish_desired(
     desired: &crate::ipod::playlist_ownership::RockboxProjectionRecord,
     bytes: &[u8],
     authorized: &HashSet<String>,
-    replace_recorded: bool,
 ) -> Result<()> {
     match io.target_state(&desired.relative_filename, authorized)? {
         TargetState::Missing => {
@@ -228,11 +221,9 @@ fn publish_desired(
             )? {
                 Ok(())
             } else {
-                io.write_durable(
-                    &desired.relative_filename,
-                    bytes,
-                    authorized,
-                    replace_recorded,
+                bail!(
+                    "prepared Rockbox projection target {:?} no longer matches its recorded hash",
+                    desired.relative_filename
                 )
             }
         }
