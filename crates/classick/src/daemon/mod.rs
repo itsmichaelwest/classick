@@ -23,6 +23,8 @@ pub mod session_admission;
 pub mod source_availability;
 pub mod state;
 pub mod sync_orchestrator;
+#[cfg(unix)]
+pub(crate) mod unix_socket;
 
 // ---------------------------------------------------------------------------
 // Tuning constants (F-27, F-28). Grouped here so the relationships between

@@ -16,8 +16,11 @@
 
 use crate::ffi;
 use std::ffi::CStr;
+use std::fs::{File, OpenOptions};
+use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use tracing_subscriber::filter::EnvFilter;
 
@@ -26,7 +29,7 @@ use tracing_subscriber::filter::EnvFilter;
 ///
 /// Writer dispatch:
 /// - `ipc_mode == true`: tracing writes to a timestamped file under
-///   `%LOCALAPPDATA%\classick\logs\core-{unix_ts}.log` (see
+///   `%LOCALAPPDATA%\classick\logs\core-{secs}-{nanos}-{pid}.log` (see
 ///   `docs/ipc-protocol.md` §9). This MUST stay off stdout — stdout carries
 ///   the JSON event stream and any non-JSON bytes corrupt it. If the file
 ///   can't be opened, falls back to `io::sink()` (silent); we deliberately
@@ -78,31 +81,53 @@ pub fn init(verbose: bool, use_tui: bool, ipc_mode: bool) {
     debug!("logging initialized (verbose={verbose}, use_tui={use_tui}, ipc_mode={ipc_mode})");
 }
 
-/// Compute the path for the IPC-mode tracing log and create the directory.
+/// Compute the directory for IPC-mode tracing logs.
 ///
-/// Layout: `<data_local_dir>/classick/logs/core-{unix_timestamp}.log`.
+/// Layout: `<data_local_dir>/classick/logs/`.
 /// On Windows this resolves to `%LOCALAPPDATA%\classick\logs\`. Falls back
 /// to the OS temp dir if `dirs::data_local_dir()` returns None (extremely
 /// unusual on supported platforms).
-fn ipc_log_path() -> PathBuf {
-    let base = dirs::data_local_dir()
+fn ipc_log_dir() -> PathBuf {
+    dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(crate::PROJECT_DIR)
-        .join("logs");
-    let _ = std::fs::create_dir_all(&base);
-    // SystemTime → unix seconds, used purely as a uniqueness suffix. We
-    // deliberately avoid pulling in `chrono` for this; `chrono` is not yet a
-    // project dep and this task is supposed to be additive-only.
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    base.join(format!("core-{secs}.log"))
+        .join("logs")
 }
 
-fn open_ipc_log_file() -> std::io::Result<std::fs::File> {
-    let path = ipc_log_path();
-    std::fs::File::create(path)
+fn open_ipc_log_file() -> io::Result<File> {
+    let base = ipc_log_dir();
+    std::fs::create_dir_all(&base)?;
+    open_unique_ipc_log_file_in(&base, SystemTime::now(), std::process::id())
+}
+
+fn open_unique_ipc_log_file_in(
+    base: &std::path::Path,
+    now: SystemTime,
+    pid: u32,
+) -> io::Result<File> {
+    let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let stem = format!(
+        "core-{}-{:09}-{pid}",
+        timestamp.as_secs(),
+        timestamp.subsec_nanos()
+    );
+    let mut collision = 0_u64;
+    loop {
+        let name = if collision == 0 {
+            format!("{stem}.log")
+        } else {
+            format!("{stem}-{collision}.log")
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(base.join(name))
+        {
+            Ok(file) => return Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => collision += 1,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 extern "C" fn glib_log_handler(
@@ -145,5 +170,45 @@ fn install_glib_handler() {
     // We pass null user_data because the handler doesn't need any state.
     unsafe {
         ffi::g_log_set_default_handler(Some(glib_log_handler), std::ptr::null_mut());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn test_dir(name: &str) -> PathBuf {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-tmp")
+            .join(format!("logging-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn unique_log_name_contains_subsecond_timestamp_and_pid() {
+        let base = test_dir("qualified-name");
+        let now = UNIX_EPOCH + Duration::new(1234, 5678);
+
+        drop(open_unique_ipc_log_file_in(&base, now, 42).unwrap());
+
+        assert!(base.join("core-1234-000005678-42.log").is_file());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn colliding_log_name_does_not_truncate_existing_file() {
+        let base = test_dir("collision");
+        let now = UNIX_EPOCH + Duration::new(1234, 5678);
+        let original = base.join("core-1234-000005678-42.log");
+        std::fs::write(&original, b"keep me").unwrap();
+
+        drop(open_unique_ipc_log_file_in(&base, now, 42).unwrap());
+
+        assert_eq!(std::fs::read(&original).unwrap(), b"keep me");
+        assert!(base.join("core-1234-000005678-42-1.log").is_file());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

@@ -15,10 +15,10 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+#[cfg(unix)]
+use crate::daemon::unix_socket::UnixSocketLease;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::ServerOptions;
-#[cfg(unix)]
-use tokio::net::UnixListener;
 
 #[cfg(target_os = "macos")]
 extern "C" {
@@ -219,16 +219,9 @@ fn spawn_accept_loop(
     cmd_tx: mpsc::UnboundedSender<ClientCommand>,
     new_client_tx: mpsc::UnboundedSender<NewClient>,
 ) -> Result<()> {
-    // UnixListener::bind errors if the path already exists. A stale
-    // socket from a previously-crashed daemon is the common case;
-    // remove it. If a real daemon is currently bound we'll trample
-    // its socket, but a real daemon would also be holding a process
-    // lock somewhere — the named-pipe `first_pipe_instance(true)`
-    // analogue. For now: trust the operator to run only one daemon.
-    let _ = std::fs::remove_file(&pipe_name);
-    let listener =
-        UnixListener::bind(&pipe_name).with_context(|| format!("bind unix socket {pipe_name}"))?;
+    let (listener, lease) = UnixSocketLease::bind(std::path::Path::new(&pipe_name))?;
     tokio::spawn(async move {
+        let _lease = lease;
         tracing::info!("ipc-server: listening on {pipe_name}");
         let mut next_client_id: u64 = 1;
         loop {
