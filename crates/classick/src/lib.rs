@@ -83,6 +83,7 @@ pub mod portable_path;
 pub mod preflight;
 pub mod progress;
 pub mod rockbox_playlist;
+pub mod rockbox_projection_fs;
 pub mod scan;
 #[cfg(windows)]
 pub mod scsi_inquiry;
