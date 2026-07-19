@@ -770,4 +770,65 @@ final class WireCodecTests: XCTestCase {
     XCTAssertThrowsError(
       try JSONDecoder().decode(HistoryEntry.self, from: Data(legacy.utf8)))
   }
+
+  // MARK: - Protocol 2.0.0 source recovery
+
+  func testRetrySourceMountEncodesRequiredFieldsWithoutDeviceIdentity() throws {
+    for allowUI in [true, false] {
+      let data = try JSONEncoder().encode(
+        DaemonCommand.retrySourceMount(allowUI: allowUI, requestID: "req-123"))
+      let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+      XCTAssertEqual(object["type"] as? String, "retry_source_mount")
+      XCTAssertEqual(object["allow_ui"] as? Bool, allowUI)
+      XCTAssertEqual(object["request_id"] as? String, "req-123")
+      XCTAssertNil(object["serial"])
+      XCTAssertEqual(object.count, 3)
+    }
+  }
+
+  func testDecodesAvailableSourceAvailabilityWithResolvedRootAndCorrelation() throws {
+    let json =
+      #"{"type":"source_availability","state":"available","source_root":"/Volumes/data-1/media/music","acknowledged_request_id":"req-123"}"#
+    let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+
+    guard case .sourceAvailability(let availability) = event else {
+      return XCTFail("expected sourceAvailability")
+    }
+    XCTAssertEqual(availability.state, .available)
+    XCTAssertEqual(availability.sourceRoot, "/Volumes/data-1/media/music")
+    XCTAssertEqual(availability.acknowledgedRequestID, "req-123")
+  }
+
+  func testDecodesUncorrelatedSourceAvailabilityLifecycleBroadcast() throws {
+    for state in ["remounting", "auth_required", "unavailable"] {
+      let json = #"{"type":"source_availability","state":"\#(state)"}"#
+      let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+
+      guard case .sourceAvailability(let availability) = event else {
+        return XCTFail("expected sourceAvailability for \(state)")
+      }
+      XCTAssertEqual(availability.state.rawValue, state)
+      XCTAssertNil(availability.sourceRoot)
+      XCTAssertNil(availability.acknowledgedRequestID)
+    }
+  }
+
+  func testSourceAvailabilityRejectsMissingOrInvalidStateAndRootShapes() {
+    let invalidPayloads = [
+      #"{"type":"source_availability"}"#,
+      #"{"type":"source_availability","state":"unknown"}"#,
+      #"{"type":"source_availability","state":"available"}"#,
+      #"{"type":"source_availability","state":"available","source_root":null}"#,
+      #"{"type":"source_availability","state":"auth_required","source_root":"/music"}"#,
+      #"{"type":"source_availability","state":"unavailable","source_root":null}"#,
+      #"{"type":"source_availability","state":"remounting","source_root":"/music"}"#,
+    ]
+
+    for payload in invalidPayloads {
+      XCTAssertThrowsError(
+        try JSONDecoder().decode(DaemonEvent.self, from: Data(payload.utf8)),
+        "invalid payload unexpectedly decoded: \(payload)")
+    }
+  }
 }

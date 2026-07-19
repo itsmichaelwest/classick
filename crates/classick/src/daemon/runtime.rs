@@ -20,10 +20,14 @@ use crate::daemon::ipc_server::ClientCommand;
 use crate::daemon::runtime_state::{RuntimeState, SessionControls};
 use crate::daemon::scheduler::SyncScheduler;
 use crate::daemon::session_admission::EventContext;
+use crate::daemon::source_availability::{
+    ResolvedSource, SourceAvailabilityService, SourceUnavailable,
+};
 use crate::daemon::state::SessionKind;
 use crate::daemon::sync_orchestrator::{self, OrchestratorOutcome};
 use crate::ipc_daemon::{
-    DaemonCommand, DaemonEvent, DaemonStateLabel, PlaylistKind, TriggerSource,
+    DaemonCommand, DaemonEvent, DaemonStateLabel, PlaylistKind, SourceAvailabilityState,
+    TriggerSource,
 };
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -167,6 +171,7 @@ pub async fn run_daemon() -> Result<()> {
         config_path: None,
         history_path: None,
         pipe_name: None,
+        source_availability: None,
     };
     run_daemon_with_deps(deps).await
 }
@@ -245,6 +250,10 @@ pub struct DaemonDeps {
     /// `\\.\pipe\classick-test-<pid>-<n>` so the suite runs even
     /// while a real daemon is bound to the production pipe.
     pub pipe_name: Option<String>,
+    /// Override source mounting for deterministic recovery tests. Production
+    /// uses the platform backend (NetFS on macOS, established sessions
+    /// elsewhere).
+    pub source_availability: Option<SourceAvailabilityService>,
 }
 
 /// Internal events posted from background sync tasks back to the runtime
@@ -276,6 +285,10 @@ enum InternalEvent {
         session_id: crate::ipc_device::SessionId,
         outcome: Result<OrchestratorOutcome>,
     },
+    SourceAvailabilityResolved {
+        attempt_id: u64,
+        result: std::result::Result<ResolvedSource, SourceUnavailable>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -299,6 +312,342 @@ impl ConfigRevision {
     #[cfg(test)]
     fn advance_after_persist(&mut self) -> u64 {
         self.record_persisted_mutation(true)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingSync {
+    trigger: SyncTrigger,
+    serial: String,
+    drive: String,
+}
+
+#[derive(Debug, Default)]
+struct PendingSourceAction {
+    scan_requested: bool,
+    sync: Option<PendingSync>,
+}
+
+#[derive(Debug)]
+struct SourceRecoveryState {
+    pending: PendingSourceAction,
+    in_flight_attempt: Option<u64>,
+    next_attempt_id: u64,
+    retry_request_ids: Vec<String>,
+    sync_after_scan: Option<PendingSync>,
+    current_state: SourceAvailabilityState,
+    available_root: Option<PathBuf>,
+}
+
+impl Default for SourceRecoveryState {
+    fn default() -> Self {
+        Self {
+            pending: PendingSourceAction::default(),
+            in_flight_attempt: None,
+            next_attempt_id: 1,
+            retry_request_ids: Vec::new(),
+            sync_after_scan: None,
+            current_state: SourceAvailabilityState::Unavailable,
+            available_root: None,
+        }
+    }
+}
+
+impl PendingSourceAction {
+    fn request_scan(&mut self) {
+        self.scan_requested = true;
+    }
+
+    fn request_sync(&mut self, sync: PendingSync) {
+        if self.sync.is_none() {
+            self.sync = Some(sync);
+        }
+    }
+}
+
+fn mount_interaction(allow_ui: bool) -> crate::daemon::source_availability::MountInteraction {
+    if allow_ui {
+        crate::daemon::source_availability::MountInteraction::AllowUi
+    } else {
+        crate::daemon::source_availability::MountInteraction::SuppressUi
+    }
+}
+
+fn persist_resolved_source(
+    config_path: &Path,
+    location: &crate::source_location::SourceLocation,
+    resolved_root: &Path,
+) -> Result<()> {
+    let mut config = config_file::load(config_path)?.unwrap_or_default();
+    let mut location = location.clone();
+    location.resolved_path = resolved_root.to_path_buf();
+    config.source = Some(resolved_root.to_path_buf());
+    config.source_location = Some(location);
+    config_file::save(config_path, &config)
+}
+
+enum SourceActionRequest {
+    Scan,
+    Sync(PendingSync),
+    Retry { allow_ui: bool, request_id: String },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request_source_action(
+    request: SourceActionRequest,
+    recovery: &mut SourceRecoveryState,
+    availability: &SourceAvailabilityService,
+    state: &mut RuntimeState,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    spawn_sync: &SpawnFn,
+    spawn_scan: &SpawnFn,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    registry: &DeviceRegistry,
+    config_path: &Path,
+    history: &HistoryService,
+    library_count_cache: Option<usize>,
+) {
+    let allow_ui = match request {
+        SourceActionRequest::Scan => {
+            recovery.pending.request_scan();
+            false
+        }
+        SourceActionRequest::Sync(sync) => {
+            recovery.pending.request_sync(sync);
+            false
+        }
+        SourceActionRequest::Retry {
+            allow_ui,
+            request_id,
+        } => {
+            recovery.retry_request_ids.push(request_id);
+            allow_ui
+        }
+    };
+
+    let Some(location) = configured_source_location_at(config_path) else {
+        recovery.pending = PendingSourceAction::default();
+        publish_source_availability(
+            recovery,
+            event_tx,
+            SourceAvailabilityState::Unavailable,
+            None,
+        );
+        return;
+    };
+
+    if location.resolved_path.exists() {
+        if !recovery.retry_request_ids.is_empty() {
+            recovery.pending.request_scan();
+        }
+        publish_source_availability(
+            recovery,
+            event_tx,
+            SourceAvailabilityState::Available,
+            Some(location.resolved_path.clone()),
+        );
+        start_available_source_actions(
+            recovery,
+            state,
+            event_tx,
+            spawn_sync,
+            spawn_scan,
+            internal_tx,
+            registry,
+            config_path,
+            history,
+            library_count_cache,
+        );
+        return;
+    }
+
+    if recovery.in_flight_attempt.is_some() {
+        return;
+    }
+
+    let attempt_id = recovery.next_attempt_id;
+    recovery.next_attempt_id = recovery
+        .next_attempt_id
+        .checked_add(1)
+        .expect("source recovery attempt id space exhausted");
+    recovery.in_flight_attempt = Some(attempt_id);
+    recovery.current_state = SourceAvailabilityState::Remounting;
+    recovery.available_root = None;
+    let _ = event_tx.send(DaemonEvent::SourceAvailability {
+        state: SourceAvailabilityState::Remounting,
+        source_root: None,
+        acknowledged_request_id: None,
+    });
+
+    let availability = availability.clone();
+    let internal_tx = internal_tx.clone();
+    tokio::spawn(async move {
+        let result = availability
+            .ensure_source_available(&location, mount_interaction(allow_ui))
+            .await;
+        let _ = internal_tx.send(InternalEvent::SourceAvailabilityResolved { attempt_id, result });
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_available_source_actions(
+    recovery: &mut SourceRecoveryState,
+    state: &mut RuntimeState,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    spawn_sync: &SpawnFn,
+    spawn_scan: &SpawnFn,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    registry: &DeviceRegistry,
+    config_path: &Path,
+    history: &HistoryService,
+    library_count_cache: Option<usize>,
+) {
+    if !state.is_idle() {
+        return;
+    }
+    if recovery.pending.scan_requested {
+        recovery.pending.scan_requested = false;
+        if recovery.sync_after_scan.is_none() {
+            recovery.sync_after_scan = recovery.pending.sync.take();
+        }
+        start_scan_session(
+            state,
+            event_tx,
+            spawn_scan,
+            internal_tx,
+            registry,
+            config_path,
+            history,
+            library_count_cache,
+        );
+    } else if let Some(sync) = recovery.pending.sync.take() {
+        start_sync_session(
+            sync.trigger,
+            sync.serial,
+            sync.drive,
+            state,
+            event_tx,
+            spawn_sync,
+            internal_tx,
+            config_path,
+            library_count_cache,
+        );
+    }
+}
+
+fn publish_source_availability(
+    recovery: &mut SourceRecoveryState,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    state: SourceAvailabilityState,
+    source_root: Option<PathBuf>,
+) {
+    recovery.current_state = state;
+    recovery.available_root = source_root.clone();
+    let source_root = source_root.map(|path| path.to_string_lossy().into_owned());
+    if recovery.retry_request_ids.is_empty() {
+        let _ = event_tx.send(DaemonEvent::SourceAvailability {
+            state,
+            source_root,
+            acknowledged_request_id: None,
+        });
+        return;
+    }
+    for request_id in recovery.retry_request_ids.drain(..) {
+        let _ = event_tx.send(DaemonEvent::SourceAvailability {
+            state,
+            source_root: source_root.clone(),
+            acknowledged_request_id: Some(request_id),
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_source_recovery(
+    attempt_id: u64,
+    result: std::result::Result<ResolvedSource, SourceUnavailable>,
+    recovery: &mut SourceRecoveryState,
+    library_watcher: &mut crate::daemon::library_watcher::LibraryWatcher,
+    library_scan_deadline: &mut Option<tokio::time::Instant>,
+    state: &mut RuntimeState,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    spawn_sync: &SpawnFn,
+    spawn_scan: &SpawnFn,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    registry: &DeviceRegistry,
+    config_path: &Path,
+    history: &HistoryService,
+    library_count_cache: Option<usize>,
+    config_revision: &mut ConfigRevision,
+) {
+    if recovery.in_flight_attempt != Some(attempt_id) {
+        tracing::debug!(attempt_id, "daemon: ignoring stale source recovery result");
+        return;
+    }
+    recovery.in_flight_attempt = None;
+    match result {
+        Ok(resolved) => {
+            let Some(location) = configured_source_location_at(config_path) else {
+                publish_source_availability(
+                    recovery,
+                    event_tx,
+                    SourceAvailabilityState::Unavailable,
+                    None,
+                );
+                return;
+            };
+            if let Err(error) = persist_resolved_source(config_path, &location, &resolved.root) {
+                tracing::warn!("daemon: failed to persist recovered source: {error:#}");
+                publish_source_availability(
+                    recovery,
+                    event_tx,
+                    SourceAvailabilityState::Unavailable,
+                    None,
+                );
+                return;
+            }
+            config_revision.record_persisted_mutation(true);
+            let _ = event_tx.send(build_config_update(
+                config_file::load(config_path).ok().flatten(),
+                registry,
+                config_revision.current(),
+                None,
+            ));
+            library_watcher.rewatch(Some(resolved.root.clone()));
+            *library_scan_deadline = None;
+            recovery.pending.request_scan();
+            publish_source_availability(
+                recovery,
+                event_tx,
+                SourceAvailabilityState::Available,
+                Some(resolved.root),
+            );
+            start_available_source_actions(
+                recovery,
+                state,
+                event_tx,
+                spawn_sync,
+                spawn_scan,
+                internal_tx,
+                registry,
+                config_path,
+                history,
+                library_count_cache,
+            );
+        }
+        Err(SourceUnavailable::AuthRequired) => publish_source_availability(
+            recovery,
+            event_tx,
+            SourceAvailabilityState::AuthRequired,
+            None,
+        ),
+        Err(SourceUnavailable::MountFailed(_) | SourceUnavailable::MissingSubpath(_)) => {
+            publish_source_availability(
+                recovery,
+                event_tx,
+                SourceAvailabilityState::Unavailable,
+                None,
+            )
+        }
     }
 }
 
@@ -337,6 +686,10 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let mut config_revision = ConfigRevision::default();
     let mut scheduler = SyncScheduler::new(deps.schedule_minutes);
     let mut debouncer = Debouncer::new(crate::daemon::DEVICE_DEBOUNCE_WINDOW);
+    let source_availability = deps
+        .source_availability
+        .unwrap_or_else(SourceAvailabilityService::platform_default);
+    let mut source_recovery = SourceRecoveryState::default();
 
     let pipe_name = deps
         .pipe_name
@@ -386,15 +739,14 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
 
     // Refresh the library index once at startup so the browser is current
     // without a user action. Guarded/incremental like any scan.
-    if config_file::load(&config_path)
-        .ok()
-        .flatten()
-        .and_then(|c| c.source)
-        .is_some()
-    {
-        start_scan_session(
+    if configured_source_location_at(&config_path).is_some() {
+        request_source_action(
+            SourceActionRequest::Scan,
+            &mut source_recovery,
+            &source_availability,
             &mut state,
             &event_tx,
+            &spawn_sync,
             &spawn_scan,
             &internal_tx,
             &registry,
@@ -440,6 +792,8 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &mut scheduler,
                     &mut library_count_cache,
                     &mut config_revision,
+                    &mut source_recovery,
+                    &source_availability,
                 );
                 snapshot_publisher.publish(
                     &event_tx,
@@ -460,6 +814,20 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                             "daemon: skipping library rewatch, config load failed: {e:#}"
                         ),
                     }
+                    request_source_action(
+                        SourceActionRequest::Scan,
+                        &mut source_recovery,
+                        &source_availability,
+                        &mut state,
+                        &event_tx,
+                        &spawn_sync,
+                        &spawn_scan,
+                        &internal_tx,
+                        &registry,
+                        &config_path,
+                        &history,
+                        library_count_cache,
+                    );
                 }
                 if should_exit { break ExitReason::Shutdown; }
             }
@@ -481,6 +849,9 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &config_path,
                     library_count_cache,
                     config_revision.current(),
+                    &mut source_recovery,
+                    &source_availability,
+                    &spawn_scan,
                 );
                 broadcast_status(&event_tx, &state, &registry, &config_path, &history, library_count_cache);
                 snapshot_publisher.publish(
@@ -494,16 +865,66 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
             }
 
             Some(internal) = internal_rx.recv() => {
-                handle_internal_event(
-                    internal,
-                    &mut state,
-                    &event_tx,
-                    &history,
-                    &mut registry,
-                    &config_path,
-                    &mut library_count_cache,
-                    &mut config_revision,
-                );
+                match internal {
+                    InternalEvent::SourceAvailabilityResolved { attempt_id, result } => {
+                        complete_source_recovery(
+                            attempt_id,
+                            result,
+                            &mut source_recovery,
+                            &mut library_watcher,
+                            &mut library_scan_deadline,
+                            &mut state,
+                            &event_tx,
+                            &spawn_sync,
+                            &spawn_scan,
+                            &internal_tx,
+                            &registry,
+                            &config_path,
+                            &history,
+                            library_count_cache,
+                            &mut config_revision,
+                        );
+                    }
+                    internal => {
+                        let completes_active_scan = matches!(
+                            &internal,
+                            InternalEvent::ScanCompleted { session_id, .. }
+                                if state.active_session().is_some_and(|session| session.id == *session_id)
+                        );
+                        handle_internal_event(
+                            internal,
+                            &mut state,
+                            &event_tx,
+                            &history,
+                            &mut registry,
+                            &config_path,
+                            &mut library_count_cache,
+                            &mut config_revision,
+                        );
+                        if completes_active_scan {
+                            if let Some(sync) = source_recovery.sync_after_scan.take() {
+                                source_recovery.pending.request_sync(sync);
+                            }
+                        }
+                        if state.is_idle()
+                            && source_recovery.current_state
+                                == SourceAvailabilityState::Available
+                        {
+                            start_available_source_actions(
+                                &mut source_recovery,
+                                &mut state,
+                                &event_tx,
+                                &spawn_sync,
+                                &spawn_scan,
+                                &internal_tx,
+                                &registry,
+                                &config_path,
+                                &history,
+                                library_count_cache,
+                            );
+                        }
+                    }
+                }
                 snapshot_publisher.publish(
                     &event_tx,
                     &registry,
@@ -512,6 +933,16 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &config_path,
                     library_count_cache,
                 );
+                if configured_source_location_at(&config_path).is_some() {
+                    let _ = event_tx.send(DaemonEvent::SourceAvailability {
+                        state: source_recovery.current_state,
+                        source_root: source_recovery
+                            .available_root
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().into_owned()),
+                        acknowledged_request_id: None,
+                    });
+                }
             }
 
             Some(()) = new_client_rx.recv() => {
@@ -544,15 +975,22 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                 if state.is_idle() && scheduled_device.as_ref()
                     .is_some_and(|device| auto_sync_enabled(&config_path, &device.serial)) {
                     if let Some(device) = scheduled_device {
-                        start_sync_session(
-                            SyncTrigger::Scheduled,
-                            device.serial.clone(),
-                            device.drive.clone(),
+                        request_source_action(
+                            SourceActionRequest::Sync(PendingSync {
+                                trigger: SyncTrigger::Scheduled,
+                                serial: device.serial.clone(),
+                                drive: device.drive.clone(),
+                            }),
+                            &mut source_recovery,
+                            &source_availability,
                             &mut state,
                             &event_tx,
                             &spawn_sync,
+                            &spawn_scan,
                             &internal_tx,
+                            &registry,
                             &config_path,
+                            &history,
                             library_count_cache,
                         );
                         snapshot_publisher.publish(
@@ -593,9 +1031,19 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     // Consume the deadline and run the incremental scan.
                     library_scan_deadline = None;
                     tracing::info!("daemon: library watcher fired a scan after debounce");
-                    start_scan_session(
-                        &mut state, &event_tx, &spawn_scan, &internal_tx,
-                        &registry, &config_path, &history, library_count_cache,
+                    request_source_action(
+                        SourceActionRequest::Scan,
+                        &mut source_recovery,
+                        &source_availability,
+                        &mut state,
+                        &event_tx,
+                        &spawn_sync,
+                        &spawn_scan,
+                        &internal_tx,
+                        &registry,
+                        &config_path,
+                        &history,
+                        library_count_cache,
                     );
                     snapshot_publisher.publish(
                         &event_tx,
@@ -682,6 +1130,9 @@ fn handle_internal_event(
     config_revision: &mut ConfigRevision,
 ) {
     match event {
+        InternalEvent::SourceAvailabilityResolved { .. } => {
+            unreachable!("source recovery results are handled by the runtime loop")
+        }
         InternalEvent::LibraryCountComputed { count } => {
             *library_count_cache = Some(count);
             broadcast_status(
@@ -917,6 +1368,9 @@ fn handle_device_event(
     config_path: &std::path::Path,
     library_count_cache: Option<usize>,
     config_revision: u64,
+    source_recovery: &mut SourceRecoveryState,
+    source_availability: &SourceAvailabilityService,
+    spawn_scan: &SpawnFn,
 ) {
     match event {
         DeviceEvent::Connected(mut ipod) => {
@@ -991,15 +1445,22 @@ fn handle_device_event(
                 .is_some_and(|serial| state.is_idle() && auto_sync_enabled(config_path, serial))
             {
                 let serial = configured_serial.expect("configured serial checked above");
-                start_sync_session(
-                    SyncTrigger::PlugIn,
-                    serial,
-                    ipod.drive.clone(),
+                request_source_action(
+                    SourceActionRequest::Sync(PendingSync {
+                        trigger: SyncTrigger::PlugIn,
+                        serial,
+                        drive: ipod.drive.clone(),
+                    }),
+                    source_recovery,
+                    source_availability,
                     state,
                     event_tx,
                     spawn_sync,
+                    spawn_scan,
                     internal_tx,
+                    registry,
                     config_path,
+                    history,
                     library_count_cache,
                 );
             }
@@ -1513,6 +1974,8 @@ fn handle_client_command(
     scheduler: &mut SyncScheduler,
     library_count_cache: &mut Option<usize>,
     config_revision: &mut ConfigRevision,
+    source_recovery: &mut SourceRecoveryState,
+    source_availability: &SourceAvailabilityService,
 ) -> bool {
     tracing::info!("daemon: client {client_id} command: {command:?}");
     if let Some(reason) = target_rejection(&command, registry, state) {
@@ -1728,15 +2191,22 @@ fn handle_client_command(
                 TriggerSource::PlugIn => SyncTrigger::PlugIn,
             };
             let _ = history; // history mutations now happen in handle_internal_event
-            start_sync_session(
-                trigger,
-                raw_serial.to_string(),
-                device.drive.clone(),
+            request_source_action(
+                SourceActionRequest::Sync(PendingSync {
+                    trigger,
+                    serial: raw_serial.to_string(),
+                    drive: device.drive.clone(),
+                }),
+                source_recovery,
+                source_availability,
                 state,
                 event_tx,
                 spawn_sync,
+                spawn_scan,
                 internal_tx,
+                registry,
                 config_path,
+                history,
                 *library_count_cache,
             );
         }
@@ -1904,9 +2374,35 @@ fn handle_client_command(
                 return false;
             }
             tracing::info!("daemon: client {client_id} triggered a library scan");
-            start_scan_session(
+            request_source_action(
+                SourceActionRequest::Scan,
+                source_recovery,
+                source_availability,
                 state,
                 event_tx,
+                spawn_sync,
+                spawn_scan,
+                internal_tx,
+                registry,
+                config_path,
+                history,
+                *library_count_cache,
+            );
+        }
+        DaemonCommand::RetrySourceMount {
+            allow_ui,
+            request_id,
+        } => {
+            request_source_action(
+                SourceActionRequest::Retry {
+                    allow_ui,
+                    request_id,
+                },
+                source_recovery,
+                source_availability,
+                state,
+                event_tx,
+                spawn_sync,
                 spawn_scan,
                 internal_tx,
                 registry,
@@ -2955,6 +3451,366 @@ mod tests {
             }),
             "auto-sync must be off when the device setting is off"
         );
+    }
+
+    #[test]
+    fn pending_source_action_coalesces_scan_and_keeps_one_sync() {
+        let first = PendingSync {
+            trigger: SyncTrigger::Manual,
+            serial: "RAW-A".into(),
+            drive: "/Volumes/IPOD-A".into(),
+        };
+        let second = PendingSync {
+            trigger: SyncTrigger::Scheduled,
+            serial: "RAW-B".into(),
+            drive: "/Volumes/IPOD-B".into(),
+        };
+        let mut pending = PendingSourceAction::default();
+
+        pending.request_scan();
+        pending.request_scan();
+        pending.request_sync(first.clone());
+        pending.request_sync(second);
+
+        assert!(pending.scan_requested);
+        assert_eq!(pending.sync, Some(first));
+    }
+
+    #[test]
+    fn source_mount_interaction_only_allows_ui_for_explicit_true() {
+        assert_eq!(
+            mount_interaction(false),
+            crate::daemon::source_availability::MountInteraction::SuppressUi
+        );
+        assert_eq!(
+            mount_interaction(true),
+            crate::daemon::source_availability::MountInteraction::AllowUi
+        );
+    }
+
+    #[test]
+    fn alternate_mount_persists_legacy_and_logical_source_together() {
+        let base = std::env::temp_dir().join(format!(
+            "classick-source-recovery-persist-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let config_path = base.join("config.toml");
+        let old = PathBuf::from("/Volumes/data/media/music");
+        let new = PathBuf::from("/Volumes/data-1/media/music");
+        let location = crate::source_location::SourceLocation {
+            resolved_path: old.clone(),
+            identity: crate::source_location::SourceIdentity::Smb {
+                host: "jupiter".into(),
+                share: "data".into(),
+                subpath: Some(crate::portable_path::PortablePath::parse("media/music").unwrap()),
+            },
+        };
+        crate::config_file::save(
+            &config_path,
+            &PersistedConfig {
+                source: Some(old),
+                source_location: Some(location.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        persist_resolved_source(&config_path, &location, &new).unwrap();
+
+        let saved = crate::config_file::load(&config_path)
+            .unwrap()
+            .expect("saved config");
+        assert_eq!(saved.source.as_deref(), Some(new.as_path()));
+        assert_eq!(
+            saved
+                .source_location
+                .as_ref()
+                .map(|source| source.resolved_path.as_path()),
+            Some(new.as_path())
+        );
+        assert_eq!(saved.source_location.unwrap().identity, location.identity);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn completed_spawn(counter: Arc<std::sync::atomic::AtomicUsize>) -> SpawnFn {
+        Arc::new(move |_, _, _, _, _, _| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                Ok(OrchestratorOutcome::Completed {
+                    outcome: SyncOutcome::Ok,
+                    summary: None,
+                    db_restored: false,
+                })
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn existing_local_source_admits_sync_without_mount_recovery() {
+        let base = std::env::temp_dir().join(format!(
+            "classick-source-local-immediate-{}",
+            std::process::id()
+        ));
+        let source = base.join("music");
+        std::fs::create_dir_all(&source).unwrap();
+        let config_path = base.join("config.toml");
+        crate::config_file::save(
+            &config_path,
+            &PersistedConfig {
+                source: Some(source.clone()),
+                source_location: Some(crate::source_location::SourceLocation {
+                    resolved_path: source,
+                    identity: crate::source_location::SourceIdentity::Local {
+                        library_id: "local-test".into(),
+                    },
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut state = RuntimeState::new();
+        let mut recovery = SourceRecoveryState::default();
+        let (event_tx, _) = broadcast::channel(16);
+        let (internal_tx, _internal_rx) = mpsc::unbounded_channel();
+        let sync_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let scan_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spawn_sync = completed_spawn(sync_count.clone());
+        let spawn_scan = completed_spawn(scan_count);
+        let registry = registry(&["RAW-A"]);
+        let history = HistoryService::new(base.join("history.json"));
+
+        request_source_action(
+            SourceActionRequest::Sync(PendingSync {
+                trigger: SyncTrigger::Manual,
+                serial: "RAW-A".into(),
+                drive: "/Volumes/IPOD".into(),
+            }),
+            &mut recovery,
+            &SourceAvailabilityService::platform_default(),
+            &mut state,
+            &event_tx,
+            &spawn_sync,
+            &spawn_scan,
+            &internal_tx,
+            &registry,
+            &config_path,
+            &history,
+            Some(11),
+        );
+
+        assert!(matches!(state_label(&state), DaemonStateLabel::Syncing));
+        tokio::task::yield_now().await;
+        assert_eq!(sync_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(recovery.in_flight_attempt.is_none());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn recovered_alternate_mount_rearms_once_and_scans_before_pending_sync() {
+        let base = std::env::temp_dir().join(format!(
+            "classick-source-recovery-flow-{}",
+            std::process::id()
+        ));
+        let recovered = base.join("Volumes/data-1/media/music");
+        std::fs::create_dir_all(&recovered).unwrap();
+        let config_path = base.join("config.toml");
+        let location = crate::source_location::SourceLocation {
+            resolved_path: base.join("missing/media/music"),
+            identity: crate::source_location::SourceIdentity::Smb {
+                host: "jupiter".into(),
+                share: "data".into(),
+                subpath: Some(crate::portable_path::PortablePath::parse("media/music").unwrap()),
+            },
+        };
+        crate::config_file::save(
+            &config_path,
+            &PersistedConfig {
+                source: Some(location.resolved_path.clone()),
+                source_location: Some(location),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut state = RuntimeState::new();
+        let mut recovery = SourceRecoveryState::default();
+        recovery.in_flight_attempt = Some(7);
+        recovery.pending.request_scan();
+        recovery.pending.request_sync(PendingSync {
+            trigger: SyncTrigger::Manual,
+            serial: "RAW-A".into(),
+            drive: "/Volumes/IPOD".into(),
+        });
+        let (event_tx, _) = broadcast::channel(16);
+        let (internal_tx, _internal_rx) = mpsc::unbounded_channel();
+        let scan_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spawn_scan = completed_spawn(scan_count.clone());
+        let spawn_sync = completed_spawn(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let registry = registry(&["RAW-A"]);
+        let history = HistoryService::new(base.join("history.json"));
+        let (mut watcher, mut watcher_rx) =
+            crate::daemon::library_watcher::LibraryWatcher::spawn(None);
+        let mut deadline = Some(tokio::time::Instant::now());
+        let mut revision = ConfigRevision::default();
+
+        complete_source_recovery(
+            7,
+            Ok(ResolvedSource {
+                root: recovered.clone(),
+                remounted: true,
+            }),
+            &mut recovery,
+            &mut watcher,
+            &mut deadline,
+            &mut state,
+            &event_tx,
+            &spawn_sync,
+            &spawn_scan,
+            &internal_tx,
+            &registry,
+            &config_path,
+            &history,
+            Some(37),
+            &mut revision,
+        );
+        complete_source_recovery(
+            7,
+            Ok(ResolvedSource {
+                root: recovered.clone(),
+                remounted: true,
+            }),
+            &mut recovery,
+            &mut watcher,
+            &mut deadline,
+            &mut state,
+            &event_tx,
+            &spawn_sync,
+            &spawn_scan,
+            &internal_tx,
+            &registry,
+            &config_path,
+            &history,
+            Some(37),
+            &mut revision,
+        );
+
+        tokio::task::yield_now().await;
+        assert_eq!(scan_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(state_label(&state), DaemonStateLabel::Scanning));
+        assert!(recovery.sync_after_scan.is_some());
+        assert!(deadline.is_none());
+        assert_eq!(revision.current(), 1);
+        let saved = crate::config_file::load(&config_path).unwrap().unwrap();
+        assert_eq!(saved.source.as_deref(), Some(recovered.as_path()));
+        assert_eq!(saved.source_location.unwrap().resolved_path, recovered);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        std::fs::write(recovered.join("watch.flac"), b"x").unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), watcher_rx.recv())
+                .await
+                .is_ok()
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn failed_recovery_keeps_cached_library_count_and_index() {
+        let base = std::env::temp_dir().join(format!(
+            "classick-source-recovery-cache-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let index_path = base.join("library-index.json");
+        std::fs::write(&index_path, b"cached-index").unwrap();
+        let count = Some(91usize);
+        let config_path = base.join("config.toml");
+        crate::config_file::save(
+            &config_path,
+            &PersistedConfig {
+                source: Some(base.join("missing")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut recovery = SourceRecoveryState::default();
+        recovery.in_flight_attempt = Some(4);
+        recovery.retry_request_ids.push("retry-failed".into());
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let (internal_tx, _internal_rx) = mpsc::unbounded_channel();
+        let spawn_sync = completed_spawn(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let spawn_scan = completed_spawn(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let registry = registry(&["RAW-A"]);
+        let history = HistoryService::new(base.join("history.json"));
+        let (mut watcher, _watcher_rx) =
+            crate::daemon::library_watcher::LibraryWatcher::spawn(None);
+        let mut deadline = None;
+        let mut state = RuntimeState::new();
+        let mut revision = ConfigRevision::default();
+
+        complete_source_recovery(
+            4,
+            Err(SourceUnavailable::MountFailed(
+                "smb://alice:secret@jupiter/data".into(),
+            )),
+            &mut recovery,
+            &mut watcher,
+            &mut deadline,
+            &mut state,
+            &event_tx,
+            &spawn_sync,
+            &spawn_scan,
+            &internal_tx,
+            &registry,
+            &config_path,
+            &history,
+            count,
+            &mut revision,
+        );
+
+        assert_eq!(count, Some(91));
+        assert_eq!(std::fs::read(&index_path).unwrap(), b"cached-index");
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(DaemonEvent::SourceAvailability {
+                state: SourceAvailabilityState::Unavailable,
+                source_root: None,
+                acknowledged_request_id: Some(request_id),
+            }) if request_id == "retry-failed"
+        ));
+        assert!(recovery.pending.sync.is_none());
+        assert_eq!(revision.current(), 0);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn coalesced_explicit_retries_each_receive_one_terminal_ack() {
+        let mut recovery = SourceRecoveryState::default();
+        recovery.retry_request_ids = vec!["req-a".into(), "req-b".into()];
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+
+        publish_source_availability(
+            &mut recovery,
+            &event_tx,
+            SourceAvailabilityState::AuthRequired,
+            None,
+        );
+
+        let mut acknowledged = [event_rx.try_recv().unwrap(), event_rx.try_recv().unwrap()]
+            .into_iter()
+            .map(|event| match event {
+                DaemonEvent::SourceAvailability {
+                    state: SourceAvailabilityState::AuthRequired,
+                    source_root: None,
+                    acknowledged_request_id: Some(request_id),
+                } => request_id,
+                other => panic!("unexpected terminal event: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        acknowledged.sort();
+        assert_eq!(acknowledged, ["req-a", "req-b"]);
+        assert!(recovery.retry_request_ids.is_empty());
     }
 
     // Cold-start "X of Y": count_source_library resolves the config's source

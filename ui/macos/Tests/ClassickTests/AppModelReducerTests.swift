@@ -993,6 +993,123 @@ final class AppModelReducerTests: XCTestCase {
         focusedSerial: model.focusedDeviceSerial, devices: model.devices))
   }
 
+  // MARK: - Protocol 2.0.0 source recovery
+
+  func testSourceAvailabilityFailurePreservesCachedLibraryAndCount() {
+    let model = AppModel()
+    let cached = LibraryInfo(
+      sourceRoot: "/Volumes/data/media/music", scannedAtUnixSecs: 42,
+      artists: [], genres: [], totalTracks: 1407, totalBytes: 99)
+    model.apply(.libraryUpdate(cached))
+    model.apply(
+      .sourceAvailability(
+        .init(
+          state: .authRequired, sourceRoot: nil, acknowledgedRequestID: nil)))
+
+    XCTAssertEqual(model.sourceAvailability?.state, .authRequired)
+    XCTAssertEqual(model.library, cached)
+    XCTAssertEqual(model.library?.totalTracks, 1407)
+    XCTAssertTrue(model.sourceNeedsAttention)
+    XCTAssertEqual(SourceRecoveryPresentation.attentionTitle, "Music share needs attention")
+  }
+
+  func testSourceRetryRequiresAttentionAndActiveApplication() {
+    let model = AppModel()
+    model.apply(
+      .sourceAvailability(
+        .init(state: .unavailable, sourceRoot: nil, acknowledgedRequestID: nil)))
+
+    XCTAssertNil(
+      model.prepareSourceMountRetry(isApplicationActive: false, requestID: "req-inactive"))
+    XCTAssertFalse(model.sourceRetryPending)
+
+    let command = model.prepareSourceMountRetry(
+      isApplicationActive: true, requestID: "req-active")
+    guard case .retrySourceMount(let allowUI, let requestID) = command else {
+      return XCTFail("expected retrySourceMount")
+    }
+    XCTAssertTrue(allowUI)
+    XCTAssertEqual(requestID, "req-active")
+    XCTAssertTrue(model.sourceRetryPending)
+    XCTAssertNil(
+      model.prepareSourceMountRetry(isApplicationActive: true, requestID: "req-duplicate"),
+      "a pending retry must coalesce duplicate clicks")
+  }
+
+  func testStaleSourceAvailabilityReplyCannotOverwriteCurrentRequest() {
+    let model = AppModel()
+    model.apply(
+      .sourceAvailability(
+        .init(state: .authRequired, sourceRoot: nil, acknowledgedRequestID: nil)))
+    _ = model.prepareSourceMountRetry(isApplicationActive: true, requestID: "req-current")
+
+    model.apply(
+      .sourceAvailability(
+        .init(
+          state: .available, sourceRoot: "/Volumes/stale/media/music",
+          acknowledgedRequestID: "req-stale")))
+
+    XCTAssertEqual(model.sourceAvailability?.state, .authRequired)
+    XCTAssertTrue(model.sourceRetryPending)
+  }
+
+  func testOtherClientSourceAvailabilityReplyIsAnAuthoritativeBroadcast() {
+    let model = AppModel()
+    model.apply(
+      .sourceAvailability(
+        .init(state: .remounting, sourceRoot: nil, acknowledgedRequestID: nil)))
+
+    model.apply(
+      .sourceAvailability(
+        .init(
+          state: .available, sourceRoot: "/Volumes/data-1/media/music",
+          acknowledgedRequestID: "another-client")))
+
+    XCTAssertEqual(model.sourceAvailability?.state, .available)
+    XCTAssertEqual(model.sourceAvailability?.sourceRoot, "/Volumes/data-1/media/music")
+  }
+
+  func testMatchingAvailableReplyClearsAttentionAndReflectsReturnedRoot() {
+    let model = AppModel()
+    let cached = LibraryInfo(
+      sourceRoot: "/Volumes/data/media/music", scannedAtUnixSecs: 42,
+      artists: [], genres: [], totalTracks: 1407, totalBytes: 99)
+    model.apply(.libraryUpdate(cached))
+    model.apply(
+      .configUpdate(
+        source: "/Volumes/data/media/music", daemon: nil, ipod: nil,
+        configRevision: 1, acknowledgedRequestID: "config"))
+    model.apply(
+      .sourceAvailability(
+        .init(state: .authRequired, sourceRoot: nil, acknowledgedRequestID: nil)))
+    _ = model.prepareSourceMountRetry(isApplicationActive: true, requestID: "req-123")
+
+    model.apply(
+      .sourceAvailability(
+        .init(
+          state: .available, sourceRoot: "/Volumes/data-1/media/music",
+          acknowledgedRequestID: "req-123")))
+
+    XCTAssertEqual(model.sourceAvailability?.state, .available)
+    XCTAssertEqual(model.sourceAvailability?.sourceRoot, "/Volumes/data-1/media/music")
+    XCTAssertEqual(model.library?.sourceRoot, "/Volumes/data-1/media/music")
+    XCTAssertEqual(model.config?.source, "/Volumes/data-1/media/music")
+    XCTAssertFalse(model.sourceNeedsAttention)
+    XCTAssertFalse(model.sourceRetryPending)
+    XCTAssertEqual(model.library?.totalTracks, 1407)
+  }
+
+  func testSourceConnectIntentWaitsForExplicitInactiveClickAndCoalescesActivation() {
+    var intent = SourceConnectIntent()
+
+    XCTAssertFalse(intent.applicationDidBecomeActive(), "incidental activation must never prompt")
+    XCTAssertFalse(intent.userRequestedConnect(isApplicationActive: false))
+    XCTAssertFalse(intent.userRequestedConnect(isApplicationActive: false))
+    XCTAssertTrue(intent.applicationDidBecomeActive())
+    XCTAssertFalse(intent.applicationDidBecomeActive(), "one click burst produces one retry")
+    XCTAssertTrue(intent.userRequestedConnect(isApplicationActive: true))
+  }
+
   private func seedDevices(_ serials: [String], in model: AppModel) {
     let devices = serials.map { deviceSnapshot($0) }
     model.apply(.deviceInventorySnapshot(.init(revision: 1, devices: devices)))

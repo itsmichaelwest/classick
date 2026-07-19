@@ -626,3 +626,8 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   The daemon's failure-rate tracker counts every subprocess `error` event as a
   failed track and may cancel the session, so a host-cache refresh warning
   after a validated device publish must remain a visible `log` event.
+- **Source recovery owns pending intent until reachability is terminal.** Scan
+  and sync triggers coalesce behind one mount attempt; authentication failure
+  retains that intent for an explicit UI-authorized retry, while success first
+  persists the returned root, rearms the watcher, and runs exactly one scan
+  before admitting the deferred sync.

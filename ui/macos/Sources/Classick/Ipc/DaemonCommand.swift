@@ -358,6 +358,7 @@ enum DaemonCommand: Encodable, Sendable {
   case backfillRockbox(serial: String, requestID: String)
   case getLibrary(requestID: String)
   case scanLibrary(requestID: String)
+  case retrySourceMount(allowUI: Bool, requestID: String)
   case previewSelection(
     mode: SelectionMode, rules: [SelectionRule], serial: String, requestID: String)
   case getHistory(limit: Int, requestID: String)
@@ -411,6 +412,7 @@ enum DaemonCommand: Encodable, Sendable {
     case subscriptions
     case settings
     case requestID = "request_id"
+    case allowUI = "allow_ui"
   }
 
   static func newRequestID() -> String {
@@ -466,6 +468,10 @@ enum DaemonCommand: Encodable, Sendable {
       try container.encode(requestID, forKey: .requestID)
     case .scanLibrary(let requestID):
       try container.encode("scan_library", forKey: .type)
+      try container.encode(requestID, forKey: .requestID)
+    case .retrySourceMount(let allowUI, let requestID):
+      try container.encode("retry_source_mount", forKey: .type)
+      try container.encode(allowUI, forKey: .allowUI)
       try container.encode(requestID, forKey: .requestID)
     case .previewSelection(let mode, let rules, let serial, let requestID):
       try container.encode("preview_selection", forKey: .type)

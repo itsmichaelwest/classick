@@ -166,6 +166,7 @@ async fn sandbox_with_source() -> WatcherSandbox {
         config_path: Some(config_path),
         history_path: Some(history_path),
         pipe_name: Some(pipe_name.clone()),
+        source_availability: None,
     };
     let runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 

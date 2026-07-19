@@ -177,6 +177,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
         config_path: Some(config_path),
         history_path: Some(history_path),
         pipe_name: Some(pipe_name),
+        source_availability: None,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 
@@ -310,6 +311,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
         config_path: Some(config_path),
         history_path: Some(history_path),
         pipe_name: Some(pipe_name),
+        source_availability: None,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 
@@ -453,6 +455,7 @@ async fn runtime_stays_responsive_during_long_sync() {
         config_path: Some(config_path),
         history_path: Some(history_path),
         pipe_name: Some(pipe_name),
+        source_availability: None,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 

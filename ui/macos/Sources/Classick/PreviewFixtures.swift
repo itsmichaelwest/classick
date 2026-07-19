@@ -547,6 +547,14 @@
       return m
     }
 
+    static func sourceAttentionModel() -> AppModel {
+      let m = connectedSyncedModel()
+      m.apply(
+        .sourceAvailability(
+          .init(state: .authRequired, sourceRoot: nil, acknowledgedRequestID: nil)))
+      return m
+    }
+
     /// Actively syncing — `Phase.syncing` with a live track label + ETA.
     static func syncingModel() -> AppModel {
       let m = connectedSyncedModel()

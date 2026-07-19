@@ -197,6 +197,7 @@ impl Sandbox {
             config_path: Some(config_path.clone()),
             history_path: Some(history_path.clone()),
             pipe_name: Some(pipe_name.clone()),
+            source_availability: None,
         };
         let runtime = tokio::spawn(run_daemon_with_deps(deps));
         Self {

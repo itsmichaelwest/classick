@@ -282,6 +282,19 @@ struct DeviceInventorySnapshot: Codable, Equatable, Sendable {
   var devices: [DeviceSnapshotWire]
 }
 
+enum SourceAvailabilityState: String, Decodable, Equatable, Sendable {
+  case available
+  case remounting
+  case authRequired = "auth_required"
+  case unavailable
+}
+
+struct SourceAvailabilityInfo: Equatable, Sendable {
+  var state: SourceAvailabilityState
+  var sourceRoot: String?
+  var acknowledgedRequestID: String?
+}
+
 // MARK: - DaemonEvent (received)
 
 enum DaemonEvent: Decodable, Sendable {
@@ -307,6 +320,7 @@ enum DaemonEvent: Decodable, Sendable {
     serial: String, selection: SelectionState, subscriptions: SubscriptionsWire,
     settings: DeviceSettingsWire, acknowledgedRequestID: String)
   case devicePreview(DevicePreview)
+  case sourceAvailability(SourceAvailabilityInfo)
   /// Reply to `resolve_tracks`. An empty `tracks` array is a valid reply
   /// (no rule matched anything in the index), not an error.
   case resolvedTracks(tracks: [String], acknowledgedRequestID: String)
@@ -463,6 +477,26 @@ enum DaemonEvent: Decodable, Sendable {
           genres: try container.decode([LibraryGenre].self, forKey: .genres),
           totalTracks: try container.decode(Int.self, forKey: .totalTracks),
           totalBytes: try container.decode(UInt64.self, forKey: .totalBytes),
+          acknowledgedRequestID: try container.decodeIfPresent(
+            String.self, forKey: .acknowledgedRequestID)))
+    case "source_availability":
+      let state = try container.decode(SourceAvailabilityState.self, forKey: .state)
+      let sourceRoot: String?
+      switch state {
+      case .available:
+        sourceRoot = try container.decode(String.self, forKey: .sourceRoot)
+      case .remounting, .authRequired, .unavailable:
+        guard !container.contains(.sourceRoot) else {
+          throw DecodingError.dataCorruptedError(
+            forKey: .sourceRoot, in: container,
+            debugDescription: "source_root must be omitted unless source is available")
+        }
+        sourceRoot = nil
+      }
+      self = .sourceAvailability(
+        SourceAvailabilityInfo(
+          state: state,
+          sourceRoot: sourceRoot,
           acknowledgedRequestID: try container.decodeIfPresent(
             String.self, forKey: .acknowledgedRequestID)))
     case "selection_update":

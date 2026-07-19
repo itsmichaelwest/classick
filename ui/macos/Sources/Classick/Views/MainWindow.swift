@@ -13,6 +13,7 @@ struct MainWindow: View {
   var onResume: (DeviceSerial) -> Void
   var onRetry: (DeviceSerial) -> Void
   var onScan: () -> Void
+  var onConnectSource: () -> Void
   var onForgetIpod: (DeviceSerial) -> Void
   /// True disk eject (sidebar's eject glyph) — distinct from
   /// `onForgetIpod` (Settings page's unpair action). Required, no no-op
@@ -91,7 +92,7 @@ struct MainWindow: View {
     } else {
       switch model.selectedDestination {
       case .library, nil:
-        LibraryView(model: model, onScan: onScan)
+        LibraryView(model: model, onScan: onScan, onConnectSource: onConnectSource)
       case .device(let serial, .music):
         DeviceMusicPage(
           model: model, serial: serial, onSyncNow: onSyncNow,
@@ -151,6 +152,7 @@ struct SetupCallToActionView: View {
         model: model,
         onSyncNow: { _ in }, onPause: { _ in }, onCancelSync: { _ in },
         onResume: { _ in }, onRetry: { _ in }, onScan: {},
+        onConnectSource: {},
         onForgetIpod: { _ in }, onEjectIpod: { _ in },
         onBackfill: { _ in }, onSetUp: { _ in }, onReplaceLibrary: { _ in },
         onAppearRequests: {}, onSavePlaylist: { _ in },

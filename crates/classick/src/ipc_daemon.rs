@@ -213,6 +213,16 @@ pub enum DaemonEvent {
         tracks: Vec<String>,
         acknowledged_request_id: String,
     },
+    /// Current reachability of the configured source library. `source_root`
+    /// is present only for `available`; mount failures intentionally carry no
+    /// backend diagnostics so share paths and credentials cannot leak.
+    SourceAvailability {
+        state: SourceAvailabilityState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_root: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acknowledged_request_id: Option<String>,
+    },
 }
 
 impl DaemonEvent {
@@ -375,6 +385,15 @@ pub enum DaemonStateLabel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum SourceAvailabilityState {
+    Available,
+    Remounting,
+    AuthRequired,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SyncRejectReason {
     AlreadySyncing,
     NoIpod,
@@ -472,6 +491,12 @@ pub enum DaemonCommand {
     /// Spawn a --scan-library subprocess under the shared sync guard.
     /// No-op (log + drop) if busy or no source configured.
     ScanLibrary {
+        request_id: String,
+    },
+    /// Retry the global source-library mount. `allow_ui` is required so the
+    /// daemon never infers permission to open authentication UI.
+    RetrySourceMount {
+        allow_ui: bool,
         request_id: String,
     },
     /// Pure computation; nothing persists. Reply: selection_preview.
@@ -610,6 +635,7 @@ impl DaemonCommand {
             | Self::ReplaceLibrary { request_id, .. }
             | Self::GetLibrary { request_id }
             | Self::ScanLibrary { request_id }
+            | Self::RetrySourceMount { request_id, .. }
             | Self::PreviewSelection { request_id, .. }
             | Self::ListPlaylists { request_id }
             | Self::GetPlaylist { request_id, .. }
@@ -658,6 +684,70 @@ mod tests {
     #[test]
     fn protocol_version_is_2_0_0_constant() {
         assert_eq!(DAEMON_PROTOCOL_VERSION, "2.0.0");
+    }
+
+    #[test]
+    fn source_availability_available_serializes_with_correlated_root() {
+        let event = DaemonEvent::SourceAvailability {
+            state: SourceAvailabilityState::Available,
+            source_root: Some("/Volumes/data-1/media/music".into()),
+            acknowledged_request_id: Some("req-mount".into()),
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "source_availability",
+                "state": "available",
+                "source_root": "/Volumes/data-1/media/music",
+                "acknowledged_request_id": "req-mount"
+            })
+        );
+    }
+
+    #[test]
+    fn source_availability_non_available_states_omit_root_and_ack() {
+        let event = DaemonEvent::SourceAvailability {
+            state: SourceAvailabilityState::AuthRequired,
+            source_root: None,
+            acknowledged_request_id: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "source_availability",
+                "state": "auth_required"
+            })
+        );
+    }
+
+    #[test]
+    fn retry_source_mount_requires_allow_ui_and_request_id() {
+        let command: DaemonCommand = serde_json::from_value(serde_json::json!({
+            "type": "retry_source_mount",
+            "allow_ui": true,
+            "request_id": "req-mount"
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            command,
+            DaemonCommand::RetrySourceMount {
+                allow_ui: true,
+                request_id
+            } if request_id == "req-mount"
+        ));
+        assert!(serde_json::from_value::<DaemonCommand>(serde_json::json!({
+            "type": "retry_source_mount",
+            "request_id": "req-mount"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<DaemonCommand>(serde_json::json!({
+            "type": "retry_source_mount",
+            "allow_ui": true
+        }))
+        .is_err());
     }
 
     #[test]

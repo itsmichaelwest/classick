@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// Whether the subprocess stream currently in flight is a library scan
   /// (latched at `header` — see `observeForNotification`).
   private var currentStreamIsScan = false
+  private var sourceConnectIntent = SourceConnectIntent()
 
   private let syncEventDecoder = JSONDecoder()
 
@@ -114,6 +115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
   }
 
+  func applicationDidBecomeActive(_ notification: Notification) {
+    guard sourceConnectIntent.applicationDidBecomeActive() else { return }
+    sendSourceMountRetry()
+  }
+
   /// Shows first-run setup. Wired to the "Set Up Classick…" menu row and
   /// reused by `autoPresentSetupIfNeeded`.
   func presentSetup(serial: DeviceSerial? = nil) {
@@ -141,6 +147,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// "Rescan Library" action for the main window's `LibraryView`.
   func rescan() {
     Task { await daemonClient.send(.scanLibrary(requestID: DaemonCommand.newRequestID())) }
+  }
+
+  func connectSource() {
+    guard
+      sourceConnectIntent.userRequestedConnect(
+        isApplicationActive: NSApplication.shared.isActive)
+    else {
+      NSApplication.shared.activate(ignoringOtherApps: true)
+      return
+    }
+    sendSourceMountRetry()
+  }
+
+  private func sendSourceMountRetry() {
+    let requestID = DaemonCommand.newRequestID()
+    guard
+      let command = model.prepareSourceMountRetry(
+        isApplicationActive: NSApplication.shared.isActive,
+        requestID: requestID)
+    else { return }
+    Task { await daemonClient.send(command) }
   }
 
   /// TRUE disk eject for the sidebar's eject glyph: unmounts the iPod's
@@ -566,6 +593,7 @@ struct ClassickApp: App {
         onResume: appDelegate.resume,
         onRetry: appDelegate.retry,
         onScan: appDelegate.rescan,
+        onConnectSource: appDelegate.connectSource,
         onForgetIpod: appDelegate.forgetIpod,
         onEjectIpod: appDelegate.ejectIpod,
         onBackfill: appDelegate.backfillRockbox,
@@ -603,6 +631,7 @@ struct ClassickApp: App {
         onOpenSettings: openSettingsWindow,
         onSyncNow: appDelegate.syncNow,
         onRescan: appDelegate.rescan,
+        onConnectSource: appDelegate.connectSource,
         onCancelSync: appDelegate.cancelSync,
         onPause: appDelegate.pause,
         onResume: appDelegate.resume,

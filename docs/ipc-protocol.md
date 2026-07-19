@@ -1287,6 +1287,7 @@ subscription migrations are independent of this wire break and remain intact.
 | `get_history` | `request_id` | `limit` (defaults to 10) | Global; each returned history entry identifies its device |
 | `get_library` | `request_id` | — | Global |
 | `scan_library` | `request_id` | — | Global scan session |
+| `retry_source_mount` | `allow_ui`, `request_id` | — | Global source recovery |
 | `list_playlists` | `request_id` | — | Global |
 | `get_playlist` | `slug`, `request_id` | — | Global |
 | `save_playlist` | `playlist`, `request_id` | — | Global |
@@ -1313,6 +1314,7 @@ Examples:
 {"type":"trigger_sync","source":"manual","serial":"RAW-A","request_id":"req-sync"}
 {"type":"get_history","limit":50,"request_id":"req-history"}
 {"type":"preview_selection","mode":"include","rules":[],"serial":"RAW-A","request_id":"req-preview"}
+{"type":"retry_source_mount","allow_ui":true,"request_id":"req-source"}
 ```
 
 The following v1 payload is invalid in v2 because it has neither a target nor
@@ -1340,6 +1342,7 @@ real domain state.
 | `device_config_update` | `serial`, `selection`, `subscriptions`, `settings`, `acknowledged_request_id` | — |
 | `device_preview` | `serial`, existing preview fields, `acknowledged_request_id` | `projected_free_bytes` may be `null`; `unresolved_subscriptions` is omitted when empty |
 | `resolved_tracks` | `tracks`, `acknowledged_request_id` | — |
+| `source_availability` | `state`; `source_root` when `state` is `available` | `acknowledged_request_id` (terminal reply to an explicit retry only) |
 
 `status_update`, `library_update`, `selection_update`, and `playlists_update`
 may be either replies or broadcasts, so their `acknowledged_request_id` is
@@ -1352,6 +1355,30 @@ advances only after a content-changing config write succeeds; reads, failed
 writes, and no-op saves retain the current revision. A new `hello` starts a new
 connection epoch, so clients discard revision ordering from the prior daemon
 process rather than comparing across restarts.
+
+### Source availability and recovery
+
+`source_availability.state` is exactly one of `available`, `remounting`,
+`auth_required`, or `unavailable`. `source_root` is state-dependent: it is a
+required string for `available` and is omitted (not `null`) for every other
+state. The payload never contains an SMB URL, credentials, native mount error,
+or backend diagnostic.
+
+Automatic recovery attempts always suppress platform UI and publish
+uncorrelated lifecycle events. Authentication UI is permitted only after the
+client sends `retry_source_mount` with the required `allow_ui` field set to
+`true`; omission is a decode error and `false` retains suppress-UI behavior.
+`remounting` is an uncorrelated lifecycle broadcast. The terminal
+`available`, `auth_required`, or `unavailable` event for an explicit retry
+carries that command's `request_id` as `acknowledged_request_id`. If several
+explicit retries coalesce behind one physical mount attempt, the daemon emits
+one terminal correlated event per request id.
+
+```json
+{"type":"source_availability","state":"remounting"}
+{"type":"source_availability","state":"auth_required","acknowledged_request_id":"req-source"}
+{"type":"source_availability","state":"available","source_root":"/Volumes/data-1/media/music","acknowledged_request_id":"req-source"}
+```
 
 ### Device inventory snapshot
 

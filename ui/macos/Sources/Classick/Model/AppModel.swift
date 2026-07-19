@@ -84,6 +84,39 @@ enum DeviceCommandGate {
   }
 }
 
+enum SourceRecoveryPresentation {
+  static let attentionTitle = "Music share needs attention"
+
+  static func needsAttention(_ availability: SourceAvailabilityInfo?) -> Bool {
+    guard let availability else { return false }
+    switch availability.state {
+    case .authRequired, .unavailable:
+      return true
+    case .available, .remounting:
+      return false
+    }
+  }
+}
+
+struct SourceConnectIntent {
+  private var awaitingActivation = false
+
+  mutating func userRequestedConnect(isApplicationActive: Bool) -> Bool {
+    if isApplicationActive {
+      awaitingActivation = false
+      return true
+    }
+    awaitingActivation = true
+    return false
+  }
+
+  mutating func applicationDidBecomeActive() -> Bool {
+    guard awaitingActivation else { return false }
+    awaitingActivation = false
+    return true
+  }
+}
+
 @Observable
 @MainActor
 final class AppModel {
@@ -108,6 +141,8 @@ final class AppModel {
   private(set) var lastRunDbRestored = false
 
   private(set) var library: LibraryInfo?
+  private(set) var sourceAvailability: SourceAvailabilityInfo?
+  private var pendingSourceRetryRequestID: String?
   private(set) var selection: SelectionState?
   private(set) var selectionPreview: SelectionPreviewInfo?
 
@@ -148,6 +183,24 @@ final class AppModel {
   /// supplied its first authoritative inventory snapshot.
   var deviceActionsAvailable: Bool {
     hasAuthoritativeInventory
+  }
+
+  var sourceNeedsAttention: Bool {
+    SourceRecoveryPresentation.needsAttention(sourceAvailability)
+  }
+
+  var sourceRetryPending: Bool {
+    pendingSourceRetryRequestID != nil
+  }
+
+  func prepareSourceMountRetry(
+    isApplicationActive: Bool, requestID: String
+  ) -> DaemonCommand? {
+    guard isApplicationActive, sourceNeedsAttention, pendingSourceRetryRequestID == nil else {
+      return nil
+    }
+    pendingSourceRetryRequestID = requestID
+    return .retrySourceMount(allowUI: true, requestID: requestID)
   }
 
   func canSendDeviceCommand(to serial: DeviceSerial) -> Bool {
@@ -279,6 +332,8 @@ final class AppModel {
       configuredSerial = nil
       hasSeenConfig = false
       statusConfigured = false
+      sourceAvailability = nil
+      pendingSourceRetryRequestID = nil
 
     case .unknown:
       break
@@ -288,6 +343,21 @@ final class AppModel {
 
     case .libraryUpdate(let info):
       library = info
+
+    case .sourceAvailability(let info):
+      if let acknowledgedRequestID = info.acknowledgedRequestID {
+        if let pendingSourceRetryRequestID {
+          guard acknowledgedRequestID == pendingSourceRetryRequestID else { break }
+          self.pendingSourceRetryRequestID = nil
+        }
+      } else if info.state != .remounting {
+        pendingSourceRetryRequestID = nil
+      }
+      sourceAvailability = info
+      if case .available = info.state, let sourceRoot = info.sourceRoot {
+        library?.sourceRoot = sourceRoot
+        config?.source = sourceRoot
+      }
 
     case .selectionUpdate(let mode, let rules, _, _):
       selection = SelectionState(mode: mode, rules: rules)

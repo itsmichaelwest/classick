@@ -15,6 +15,7 @@ struct MenuContent: View {
   var onSyncNow: (DeviceSerial) -> Void = { _ in print("TODO: send(.triggerSync(source: .manual))")
   }
   var onRescan: () -> Void = { print("TODO: send(.scanLibrary)") }
+  var onConnectSource: () -> Void = { print("TODO: send(.retrySourceMount)") }
   var onCancelSync: (DeviceSerial) -> Void = { _ in print("TODO: send(.cancelSync)") }
   var onPause: (DeviceSerial) -> Void = { _ in print("TODO: send(.pause)") }
   var onResume: (DeviceSerial) -> Void = { _ in print("TODO: send(.triggerSync(source: .manual))") }
@@ -28,6 +29,12 @@ struct MenuContent: View {
     }
 
     Button("Open Classick", action: onOpenMain)
+    if model.sourceNeedsAttention {
+      Divider()
+      Text(SourceRecoveryPresentation.attentionTitle)
+      Button("Connect", action: onConnectSource)
+        .disabled(model.sourceRetryPending)
+    }
     Divider()
     phaseContent
     Divider()
@@ -154,6 +161,11 @@ private func formatLastSync(_ iso: String) -> String {
 
   #Preview("Error") {
     MenuContent(model: PreviewFixtures.errorModel())
+      .frame(width: 280)
+  }
+
+  #Preview("Music share needs attention") {
+    MenuContent(model: PreviewFixtures.sourceAttentionModel())
       .frame(width: 280)
   }
 #endif
