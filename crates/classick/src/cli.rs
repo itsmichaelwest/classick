@@ -4,7 +4,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 /// Encoder choice for the transcode pipeline. Passthrough sources never see
-/// this (no encoding happens). See docs/superpowers/specs/2026-05-23-phase-3-addendum.md
+/// this (no encoding happens). See docs/architecture.md.
 /// Change 1 for why ffmpeg is the default (was: auto in the original spec).
 //
 // FUTURE: per-format encoder selection. If a future user wants per-source-codec
@@ -99,7 +99,7 @@ pub struct Cli {
     /// Run as a long-lived background daemon. Listens on a named pipe for
     /// UI clients, handles device events + scheduling, spawns sync
     /// subprocesses on demand. See
-    /// docs/superpowers/specs/2026-05-24-phase-6-daemon-model-design.md.
+    /// docs/architecture.md and docs/ipc/daemon.md.
     /// Mutually exclusive with --ipc-mode and --no-tui.
     #[arg(long, conflicts_with_all = ["ipc_mode", "no_tui"])]
     pub daemon: bool,

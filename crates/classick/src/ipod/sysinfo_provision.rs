@@ -1,6 +1,6 @@
 //! Provision a per-model `SysInfoExtended` onto the iPod so libgpod emits the
 //! artwork ithmb format set the firmware reads. See
-//! docs/superpowers/specs/2026-07-13-sysinfoextended-provisioning-design.md.
+//! docs/device-safety.md and docs/archive/scsi-research.md.
 
 use anyhow::{anyhow, Result};
 use std::path::Path;

@@ -2,7 +2,7 @@
 //! an `.m4a`, so a transcoded track is self-describing for Rockbox (which reads
 //! tags/art from the file) while Apple firmware keeps reading the iTunesDB +
 //! ithmb ArtworkDB. See
-//! docs/superpowers/specs/2026-07-13-rockbox-compatibility-design.md.
+//! docs/device-safety.md.
 
 use anyhow::{Context, Result};
 use std::io::Cursor;

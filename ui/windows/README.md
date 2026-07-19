@@ -171,11 +171,9 @@ touches the WinAppSDK module initializer.
 - **`PRI249` resource warnings are noise.** WinAppSDK PRI tooling complains
   about empty qualifier strings on some assets — cosmetic only.
 - **No `AnyCPU`.** Build x64 or ARM64 explicitly. WinUI 3 needs the RID.
-- **Packaged-by-default.** Deviates from the original spec (`<WindowsPackageType>None</WindowsPackageType>`),
-  but the `winui-mvvm` template's packaged + debug-identity setup is what
-  keeps `dotnet run` ergonomic; staying with it makes the future MSIX
-  milestone smaller. Trade documented in
-  `..\..\docs\superpowers\specs\2026-05-24-phase-6-winui-app.md`.
+- **Packaged-by-default.** The `winui-mvvm` template's packaged +
+  debug-identity setup keeps `dotnet run` ergonomic and preserves the path to
+  MSIX distribution.
 - **Live UI changes need a real device.** Most VM logic is exercised by unit
   tests, but window positioning, tray theming, popover anchoring, and toast
   delivery only show their real behaviour against a running daemon with an

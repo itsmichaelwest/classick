@@ -393,8 +393,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   }
 
   /// Toolbar menu's "Delete Playlist" (with confirmation, handled by the
-  /// caller). The daemon replies via an unsolicited `playlists_update`
-  /// broadcast, same as `savePlaylist`.
+  /// caller). The daemon replies with a correlated `playlists_update` and
+  /// broadcasts any changed device configurations.
   func deletePlaylist(slug: String) {
     Task {
       await daemonClient.send(
@@ -404,7 +404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
   }
 
-  /// Add Songs picker (Task 7, protocol 1.7.0): expands checked
+  /// Add Songs picker: expands checked
   /// artist/album/genre rules into real track paths server-side — see
   /// `AppModel.willRequestResolveTracks`'s doc comment for why this
   /// bookkeeping precedes the send (mirrors `previewDevice`). `slug` is the

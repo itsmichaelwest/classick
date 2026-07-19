@@ -1,9 +1,8 @@
 //! Playlists: manual (ordered track lists) and smart (rule-based). Manual
 //! playlists are portable `.m3u8` files with SOURCE-RELATIVE paths; smart
 //! playlists are `.rules.json` files evaluated host-side at sync time
-//! (evaluator itself lives in `playlist_rules`, Task 2). Store root is
-//! `<config>/classick/playlists/` — see `docs/superpowers/specs/
-//! 2026-07-17-library-playlists-devices-design.md` §1.
+//! (evaluator itself lives in `playlist_rules`). Store root is
+//! `<config>/classick/playlists/`; see `docs/architecture.md`.
 
 use crate::playlist_rules::SmartRules;
 use anyhow::{Context, Result};

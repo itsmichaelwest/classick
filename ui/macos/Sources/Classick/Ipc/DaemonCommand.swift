@@ -397,7 +397,7 @@ enum DaemonCommand: Encodable, Sendable {
     serial: String, selection: SelectionState?, subscriptions: SubscriptionsWire?,
     settings: DeviceSettingsWire?, requestID: String)
   case previewDevice(serial: String, requestID: String)
-  /// **Since daemon protocol 1.7.0.** Expands artist/album/genre rules
+  /// Expands artist/album/genre rules
   /// (the same `SelectionRule` shape `save_device_config`'s selection
   /// uses) into real, resolvable source-relative track paths, evaluated
   /// server-side against the cached library index — the client has no

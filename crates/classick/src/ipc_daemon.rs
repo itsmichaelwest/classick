@@ -3,11 +3,11 @@
 //! sync-subprocess channel). Same envelope shape: newline-delimited
 //! JSON with a snake_case `type` discriminator.
 //!
-//! Spec §7. Protocol semver: daemon emits hello with
+//! Protocol semver: daemon emits hello with
 //! `protocol_version = "2.0.0"`. Version 2 makes command correlation and
 //! device targeting explicit, adds serial-keyed inventory snapshots, and
 //! removes the deprecated singleton selection commands. See
-//! `docs/ipc-protocol.md` "Daemon v2.0.0".
+//! `docs/ipc/daemon.md`.
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
 use crate::daemon::device_storage::StorageInfo;
@@ -38,8 +38,7 @@ pub enum DaemonEvent {
         next_scheduled_unix_secs: Option<u64>,
         /// Free + total bytes on the iPod's drive. `None` when no iPod
         /// is connected, or when the drive query failed (treat absence
-        /// as "no info yet" on the UI). Always `None` on non-Windows
-        /// platforms until a native `statvfs`/`statfs` impl lands.
+        /// as "no info yet" on the UI).
         #[serde(skip_serializing_if = "Option::is_none")]
         storage: Option<StorageInfo>,
         /// Tracks currently on the iPod per the manifest (X in "X of Y
@@ -117,9 +116,9 @@ pub enum DaemonEvent {
     },
     /// Forwarded sync-subprocess event. `line` is the raw JSON line
     /// the subprocess emitted on its stdout, unparsed. UI clients
-    /// deserialize it as an M1 `IpcEvent`. Wrapping rather than
-    /// re-modeling keeps the daemon protocol decoupled from the M1
-    /// stdio protocol — bumping M1 doesn't bump daemon-protocol
+    /// deserialize it as a subprocess `IpcEvent`. Wrapping rather than
+    /// re-modeling keeps the daemon protocol decoupled from the subprocess
+    /// stdio protocol — bumping one doesn't bump the other protocol's
     /// semver.
     SyncEvent {
         line: String,
@@ -239,7 +238,7 @@ pub enum DaemonEvent {
         unresolved_subscriptions: Vec<String>,
         acknowledged_request_id: String,
     },
-    /// Reply to `resolve_tracks` (v1.7.0): concrete source-relative track
+    /// Reply to `resolve_tracks`: concrete source-relative track
     /// paths matched by the given selection rules, expanded against the
     /// cached library index — see `daemon::library::resolve_tracks`. Rules
     /// that match nothing contribute nothing; an absent/never-scanned index
@@ -569,9 +568,8 @@ pub enum DaemonCommand {
     /// Create (absent `playlist.slug`) or replace (present) a playlist.
     /// Persists atomically; broadcasts a fresh `playlists_update` to every
     /// client on success. No direct reply — on a store-open or write
-    /// failure (including "couldn't allocate a slug"), the arm logs and
-    /// returns without persisting or broadcasting; the client learns
-    /// nothing changed only by the absence of a `playlists_update`.
+    /// failure (including "couldn't allocate a slug"), the daemon sends a
+    /// correlated `command_failed` without broadcasting a success update.
     SavePlaylist {
         playlist: PlaylistPayload,
         request_id: String,
@@ -579,8 +577,8 @@ pub enum DaemonCommand {
     /// Delete a playlist by slug and remove that slug from every remembered
     /// device's subscriptions in one recoverable host transaction. A missing
     /// playlist is an acknowledged no-op. Successful deletion broadcasts the
-    /// changed device configs followed by `playlists_update`; failures log
-    /// without a success broadcast.
+    /// changed device configs followed by `playlists_update`; failures send a
+    /// correlated `command_failed` without a success broadcast.
     DeletePlaylist {
         slug: String,
         request_id: String,
@@ -624,7 +622,7 @@ pub enum DaemonCommand {
         serial: String,
         request_id: String,
     },
-    /// v1.7.0: expand artist/album/genre selection rules — the SAME `rules`
+    /// Expand artist/album/genre selection rules — the SAME `rules`
     /// wire shape `save_device_config`'s `selection.rules` uses
     /// (`selection::SelectionRule`) — into concrete source-relative track
     /// paths against the cached library index. Exists for clients (e.g. the
@@ -1430,7 +1428,7 @@ mod tests {
 
     #[test]
     fn resolve_tracks_command_deserializes_reusing_selection_rule_shape() {
-        // Doc-literal payload from docs/ipc-protocol.md "Daemon v1.7.0" —
+        // Doc-shaped payload from docs/ipc/daemon.md —
         // `rules` reuses the exact same wire shape as
         // `save_device_config`'s `selection.rules`.
         let json = r#"{"type":"resolve_tracks","rules":[

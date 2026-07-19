@@ -34,7 +34,7 @@ Classick can make one shared ALAC library play on **both** the stock Apple firmw
 - `crates/classick/` — Rust core. One binary that runs as a CLI, an IPC subprocess, or a long-lived daemon. Cross-platform; wraps libgpod, spawns the transcoder, writes the iTunesDB.
 - `ui/windows/` — WinUI 3 / .NET 10 **tray app**. Owns the daemon, surfaces device state + sync progress + settings + first-run wizard. See `ui/windows/README.md`.
 - `ui/macos/` — SwiftUI **menu-bar app** (macOS 15+). The Mac counterpart to the tray app, same daemon + IPC. See `ui/macos/README.md`.
-- `docs/` — IPC wire format, design specs, SCSI notes.
+- `docs/` — current architecture, wire protocols, safety invariants, and maintenance audits.
 
 Each UI owns the `classick` daemon and talks to it over the same JSON IPC (`docs/ipc-protocol.md`) — a **named pipe** (`\\.\pipe\classick`) on Windows, a **Unix socket** on macOS. Nothing about the UIs is baked into the Rust core.
 
@@ -66,5 +66,6 @@ The csproj copies `target\release\classick.exe` and the libgpod DLLs next to `Cl
 ## More
 
 - `AGENTS.md` — orientation for anyone working in this repo, human or agent.
-- `docs/SPEC.md` — original design, rejected alternatives, FFI rationale.
-- `LEARNINGS.md` — incidents and gotchas. Read before touching iTunes-DB or artwork code.
+- `docs/README.md` — index of current and archived documentation.
+- `docs/architecture.md` — current component and data-authority model.
+- `LEARNINGS.md` — current operational gotchas. Read before touching iTunesDB or artwork code.

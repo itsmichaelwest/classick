@@ -5,9 +5,8 @@ Native macOS menu-bar app — the Mac counterpart to the WinUI 3 tray app
 iPod-sync experience: see the iPod's state, sync manually or automatically on
 plug-in, and stay out of the way.
 
-Talks to the daemon over the same **v1.1.0 IPC** as the Windows app
-(`docs/ipc-protocol.md`) — **no Rust changes**. This is SP2 of the macOS port;
-see `docs/superpowers/specs/2026-07-12-macos-swiftui-app-design.md`.
+Talks to the daemon over the same **v2.0.0 IPC** as the Windows app; see
+`../../docs/ipc-protocol.md` and `../../docs/ipc/daemon.md`.
 
 ## Requirements
 

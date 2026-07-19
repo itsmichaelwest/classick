@@ -11,8 +11,8 @@ import SwiftUI
 /// manual playlist's `tracks: [String]` — that field wants literal,
 /// resolvable source-relative file paths, and the library aggregates this
 /// browser renders carry track COUNTS only, never individual filenames
-/// (`docs/ipc-protocol.md` §"Daemon v1.7.0"). `onAdd` hands the checked
-/// rules to the caller, which sends `resolve_tracks` (protocol 1.7.0) and
+/// (`docs/ipc/daemon.md`, "Library-drop outcomes"). `onAdd` hands the checked
+/// rules to the caller, which sends `resolve_tracks` and
 /// appends whatever comes back on `resolved_tracks` — see
 /// `ManualPlaylistLogic.appendingTracks` and `PlaylistPage`'s
 /// `ManualPlaylistEditor`.

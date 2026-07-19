@@ -35,7 +35,7 @@
 //! read+write access against a raw volume requires administrator
 //! elevation on modern Windows.
 //!
-//! Empirically verified (see `SCSI.md`): every combination tested
+//! Empirically verified (see `docs/archive/scsi-research.md`): every combination tested
 //! against a normal user's session returns `ERROR_ACCESS_DENIED` —
 //! either at `CreateFile` (when requesting any non-zero access) or
 //! at the `DeviceIoControl` call (with zero-access opens). Only an
@@ -63,7 +63,7 @@
 //!    descriptors alone. When we add that support we'll also need
 //!    a privileged path to invoke this code (LocalSystem helper
 //!    service via MSIX `desktop6:Service`, or SDDL grant via a
-//!    traditional installer — see `SCSI.md` for the analysis).
+//!    traditional installer — see `docs/archive/scsi-research.md` for the analysis).
 //! 3. Belt-and-suspenders for the rare elevated daemon run (e.g.
 //!    dev builds, troubleshooting) — when SCSI succeeds it's the
 //!    authoritative source for `ModelNumStr` and overrides the

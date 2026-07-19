@@ -3,7 +3,7 @@
 # a repo-local prefix so build.rs's pkg-config path can link it. Mirrors
 # vendor/libgpod/BUILD-NOTES.md (the Windows/MSYS2 build) with the same source
 # SHA and the same 3 patches. libgcrypt is mandatory (Classic 7G iTunesDB
-# signature). See docs/superpowers/specs/2026-07-12-macos-core-enablement-design.md.
+# signature). See docs/archive/design/2026-07-12-macos-core-enablement-design.md.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -2,9 +2,8 @@
 //!
 //! Declarative match rules (artist/album/genre/year, is/contains/gte/lte),
 //! limits, and ordering, evaluated host-side against the library index at
-//! sync/preview time into a static device playlist. See `docs/superpowers/
-//! specs/2026-07-17-library-playlists-devices-design.md` §1 for the file
-//! shape this mirrors.
+//! sync/preview time into a static device playlist. See
+//! `docs/architecture.md` for the playlist model.
 
 use crate::library_index::{IndexedTrack, LibraryIndex};
 use serde::{Deserialize, Serialize};

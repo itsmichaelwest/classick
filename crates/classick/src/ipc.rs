@@ -1,4 +1,4 @@
-//! IPC wire types for `--ipc-mode`. See `docs/ipc-protocol.md`.
+//! IPC wire types for `--ipc-mode`. See `docs/ipc/subprocess.md`.
 //!
 //! These are serde-serializable mirrors of internal `ProgressEvent` and
 //! `Decision` enums. Conversion happens at the channel boundary in the
@@ -9,28 +9,28 @@
 use serde::{Deserialize, Serialize};
 
 /// Current wire-protocol semver. Bumped per the rules in
-/// `docs/ipc-protocol.md` §1.
+/// `docs/ipc-protocol.md` and `docs/ipc/subprocess.md`.
 pub const PROTOCOL_VERSION: &str = "1.4.0";
 
 /// Events emitted from the core to the UI on stdout.
 ///
 /// Serialized as newline-delimited JSON with a `type` discriminator using
-/// `snake_case`. Field names are also `snake_case`. See `docs/ipc-protocol.md` §4.
+/// `snake_case`. Field names are also `snake_case`. See `docs/ipc/subprocess.md`.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcEvent {
-    /// Handshake. MUST be the first event after spawn. See §4.1.
+    /// Handshake. MUST be the first event after spawn.
     Hello {
         protocol_version: String, // PROTOCOL_VERSION
         core_version: String,     // env!("CARGO_PKG_VERSION")
     },
-    /// Resolved paths. Mirrors `ProgressEvent::Header`. See §4.2.
+    /// Resolved paths. Mirrors `ProgressEvent::Header`.
     Header {
         source: String,
         ipod: String,
         manifest: String,
     },
-    /// Action-plan counts. Mirrors `ProgressEvent::Summary`. See §4.3.
+    /// Action-plan counts. Mirrors `ProgressEvent::Summary`.
     Summary {
         add: usize,
         modify: usize,
@@ -39,25 +39,25 @@ pub enum IpcEvent {
         unchanged: usize,
         total_planned: usize,
     },
-    /// Action-plan review request. Reply with `review_decision`. See §4.4.
+    /// Action-plan review request. Reply with `review_decision`.
     Review {
         summary: IpcActionPlanSummary,
         no_delete: bool,
     },
-    /// Modal multi-choice prompt. Reply with `prompt_decision`. See §4.5.
+    /// Modal multi-choice prompt. Reply with `prompt_decision`.
     Prompt {
         id: u64,
         message: String,
         options: Vec<String>,
     },
-    /// Modal text-input prompt. Reply with `form_decision`. See §4.6.
+    /// Modal text-input prompt. Reply with `form_decision`.
     Form {
         id: u64,
         label: String,
         initial: String,
         hint: String,
     },
-    /// Per-track start. See §4.7.
+    /// Per-track start.
     TrackStart {
         current: usize,
         total: usize,
@@ -67,7 +67,7 @@ pub enum IpcEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         eta_secs: Option<u64>,
     },
-    /// Per-track done. No fields. See §4.8.
+    /// Per-track completion and outcome.
     TrackDone {
         result: crate::progress::TrackResult,
     },
@@ -77,47 +77,44 @@ pub enum IpcEvent {
         staged_tracks: usize,
     },
     Cancelled,
-    /// Informational log line. See §4.9.
+    /// Informational log line.
     Log {
         message: String,
     },
-    /// Non-fatal or fatal error. `recovery_hints` is currently always empty
-    /// in M1; it's reserved for future use and omitted on the wire when
-    /// empty. See §4.10.
+    /// Non-fatal or fatal error. `recovery_hints` is omitted when empty.
     Error {
         message: String,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         recovery_hints: Vec<String>,
     },
-    /// Terminal event. The core closes stdout shortly after. See §4.11.
+    /// Terminal summary. The core closes stdout shortly afterward.
     Finish {
         success: bool,
-        /// Fit-pass (Task 8) deferral rollup: whole albums that didn't fit
+        /// Fit-pass deferral rollup: whole albums that didn't fit
         /// the device's remaining space even after the end-of-run retry.
         /// Absent when nothing was deferred (all-fit run, or a core older
         /// than 1.3.0).
         #[serde(skip_serializing_if = "Option::is_none")]
         skipped_for_space: Option<SkippedForSpace>,
         /// Artwork embed/refresh rollup for this run's Add/Modify/MetadataOnly
-        /// actions (Task 13). Absent when the run never reached the apply
+        /// actions. Absent when the run never reached the apply
         /// loop (dry-run, "nothing to do" with no pending artwork repair, or
         /// an early abort), or when talking to a core older than this field.
         #[serde(skip_serializing_if = "Option::is_none")]
         artwork: Option<ArtworkSummary>,
-        /// True when Task 4's auto-restore-from-backup path fired this run
+        /// True when the auto-restore-from-backup path fired this run
         /// (the iTunesDB failed to parse and was replaced from the session
         /// backup before the sync proceeded). Omitted (not `false`) on the
         /// wire when it didn't fire, for old-client compat.
         #[serde(skip_serializing_if = "std::ops::Not::not", default)]
         db_restored: bool,
     },
-    /// Terminal event: the sync was gracefully paused (Task 6). Completed
-    /// tracks were committed to the iTunesDB + manifest before this was
-    /// emitted; the core exits shortly after, same as `finish`. No fields.
+    /// The sync was gracefully paused. Completed tracks were committed to the
+    /// iTunesDB and manifest before this is emitted; `finish` follows.
     Paused,
 }
 
-/// Action-plan summary carried inside `IpcEvent::Review`. See §4.4.
+/// Action-plan summary carried inside `IpcEvent::Review`.
 #[derive(Debug, Serialize)]
 pub struct IpcActionPlanSummary {
     pub add: usize,
@@ -127,10 +124,10 @@ pub struct IpcActionPlanSummary {
     pub unchanged: usize,
 }
 
-/// Fit-pass (Task 8) deferral rollup attached to `finish`. Whole-album
+/// Fit-pass deferral rollup attached to `finish`. Whole-album
 /// granularity mirrors `fit::DeferredAlbum` — `albums`/`tracks`/`bytes` are
 /// sums across every album that still didn't fit after the end-of-run retry.
-/// See `docs/ipc-protocol.md` §4.11.
+/// See `docs/ipc/subprocess.md`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SkippedForSpace {
     pub albums: usize,
@@ -166,9 +163,9 @@ pub(crate) fn format_bytes_human(bytes: u64) -> String {
     }
 }
 
-/// Artwork embed/refresh rollup attached to `finish` (Task 13). Counted
+/// Artwork embed/refresh rollup attached to `finish`. Counted
 /// across a run's Add/Modify/MetadataOnly actions — see
-/// `apply_loop::ArtworkCounts`. See `docs/ipc-protocol.md` §4.11.
+/// `apply_loop::ArtworkCounts`. See `docs/ipc/subprocess.md`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArtworkSummary {
     pub embedded: usize,
@@ -179,31 +176,29 @@ pub struct ArtworkSummary {
 /// Commands the UI sends to the core over stdin.
 ///
 /// Serialized as newline-delimited JSON with a `type` discriminator using
-/// `snake_case`. See `docs/ipc-protocol.md` §5.
+/// `snake_case`. See `docs/ipc/subprocess.md`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcCommand {
-    /// Reserved for M2+ (handshake / explicit start). M1 ignores it.
+    /// Reserved for an explicit start handshake; currently ignored.
     Start,
     /// Reply to a `review` event. Carries the choice as a nested typed
-    /// envelope; see §5.1.
+    /// envelope; see `docs/ipc/subprocess.md`.
     ReviewDecision { decision: ReviewDecisionPayload },
     /// Reply to a `prompt` event. `id` MUST echo the originating prompt's id.
     PromptDecision { id: u64, choice: usize },
     /// Reply to a `form` event. `value: None` means user aborted.
     FormDecision { id: u64, value: Option<String> },
-    /// Best-effort graceful shutdown. M1 maps it to `Quit` at the next
-    /// review-decision recv() point; the UI must back this with a 5s
-    /// force-kill timer (see §5.5 and §7).
+    /// Graceful cancellation. Admission stops at an album boundary and the
+    /// owner drains finalization through `finish` and EOF.
     Cancel,
     /// Graceful pause: finish in-flight/completed tracks, checkpoint, then
-    /// stop. Unlike `cancel`, this is not a shutdown request — the core
-    /// exits after emitting `paused`, and a later run resumes from the
-    /// manifest. Mapped to `Decision::Pause` at the next action-loop poll.
+    /// stop. The core emits `paused`, a successful `finish`, and EOF; a later
+    /// run resumes from the manifest.
     Pause,
 }
 
-/// Nested `decision` object inside `review_decision`. See §5.1.
+/// Nested `decision` object inside `review_decision`.
 ///
 /// The wire shape uses the same typed-envelope pattern as the top-level
 /// `IpcCommand`, but scoped to this field. The Rust `ReviewDecision` enum
@@ -218,7 +213,7 @@ pub enum ReviewDecisionPayload {
 
 impl IpcEvent {
     /// Convert an internal `ProgressEvent` to a wire `IpcEvent`. Returns
-    /// `None` for events that don't translate (none in M1, but an extension
+    /// `None` for events that don't translate (currently none, but an extension
     /// point for the future).
     pub fn from_progress(event: &crate::progress::ProgressEvent) -> Option<Self> {
         use crate::progress::ProgressEvent as PE;
@@ -400,7 +395,7 @@ mod tests {
 
     #[test]
     fn review_decision_nested_envelope_round_trips() {
-        // This is the critical nuance from docs/ipc-protocol.md §5.1: the
+        // This is the critical nuance from docs/ipc/subprocess.md: the
         // `decision` field is a nested typed envelope, NOT a flat shape.
         let cmd_json = r#"{"type":"review_decision","decision":{"type":"apply","no_delete":true}}"#;
         let cmd: IpcCommand = serde_json::from_str(cmd_json).unwrap();

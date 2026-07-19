@@ -30,8 +30,8 @@ IPC: a named pipe (`\\.\pipe\classick`) on Windows, a Unix socket (under
 format is in `docs/ipc-protocol.md` — that document is the source of truth; all
 implementations must agree with it.
 
-For the full design rationale and the rejected-alternatives table, see
-`docs/SPEC.md`. For battle-scars and hard-won gotchas, see `LEARNINGS.md` —
+For the current architecture and safety invariants, see `docs/architecture.md`
+and `docs/device-safety.md`. For battle-scars and hard-won gotchas, see `LEARNINGS.md` —
 **always read this before touching anything iTunes-DB-adjacent**.
 
 ## Top-level layout
@@ -53,10 +53,11 @@ classick/                  Cargo workspace root
 │   ├── windows/            WinUI 3 / .NET 10 tray app (see its own README).
 │   └── macos/              SwiftUI menu-bar app, macOS 15+ (see its own README).
 ├── docs/
-│   ├── ipc-protocol.md     Wire format (Rust ↔ UI). Source of truth.
-│   ├── SPEC.md             Full original design spec
-│   ├── SCSI.md             SCSI INQUIRY notes (SysInfoExtended path)
-│   └── superpowers/        Phase specs, plans, code reviews
+│   ├── README.md            Current documentation index
+│   ├── architecture.md      Components, data authorities, and flow
+│   ├── ipc-protocol.md      Wire-format entry point and source of truth
+│   ├── device-safety.md     Device/source mutation invariants
+│   └── archive/             Historical design and investigation records
 ├── scripts/                One-off PowerShell helpers (e.g. probe-daemon.ps1)
 ├── target/                 Cargo workspace build output (gitignored)
 ├── README.md               Short overview + build/status pointers
@@ -215,10 +216,9 @@ label is the IPC contract.
 - **`LEARNINGS.md`.** New gotchas, debugging insights, and non-obvious
   conventions go here, one bullet per learning. Check for duplicates before
   adding. Don't log routine info.
-- **Design specs.** Major changes get a written design in
-  `docs/superpowers/specs/YYYY-MM-DD-<topic>.md` before implementation.
-  Implementation plans go in `docs/superpowers/plans/`. Reviews in
-  `docs/superpowers/reviews/`.
+- **Design docs.** Substantial or ambiguous changes get a concise design under
+  `docs/design/` before implementation. Keep only durable decisions in the
+  active docs set; completed task scripts belong in Git history.
 - **Bug fixes get regression tests** where reasonable — see the daemon-runtime
   integration suite for the pattern.
 - **Keep files ≤ ~500 LOC.** Split aggressively. `apply_loop.rs` is the one
@@ -254,10 +254,11 @@ These hit hard in practice — see `LEARNINGS.md` for the full incident reports:
 
 ## Where to look for more context
 
-- `docs/SPEC.md` — full original design spec, rejected alternatives, FFI rationale
-- `docs/SCSI.md` — SCSI INQUIRY notes for the SysInfoExtended path
-- `LEARNINGS.md` — incidents, gotchas, debugging insights (chronological)
+- `docs/README.md` — current documentation index and authority rules
+- `docs/architecture.md` — current architecture and data ownership
+- `docs/device-safety.md` — device, publication, and recovery invariants
+- `LEARNINGS.md` — concise current gotchas and debugging insights
 - `docs/ipc-protocol.md` — wire format authority
-- `docs/superpowers/specs/` — per-phase design docs (read the newest first)
+- `docs/archive/` — historical context only; never current authority
 - `ui/windows/README.md` — WinUI-specific build/run/test/conventions
 - `git log` — recent commits are the best signal for what's in flux

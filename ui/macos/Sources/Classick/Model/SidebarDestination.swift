@@ -8,10 +8,8 @@ enum DevicePage: Hashable, Sendable {
 
 /// The macOS app restructure's single navigation-selection model — one
 /// `NavigationSplitView` sidebar selection, spanning Library, per-device
-/// pages, playlist editors, and History. See
-/// `docs/superpowers/plans/2026-07-17-macos-app-restructure.md` Global
-/// Constraints: "Parent device row click selects its Music child; the
-/// chevron alone toggles disclosure."
+/// pages, playlist editors, and History. A parent device-row click selects its
+/// Music child; the chevron alone toggles disclosure.
 enum SidebarDestination: Hashable, Sendable {
     case library
     case device(serial: String, page: DevicePage)
