@@ -250,6 +250,16 @@ impl DeviceRegistry {
         Ok(true)
     }
 
+    pub(crate) fn publish_selection_revision(&mut self, serial: &str, revision: u64) -> Result<()> {
+        let key = Self::required_key(serial)?;
+        let mut next = self.records.clone();
+        let record = next
+            .get_mut(&key)
+            .ok_or_else(|| anyhow!("cannot update unknown device serial {serial:?}"))?;
+        record.selection_revision = revision;
+        self.replace_records(next)
+    }
+
     fn required_key(serial: &str) -> Result<String> {
         let key = canonical_serial_key(serial);
         if key.is_empty() {
@@ -281,34 +291,14 @@ impl DeviceRegistry {
     }
 
     fn persist(&self, records: &BTreeMap<String, DeviceRecord>) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("create device registry directory {}", parent.display())
-            })?;
-        }
         let file = RegistryFile {
             version: REGISTRY_VERSION,
             records: records.values().cloned().collect(),
         };
         let text = serde_json::to_string_pretty(&file).context("serialize device registry")?;
-        let tmp = self.path.with_extension("json.tmp");
-        {
-            let file = std::fs::File::create(&tmp)
-                .with_context(|| format!("create temporary device registry {}", tmp.display()))?;
-            let mut writer = std::io::BufWriter::new(file);
-            use std::io::Write;
-            writer
-                .write_all(text.as_bytes())
-                .with_context(|| format!("write temporary device registry {}", tmp.display()))?;
-            let file = writer
-                .into_inner()
-                .context("flush device registry writer")?;
-            file.sync_all()
-                .with_context(|| format!("fsync temporary device registry {}", tmp.display()))?;
-        }
-        std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))?;
-        Ok(())
+        crate::atomic_file::AtomicFileWriter::new()
+            .write(&self.path, text.as_bytes())
+            .context("rename/publish device registry")
     }
 }
 

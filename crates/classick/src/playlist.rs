@@ -40,7 +40,7 @@ pub fn slugify(name: &str) -> String {
 
 /// A manual playlist: an ordered, user-curated track list. `tracks` are
 /// SOURCE-RELATIVE paths (portable across machines / re-rooted libraries).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManualPlaylist {
     pub slug: String,
     pub name: String,
@@ -223,8 +223,40 @@ impl PlaylistStore {
         self.last_errors.borrow().clone()
     }
 
-    fn manual_path(&self, slug: &str) -> PathBuf {
+    pub(crate) fn manual_path(&self, slug: &str) -> PathBuf {
         self.root.join(format!("{slug}.m3u8"))
+    }
+
+    pub(crate) fn encode_manual(&self, playlist: &ManualPlaylist) -> Vec<u8> {
+        render_m3u8(playlist).into_bytes()
+    }
+
+    pub(crate) fn publish_manual_bytes(&self, slug: &str, bytes: &[u8]) -> Result<()> {
+        atomic_write(&self.manual_path(slug), bytes)
+    }
+
+    pub(crate) fn playlist_revision(&self, slug: &str) -> Result<u64> {
+        Ok(self.load_revisions()?.get(slug).copied().unwrap_or(0))
+    }
+
+    pub(crate) fn publish_playlist_revision(&self, slug: &str, revision: u64) -> Result<()> {
+        let mut revisions = self.load_revisions()?;
+        revisions.insert(slug.to_string(), revision);
+        atomic_write(
+            &self.root.join("revisions.json"),
+            &serde_json::to_vec_pretty(&revisions)?,
+        )
+    }
+
+    fn load_revisions(&self) -> Result<std::collections::BTreeMap<String, u64>> {
+        let path = self.root.join("revisions.json");
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+        }
     }
 
     fn smart_path(&self, slug: &str) -> PathBuf {
@@ -367,23 +399,7 @@ impl PlaylistStore {
 /// Write `bytes` to `path` atomically: tmp file + fsync + rename, same
 /// pattern as `manifest::save_atomic` / `selection::save_atomic`.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create dir {}", parent.display()))?;
-    }
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
-    {
-        let f = std::fs::File::create(&tmp)
-            .with_context(|| format!("create temp file {}", tmp.display()))?;
-        let mut writer = std::io::BufWriter::new(f);
-        std::io::Write::write_all(&mut writer, bytes)?;
-        let f = std::io::BufWriter::into_inner(writer)?;
-        f.sync_all()
-            .with_context(|| format!("fsync {}", tmp.display()))?;
-    }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
+    crate::atomic_file::AtomicFileWriter::new().write(path, bytes)
 }
 
 /// Remove `path` if present; a `NotFound` error is the expected common case

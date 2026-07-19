@@ -15,10 +15,12 @@ pub mod iokit_watcher;
 pub mod ipc_server;
 pub mod library;
 pub(crate) mod library_drop;
+pub mod library_mutations;
 pub mod library_watcher;
 pub mod lifecycle;
 #[cfg(target_os = "macos")]
 pub mod macos_netfs;
+pub(crate) mod mutation_ledger;
 pub(crate) mod playlist_commands;
 pub mod runtime;
 pub mod runtime_state;
