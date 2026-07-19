@@ -23,9 +23,20 @@ fn main() {
 
     // Native macOS device identity + hotplug FFI (src/ipod/macos_iokit.rs).
     if target_os == "macos" {
+        build_macos_netfs(&manifest_dir);
         println!("cargo:rustc-link-lib=framework=IOKit");
         println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=framework=NetFS");
     }
+}
+
+fn build_macos_netfs(manifest_dir: &Path) {
+    let shim = manifest_dir.join("src/daemon/netfs_shim.m");
+    println!("cargo:rerun-if-changed={}", shim.display());
+    cc::Build::new()
+        .file(shim)
+        .flag("-fblocks")
+        .compile("classick_netfs_shim");
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +104,11 @@ fn build_windows(manifest_dir: &Path, out_dir: &Path) {
     let bin_dir = vendor.join("bin");
     if bin_dir.exists() {
         std::fs::create_dir_all(&target_dir).unwrap_or_else(|e| {
-            panic!("failed to create target dir {}: {}", target_dir.display(), e)
+            panic!(
+                "failed to create target dir {}: {}",
+                target_dir.display(),
+                e
+            )
         });
         let entries = std::fs::read_dir(&bin_dir).unwrap_or_else(|e| {
             panic!("failed to read vendor bin dir {}: {}", bin_dir.display(), e)
@@ -104,7 +119,12 @@ fn build_windows(manifest_dir: &Path, out_dir: &Path) {
             if path.extension().and_then(|s| s.to_str()) == Some("dll") {
                 let dest = target_dir.join(path.file_name().unwrap());
                 std::fs::copy(&path, &dest).unwrap_or_else(|e| {
-                    panic!("failed to copy {} -> {}: {}", path.display(), dest.display(), e)
+                    panic!(
+                        "failed to copy {} -> {}: {}",
+                        path.display(),
+                        dest.display(),
+                        e
+                    )
                 });
             }
         }
@@ -140,7 +160,12 @@ fn build_windows(manifest_dir: &Path, out_dir: &Path) {
             if path.is_file() {
                 let dest = dst_loaders.join(path.file_name().unwrap());
                 std::fs::copy(&path, &dest).unwrap_or_else(|e| {
-                    panic!("failed to copy {} -> {}: {}", path.display(), dest.display(), e)
+                    panic!(
+                        "failed to copy {} -> {}: {}",
+                        path.display(),
+                        dest.display(),
+                        e
+                    )
                 });
             }
         }
@@ -209,7 +234,12 @@ fn build_windows(manifest_dir: &Path, out_dir: &Path) {
             if matches!(ext, Some("exe") | Some("dll")) {
                 let dest = target_dir.join(path.file_name().unwrap());
                 std::fs::copy(&path, &dest).unwrap_or_else(|e| {
-                    panic!("failed to copy {} -> {}: {}", path.display(), dest.display(), e)
+                    panic!(
+                        "failed to copy {} -> {}: {}",
+                        path.display(),
+                        dest.display(),
+                        e
+                    )
                 });
             }
         }
@@ -276,7 +306,11 @@ fn build_pkg_config(out_dir: &Path) {
     println!("cargo:rerun-if-changed={}", header.display());
 
     let mut builder = bindgen::Builder::default().header(header.to_str().unwrap());
-    for inc in libgpod.include_paths.iter().chain(glib.include_paths.iter()) {
+    for inc in libgpod
+        .include_paths
+        .iter()
+        .chain(glib.include_paths.iter())
+    {
         builder = builder.clang_arg(format!("-I{}", inc.display()));
     }
     let bindings = builder

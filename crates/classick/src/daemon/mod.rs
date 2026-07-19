@@ -14,10 +14,13 @@ pub mod iokit_watcher;
 pub mod ipc_server;
 pub mod library;
 pub mod library_watcher;
+#[cfg(target_os = "macos")]
+pub mod macos_netfs;
 pub mod runtime;
 pub mod runtime_state;
 pub mod scheduler;
 pub mod session_admission;
+pub mod source_availability;
 pub mod state;
 pub mod sync_orchestrator;
 

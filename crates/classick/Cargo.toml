@@ -70,6 +70,7 @@ tokio = { version = "1.40", features = ["test-util"] }
 
 [build-dependencies]
 bindgen = "0.72"
+cc = "1"
 # pkg-config resolves libgpod + glib paths on non-Windows targets. The crate
 # is harmless on Windows (only invokes the pkg-config binary when its API is
 # called, and build.rs only calls it from the non-Windows arm) — keeping it

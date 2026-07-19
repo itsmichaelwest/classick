@@ -381,6 +381,7 @@ dependencies = [
  "anyhow",
  "bindgen",
  "blake3",
+ "cc",
  "clap",
  "core-foundation",
  "core-foundation-sys",
