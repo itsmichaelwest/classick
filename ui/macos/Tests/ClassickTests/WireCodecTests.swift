@@ -3,6 +3,11 @@ import XCTest
 @testable import Classick
 
 final class WireCodecTests: XCTestCase {
+  func testShutdownEncodesExactWireObject() throws {
+    let data = try JSONEncoder().encode(DaemonCommand.shutdown)
+    XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"type":"shutdown"}"#)
+  }
+
   func testDecodesDeviceConnected() throws {
     let json =
       #"{"type":"device_connected","serial":"0x000A27002138B0A8","model_label":"iPod Classic (3rd gen)","drive":"/Volumes/IPOD","name":"Michael’s iPod"}"#

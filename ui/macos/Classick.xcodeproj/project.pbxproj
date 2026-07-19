@@ -14,6 +14,7 @@
 		1E4C3D87214845558F1D7C7D /* SidebarDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3331333DE93E329157E37562 /* SidebarDestination.swift */; };
 		1EF2D88BD28C5DBB1C00A0EF /* AppModelReducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41284FF3EF16C964A6FDCCEF /* AppModelReducerTests.swift */; };
 		205413F237D7FB0ED719FD80 /* DaemonClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 692B715F0269A14C79855E96 /* DaemonClientTests.swift */; };
+		2140C5B9DAA127723215B824 /* DaemonShutdownCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D151C4C9C49FF8B1EE0B5D4 /* DaemonShutdownCoordinatorTests.swift */; };
 		21C4AD8118E2A87AC6B16D8B /* DaemonProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD34388BC51EFD2420DCC244 /* DaemonProcess.swift */; };
 		22C8CBC1F64EF320711A44B1 /* ClassickApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18857CE62529C7150D78B6EA /* ClassickApp.swift */; };
 		231F80218AE239FA50A1593D /* AddSongsPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50B6A16ACA69CE88142B0B14 /* AddSongsPicker.swift */; };
@@ -54,6 +55,7 @@
 		BE30BA8417D035B94F8893C5 /* DeviceIdentityLogicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3811F67C341FB1F6143D67B /* DeviceIdentityLogicTests.swift */; };
 		C1A0B0BDBF78B7069C08D271 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = CE8AC4C79C57BF031AF01FE8 /* Sparkle */; };
 		C1D2B216C33F513ACF890A24 /* PlaylistPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE25169AF5227F47112B49D2 /* PlaylistPage.swift */; };
+		C90B212C0DEEB37830957951 /* DaemonShutdownCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7461FA00AAEC60E377B23276 /* DaemonShutdownCoordinator.swift */; };
 		DD6453B4CA9A988965EAFDF8 /* DeviceIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0C70C5977ABC785EA99BB4F /* DeviceIcon.swift */; };
 		E95B13B518B6DC0941DF8A50 /* DaemonCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CCE54BE6F50E3358DBE7C6A /* DaemonCommand.swift */; };
 		EB742693791D9B54172F9ADE /* SyncEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5170A40922D09439C871F014 /* SyncEvent.swift */; };
@@ -76,6 +78,7 @@
 		04854C70583BD2B3841B7139 /* MenuContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuContent.swift; sourceTree = "<group>"; };
 		088D7817D297D30A5DEB28B4 /* WireCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireCodecTests.swift; sourceTree = "<group>"; };
 		0C05804D1D10803966E55427 /* LibraryBrowserLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryBrowserLogicTests.swift; sourceTree = "<group>"; };
+		0D151C4C9C49FF8B1EE0B5D4 /* DaemonShutdownCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonShutdownCoordinatorTests.swift; sourceTree = "<group>"; };
 		1788052EC7FE9655A0767A10 /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
 		18857CE62529C7150D78B6EA /* ClassickApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassickApp.swift; sourceTree = "<group>"; };
 		1D2A6B821B672C47C5AFD5EE /* AppModel+DeviceReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+DeviceReducer.swift"; sourceTree = "<group>"; };
@@ -100,6 +103,7 @@
 		692B715F0269A14C79855E96 /* DaemonClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClientTests.swift; sourceTree = "<group>"; };
 		6D5FB8D26AA10CB9C052F91B /* Classick.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Classick.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7355B0FEF32DB2EF35F3631E /* ClassickTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ClassickTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		7461FA00AAEC60E377B23276 /* DaemonShutdownCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonShutdownCoordinator.swift; sourceTree = "<group>"; };
 		779AF67AE03C82CD94CC1210 /* DeviceInventoryReducerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceInventoryReducerTests.swift; sourceTree = "<group>"; };
 		7AE77C26530FE55F27CA0B60 /* DaemonEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonEvent.swift; sourceTree = "<group>"; };
 		8292E0BE8BBA481A354A5017 /* Updater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Updater.swift; sourceTree = "<group>"; };
@@ -181,6 +185,7 @@
 			isa = PBXGroup;
 			children = (
 				DD34388BC51EFD2420DCC244 /* DaemonProcess.swift */,
+				7461FA00AAEC60E377B23276 /* DaemonShutdownCoordinator.swift */,
 			);
 			path = Daemon;
 			sourceTree = "<group>";
@@ -239,6 +244,7 @@
 			children = (
 				41284FF3EF16C964A6FDCCEF /* AppModelReducerTests.swift */,
 				692B715F0269A14C79855E96 /* DaemonClientTests.swift */,
+				0D151C4C9C49FF8B1EE0B5D4 /* DaemonShutdownCoordinatorTests.swift */,
 				60566A5DEEE88875F4B36B65 /* DeviceIconLogicTests.swift */,
 				E3811F67C341FB1F6143D67B /* DeviceIdentityLogicTests.swift */,
 				779AF67AE03C82CD94CC1210 /* DeviceInventoryReducerTests.swift */,
@@ -430,6 +436,7 @@
 			files = (
 				1EF2D88BD28C5DBB1C00A0EF /* AppModelReducerTests.swift in Sources */,
 				205413F237D7FB0ED719FD80 /* DaemonClientTests.swift in Sources */,
+				2140C5B9DAA127723215B824 /* DaemonShutdownCoordinatorTests.swift in Sources */,
 				2C666F996C7305143EFBCE52 /* DeviceIconLogicTests.swift in Sources */,
 				BE30BA8417D035B94F8893C5 /* DeviceIdentityLogicTests.swift in Sources */,
 				4A1262ED9B8700BC310255FE /* DeviceInventoryReducerTests.swift in Sources */,
@@ -457,6 +464,7 @@
 				E95B13B518B6DC0941DF8A50 /* DaemonCommand.swift in Sources */,
 				9B4E3549C2DCE960F8A6402C /* DaemonEvent.swift in Sources */,
 				21C4AD8118E2A87AC6B16D8B /* DaemonProcess.swift in Sources */,
+				C90B212C0DEEB37830957951 /* DaemonShutdownCoordinator.swift in Sources */,
 				DD6453B4CA9A988965EAFDF8 /* DeviceIcon.swift in Sources */,
 				3E24510C5CBC2388AAF2A5C0 /* DeviceIdentityLogic.swift in Sources */,
 				527BFB4E9746416B400D0024 /* DeviceMusicLogic.swift in Sources */,

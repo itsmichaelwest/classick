@@ -355,6 +355,7 @@ enum DurableIntentKey: Hashable, Sendable {
 
 enum DaemonCommand: Encodable, Sendable {
   case subscribeDeviceEvents
+  case shutdown
   case getStatus(requestID: String)
   case getConfig(requestID: String)
   case saveConfig(source: String?, daemon: DaemonSettings?, ipod: IpodIdentity?, requestID: String)
@@ -429,7 +430,7 @@ enum DaemonCommand: Encodable, Sendable {
 
   var requestID: String? {
     switch self {
-    case .subscribeDeviceEvents:
+    case .subscribeDeviceEvents, .shutdown:
       nil
     case .getStatus(let requestID), .getConfig(let requestID),
       .forgetIpod(_, let requestID), .triggerSync(_, _, let requestID),
@@ -470,6 +471,8 @@ enum DaemonCommand: Encodable, Sendable {
     switch self {
     case .subscribeDeviceEvents:
       try container.encode("subscribe_device_events", forKey: .type)
+    case .shutdown:
+      try container.encode("shutdown", forKey: .type)
     case .getStatus(let requestID):
       try container.encode("get_status", forKey: .type)
       try container.encode(requestID, forKey: .requestID)

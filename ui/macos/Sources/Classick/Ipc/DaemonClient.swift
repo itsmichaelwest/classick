@@ -83,6 +83,12 @@ actor DaemonClient {
   private var connectionGeneration = 0
   private var handshakeComplete = false
   private var durableOutbox = DurableIntentOutbox()
+  private var shutdownConnectionGeneration: Int?
+  private var shutdownCommandSent = false
+  private var shutdownInactivityTimeout: Duration?
+  private var shutdownTimeoutTask: Task<Void, Never>?
+  private var shutdownWaiters: [CheckedContinuation<Bool, Never>] = []
+  private var shutdownResult: Bool?
 
   /// Set once if the daemon's handshake fails the protocol-version check.
   /// Non-nil means the client has permanently stopped (no more reconnects).
@@ -115,8 +121,30 @@ actor DaemonClient {
     isRunning = false
     generation += 1
     connectionGeneration += 1
+    if shutdownConnectionGeneration != nil {
+      completeShutdown(result: false)
+    }
     closeSocket()
     continuation?.finish()
+  }
+
+  /// Disables reconnect, writes one graceful shutdown request, and waits for
+  /// EOF on that exact connection. Valid daemon events reset the inactivity
+  /// deadline so a healthy finalization is never cut off while progressing.
+  func shutdownAndWait(timeout: Duration) async -> Bool {
+    if let shutdownResult { return shutdownResult }
+
+    return await withCheckedContinuation { continuation in
+      shutdownWaiters.append(continuation)
+      guard shutdownConnectionGeneration == nil else { return }
+
+      isRunning = false
+      shutdownConnectionGeneration = connectionGeneration
+      shutdownInactivityTimeout = timeout
+      scheduleShutdownTimeout()
+      guard fd >= 0, handshakeComplete else { return }
+      shutdownCommandSent = sendCommand(.shutdown) == .sent
+    }
   }
 
   @discardableResult
@@ -228,6 +256,9 @@ actor DaemonClient {
         connectionGeneration: connectionGeneration)
       isFirstLine = false
     }
+    if shutdownCommandSent, shutdownConnectionGeneration == connectionGeneration {
+      completeShutdown(result: true)
+    }
   }
 
   nonisolated private static func lineStream(from connectionFd: Int32) -> AsyncStream<Data> {
@@ -292,6 +323,10 @@ actor DaemonClient {
       return
     }
 
+    if shutdownCommandSent, shutdownConnectionGeneration == connectionGeneration {
+      scheduleShutdownTimeout()
+    }
+
     if isFirstLine {
       guard case .hello(let protocolVersion, _) = event,
         Self.supportsDaemonProtocol(protocolVersion)
@@ -339,6 +374,40 @@ actor DaemonClient {
 
   nonisolated static func supportsDaemonProtocol(_ version: String) -> Bool {
     version.split(separator: ".").first == "2"
+  }
+
+  private func scheduleShutdownTimeout() {
+    guard let timeout = shutdownInactivityTimeout,
+      let shutdownConnectionGeneration
+    else { return }
+
+    shutdownTimeoutTask?.cancel()
+    shutdownTimeoutTask = Task {
+      do {
+        try await Task.sleep(for: timeout)
+      } catch {
+        return
+      }
+      guard self.shutdownConnectionGeneration == shutdownConnectionGeneration else { return }
+      self.completeShutdown(result: false)
+    }
+  }
+
+  private func completeShutdown(result: Bool) {
+    shutdownTimeoutTask?.cancel()
+    shutdownTimeoutTask = nil
+    shutdownConnectionGeneration = nil
+    shutdownCommandSent = false
+    shutdownInactivityTimeout = nil
+    shutdownResult = result
+    if !result {
+      closeSocket()
+    }
+    let waiters = shutdownWaiters
+    shutdownWaiters.removeAll()
+    for waiter in waiters {
+      waiter.resume(returning: result)
+    }
   }
 
   // MARK: - Raw POSIX socket I/O

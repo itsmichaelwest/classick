@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   let model = AppModel()
   let daemonClient = DaemonClient()
   private let daemonProcess = DaemonProcess()
+  private let daemonShutdownCoordinator = DaemonShutdownCoordinator()
   private let setupWindowController = SetupWindowController()
 
   /// First-run setup is auto-presented exactly once per launch, the moment
@@ -83,9 +84,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     guard !ProcessInfo.isRunningInXcodePreviews else { return }
 
     Notifier.requestAuth()
-    daemonProcess.ensureRunning()
-
     eventTask = Task {
+      await self.daemonProcess.ensureRunning()
       // Register the event stream's continuation before starting the
       // connect/reconnect loop, so nothing yielded during the initial
       // handshake is dropped (mirrors DaemonClientTests' call order).
@@ -551,11 +551,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
   func applicationWillTerminate(_ notification: Notification) {
     eventTask?.cancel()
-    // Best-effort: actor-isolated socket teardown can't be awaited from
-    // this synchronous delegate callback without risking a delay to
-    // process termination, so this is fire-and-forget.
     Task { await daemonClient.stop() }
-    daemonProcess.stop()
+  }
+
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    daemonShutdownCoordinator.begin(
+      shutdown: { [daemonClient] in
+        await daemonClient.shutdownAndWait(timeout: .seconds(130))
+      },
+      forceTerminateOwnedDaemon: { [daemonProcess] in
+        daemonProcess.forceTerminateOwnedDaemon()
+      },
+      reply: { shouldTerminate in
+        sender.reply(toApplicationShouldTerminate: shouldTerminate)
+      })
   }
 
   /// Hybrid app: closing the main window leaves the app running in the Dock
