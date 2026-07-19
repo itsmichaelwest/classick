@@ -86,6 +86,12 @@ impl CheckpointCoordinator<'_> {
         use crate::pending_session::PendingPhase;
 
         self.validate_journal(journal)?;
+        if journal.phase == PendingPhase::RollbackComplete {
+            bail!(
+                "pending sync {} is blocked after verified rollback; manual resolution is required",
+                journal.session_id
+            );
+        }
         let store = crate::pending_session::PendingSessionStore::new(self.mount);
         store.save(journal)?;
 
@@ -127,7 +133,7 @@ impl CheckpointCoordinator<'_> {
             if let Err(error) = verification {
                 let message = format!("{error:#}");
                 drop(reopened);
-                self.rollback_to_ready(journal, &store, &snapshot, error)?;
+                self.rollback_after_verified_mismatch(journal, &store, &snapshot, error)?;
                 bail!("database verification failed; database and artwork restored: {message}");
             }
         }
@@ -137,7 +143,7 @@ impl CheckpointCoordinator<'_> {
             if let Err(error) = self.verify_candidate(&reopened, &candidate) {
                 let message = format!("{error:#}");
                 drop(reopened);
-                self.rollback_to_ready(journal, &store, &snapshot, error)?;
+                self.rollback_after_verified_mismatch(journal, &store, &snapshot, error)?;
                 bail!("database verification failed; database and artwork restored: {message}");
             }
             if let Some(ownership) = journal.candidate_playlist_ownership.as_ref() {
@@ -149,7 +155,7 @@ impl CheckpointCoordinator<'_> {
                     Ok(verified) => journal.verified_playlist_memberships = verified,
                     Err(error) => {
                         drop(reopened);
-                        self.rollback_to_ready(journal, &store, &snapshot, error)?;
+                        self.rollback_after_verified_mismatch(journal, &store, &snapshot, error)?;
                         bail!("playlist verification failed; database and artwork restored");
                     }
                 }
@@ -490,6 +496,21 @@ impl CheckpointCoordinator<'_> {
         self.cleanup_after_rollback(journal)?;
         reset_staged_publication(journal);
         journal.phase = crate::pending_session::PendingPhase::ReadyToPublish;
+        store.save(journal)
+    }
+
+    fn rollback_after_verified_mismatch(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+        snapshot: &RollbackSnapshot,
+        cause: anyhow::Error,
+    ) -> Result<()> {
+        snapshot
+            .restore(self.mount)
+            .with_context(|| format!("restore rollback after {cause:#}"))?;
+        self.cleanup_after_rollback(journal)?;
+        journal.phase = crate::pending_session::PendingPhase::RollbackComplete;
         store.save(journal)
     }
 
@@ -1178,7 +1199,10 @@ mod tests {
         progress.finish(false).unwrap();
 
         assert!(format!("{error:#}").contains("playlist verification failed"));
-        assert_eq!(store.load(17).unwrap().phase, PendingPhase::ReadyToPublish);
+        assert_eq!(
+            store.load(17).unwrap().phase,
+            PendingPhase::RollbackComplete
+        );
         assert_eq!(
             std::fs::read(crate::ipod::layout::itunes_db_path(&mount)).unwrap(),
             original_db

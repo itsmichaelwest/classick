@@ -22,6 +22,7 @@ pub enum PendingPhase {
     PlaylistOwnershipPublished,
     RockboxProjectionsPublished,
     CleanupComplete,
+    RollbackComplete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

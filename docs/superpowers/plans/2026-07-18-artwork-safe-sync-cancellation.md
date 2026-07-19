@@ -23,7 +23,7 @@
 
 ```rust
 pub enum StopReason { Cancelled, Paused }
-pub enum PendingPhase { Staging, ReadyToPublish, DatabaseVerified, DeviceManifestPublished, CleanupComplete }
+pub enum PendingPhase { Staging, ReadyToPublish, DatabaseVerified, DeviceManifestPublished, CleanupComplete, RollbackComplete }
 pub struct StagedFile { pub source: PathBuf, pub pending_path: PathBuf, pub final_ipod_path: Option<PathBuf>, pub dbid: u64 }
 pub struct ObsoleteFile { pub path: PathBuf, pub prior_dbid: u64 }
 pub struct PendingSession { pub version: u32, pub session_id: SessionId, pub serial: String, pub phase: PendingPhase, pub albums: Vec<PendingAlbum>, pub staged_files: Vec<StagedFile>, pub obsolete_files: Vec<ObsoleteFile> }
@@ -32,6 +32,8 @@ pub fn publish(&self, journal: &mut PendingSession, manifest: &mut Manifest, pro
 ```
 
 Use durable phases `Staging → ReadyToPublish → DatabaseVerified → DeviceManifestPublished → CleanupComplete`. Publication order: prepare all artwork; create/validate the full DB/artwork rollback snapshot; fresh DB; replay into a cloned candidate manifest; rehydrate all retained source-known tracks; remove stale artwork outputs; write; reopen; verify; persist `DatabaseVerified`; publish device manifest then host cache; assign the candidate manifest only after device publication; persist `DeviceManifestPublished`; obsolete/pending cleanup; journal removal. Restore the complete snapshot on write/verification/device-manifest failure. Journal every final `itdb_cp_track_to_ipod` path before DB write. Recovery inspects the live DB in ambiguous phases and never deletes a referenced new file. Defer deletion and set remove fit credit to zero. Journal every album; publish only at album boundaries/time/count/finalization.
+
+Recovery that detects a mismatch at or after `DatabaseVerified` restores the full snapshot and persists terminal `RollbackComplete` with its candidate diagnostics intact. That phase fails closed on every later startup; it must never re-enter `ReadyToPublish`, reconcile playlists, or allocate replacement IDs.
 
 - [ ] Add RED tests for atomic/corrupt journal, pre/post-publication recovery, foreign-file preservation, album order, boundary scheduling, failure injection at artwork/DB/manifest boundaries, old-audio retention, exact publication order, and peak-space budgeting.
 - [ ] Implement `unlink_track_keep_file`, metadata+art setter, per-track verify, and referenced paths in `OwnedDb`; implement coordinator and recovery.

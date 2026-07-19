@@ -137,7 +137,7 @@ fn device_manifest_published_future_ops_remain_byte_exact_when_recovery_rejects_
 }
 
 #[test]
-fn database_verified_mismatch_restores_without_reconciling_replacement_ids() {
+fn database_verified_mismatch_blocks_reconcile_on_every_restart() {
     let mut fixture = fixture("verified-mismatch");
     let store = PendingSessionStore::new(&fixture.mount);
     RollbackSnapshot::create(&fixture.mount, &store.snapshot_dir(2)).unwrap();
@@ -174,7 +174,25 @@ fn database_verified_mismatch_restores_without_reconciling_replacement_ids() {
     journal
         .desired_playlist_memberships
         .insert("mix".into(), Vec::new());
+    journal.verified_playlist_memberships = vec![VerifiedPlaylistMembership {
+        slug: "mix".into(),
+        apple_playlist_id: original_candidate_id,
+        ordered_dbids: Vec::new(),
+        ordered_ipod_paths: Vec::new(),
+    }];
+    let expected_candidate = journal.candidate_manifest.clone();
+    let expected_ownership = journal.candidate_playlist_ownership.clone();
+    let expected_desired = journal.desired_playlist_memberships.clone();
+    let expected_verified = journal.verified_playlist_memberships.clone();
     store.save(&journal).unwrap();
+    let database = classick::ipod::layout::itunes_db_path(&fixture.mount);
+    let restored_database = std::fs::read(&database).unwrap();
+    let restored_playlist_ids = classick::ipod::playlist_audit::snapshot_playlists(
+        &classick::ipod::db::OwnedDb::open(&fixture.mount).unwrap(),
+    )
+    .into_iter()
+    .map(|playlist| playlist.id)
+    .collect::<Vec<_>>();
     let desired = vec![("mix".to_string(), "Mix".to_string(), Vec::new())];
     let state_root = fixture.host.join("state");
     let (progress, _decisions) = Progress::start(false, false).unwrap();
@@ -200,13 +218,60 @@ fn database_verified_mismatch_restores_without_reconciling_replacement_ids() {
     progress.finish(false).unwrap();
 
     assert!(format!("{error:#}").contains("database verification failed"));
-    assert_eq!(store.load(2).unwrap().phase, PendingPhase::ReadyToPublish);
+    let restarted_store = PendingSessionStore::new(&fixture.mount);
+    let (progress, _decisions) = Progress::start(false, false).unwrap();
+    let restarted_coordinator = CheckpointCoordinator {
+        mount: &fixture.mount,
+        serial: SERIAL,
+        manifest_store: &fixture.manifest_store,
+        artwork_cache: fixture.cache.clone(),
+    };
+    let second = restarted_coordinator.recover_pending_with_options(
+        &mut fixture.manifest,
+        &progress,
+        PublishOptions {
+            desired_playlists: Some(&desired),
+            playlist_state_root: Some(&state_root),
+            device_identity: None,
+            playlist_failure_point: None,
+        },
+    );
+    progress.finish(second.is_ok()).unwrap();
+
+    assert!(
+        second.is_err(),
+        "blocked recovery must fail on every restart"
+    );
+    let retained = restarted_store.load(2).unwrap();
+    assert_eq!(
+        serde_json::to_value(retained.phase).unwrap(),
+        serde_json::json!("rollback_complete")
+    );
+    assert_eq!(
+        retained
+            .candidate_playlist_ownership
+            .as_ref()
+            .unwrap()
+            .playlists["mix"]
+            .apple_playlist_id,
+        original_candidate_id
+    );
+    assert_eq!(retained.candidate_manifest, expected_candidate);
+    assert_eq!(retained.candidate_playlist_ownership, expected_ownership);
+    assert_eq!(retained.desired_playlist_memberships, expected_desired);
+    assert_eq!(retained.verified_playlist_memberships, expected_verified);
+    assert_eq!(std::fs::read(database).unwrap(), restored_database);
     let reopened = classick::ipod::db::OwnedDb::open(&fixture.mount).unwrap();
+    let playlist_ids = classick::ipod::playlist_audit::snapshot_playlists(&reopened)
+        .into_iter()
+        .map(|playlist| playlist.id)
+        .collect::<Vec<_>>();
+    assert_eq!(playlist_ids, restored_playlist_ids);
     let replacement_count = classick::ipod::db::list_playlists(&reopened)
         .into_iter()
         .filter(|(_, is_master)| !is_master)
         .count();
-    assert_eq!(replacement_count, 0, "recovery must not call reconcile");
+    assert_eq!(replacement_count, 0, "neither recovery may call reconcile");
     assert!(
         !classick::ipod::playlist_audit::snapshot_playlists(&reopened)
             .iter()
@@ -271,7 +336,7 @@ fn device_manifest_published_playlist_mismatch_restores_and_keeps_journal() {
     progress.finish(false).unwrap();
 
     assert!(format!("{error:#}").contains("database verification failed"));
-    assert_eq!(store.load(3).unwrap().phase, PendingPhase::ReadyToPublish);
+    assert_eq!(store.load(3).unwrap().phase, PendingPhase::RollbackComplete);
     assert_eq!(
         std::fs::read(classick::ipod::layout::itunes_db_path(&fixture.mount)).unwrap(),
         original_db
