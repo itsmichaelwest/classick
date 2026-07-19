@@ -202,6 +202,7 @@
       ],
       rules: nil,
       error: nil,
+      playlistRevision: 1,
       acknowledgedRequestID: requestID)
 
     static let smartPlaylistDetail = PlaylistDetail(
@@ -219,11 +220,13 @@
         order: .recentlyModified,
         seed: 42),
       error: nil,
+      playlistRevision: 1,
       acknowledgedRequestID: requestID)
 
     static let brokenPlaylistDetail = PlaylistDetail(
       slug: brokenPlaylist.slug, name: nil, kind: nil, tracks: nil, rules: nil,
       error: brokenPlaylist.error,
+      playlistRevision: 1,
       acknowledgedRequestID: requestID)
 
     /// History outcome strings on the wire are `ok`/`error`/`aborted`
@@ -326,7 +329,9 @@
         m.apply(.libraryUpdate(library))
       }
       m.apply(.historyUpdate(entries: historyEntries, acknowledgedRequestID: requestID))
-      m.apply(.playlistsUpdate(playlistSummaries, acknowledgedRequestID: requestID))
+      m.apply(
+        .playlistsUpdate(
+          playlistSummaries, playlistRevision: 1, acknowledgedRequestID: requestID))
       m.seedPreviewStorage(free: storage.free, total: storage.total)
       return m
     }
@@ -342,6 +347,7 @@
           subscriptions: SubscriptionsWire(playlists: [electronicEssentials.slug, roadTripMix.slug]
           ),
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+          selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1,
           acknowledgedRequestID: requestID))
       m.willRequestDevicePreview(serial: pairedIpod.serial, requestID: requestID)
       m.apply(.devicePreview(devicePreviewFits))
@@ -363,6 +369,7 @@
           selection: SelectionState(mode: .include, rules: rules),
           subscriptions: SubscriptionsWire(playlists: [electronicEssentials.slug]),
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+          selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1,
           acknowledgedRequestID: requestID))
       m.willRequestDevicePreview(serial: pairedIpod.serial, requestID: requestID)
       m.apply(
@@ -386,6 +393,7 @@
           selection: SelectionState(mode: .all, rules: []),
           subscriptions: SubscriptionsWire(playlists: []),
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+          selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1,
           acknowledgedRequestID: requestID))
       return m
     }
@@ -406,6 +414,7 @@
             electronicEssentials.slug, roadTripMix.slug, nightDrive.slug,
           ]),
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+          selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1,
           acknowledgedRequestID: requestID))
       m.willRequestDevicePreview(serial: pairedIpod.serial, requestID: requestID)
       m.apply(.devicePreview(devicePreviewOverfull))
@@ -444,7 +453,9 @@
           acknowledgedRequestID: requestID))
       m.apply(.libraryUpdate(richLibrary))
       m.apply(.historyUpdate(entries: historyEntries, acknowledgedRequestID: requestID))
-      m.apply(.playlistsUpdate(playlistSummaries, acknowledgedRequestID: requestID))
+      m.apply(
+        .playlistsUpdate(
+          playlistSummaries, playlistRevision: 1, acknowledgedRequestID: requestID))
       m.apply(
         .deviceInventorySnapshot(
           .init(
@@ -460,6 +471,7 @@
           selection: SelectionState(mode: .all, rules: []),
           subscriptions: SubscriptionsWire(playlists: [electronicEssentials.slug]),
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+          selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1,
           acknowledgedRequestID: requestID))
       return m
     }
@@ -495,7 +507,9 @@
           acknowledgedRequestID: requestID))
       m.apply(.libraryUpdate(richLibrary))
       m.apply(.historyUpdate(entries: historyEntries, acknowledgedRequestID: requestID))
-      m.apply(.playlistsUpdate(playlistSummaries, acknowledgedRequestID: requestID))
+      m.apply(
+        .playlistsUpdate(
+          playlistSummaries, playlistRevision: 1, acknowledgedRequestID: requestID))
       return m
     }
 
@@ -578,6 +592,17 @@
       return m
     }
 
+    static func finalizingModel() -> AppModel {
+      let m = syncingModel()
+      m.apply(
+        .syncEvent(
+          line:
+            #"{"type":"finalizing","reason":"cancelled","staged_albums":12,"staged_tracks":91}"#,
+          serial: pairedIpod.serial,
+          sessionID: 1))
+      return m
+    }
+
     /// A sync that's been paused mid-run.
     static func pausedModel() -> AppModel {
       let m = syncingModel()
@@ -615,6 +640,33 @@
       return m
     }
 
+    static func longContentErrorModel() -> AppModel {
+      let m = connectedSyncedModel()
+      let identity = IpodIdentity(
+        serial: pairedIpod.serial,
+        modelLabel: pairedIpod.modelLabel,
+        name: "Michael's extraordinarily long engraved silver iPod Classic used for road trips",
+        customSelection: false)
+      let message =
+        "Classick could not verify the complete artwork publication for this iPod after saving the database."
+      m.apply(
+        .deviceInventorySnapshot(
+          .init(
+            revision: 2,
+            devices: [
+              deviceSnapshot(
+                identity: identity,
+                phase: .error,
+                storage: (free: 42_000_000_000, total: 160_000_000_000),
+                syncedCount: 91,
+                libraryCount: 91,
+                latestSuccessfulSync: mostRecentSync,
+                latestAttempt: mostRecentSync,
+                lastTerminalError: message)
+            ])))
+      return m
+    }
+
     /// Fixture stand-in for the daemon's `get_playlist` reply, so preview
     /// hosts can answer `onGetPlaylist` and playlist pages actually load in
     /// the canvas (a no-op closure left them on "Loading…" forever). Slugs
@@ -629,11 +681,12 @@
         return PlaylistDetail(
           slug: nightDrive.slug, name: nightDrive.name, kind: .manual,
           tracks: Array(manualPlaylistDetail.tracks?.prefix(6) ?? []),
-          rules: nil, error: nil, acknowledgedRequestID: requestID)
+          rules: nil, error: nil, playlistRevision: 1, acknowledgedRequestID: requestID)
       default:
         return PlaylistDetail(
           slug: slug, name: nil, kind: nil, tracks: nil, rules: nil,
           error: "No fixture detail for slug “\(slug)”.",
+          playlistRevision: 1,
           acknowledgedRequestID: requestID)
       }
     }
@@ -645,7 +698,9 @@
     static func playlistDetailModel(_ detail: PlaylistDetail) -> AppModel {
       let m = AppModel()
       m.apply(.libraryUpdate(richLibrary))
-      m.apply(.playlistsUpdate(playlistSummaries, acknowledgedRequestID: requestID))
+      m.apply(
+        .playlistsUpdate(
+          playlistSummaries, playlistRevision: 1, acknowledgedRequestID: requestID))
       m.apply(.playlistDetail(detail))
       return m
     }
@@ -654,7 +709,9 @@
     static func playlistLoadingModel() -> AppModel {
       let m = AppModel()
       m.apply(.libraryUpdate(richLibrary))
-      m.apply(.playlistsUpdate(playlistSummaries, acknowledgedRequestID: requestID))
+      m.apply(
+        .playlistsUpdate(
+          playlistSummaries, playlistRevision: 1, acknowledgedRequestID: requestID))
       return m
     }
   }

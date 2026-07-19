@@ -44,6 +44,11 @@ struct MainWindow: View {
     Binding(get: { model.selectedDestination }, set: { model.selectedDestination = $0 })
   }
 
+  private var selectedDeviceSerial: DeviceSerial? {
+    guard case .device(let serial, _) = model.selectedDestination else { return nil }
+    return serial
+  }
+
   var body: some View {
     // Sidebar is collapsible via the system toggle — the native pattern
     // (Music/Finder/Mail all allow it). An earlier pinned-open variant
@@ -66,6 +71,7 @@ struct MainWindow: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
           DeviceRow(
             model: model,
+            selectedSerial: selectedDeviceSerial,
             onSyncNow: onSyncNow, onPause: onPause,
             onCancelSync: onCancelSync, onResume: onResume,
             onRetry: onRetry, onSetUp: onSetUp)
