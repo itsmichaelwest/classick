@@ -20,6 +20,18 @@ pub struct TrackHandle {
     pub ipod_relpath: String,
 }
 
+/// Read-only snapshot of every per-track artwork signal exposed by libgpod.
+/// Kept as raw facts so audit policy and failure ordering remain pure/testable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrackArtworkSignals {
+    pub has_artwork: bool,
+    pub mhii_link: u32,
+    pub has_artwork_record: bool,
+    pub has_thumbnail: bool,
+    pub has_thumbnails: bool,
+    pub decoded_thumbnail: bool,
+}
+
 /// The metadata fields we copy into `Itdb_Track`. Parsed from ffprobe by main.rs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Tags {
@@ -361,6 +373,39 @@ impl OwnedDb {
             !found.is_null()
                 && (*found).has_artwork == 1
                 && ffi::itdb_track_has_thumbnails(found) != 0
+        }
+    }
+
+    /// Inspect a track's complete artwork chain without mutating the DB.
+    /// The decoded thumbnail is a newly-referenced GdkPixbuf owned by the
+    /// caller, so every non-null return must be released with `g_object_unref`.
+    pub fn track_artwork_signals(&self, dbid: u64) -> Option<TrackArtworkSignals> {
+        unsafe {
+            let track = self.find_track_by_dbid(dbid);
+            if track.is_null() {
+                return None;
+            }
+
+            let artwork = (*track).artwork;
+            let thumbnail = if artwork.is_null() {
+                ptr::null_mut()
+            } else {
+                (*artwork).thumbnail
+            };
+            let pixbuf = ffi::itdb_track_get_thumbnail(track, -1, -1);
+            let decoded_thumbnail = !pixbuf.is_null();
+            if decoded_thumbnail {
+                ffi::g_object_unref(pixbuf);
+            }
+
+            Some(TrackArtworkSignals {
+                has_artwork: (*track).has_artwork == 1,
+                mhii_link: (*track).mhii_link,
+                has_artwork_record: !artwork.is_null(),
+                has_thumbnail: !thumbnail.is_null(),
+                has_thumbnails: ffi::itdb_track_has_thumbnails(track) != 0,
+                decoded_thumbnail,
+            })
         }
     }
 

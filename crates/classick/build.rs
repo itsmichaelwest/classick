@@ -63,6 +63,9 @@ fn build_windows(manifest_dir: &Path, out_dir: &Path) {
     // an MSVC-format import lib (glib.lib) from its export table so Rust can
     // resolve those symbols at link time.
     println!("cargo:rustc-link-lib=dylib=glib");
+    // The artwork audit owns the GdkPixbuf returned by
+    // itdb_track_get_thumbnail and must release it with g_object_unref.
+    println!("cargo:rustc-link-lib=dylib=gobject");
 
     // Re-run if the header changes.
     let header = vendor.join("include").join("gpod").join("itdb.h");
@@ -70,6 +73,10 @@ fn build_windows(manifest_dir: &Path, out_dir: &Path) {
     println!(
         "cargo:rerun-if-changed={}",
         vendor.join("lib").join("gpod.lib").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        vendor.join("lib").join("gobject.lib").display()
     );
 
     // GLib headers ship with the MSYS2 MinGW64 toolchain used to build libgpod.
@@ -82,6 +89,8 @@ fn build_windows(manifest_dir: &Path, out_dir: &Path) {
         .clang_arg(format!("-I{}", vendor.join("include").display()))
         .clang_arg(format!("-I{}", glib_include.display()))
         .clang_arg(format!("-I{}", glib_config_include.display()))
+        .clang_arg("-include")
+        .clang_arg("glib-object.h")
         .pipe(allowlists)
         .layout_tests(false)
         .generate()
@@ -290,6 +299,16 @@ fn build_pkg_config(out_dir: &Path) {
                  glib2 (Arch), or glib (Homebrew)."
             )
         });
+    let gobject = pkg_config::Config::new()
+        .atleast_version("2.0")
+        .probe("gobject-2.0")
+        .unwrap_or_else(|e| {
+            panic!(
+                "gobject-2.0 not found via pkg-config: {e}\n\
+                 Install libglib2.0-dev (Debian/Ubuntu), glib2-devel (Fedora), \
+                 glib2 (Arch), or glib (Homebrew)."
+            )
+        });
 
     // Locate gpod/itdb.h inside one of libgpod's include paths.
     let header = libgpod
@@ -305,11 +324,15 @@ fn build_pkg_config(out_dir: &Path) {
         });
     println!("cargo:rerun-if-changed={}", header.display());
 
-    let mut builder = bindgen::Builder::default().header(header.to_str().unwrap());
+    let mut builder = bindgen::Builder::default()
+        .header(header.to_str().unwrap())
+        .clang_arg("-include")
+        .clang_arg("glib-object.h");
     for inc in libgpod
         .include_paths
         .iter()
         .chain(glib.include_paths.iter())
+        .chain(gobject.include_paths.iter())
     {
         builder = builder.clang_arg(format!("-I{}", inc.display()));
     }
@@ -346,6 +369,7 @@ fn allowlists(b: bindgen::Builder) -> bindgen::Builder {
         .allowlist_function("g_error_.*")
         .allowlist_function("g_strdup")
         .allowlist_function("g_free")
+        .allowlist_function("g_object_unref")
         // Task 11: route libgpod's GLib WARNING/CRITICAL messages through tracing.
         .allowlist_function("g_log_.*")
         .allowlist_type("GLogLevelFlags")
