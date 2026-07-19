@@ -59,6 +59,11 @@ pub fn orchestrate(
         }
     }
 
+    if cli.audit_playlists {
+        crate::playlist_audit_command::run(cli.ipod.as_deref(), progress)?;
+        return Ok(RunOutcome::Completed);
+    }
+
     ensure_source_or_wizard(&cli, progress, decision_rx)?;
     let mut config = config::resolve(cli)?;
     if config.scan_library {

@@ -178,6 +178,21 @@ pub struct Cli {
         "dry_run", "rebuild_manifest",
     ])]
     pub verify_artwork: bool,
+
+    /// Emit a complete structural iTunesDB playlist inventory as JSON, then
+    /// exit. Opens the DB and ownership record read-only and performs no
+    /// device write.
+    #[arg(long, conflicts_with_all = [
+        "apply",
+        "dry_run",
+        "rebuild_manifest",
+        "backfill_rockbox",
+        "scan_library",
+        "restore_db_backup",
+        "replace_library",
+        "verify_artwork",
+    ])]
+    pub audit_playlists: bool,
 }
 
 #[cfg(test)]

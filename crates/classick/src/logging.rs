@@ -74,7 +74,7 @@ pub fn init(verbose: bool, use_tui: bool, ipc_mode: bool) {
     } else if use_tui {
         builder.with_writer(std::io::sink).init();
     } else {
-        builder.init();
+        builder.with_writer(std::io::stderr).init();
     }
 
     install_glib_handler();
