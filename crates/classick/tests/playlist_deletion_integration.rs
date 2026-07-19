@@ -103,6 +103,47 @@ async fn registry_publish_failure_rolls_back_and_emits_no_success_broadcast() {
 }
 
 #[tokio::test]
+async fn live_playlist_mutation_journal_blocks_dependent_mutations() {
+    let sandbox = Sandbox::start(&[("RAW-A", 3)]).await;
+    save_playlist(&sandbox.root, "gym");
+    let playlist_path = sandbox.root.join("playlists/gym.m3u8");
+    let playlist_before = std::fs::read(&playlist_path).unwrap();
+    let mut client = sandbox.connect().await;
+    let mutation_root = sandbox.root.join("devices/playlist-mutations");
+    std::fs::create_dir_all(&mutation_root).unwrap();
+    std::fs::write(mutation_root.join("unresolved.json"), b"{}").unwrap();
+
+    client
+        .send(json!({
+            "type":"delete_playlist",
+            "slug":"gym",
+            "request_id":"delete-while-recovery-pending"
+        }))
+        .await;
+
+    let event = loop {
+        let event = client.next().await;
+        if matches!(
+            event["type"].as_str(),
+            Some("command_failed" | "playlists_update")
+        ) {
+            break event;
+        }
+    };
+    assert_eq!(event["type"], "command_failed");
+    assert_eq!(
+        event["acknowledged_request_id"],
+        "delete-while-recovery-pending"
+    );
+    assert_eq!(
+        event["error"],
+        "playlist mutation recovery is pending; restart Classick"
+    );
+    assert_eq!(std::fs::read(playlist_path).unwrap(), playlist_before);
+    sandbox.shutdown().await;
+}
+
+#[tokio::test]
 async fn startup_rolls_forward_publishing_journal_and_next_preview_is_clean() {
     let root = test_root("recover-publishing");
     let config_path = root.join("config.toml");

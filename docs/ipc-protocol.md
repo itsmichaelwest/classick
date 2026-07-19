@@ -1373,13 +1373,14 @@ real domain state.
 | `selection_preview` | `selected_tracks`, `selected_bytes`, `adds`, `removes`, `serial`, `acknowledged_request_id` | — |
 | `playlists_update` | `playlists`, `playlist_revision` | `acknowledged_request_id` (absent for an unsolicited broadcast) |
 | `playlist_detail` | existing detail fields, `playlist_revision`, `acknowledged_request_id` | content/error fields retain their documented result semantics |
-| `device_config_update` | `serial`, `selection`, `subscriptions`, `settings`, `selection_revision`, `settings_revision`, `subscriptions_revision`, `acknowledged_request_id` | — |
+| `device_config_update` | `serial`, `selection`, `subscriptions`, `settings`, `selection_revision`, `settings_revision`, `subscriptions_revision` | `acknowledged_request_id` (present only when every component requested by that command persisted) |
 | `device_preview` | `serial`, existing preview fields, `acknowledged_request_id` | `projected_free_bytes` may be `null`; `unresolved_subscriptions` is omitted when empty |
 | `resolved_tracks` | `tracks`, `acknowledged_request_id` | — |
 | `command_failed` | `acknowledged_request_id`, `error` | —; deliberately has no revision and is not a durable acknowledgement |
 | `source_availability` | `state`; `source_root` when `state` is `available` | `acknowledged_request_id` (terminal reply to an explicit retry only) |
 
-`status_update`, `library_update`, `selection_update`, and `playlists_update`
+`status_update`, `library_update`, `selection_update`, `playlists_update`, and
+`device_config_update`
 may be either replies or broadcasts, so their `acknowledged_request_id` is
 optional. `HistoryEntry.serial` is required on the v2 wire;
 `HistoryEntry.session_id` remains optional because migrated historical records
@@ -1405,6 +1406,13 @@ revision are therefore the evidence a durable-intent client uses to remove
 that request from its outbox. `get_playlist` returns the current playlist
 revision, while the pure `resolve_tracks` reply is correlated but does not
 carry a persistence revision.
+
+For a multi-component `save_device_config`, success means every requested
+component persisted. If one component fails while another persists, the daemon
+broadcasts the actual canonical `device_config_update` without
+`acknowledged_request_id` and sends a correlated `command_failed`. The
+uncorrelated broadcast updates visible truth; only a later fully successful
+correlated update may remove the durable request from the client outbox.
 
 A rejected or failed editor command receives a private `command_failed` reply
 with the original request ID and a user-safe error string. It advances no

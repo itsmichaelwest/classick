@@ -788,6 +788,11 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
         config_file::device_registry_path(&config_path),
         legacy_identity.as_ref(),
     )?;
+    crate::daemon::device_config_transaction::recover_pending(
+        &registry,
+        device_state_root(&config_path),
+    )
+    .context("recover pending device config mutations")?;
     crate::daemon::playlist_commands::recover_pending_playlist_mutations(
         &mut registry,
         device_state_root(&config_path),
@@ -2035,6 +2040,56 @@ fn count_source_library(config_path: &std::path::Path) -> Option<usize> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PendingHostMutation {
+    Playlist,
+    DeviceConfig,
+}
+
+fn command_requires_settled_host_state(command: &DaemonCommand) -> bool {
+    matches!(
+        command,
+        DaemonCommand::SavePlaylist { .. }
+            | DaemonCommand::DeletePlaylist { .. }
+            | DaemonCommand::SaveDeviceConfig { .. }
+            | DaemonCommand::ForgetIpod { .. }
+            | DaemonCommand::SaveConfig { ipod: Some(_), .. }
+    )
+}
+
+fn pending_host_mutation(state_root: &Path) -> Result<Option<PendingHostMutation>> {
+    let playlist_root = state_root.join("devices").join("playlist-mutations");
+    if directory_has_json(&playlist_root)? {
+        return Ok(Some(PendingHostMutation::Playlist));
+    }
+    if crate::daemon::device_config_transaction::has_pending(state_root)? {
+        return Ok(Some(PendingHostMutation::DeviceConfig));
+    }
+    Ok(None)
+}
+
+fn directory_has_json(root: &Path) -> Result<bool> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read mutations {}", root.display()))
+        }
+    };
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("read mutation entry in {}", root.display()))?
+            .path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Handle one client command. Returns `true` iff the daemon should exit
 /// its main loop (currently only the Shutdown command sets this — the
 /// outer loop then runs the graceful-drain sequence so the in-flight
@@ -2077,6 +2132,47 @@ fn handle_client_command(
         });
         tracing::warn!("daemon: client {client_id} rejected exact device target");
         return false;
+    }
+    if command_requires_settled_host_state(&command) {
+        match pending_host_mutation(device_state_root(config_path)) {
+            Ok(Some(PendingHostMutation::Playlist)) => {
+                let request_id = command
+                    .request_id()
+                    .expect("blocked mutation commands carry request ids")
+                    .to_string();
+                let _ = reply.send(command_failed(
+                    request_id,
+                    "playlist mutation recovery is pending; restart Classick",
+                ));
+                return false;
+            }
+            Ok(Some(PendingHostMutation::DeviceConfig)) => {
+                let request_id = command
+                    .request_id()
+                    .expect("blocked mutation commands carry request ids")
+                    .to_string();
+                let _ = reply.send(command_failed(
+                    request_id,
+                    "device configuration recovery is pending; restart Classick",
+                ));
+                return false;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(
+                    "daemon: cannot inspect pending host mutations before command: {error:#}"
+                );
+                let request_id = command
+                    .request_id()
+                    .expect("blocked mutation commands carry request ids")
+                    .to_string();
+                let _ = reply.send(command_failed(
+                    request_id,
+                    "could not verify host mutation recovery state",
+                ));
+                return false;
+            }
+        }
     }
     let target_serial = command.target_serial().map(|requested| {
         registry
@@ -2643,7 +2739,7 @@ fn handle_client_command(
                             config_path,
                             registry,
                             serial,
-                            request_id.clone(),
+                            Some(request_id.clone()),
                         ));
                     }
                     let persisted_revision =
@@ -2672,7 +2768,7 @@ fn handle_client_command(
                 config_path,
                 registry,
                 raw_serial,
-                request_id,
+                Some(request_id),
             ));
         }
         DaemonCommand::SaveDeviceConfig {
@@ -2685,9 +2781,10 @@ fn handle_client_command(
             let raw_serial = target_serial
                 .as_deref()
                 .expect("save_device_config is serial-targeted");
-            let mut selection_changed = false;
-            let mut subscriptions_changed = false;
-            let mut settings_changed = false;
+            use crate::daemon::device_config_transaction::{
+                ConfigComponentKind, ConfigComponentUpdate,
+            };
+            let mut updates = Vec::new();
             let mut component_failure = None;
             if let Some(sel) = selection {
                 match crate::selection::effective_device_selection_path_in(
@@ -2702,14 +2799,17 @@ fn handle_client_command(
                         };
                         let changed = crate::selection::load_or_all(&path) != full;
                         if changed {
-                            match crate::selection::save_atomic(&path, &full) {
-                                Ok(()) => selection_changed = true,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "daemon: failed to save device selection for {raw_serial}: {e:#}"
-                                    );
+                            match serde_json::to_vec_pretty(&full) {
+                                Ok(target_contents) => updates.push(ConfigComponentUpdate {
+                                    kind: ConfigComponentKind::Selection,
+                                    live_path: path,
+                                    target_contents,
+                                    failure_message: "could not persist the device selection",
+                                }),
+                                Err(error) => {
+                                    tracing::error!("daemon: failed to encode device selection for {raw_serial}: {error:#}");
                                     component_failure
-                                        .get_or_insert("could not persist the device selection");
+                                        .get_or_insert("could not encode the device selection");
                                 }
                             }
                         }
@@ -2735,15 +2835,17 @@ fn handle_client_command(
                         let changed =
                             crate::device_config::Subscriptions::load_or_default(&path) != full;
                         if changed {
-                            match crate::device_config::Subscriptions::save_atomic(&path, &full) {
-                                Ok(()) => subscriptions_changed = true,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "daemon: failed to save subscriptions for {raw_serial}: {e:#}"
-                                    );
-                                    component_failure.get_or_insert(
-                                        "could not persist the device subscriptions",
-                                    );
+                            match serde_json::to_vec_pretty(&full) {
+                                Ok(target_contents) => updates.push(ConfigComponentUpdate {
+                                    kind: ConfigComponentKind::Subscriptions,
+                                    live_path: path,
+                                    target_contents,
+                                    failure_message: "could not persist the device subscriptions",
+                                }),
+                                Err(error) => {
+                                    tracing::error!("daemon: failed to encode subscriptions for {raw_serial}: {error:#}");
+                                    component_failure
+                                        .get_or_insert("could not encode the device subscriptions");
                                 }
                             }
                         }
@@ -2771,14 +2873,17 @@ fn handle_client_command(
                         let changed =
                             crate::device_config::DeviceSettings::load_or_default(&path) != full;
                         if changed {
-                            match crate::device_config::DeviceSettings::save_atomic(&path, &full) {
-                                Ok(()) => settings_changed = true,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "daemon: failed to save settings for {raw_serial}: {e:#}"
-                                    );
+                            match serde_json::to_vec_pretty(&full) {
+                                Ok(target_contents) => updates.push(ConfigComponentUpdate {
+                                    kind: ConfigComponentKind::Settings,
+                                    live_path: path,
+                                    target_contents,
+                                    failure_message: "could not persist the device settings",
+                                }),
+                                Err(error) => {
+                                    tracing::error!("daemon: failed to encode settings for {raw_serial}: {error:#}");
                                     component_failure
-                                        .get_or_insert("could not persist the device settings");
+                                        .get_or_insert("could not encode the device settings");
                                 }
                             }
                         }
@@ -2791,26 +2896,40 @@ fn handle_client_command(
                     }
                 }
             }
-            if let Err(error) = registry.advance_config_revisions(
+            let outcome = match crate::daemon::device_config_transaction::commit(
+                registry,
+                device_state_root(config_path),
                 raw_serial,
-                selection_changed,
-                settings_changed,
-                subscriptions_changed,
+                &request_id,
+                updates,
             ) {
-                tracing::error!(
-                    "daemon: failed to advance config revisions for {raw_serial}: {error:#}"
-                );
-                let _ = reply.send(command_failed(
-                    request_id,
-                    "could not persist the device configuration revision",
-                ));
-                return false;
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::error!(
+                        "daemon: failed to commit device configuration for {raw_serial}: {error:#}"
+                    );
+                    let _ = event_tx.send(build_device_config_update(
+                        config_path,
+                        registry,
+                        raw_serial,
+                        None,
+                    ));
+                    let _ = reply.send(command_failed(
+                        request_id,
+                        "could not persist the device configuration revision",
+                    ));
+                    return false;
+                }
+            };
+            if component_failure.is_none() {
+                component_failure = outcome.component_failure;
             }
+            let acknowledged_request_id = component_failure.is_none().then(|| request_id.clone());
             let _ = event_tx.send(build_device_config_update(
                 config_path,
                 registry,
                 raw_serial,
-                request_id.clone(),
+                acknowledged_request_id,
             ));
             if let Some(error) = component_failure {
                 let _ = reply.send(command_failed(request_id, error));
@@ -3028,7 +3147,7 @@ fn build_device_config_update(
     config_path: &std::path::Path,
     registry: &DeviceRegistry,
     serial: &str,
-    acknowledged_request_id: String,
+    acknowledged_request_id: Option<String>,
 ) -> DaemonEvent {
     let root = device_state_root(config_path);
     let selection = crate::selection::effective_device_selection_path_in(root, serial)

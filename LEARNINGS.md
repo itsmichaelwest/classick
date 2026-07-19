@@ -6,6 +6,7 @@ Per global AGENTS.md: record discovered conventions, gotchas, debugging insights
 - **Fresh publication DBs need the full transaction context:** a checkpoint that reopens `OwnedDb` must reapply FirewireGuid/ModelNumStr, resolve playlists against post-staging DBIDs, and snapshot playlist ownership before reconciliation so rollback restores both device and host authority.
 - **Durable sync recovery must run before diff planning:** enumerate only mount-scoped pending journals, require exact filename/session/raw-serial identity, and reject cleanup paths outside that session's staging directory or `iPod_Control/Music`; unsafe journals stay untouched and block a fresh transaction.
 - **Playlist deletion is a host transaction, not device work:** stage the playlist plus every affected subscription under `devices/playlist-mutations`, persist hashes/revision targets before renames, recover before daemon IPC, and broadcast only after the playlist, subscriptions, and registry revisions are durable.
+- **Per-device config content and registry revisions are one host transaction:** journal exact originals before publishing component files, restore when durable revisions remain original, accept only exact target bytes when revisions advanced, and never correlate a partial-state broadcast with the failed request ID.
 
 ## iTunes will always reject a libgpod-managed iPod (2026-05-24)
 

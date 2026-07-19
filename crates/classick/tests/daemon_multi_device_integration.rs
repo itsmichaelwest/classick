@@ -894,7 +894,7 @@ async fn forget_keeps_connected_device_unconfigured_and_restart_does_not_remigra
 }
 
 #[tokio::test]
-async fn save_device_config_advances_only_successfully_persisted_components() {
+async fn save_device_config_partial_failure_broadcasts_state_without_acknowledging_request() {
     let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
     let mut sandbox = Sandbox::start(&[("RAW-A", true)]).await;
     let mut client = sandbox.connect().await;
@@ -914,7 +914,25 @@ async fn save_device_config_advances_only_successfully_persisted_components() {
             "request_id": "mixed-config"
         }))
         .await;
-    let update = client.next_type("device_config_update").await;
+    let mut update = None;
+    let mut failed = None;
+    let mut snapshot = None;
+    while update.is_none() || failed.is_none() || snapshot.is_none() {
+        let event = client.next().await;
+        match event["type"].as_str() {
+            Some("device_config_update") => update = Some(event),
+            Some("command_failed") => failed = Some(event),
+            Some("device_inventory_snapshot")
+                if snapshot_device(&event, "RAW-A")["selection_revision"] == 1 =>
+            {
+                snapshot = Some(event)
+            }
+            _ => {}
+        }
+    }
+    let update = update.unwrap();
+    let failed = failed.unwrap();
+    let snapshot = snapshot.unwrap();
     assert_eq!(update["serial"], "RAW-A");
     assert_eq!(update["selection"]["mode"], "include");
     assert_eq!(update["subscriptions"]["playlists"], json!([]));
@@ -923,18 +941,73 @@ async fn save_device_config_advances_only_successfully_persisted_components() {
     assert_eq!(update["selection_revision"], 1);
     assert_eq!(update["subscriptions_revision"], 0);
     assert_eq!(update["settings_revision"], 1);
-    assert_eq!(update["acknowledged_request_id"], "mixed-config");
-    let snapshot = client
-        .next_snapshot_where(|snapshot| {
-            snapshot_device(snapshot, "RAW-A")["selection_revision"] == 1
-        })
-        .await;
+    assert!(update["acknowledged_request_id"].is_null());
+    assert_eq!(failed["acknowledged_request_id"], "mixed-config");
     let a = snapshot_device(&snapshot, "RAW-A");
     assert_eq!(a["selection_revision"], 1);
     assert_eq!(a["subscriptions_revision"], 0);
     assert_eq!(a["settings_revision"], 1);
 
     std::fs::remove_dir(subscriptions_tmp).unwrap();
+    sandbox.finish_startup_scan().await;
+    sandbox.shutdown().await;
+}
+
+#[tokio::test]
+async fn save_device_config_registry_failure_rolls_back_before_retry_acknowledgement() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[("RAW-A", true)]).await;
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+    let registry_path = classick::config_file::device_registry_path(&sandbox.config_path);
+    let registry_before = std::fs::read(&registry_path).unwrap();
+    std::fs::remove_file(&registry_path).unwrap();
+    std::fs::create_dir(&registry_path).unwrap();
+
+    client
+        .send(json!({
+            "type": "save_device_config",
+            "serial": "raw-a",
+            "selection": {"mode": "include", "rules": []},
+            "request_id": "registry-fails"
+        }))
+        .await;
+
+    let mut failed = None;
+    let mut state_update = None;
+    while failed.is_none() || state_update.is_none() {
+        let event = client.next().await;
+        match event["type"].as_str() {
+            Some("command_failed") => failed = Some(event),
+            Some("device_config_update") => state_update = Some(event),
+            _ => {}
+        }
+    }
+    let failed = failed.unwrap();
+    assert_eq!(failed["acknowledged_request_id"], "registry-fails");
+    assert!(state_update.unwrap()["acknowledged_request_id"].is_null());
+    let selection_path =
+        classick::selection::effective_device_selection_path_in(&sandbox.base, "RAW-A").unwrap();
+    assert_eq!(
+        classick::selection::load_or_all(&selection_path).mode,
+        classick::selection::SelectionMode::All,
+        "a component write without its revision must be rolled back"
+    );
+
+    std::fs::remove_dir(&registry_path).unwrap();
+    std::fs::write(&registry_path, registry_before).unwrap();
+    client
+        .send(json!({
+            "type": "save_device_config",
+            "serial": "raw-a",
+            "selection": {"mode": "include", "rules": []},
+            "request_id": "registry-retry"
+        }))
+        .await;
+    let update = client.next_type("device_config_update").await;
+    assert_eq!(update["acknowledged_request_id"], "registry-retry");
+    assert_eq!(update["selection_revision"], 1);
+
     sandbox.finish_startup_scan().await;
     sandbox.shutdown().await;
 }

@@ -185,7 +185,8 @@ pub enum DaemonEvent {
         selection_revision: u64,
         settings_revision: u64,
         subscriptions_revision: u64,
-        acknowledged_request_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acknowledged_request_id: Option<String>,
     },
     /// Reply to `preview_device`: a pure, index-based estimate of what this
     /// device's sync would look like — no filesystem walk. `selected_*` is
@@ -256,6 +257,10 @@ impl DaemonEvent {
                 ..
             }
             | Self::PlaylistsUpdate {
+                acknowledged_request_id,
+                ..
+            }
+            | Self::DeviceConfigUpdate {
                 acknowledged_request_id,
                 ..
             } => {
@@ -570,9 +575,9 @@ pub enum DaemonCommand {
     /// Persist the provided parts (each field `None` = "don't change",
     /// same sentinel convention as `save_config`) for the given device's
     /// serial, then broadcast a fresh `device_config_update` to every
-    /// client. No direct reply. Each part is saved independently — a
-    /// failure to persist one part (logged) doesn't block the others, and
-    /// the closing broadcast always fires reflecting whatever did persist.
+    /// client. The update acknowledges this request only when every requested
+    /// part persisted. A partial failure broadcasts uncorrelated actual state
+    /// and sends a correlated `command_failed` reply.
     /// If `serial` is the currently configured device, also broadcasts a
     /// refreshed `status_update` (the selection change may move "Y" in
     /// "X of Y synced").
@@ -1247,13 +1252,37 @@ mod tests {
             selection_revision: 3,
             settings_revision: 4,
             subscriptions_revision: 5,
-            acknowledged_request_id: "request-a".into(),
+            acknowledged_request_id: Some("request-a".into()),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert_eq!(
             json,
             r#"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"include","rules":[]},"subscriptions":{"playlists":["gym"]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"settings_revision":4,"subscriptions_revision":5,"acknowledged_request_id":"request-a"}"#
         );
+    }
+
+    #[test]
+    fn uncorrelated_device_config_update_omits_acknowledgement() {
+        let evt = DaemonEvent::DeviceConfigUpdate {
+            serial: "0xABC".into(),
+            selection: SelectionPayload {
+                mode: crate::selection::SelectionMode::All,
+                rules: vec![],
+            },
+            subscriptions: SubscriptionsPayload { playlists: vec![] },
+            settings: DeviceSettingsPayload {
+                auto_sync: true,
+                rockbox_compat: false,
+            },
+            selection_revision: 3,
+            settings_revision: 4,
+            subscriptions_revision: 5,
+            acknowledged_request_id: None,
+        };
+
+        let json = serde_json::to_value(evt).unwrap();
+
+        assert!(json.get("acknowledged_request_id").is_none());
     }
 
     #[test]

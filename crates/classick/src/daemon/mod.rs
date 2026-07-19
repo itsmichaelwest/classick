@@ -3,6 +3,7 @@
 //! See `docs/superpowers/specs/2026-05-24-phase-6-daemon-model-design.md`.
 
 pub mod command_handler;
+pub(crate) mod device_config_transaction;
 pub mod device_registry;
 pub mod device_snapshot;
 pub mod device_storage;
