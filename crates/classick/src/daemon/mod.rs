@@ -14,6 +14,7 @@ pub mod history;
 pub mod iokit_watcher;
 pub mod ipc_server;
 pub mod library;
+pub(crate) mod library_drop;
 pub mod library_watcher;
 pub mod lifecycle;
 #[cfg(target_os = "macos")]
