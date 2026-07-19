@@ -197,6 +197,23 @@ public sealed partial class PopoverWindow : Window
         catch (Exception ex) { Debug.WriteLine($"popover: trigger_sync failed: {ex}"); }
     }
 
+    private async void OnConnectSource(object sender, RoutedEventArgs e)
+    {
+        var requestId = Guid.NewGuid().ToString("N");
+        var command = ViewModel.CreateSourceRetryCommand(requestId);
+        if (command is null) return;
+
+        try
+        {
+            await _daemon.SendAsync(command);
+        }
+        catch (Exception ex)
+        {
+            ViewModel.SourceRetrySendFailed(requestId);
+            Debug.WriteLine($"popover: retry_source_mount failed: {ex}");
+        }
+    }
+
     private async void OnCancelSync(object sender, RoutedEventArgs e)
     {
         var command = ViewModel.CreateCancelSyncCommand(Guid.NewGuid().ToString("N"));

@@ -174,10 +174,21 @@ pub fn save(path: &Path, cfg: &PersistedConfig) -> Result<()> {
     let tmp = path.with_extension("toml.tmp");
     {
         let mut synchronized = cfg.clone();
-        match (&synchronized.source, &mut synchronized.source_location) {
-            (Some(source), Some(location)) => location.resolved_path = source.clone(),
-            (None, Some(location)) => synchronized.source = Some(location.resolved_path.clone()),
-            _ => {}
+        match (
+            synchronized.source.clone(),
+            synchronized.source_location.as_ref(),
+        ) {
+            (Some(source), Some(location)) if location.resolved_path == source => {}
+            (Some(source), _) => {
+                synchronized.source_location = Some(SourceLocation::discover(source)?);
+            }
+            (None, Some(location)) => {
+                synchronized.source = Some(location.resolved_path.clone());
+            }
+            (None, None) => {}
+        }
+        if let Some(location) = &synchronized.source_location {
+            location.validate()?;
         }
         let s = toml::to_string_pretty(&synchronized)?;
         let f = std::fs::File::create(&tmp)
@@ -281,15 +292,17 @@ mod tests {
             "classick-test-source-location-{}",
             std::process::id()
         ));
+        let old_source = dir.join("old-source");
+        let new_source = dir.join("new-source");
+        std::fs::create_dir_all(&old_source).unwrap();
+        std::fs::create_dir_all(&new_source).unwrap();
         let path = dir.join("config.toml");
         let cfg = PersistedConfig {
-            source: Some(PathBuf::from("/Volumes/data-1/media/music")),
+            source: Some(new_source.clone()),
             source_location: Some(SourceLocation {
-                resolved_path: PathBuf::from("/Volumes/data/media/music"),
-                identity: SourceIdentity::Smb {
-                    host: "jupiter".into(),
-                    share: "data".into(),
-                    subpath: Some(PortablePath::parse("media/music").unwrap()),
+                resolved_path: old_source,
+                identity: SourceIdentity::Local {
+                    library_id: "old-library".into(),
                 },
             }),
             ..PersistedConfig::default()
@@ -297,16 +310,13 @@ mod tests {
 
         save(&path, &cfg).unwrap();
         let loaded = load(&path).unwrap().unwrap();
-        assert_eq!(
-            loaded.source.as_deref(),
-            Some(Path::new("/Volumes/data-1/media/music"))
-        );
+        assert_eq!(loaded.source.as_deref(), Some(new_source.as_path()));
         assert_eq!(
             loaded
                 .source_location
                 .as_ref()
                 .map(|location| location.resolved_path.as_path()),
-            Some(Path::new("/Volumes/data-1/media/music"))
+            Some(new_source.as_path())
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -384,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn save_then_load_roundtrip() {
+    fn save_then_load_adds_a_stable_local_source_location() {
         let path = std::env::temp_dir().join(format!(
             "classick-test-rt-config-{}.toml",
             std::process::id()
@@ -408,8 +418,74 @@ mod tests {
         };
         save(&path, &cfg).unwrap();
         let loaded = load(&path).unwrap().unwrap();
-        assert_eq!(loaded, cfg);
+        assert_eq!(loaded.source, cfg.source);
+        assert!(matches!(
+            loaded.source_location,
+            Some(SourceLocation {
+                identity: SourceIdentity::Local { .. },
+                ..
+            })
+        ));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_replaces_an_old_identity_when_the_source_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "classick-test-source-identity-change-{}",
+            std::process::id()
+        ));
+        let path = dir.join("config.toml");
+        let cfg = PersistedConfig {
+            source: Some(PathBuf::from(r"\\server-b\music\library")),
+            source_location: Some(SourceLocation {
+                resolved_path: PathBuf::from(r"\\server-a\music\library"),
+                identity: SourceIdentity::Smb {
+                    host: "server-a".into(),
+                    share: "music".into(),
+                    subpath: Some(PortablePath::parse("library").unwrap()),
+                },
+            }),
+            ..PersistedConfig::default()
+        };
+
+        save(&path, &cfg).unwrap();
+        let loaded = load(&path).unwrap().unwrap();
+        assert_eq!(
+            loaded.source_location.unwrap().identity,
+            SourceIdentity::Smb {
+                host: "server-b".into(),
+                share: "music".into(),
+                subpath: Some(PortablePath::parse("library").unwrap()),
+            }
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn save_rejects_a_credential_bearing_persisted_identity() {
+        let dir = std::env::temp_dir().join(format!(
+            "classick-test-source-credentials-{}",
+            std::process::id()
+        ));
+        let path = dir.join("config.toml");
+        let source = PathBuf::from(r"\\jupiter\data\music");
+        let cfg = PersistedConfig {
+            source: Some(source.clone()),
+            source_location: Some(SourceLocation {
+                resolved_path: source,
+                identity: SourceIdentity::Smb {
+                    host: "alice:secret@jupiter".into(),
+                    share: "data".into(),
+                    subpath: Some(PortablePath::parse("music").unwrap()),
+                },
+            }),
+            ..PersistedConfig::default()
+        };
+
+        assert!(save(&path, &cfg).is_err());
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

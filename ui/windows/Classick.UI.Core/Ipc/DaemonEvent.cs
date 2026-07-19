@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Classick_UI.Ipc;
@@ -25,6 +26,7 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(DeviceConfigUpdateEvent), "device_config_update")]
 [JsonDerivedType(typeof(DevicePreviewEvent), "device_preview")]
 [JsonDerivedType(typeof(ResolvedTracksEvent), "resolved_tracks")]
+[JsonDerivedType(typeof(SourceAvailabilityEvent), "source_availability")]
 public abstract record DaemonEvent;
 
 public sealed record StatusUpdateEvent(
@@ -191,6 +193,116 @@ public sealed record ResolvedTracksEvent(
     [property: JsonRequired, JsonPropertyName("tracks")] IReadOnlyList<string> Tracks,
     [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId
 ) : DaemonEvent;
+
+[JsonConverter(typeof(SourceAvailabilityStateJsonConverter))]
+public enum SourceAvailabilityState
+{
+    Available,
+    Remounting,
+    AuthRequired,
+    Unavailable,
+}
+
+public sealed class SourceAvailabilityStateJsonConverter
+    : JsonConverter<SourceAvailabilityState>
+{
+    public override SourceAvailabilityState Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.String)
+        {
+            throw new JsonException("source availability state must be a string");
+        }
+
+        return reader.GetString() switch
+        {
+            "available" => SourceAvailabilityState.Available,
+            "remounting" => SourceAvailabilityState.Remounting,
+            "auth_required" => SourceAvailabilityState.AuthRequired,
+            "unavailable" => SourceAvailabilityState.Unavailable,
+            _ => throw new JsonException("unknown source availability state"),
+        };
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        SourceAvailabilityState value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value switch
+        {
+            SourceAvailabilityState.Available => "available",
+            SourceAvailabilityState.Remounting => "remounting",
+            SourceAvailabilityState.AuthRequired => "auth_required",
+            SourceAvailabilityState.Unavailable => "unavailable",
+            _ => throw new JsonException("unknown source availability state"),
+        });
+    }
+}
+
+public sealed record SourceAvailabilityEvent : DaemonEvent, IJsonOnDeserialized
+{
+    public SourceAvailabilityEvent()
+    {
+    }
+
+    public SourceAvailabilityEvent(
+        SourceAvailabilityState state,
+        string? sourceRoot = null,
+        string? acknowledgedRequestId = null)
+    {
+        State = state;
+        SourceRootWire = sourceRoot is null
+            ? default
+            : JsonSerializer.SerializeToElement(sourceRoot);
+        AcknowledgedRequestId = acknowledgedRequestId;
+        ValidateShape();
+    }
+
+    [JsonRequired]
+    [JsonPropertyName("state")]
+    public SourceAvailabilityState State { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    [JsonPropertyName("source_root")]
+    public JsonElement SourceRootWire { get; init; }
+
+    [JsonIgnore]
+    public string? SourceRoot => SourceRootWire.ValueKind == JsonValueKind.String
+        ? SourceRootWire.GetString()
+        : null;
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonPropertyName("acknowledged_request_id")]
+    public string? AcknowledgedRequestId { get; init; }
+
+    public void OnDeserialized()
+    {
+        ValidateShape();
+    }
+
+    private void ValidateShape()
+    {
+        if (State == SourceAvailabilityState.Available)
+        {
+            if (SourceRootWire.ValueKind != JsonValueKind.String)
+            {
+                throw new JsonException(
+                    "source_root must be a string when source availability is available");
+            }
+
+            return;
+        }
+
+        if (SourceRootWire.ValueKind != JsonValueKind.Undefined)
+        {
+            throw new JsonException(
+                "source_root must be omitted unless source availability is available");
+        }
+    }
+}
 
 public sealed record DaemonSettings(
     [property: JsonRequired, JsonPropertyName("enabled")] bool Enabled,

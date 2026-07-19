@@ -2,6 +2,7 @@ use crate::daemon::source_availability::{
     BoxFuture, MountInteraction, SourceMountBackend, SourceUnavailable,
 };
 use crate::source_location::{SourceIdentity, SourceLocation};
+use anyhow::{bail, Context, Result};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::PathBuf;
 use tokio::sync::oneshot;
@@ -12,13 +13,118 @@ struct MountCompletion {
     sender: Option<oneshot::Sender<Result<PathBuf, SourceUnavailable>>>,
 }
 
+struct NetFsString(*mut c_char);
+
+impl NetFsString {
+    fn is_null(&self) -> bool {
+        self.0.is_null()
+    }
+
+    fn to_utf8(&self, label: &str) -> Result<String> {
+        unsafe { CStr::from_ptr(self.0) }
+            .to_str()
+            .with_context(|| format!("NetFS returned a non-UTF-8 {label}"))
+            .map(str::to_owned)
+    }
+}
+
+impl Drop for NetFsString {
+    fn drop(&mut self) {
+        unsafe { classick_netfs_free_string(self.0) };
+    }
+}
+
 unsafe extern "C" {
+    fn classick_netfs_copy_remount_info(
+        path: *const c_char,
+        host: *mut *mut c_char,
+        share_path: *mut *mut c_char,
+        mount_root: *mut *mut c_char,
+    ) -> c_int;
+    fn classick_netfs_free_string(value: *mut c_char);
     fn classick_netfs_mount_async(
         url: *const c_char,
         allow_ui: c_int,
         completion: unsafe extern "C" fn(*mut c_void, c_int, *const c_char),
         context: *mut c_void,
     ) -> c_int;
+}
+
+pub fn source_location_for_mounted_path(path: &std::path::Path) -> Result<Option<SourceLocation>> {
+    let path_utf8 = path.to_str().context("source path is not valid UTF-8")?;
+    let path_c = CString::new(path_utf8).context("source path contains an interior NUL")?;
+    let mut host = std::ptr::null_mut();
+    let mut share_path = std::ptr::null_mut();
+    let mut mount_root = std::ptr::null_mut();
+    let status = unsafe {
+        classick_netfs_copy_remount_info(
+            path_c.as_ptr(),
+            &mut host,
+            &mut share_path,
+            &mut mount_root,
+        )
+    };
+    if status != 0 {
+        bail!("NetFS source identity lookup failed (status {status})");
+    }
+    let host = NetFsString(host);
+    let share_path = NetFsString(share_path);
+    let mount_root = NetFsString(mount_root);
+    if host.is_null() && share_path.is_null() && mount_root.is_null() {
+        return Ok(None);
+    }
+    if host.is_null() || share_path.is_null() || mount_root.is_null() {
+        bail!("NetFS returned incomplete source identity");
+    }
+
+    let host_value = host.to_utf8("host")?;
+    let share_path_value = share_path.to_utf8("share path")?;
+    let mount_root_value = mount_root.to_utf8("mount root")?;
+
+    source_location_from_mounted_parts(
+        path.to_path_buf(),
+        PathBuf::from(mount_root_value),
+        host_value,
+        share_path_value,
+    )
+    .map(Some)
+}
+
+fn source_location_from_mounted_parts(
+    resolved_path: PathBuf,
+    mount_root: PathBuf,
+    host: String,
+    share_path: String,
+) -> Result<SourceLocation> {
+    let share = share_path
+        .trim_matches('/')
+        .split('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .context("NetFS remount URL did not include a share")?;
+    let relative = resolved_path.strip_prefix(&mount_root).with_context(|| {
+        format!(
+            "source {} is outside NetFS mount root {}",
+            resolved_path.display(),
+            mount_root.display()
+        )
+    })?;
+    let subpath = if relative.as_os_str().is_empty() {
+        None
+    } else {
+        Some(crate::portable_path::PortablePath::from_absolute(
+            &mount_root,
+            &resolved_path,
+        )?)
+    };
+    Ok(SourceLocation {
+        resolved_path,
+        identity: SourceIdentity::Smb {
+            host,
+            share: share.to_owned(),
+            subpath,
+        },
+    })
 }
 
 impl SourceMountBackend for MacosNetFsBackend {
@@ -168,6 +274,26 @@ mod tests {
         assert_eq!(
             map_status(libc::ENOENT),
             SourceUnavailable::MountFailed("NetFS mount failed (status 2)".into())
+        );
+    }
+
+    #[test]
+    fn derives_share_identity_from_the_actual_mount_root() {
+        let location = source_location_from_mounted_parts(
+            PathBuf::from("/Volumes/data-1/media/music"),
+            PathBuf::from("/Volumes/data-1"),
+            "JUPITER".into(),
+            "/Data".into(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            location.identity,
+            SourceIdentity::Smb {
+                host: "JUPITER".into(),
+                share: "Data".into(),
+                subpath: Some(crate::portable_path::PortablePath::parse("media/music").unwrap()),
+            }
         );
     }
 }

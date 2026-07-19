@@ -25,6 +25,7 @@ pub struct ResolvedSource {
 #[derive(Clone, PartialEq, Eq)]
 pub enum SourceUnavailable {
     AuthRequired,
+    IdentityMismatch,
     MountFailed(String),
     MissingSubpath(PathBuf),
 }
@@ -33,6 +34,7 @@ impl fmt::Debug for SourceUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::AuthRequired => "AuthRequired",
+            Self::IdentityMismatch => "IdentityMismatch",
             Self::MountFailed(_) => "MountFailed(<redacted>)",
             Self::MissingSubpath(_) => "MissingSubpath(<redacted>)",
         })
@@ -43,6 +45,9 @@ impl fmt::Display for SourceUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AuthRequired => formatter.write_str("source authentication required"),
+            Self::IdentityMismatch => {
+                formatter.write_str("resolved source identity does not match configured source")
+            }
             Self::MountFailed(_) => formatter.write_str("source mount failed"),
             Self::MissingSubpath(_) => {
                 formatter.write_str("mounted source is missing its configured subpath")
@@ -81,7 +86,7 @@ impl From<&SourceIdentity> for SourceKey {
             } => Self::Smb {
                 host: host.to_ascii_lowercase(),
                 share: share.to_ascii_lowercase(),
-                subpath: subpath.as_ref().map(|path| path.as_str().to_owned()),
+                subpath: subpath.as_ref().map(|path| path.as_str().to_lowercase()),
             },
             SourceIdentity::Local { library_id } => Self::Local(library_id.clone()),
         }
@@ -132,6 +137,17 @@ impl SourceAvailabilityService {
         interaction: MountInteraction,
     ) -> AvailabilityResult {
         if location.resolved_path.exists() {
+            match location.verify_resolved_identity() {
+                Ok(()) => {}
+                Err(error) if error.is::<crate::source_location::SourceIdentityMismatch>() => {
+                    return Err(SourceUnavailable::IdentityMismatch);
+                }
+                Err(_) => {
+                    return Err(SourceUnavailable::MountFailed(
+                        "source identity verification failed".into(),
+                    ));
+                }
+            }
             return Ok(ResolvedSource {
                 root: location.resolved_path.clone(),
                 remounted: false,
@@ -280,6 +296,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn existing_path_with_a_different_live_identity_is_not_available_or_mounted() {
+        let root = TestDir::new("identity-mismatch");
+        let backend = FakeBackend::responding_with(vec![]);
+        let service = SourceAvailabilityService::new(Arc::new(backend.clone()));
+        let configured = SourceLocation {
+            resolved_path: root.path().to_owned(),
+            identity: SourceIdentity::Smb {
+                host: "jupiter".into(),
+                share: "data".into(),
+                subpath: None,
+            },
+        };
+
+        let result = service
+            .ensure_source_available(&configured, MountInteraction::SuppressUi)
+            .await;
+
+        assert_eq!(result, Err(SourceUnavailable::IdentityMismatch));
+        assert_eq!(backend.call_count(), 0);
+        assert_eq!(format!("{:?}", result.unwrap_err()), "IdentityMismatch");
+    }
+
+    #[tokio::test]
     async fn concurrent_requests_for_the_same_logical_source_share_one_mount() {
         let mounted = TestDir::new("same-source-mounted");
         std::fs::create_dir_all(mounted.path().join("media/music")).unwrap();
@@ -311,6 +350,53 @@ mod tests {
             first.await.unwrap().unwrap(),
             second.await.unwrap().unwrap()
         );
+        assert_eq!(backend.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn smb_subpath_casing_is_one_logical_coalescing_key() {
+        let mounted = TestDir::new("subpath-case-mounted");
+        std::fs::create_dir_all(mounted.path().join("MÉDIA/Music")).unwrap();
+        let backend = FakeBackend::gated(Ok(mounted.path().to_owned()));
+        let service = Arc::new(SourceAvailabilityService::new(Arc::new(backend.clone())));
+        let upper = SourceLocation {
+            resolved_path: PathBuf::from("/missing/upper"),
+            identity: SourceIdentity::Smb {
+                host: "JUPITER".into(),
+                share: "DATA".into(),
+                subpath: Some(crate::portable_path::PortablePath::parse("MÉDIA/Music").unwrap()),
+            },
+        };
+        let lower = SourceLocation {
+            resolved_path: PathBuf::from("/missing/lower"),
+            identity: SourceIdentity::Smb {
+                host: "jupiter".into(),
+                share: "data".into(),
+                subpath: Some(crate::portable_path::PortablePath::parse("média/music").unwrap()),
+            },
+        };
+
+        let first = tokio::spawn({
+            let service = service.clone();
+            async move {
+                service
+                    .ensure_source_available(&upper, MountInteraction::SuppressUi)
+                    .await
+            }
+        });
+        let second = tokio::spawn({
+            let service = service.clone();
+            async move {
+                service
+                    .ensure_source_available(&lower, MountInteraction::SuppressUi)
+                    .await
+            }
+        });
+        wait_for_calls(&backend, 1).await;
+        backend.gate.as_ref().unwrap().add_permits(1);
+
+        let _ = first.await.unwrap();
+        let _ = second.await.unwrap();
         assert_eq!(backend.call_count(), 1);
     }
 

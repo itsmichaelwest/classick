@@ -138,6 +138,32 @@
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </StackPanel>
+
+            <StackPanel Margin="8"
+                        VerticalAlignment="Center"
+                        Visibility="{x:Bind ViewModel.ShowSourceRecovery, Mode=OneWay}">
+                <InfoBar IsOpen="{x:Bind ViewModel.SourceAttentionVisible, Mode=OneWay}"
+                         IsClosable="False"
+                         Severity="Warning"
+                         Title="{x:Bind ViewModel.SourceAttentionTitle, Mode=OneWay}"
+                         Message="{x:Bind ViewModel.SourceAttentionMessage, Mode=OneWay}">
+                    <InfoBar.ActionButton>
+                        <Button Content="Connect"
+                                IsEnabled="{x:Bind ViewModel.SourceRetryAvailable, Mode=OneWay}"
+                                Click="OnConnectSource" />
+                    </InfoBar.ActionButton>
+                </InfoBar>
+                <InfoBar IsOpen="{x:Bind ViewModel.SourceRemounting, Mode=OneWay}"
+                         IsClosable="False"
+                         Severity="Informational"
+                         Title="Reconnecting to music share…">
+                    <InfoBar.Content>
+                        <ProgressRing Width="20"
+                                      Height="20"
+                                      IsActive="True" />
+                    </InfoBar.Content>
+                </InfoBar>
+            </StackPanel>
         </Grid>
 
         <!--

@@ -631,3 +631,10 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   retains that intent for an explicit UI-authorized retry, while success first
   persists the returned root, rearms the watcher, and runs exactly one scan
   before admitting the deferred sync.
+- **An explicit source-mount retry must not lose its UI escalation while a
+  suppress-UI attempt is running.** Queue the escalation and all request ids;
+  only an authentication result starts one UI-authorized follow-up, and only
+  the final terminal result acknowledges the queued requests.
+- **Initial daemon state belongs on the connecting client's private reply
+  channel.** Broadcasting an uncorrelated source replay can make another UI
+  reduce it as the terminal state of its own in-flight retry.

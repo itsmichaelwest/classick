@@ -131,7 +131,7 @@ public sealed class DaemonClient : IAsyncDisposable
         "sync_event", "device_inventory_snapshot", "library_update",
         "selection_update", "selection_preview", "playlists_update",
         "playlist_detail", "device_config_update", "device_preview",
-        "resolved_tracks",
+        "resolved_tracks", "source_availability",
     };
 
     private static bool TryDeserialize(string line, out object? evt)

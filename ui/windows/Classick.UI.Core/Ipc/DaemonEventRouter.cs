@@ -43,6 +43,7 @@ public sealed class DaemonEventRouter : IDisposable
     public event Action<DeviceDisconnectedEvent>? DeviceDisconnected;
     public event Action<SyncRejectedEvent>? SyncRejected;
     public event Action<DeviceInventorySnapshotEvent>? DeviceInventorySnapshotReceived;
+    public event Action<SourceAvailabilityEvent>? SourceAvailabilityUpdated;
     public event Action<DaemonEvent>? DaemonEventReceived;
     public event Action<RoutedSyncEvent>? SyncEventReceived;
 
@@ -109,6 +110,9 @@ public sealed class DaemonEventRouter : IDisposable
                 break;
             case SyncRejectedEvent sr:
                 SyncRejected?.Invoke(sr);
+                break;
+            case SourceAvailabilityEvent sourceAvailability:
+                SourceAvailabilityUpdated?.Invoke(sourceAvailability);
                 break;
             case DeviceInventorySnapshotEvent snapshot:
                 if (UpdateActiveSessions(snapshot))

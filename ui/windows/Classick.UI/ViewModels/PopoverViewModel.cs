@@ -68,6 +68,7 @@ public partial class PopoverViewModel : ObservableObject
         OnPropertyChanged(nameof(ShowFooter));
         OnPropertyChanged(nameof(ShowSyncNowButton));
         OnPropertyChanged(nameof(ShowSyncControls));
+        OnPropertyChanged(nameof(ShowSourceRecovery));
     }
 
     // Storage. StorageProgressValue is 0..100 for the ProgressBar.
@@ -93,7 +94,7 @@ public partial class PopoverViewModel : ObservableObject
     /// no Sync Now / Eject buttons. Driven by daemon-reported
     /// connection state. Suppressed when a prompt overlay is active
     /// so the underlying layout doesn't bleed through.</summary>
-    public bool ShowEmptyState => !IpodConnected && !PromptActive;
+    public bool ShowEmptyState => !IpodConnected && !PromptActive && !ShowSourceRecovery;
     public string EmptyStateTitle => FinishingSync ? "Finishing sync…" : "No iPod connected";
     public string EmptyStateSubtitle => FinishingSync
         ? "iPod disconnected. Finishing safely…"
@@ -105,7 +106,7 @@ public partial class PopoverViewModel : ObservableObject
     /// <summary>The normal connected layout (device row + storage /
     /// sync progress + full footer). Suppressed when a prompt overlay
     /// is active.</summary>
-    public bool ShowConnectedContent => IpodConnected && !PromptActive;
+    public bool ShowConnectedContent => IpodConnected && !PromptActive && !ShowSourceRecovery;
 
     /// <summary>True when the popover should show the footer row
     /// (Sync now / Stop sync / Eject / Settings). Hidden during a
@@ -115,10 +116,11 @@ public partial class PopoverViewModel : ObservableObject
 
     /// <summary>True when the footer should show the Sync Now button —
     /// connected AND idle AND no prompt in flight.</summary>
-    public bool ShowSyncNowButton => IpodConnected && !Syncing && !PromptActive && !FinishingSync;
+    public bool ShowSyncNowButton => IpodConnected && !Syncing && !PromptActive &&
+        !FinishingSync && !ShowSourceRecovery;
     public bool CanControlActiveSync => ActiveSyncContext is not null &&
         IpodConnected && Syncing && !FinishingSync;
-    public bool ShowSyncControls => CanControlActiveSync && !PromptActive;
+    public bool ShowSyncControls => CanControlActiveSync && !PromptActive && !ShowSourceRecovery;
     public string SyncActionLabel => Paused ? "Resume sync" : "Sync now";
 
     /// <summary>True between sync start and the first SummaryEvent /

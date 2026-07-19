@@ -13,7 +13,7 @@ use crate::ipc_daemon::{DaemonCommand, DaemonEvent, DAEMON_PROTOCOL_VERSION};
 use crate::PROJECT_DIR;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::ServerOptions;
@@ -96,6 +96,16 @@ pub struct ClientCommand {
     pub reply: mpsc::UnboundedSender<DaemonEvent>,
 }
 
+/// A newly connected client waiting for its ordered initial state snapshot.
+pub struct NewClient {
+    pub initial: oneshot::Sender<InitialClientState>,
+}
+
+pub struct InitialClientState {
+    pub events: Vec<DaemonEvent>,
+    pub live_events: broadcast::Receiver<DaemonEvent>,
+}
+
 /// Test-friendly entry: creates a fresh broadcast channel. Uses
 /// the platform default transport address — only one such test can run
 /// at a time, and never while a real daemon is up. Tests that need
@@ -120,7 +130,7 @@ pub async fn spawn_server_full(
 ) -> Result<(
     broadcast::Sender<DaemonEvent>,
     mpsc::UnboundedReceiver<ClientCommand>,
-    mpsc::UnboundedReceiver<()>,
+    mpsc::UnboundedReceiver<NewClient>,
 )> {
     let pipe = default_pipe_name();
     spawn_server_full_with(event_tx, &pipe).await
@@ -137,27 +147,21 @@ pub async fn spawn_server_full_with(
 ) -> Result<(
     broadcast::Sender<DaemonEvent>,
     mpsc::UnboundedReceiver<ClientCommand>,
-    mpsc::UnboundedReceiver<()>,
+    mpsc::UnboundedReceiver<NewClient>,
 )> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<ClientCommand>();
-    let (new_client_tx, new_client_rx) = mpsc::unbounded_channel::<()>();
+    let (new_client_tx, new_client_rx) = mpsc::unbounded_channel::<NewClient>();
 
-    spawn_accept_loop(
-        event_tx.clone(),
-        pipe_name.to_string(),
-        cmd_tx,
-        new_client_tx,
-    )?;
+    spawn_accept_loop(pipe_name.to_string(), cmd_tx, new_client_tx)?;
 
     Ok((event_tx, cmd_rx, new_client_rx))
 }
 
 #[cfg(windows)]
 fn spawn_accept_loop(
-    event_tx: broadcast::Sender<DaemonEvent>,
     pipe_name: String,
     cmd_tx: mpsc::UnboundedSender<ClientCommand>,
-    new_client_tx: mpsc::UnboundedSender<()>,
+    new_client_tx: mpsc::UnboundedSender<NewClient>,
 ) -> Result<()> {
     tokio::spawn(async move {
         let mut next_client_id: u64 = 1;
@@ -194,7 +198,6 @@ fn spawn_accept_loop(
 
             let client_id = next_client_id;
             next_client_id += 1;
-            let event_rx = event_tx.subscribe();
             let cmd_tx = cmd_tx.clone();
             let new_client_tx = new_client_tx.clone();
             let (reader, writer) = tokio::io::split(connected);
@@ -202,7 +205,6 @@ fn spawn_accept_loop(
                 client_id,
                 reader,
                 writer,
-                event_rx,
                 cmd_tx,
                 new_client_tx,
             ));
@@ -213,10 +215,9 @@ fn spawn_accept_loop(
 
 #[cfg(unix)]
 fn spawn_accept_loop(
-    event_tx: broadcast::Sender<DaemonEvent>,
     pipe_name: String,
     cmd_tx: mpsc::UnboundedSender<ClientCommand>,
-    new_client_tx: mpsc::UnboundedSender<()>,
+    new_client_tx: mpsc::UnboundedSender<NewClient>,
 ) -> Result<()> {
     // UnixListener::bind errors if the path already exists. A stale
     // socket from a previously-crashed daemon is the common case;
@@ -240,7 +241,6 @@ fn spawn_accept_loop(
             };
             let client_id = next_client_id;
             next_client_id += 1;
-            let event_rx = event_tx.subscribe();
             let cmd_tx = cmd_tx.clone();
             let new_client_tx = new_client_tx.clone();
             let (reader, writer) = tokio::io::split(stream);
@@ -248,7 +248,6 @@ fn spawn_accept_loop(
                 client_id,
                 reader,
                 writer,
-                event_rx,
                 cmd_tx,
                 new_client_tx,
             ));
@@ -261,9 +260,8 @@ async fn handle_client<R, W>(
     client_id: u64,
     reader_half: R,
     mut writer_half: W,
-    mut event_rx: broadcast::Receiver<DaemonEvent>,
     cmd_tx: mpsc::UnboundedSender<ClientCommand>,
-    new_client_tx: mpsc::UnboundedSender<()>,
+    new_client_tx: mpsc::UnboundedSender<NewClient>,
 ) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -281,10 +279,22 @@ async fn handle_client<R, W>(
         return;
     }
 
-    // Signal the runtime to broadcast a snapshot StatusUpdate so this
-    // newly-connected client sees current state without needing to
-    // race against any in-flight broadcasts.
-    let _ = new_client_tx.send(());
+    // Block live broadcast delivery until the runtime returns this client's
+    // complete initial batch. This guarantees hello → status → inventory →
+    // source ordering and prevents another UI from observing the replay.
+    let (initial_tx, initial_rx) = oneshot::channel();
+    let _ = new_client_tx.send(NewClient {
+        initial: initial_tx,
+    });
+    let Ok(initial_state) = initial_rx.await else {
+        return;
+    };
+    for event in initial_state.events {
+        if write_event(&mut writer_half, &event).await.is_err() {
+            return;
+        }
+    }
+    let mut event_rx = initial_state.live_events;
 
     let mut reader = BufReader::new(reader_half);
     let mut line_buf = String::new();
@@ -359,6 +369,67 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn initial_snapshot_drops_broadcasts_queued_before_its_cutover() {
+        let (event_tx, _) = broadcast::channel(8);
+        let _keepalive_rx = event_tx.subscribe();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (new_client_tx, mut new_client_rx) = mpsc::unbounded_channel();
+        let (client, server) = tokio::io::duplex(4096);
+        let (server_reader, server_writer) = tokio::io::split(server);
+        let handler = tokio::spawn(handle_client(
+            1,
+            server_reader,
+            server_writer,
+            cmd_tx,
+            new_client_tx,
+        ));
+        let (client_reader, _client_writer) = tokio::io::split(client);
+        let mut reader = BufReader::new(client_reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["type"],
+            "hello"
+        );
+
+        event_tx
+            .send(DaemonEvent::SourceAvailability {
+                state: crate::ipc_daemon::SourceAvailabilityState::AuthRequired,
+                source_root: None,
+                acknowledged_request_id: None,
+            })
+            .unwrap();
+        let connected = new_client_rx.recv().await.unwrap();
+        assert!(connected
+            .initial
+            .send(InitialClientState {
+                events: vec![DaemonEvent::SourceAvailability {
+                    state: crate::ipc_daemon::SourceAvailabilityState::Remounting,
+                    source_root: None,
+                    acknowledged_request_id: None,
+                }],
+                live_events: event_tx.subscribe(),
+            })
+            .is_ok());
+
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let initial = serde_json::from_str::<serde_json::Value>(&line).unwrap();
+        assert_eq!(initial["state"], "remounting");
+        line.clear();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                reader.read_line(&mut line),
+            )
+            .await
+            .is_err(),
+            "auth_required queued before the remounting snapshot must be discarded"
+        );
+        handler.abort();
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

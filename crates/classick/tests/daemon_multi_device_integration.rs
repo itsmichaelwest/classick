@@ -5,8 +5,13 @@ use classick::daemon::device_watcher::{DeviceEvent, DeviceWatcher};
 use classick::daemon::history::{HistoryEntry, HistoryFile, SyncOutcome, SyncSummary, SyncTrigger};
 use classick::daemon::runtime::{run_daemon_with_deps, DaemonDeps, SpawnFn};
 use classick::daemon::session_admission::EventContext;
+use classick::daemon::source_availability::{
+    BoxFuture, MountInteraction, SourceAvailabilityService, SourceMountBackend, SourceUnavailable,
+};
 use classick::daemon::sync_orchestrator::OrchestratorOutcome;
 use classick::ipod::device::DetectedIpod;
+use classick::portable_path::PortablePath;
+use classick::source_location::{SourceIdentity, SourceLocation};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -22,6 +27,18 @@ struct ScriptedWatcher(mpsc::Receiver<DeviceEvent>);
 impl DeviceWatcher for ScriptedWatcher {
     fn start(self: Box<Self>) -> mpsc::Receiver<DeviceEvent> {
         self.0
+    }
+}
+
+struct AuthRequiredBackend;
+
+impl SourceMountBackend for AuthRequiredBackend {
+    fn mount<'a>(
+        &'a self,
+        _location: &'a SourceLocation,
+        _interaction: MountInteraction,
+    ) -> BoxFuture<'a, Result<PathBuf, SourceUnavailable>> {
+        Box::pin(async { Err(SourceUnavailable::AuthRequired) })
     }
 }
 
@@ -71,6 +88,19 @@ impl TestClient {
                 return value;
             }
         }
+    }
+
+    async fn next_type_within(&mut self, event_type: &str, timeout: Duration) -> Option<Value> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let value = read_json(&mut self.reader).await;
+                if value["type"] == event_type {
+                    break value;
+                }
+            }
+        })
+        .await
+        .ok()
     }
 
     async fn next_snapshot_where(&mut self, predicate: impl Fn(&Value) -> bool) -> Value {
@@ -133,6 +163,13 @@ struct Sandbox {
 
 impl Sandbox {
     async fn start(records: &[(&str, bool)]) -> Self {
+        Self::start_with_auth_required_source(records, false).await
+    }
+
+    async fn start_with_auth_required_source(
+        records: &[(&str, bool)],
+        auth_required: bool,
+    ) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let base = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -140,7 +177,21 @@ impl Sandbox {
             .join("test-tmp")
             .join(format!("daemon-multi-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(base.join("source")).unwrap();
+        let source = if auth_required {
+            base.join("missing/media/music")
+        } else {
+            let source = base.join("source");
+            std::fs::create_dir_all(&source).unwrap();
+            source
+        };
+        let source_location = auth_required.then(|| SourceLocation {
+            resolved_path: source.clone(),
+            identity: SourceIdentity::Smb {
+                host: "jupiter".into(),
+                share: "data".into(),
+                subpath: Some(PortablePath::parse("media/music").unwrap()),
+            },
+        });
         let config_path = base.join("config.toml");
         let legacy = records
             .iter()
@@ -149,7 +200,8 @@ impl Sandbox {
         classick::config_file::save(
             &config_path,
             &PersistedConfig {
-                source: Some(base.join("source")),
+                source: Some(source),
+                source_location,
                 daemon: Some(DaemonSettings {
                     enabled: false,
                     schedule_minutes: 0,
@@ -197,7 +249,8 @@ impl Sandbox {
             config_path: Some(config_path.clone()),
             history_path: Some(history_path.clone()),
             pipe_name: Some(pipe_name.clone()),
-            source_availability: None,
+            source_availability: auth_required
+                .then(|| SourceAvailabilityService::new(Arc::new(AuthRequiredBackend))),
         };
         let runtime = tokio::spawn(run_daemon_with_deps(deps));
         Self {
@@ -323,6 +376,35 @@ fn snapshot_device<'a>(snapshot: &'a Value, serial: &str) -> &'a Value {
         .iter()
         .find(|device| device["identity"]["serial"] == serial)
         .unwrap_or_else(|| panic!("snapshot missing {serial}: {snapshot}"))
+}
+
+#[tokio::test]
+async fn fresh_client_replays_failed_startup_source_state_after_snapshot() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let sandbox = Sandbox::start_with_auth_required_source(&[], true).await;
+    let mut first = sandbox.connect().await;
+    let failed = first.next_type("source_availability").await;
+    assert_eq!(failed["state"], "auth_required");
+    assert!(failed["acknowledged_request_id"].is_null());
+
+    let mut fresh = sandbox.connect().await;
+    sandbox.attach("RAW-LIVE", "/Volumes/LIVE").await;
+    let status = fresh.next().await;
+    let inventory = fresh.next().await;
+    let replay = fresh.next().await;
+    assert_eq!(status["type"], "status_update");
+    assert_eq!(inventory["type"], "device_inventory_snapshot");
+    assert_eq!(replay["type"], "source_availability");
+    assert_eq!(replay["state"], "auth_required");
+    assert!(replay["acknowledged_request_id"].is_null());
+    assert!(
+        first
+            .next_type_within("source_availability", Duration::from_millis(150))
+            .await
+            .is_none(),
+        "client B's initial source replay must not be broadcast to client A"
+    );
+    sandbox.shutdown().await;
 }
 
 #[tokio::test]
@@ -723,6 +805,7 @@ async fn failed_registry_configure_acknowledges_only_actual_global_and_device_au
     std::fs::remove_file(&registry_path).unwrap();
     std::fs::create_dir(&registry_path).unwrap();
     let replacement = sandbox.base.join("replacement-source");
+    std::fs::create_dir_all(&replacement).unwrap();
 
     client
         .send(json!({

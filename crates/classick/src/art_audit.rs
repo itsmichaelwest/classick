@@ -167,7 +167,7 @@ pub fn verify_artwork(config: &Config, progress: &Progress) -> Result<ArtAuditRe
     let identity = device::resolve_libgpod_identity(Path::new(&mount))
         .context("resolving device identity for artwork audit")?;
     let serial = device_state::sanitize_serial(&identity.firewire_guid);
-    let source_location = crate::apply_loop::configured_source_location(config);
+    let source_location = crate::apply_loop::configured_source_location(config)?;
     let loaded_manifest = crate::apply_loop::manifest_store(config, Path::new(&mount), &serial)?
         .load(&source_location)?
         .manifest;

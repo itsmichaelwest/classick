@@ -25,6 +25,18 @@ impl DeviceSnapshotPublisher {
         config_path: &Path,
         library_count_cache: Option<usize>,
     ) {
+        let event = self.next_event(registry, state, history, config_path, library_count_cache);
+        let _ = event_tx.send(event);
+    }
+
+    pub(crate) fn next_event(
+        &mut self,
+        registry: &DeviceRegistry,
+        state: &RuntimeState,
+        history: &HistoryService,
+        config_path: &Path,
+        library_count_cache: Option<usize>,
+    ) -> DaemonEvent {
         self.revision = self
             .revision
             .checked_add(1)
@@ -37,7 +49,7 @@ impl DeviceSnapshotPublisher {
             config_path,
             library_count_cache,
         );
-        let _ = event_tx.send(DaemonEvent::DeviceInventorySnapshot(snapshot));
+        DaemonEvent::DeviceInventorySnapshot(snapshot)
     }
 }
 

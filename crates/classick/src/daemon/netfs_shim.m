@@ -10,6 +10,87 @@
 typedef void (*classick_netfs_completion)(void *context, int status,
                                           const char *mountpoint);
 
+static char *classick_copy_cf_string(CFStringRef value) {
+  if (value == NULL) {
+    return NULL;
+  }
+  CFIndex capacity = CFStringGetMaximumSizeForEncoding(CFStringGetLength(value),
+                                                       kCFStringEncodingUTF8) +
+                     1;
+  char *buffer = malloc((size_t)capacity);
+  if (buffer != NULL &&
+      CFStringGetCString(value, buffer, capacity, kCFStringEncodingUTF8)) {
+    return buffer;
+  }
+  free(buffer);
+  return NULL;
+}
+
+int classick_netfs_copy_remount_info(const char *path_utf8, char **host_utf8,
+                                     char **share_path_utf8,
+                                     char **mount_root_utf8) {
+  if (path_utf8 == NULL || host_utf8 == NULL || share_path_utf8 == NULL ||
+      mount_root_utf8 == NULL) {
+    return EINVAL;
+  }
+  *host_utf8 = NULL;
+  *share_path_utf8 = NULL;
+  *mount_root_utf8 = NULL;
+
+  struct statfs filesystem;
+  if (statfs(path_utf8, &filesystem) != 0) {
+    return errno;
+  }
+
+  CFURLRef local_url = CFURLCreateFromFileSystemRepresentation(
+      kCFAllocatorDefault, (const UInt8 *)path_utf8, (CFIndex)strlen(path_utf8),
+      true);
+  if (local_url == NULL) {
+    return ENOMEM;
+  }
+  CFURLRef remount_url = NetFSCopyURLForRemountingVolume(local_url);
+  CFRelease(local_url);
+  if (remount_url == NULL) {
+    return 0;
+  }
+
+  CFStringRef scheme = CFURLCopyScheme(remount_url);
+  Boolean is_smb =
+      scheme != NULL &&
+      CFStringCompare(scheme, CFSTR("smb"), kCFCompareCaseInsensitive) ==
+          kCFCompareEqualTo;
+  if (scheme != NULL)
+    CFRelease(scheme);
+  if (!is_smb) {
+    CFRelease(remount_url);
+    return 0;
+  }
+
+  CFStringRef host = CFURLCopyHostName(remount_url);
+  CFStringRef share_path = CFURLCopyPath(remount_url);
+  char *host_copy = classick_copy_cf_string(host);
+  char *share_path_copy = classick_copy_cf_string(share_path);
+  char *mount_root_copy = strdup(filesystem.f_mntonname);
+  if (host != NULL)
+    CFRelease(host);
+  if (share_path != NULL)
+    CFRelease(share_path);
+  CFRelease(remount_url);
+
+  if (host_copy == NULL || share_path_copy == NULL || mount_root_copy == NULL) {
+    free(host_copy);
+    free(share_path_copy);
+    free(mount_root_copy);
+    return ENOMEM;
+  }
+  *host_utf8 = host_copy;
+  *share_path_utf8 = share_path_copy;
+  *mount_root_utf8 = mount_root_copy;
+  return 0;
+}
+
+void classick_netfs_free_string(char *value) { free(value); }
+
 static char *classick_copy_mountpoint(CFArrayRef mountpoints) {
   if (mountpoints == NULL) {
     return NULL;

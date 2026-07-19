@@ -26,7 +26,9 @@ use crate::pipeline::OrderedTranscoder;
 use crate::preflight;
 use crate::progress::{ActionPlanSummary, Decision, Progress, ReviewDecision};
 use crate::source::{self, SourceEntry};
-use crate::source_location::{SourceIdentity, SourceLocation};
+#[cfg(test)]
+use crate::source_location::SourceIdentity;
+use crate::source_location::SourceLocation;
 use crate::tags::tags_from_probe;
 use crate::transcode::{self, has_embedded_art, ProbeOutput, SourceAction};
 use crate::try_with_prompt::{await_prompt, PromptOutcome};
@@ -119,13 +121,13 @@ pub fn source_change_requires_confirmation(
     }
 }
 
-pub(crate) fn configured_source_location(config: &Config) -> SourceLocation {
+pub(crate) fn configured_source_location(config: &Config) -> Result<SourceLocation> {
     let config_path = config
         .manifest_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("config.toml");
-    let persisted = config_file::load(&config_path).ok().flatten();
+    let persisted = config_file::load(&config_path)?;
     if let Some(mut location) = persisted
         .as_ref()
         .and_then(|persisted| persisted.source_location.clone())
@@ -136,15 +138,11 @@ pub(crate) fn configured_source_location(config: &Config) -> SourceLocation {
             == Some(config.source.as_path());
         if location.resolved_path == config.source || persisted_root_matches {
             location.resolved_path = config.source.clone();
-            return location;
+            location.verify_resolved_identity()?;
+            return Ok(location);
         }
     }
-    SourceLocation {
-        resolved_path: config.source.clone(),
-        identity: SourceIdentity::Local {
-            library_id: format!("legacy-root:{}", config.source.display()),
-        },
-    }
+    SourceLocation::discover(config.source.clone())
 }
 
 pub(crate) fn manifest_store(config: &Config, mount: &Path, serial: &str) -> Result<ManifestStore> {
@@ -344,7 +342,7 @@ pub fn run(
         }
     };
     let _ = &effective_set; // sources + missing/error counts already consumed above
-    let source_location = configured_source_location(config);
+    let source_location = configured_source_location(config)?;
     let manifest_store = manifest_store(config, Path::new(&mount), &serial)?;
     let manifest_path = device_state::portable_manifest_path(Path::new(&mount));
 
@@ -1374,7 +1372,7 @@ pub fn replace_library(
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
     let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
     let serial = device_state::sanitize_serial(&identity.firewire_guid);
-    let source_location = configured_source_location(config);
+    let source_location = configured_source_location(config)?;
     let manifest_store = manifest_store(config, Path::new(&mount), &serial)?;
 
     // Validate the source BEFORE wiping anything: an empty/unreachable
@@ -2114,7 +2112,7 @@ pub fn backfill_rockbox(
     // would silently operate on a stale/legacy copy of the track list.
     let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
     let serial = device_state::sanitize_serial(&identity.firewire_guid);
-    let source_location = configured_source_location(config);
+    let source_location = configured_source_location(config)?;
     let manifest = manifest_store(config, Path::new(&mount), &serial)?
         .load(&source_location)?
         .manifest;
@@ -2591,6 +2589,69 @@ mod tests {
         let persisted = persisted_config_for_sync(&config, &source);
 
         assert_eq!(persisted.source_location, Some(source));
+    }
+
+    #[test]
+    fn unsaved_direct_cli_smb_sources_receive_portable_identities() {
+        let base =
+            std::env::temp_dir().join(format!("classick-direct-cli-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        for source in [
+            r"\\JUPITER\Data\media\music",
+            "smb://JUPITER/Data/media/music",
+        ] {
+            let mut config = test_config_for_preflight(PathBuf::from(source));
+            config.manifest_path = base.join("manifest.json");
+            let location = configured_source_location(&config).unwrap();
+
+            assert!(matches!(
+                location.identity,
+                SourceIdentity::Smb {
+                    ref host,
+                    ref share,
+                    ..
+                } if host.eq_ignore_ascii_case("jupiter")
+                    && share.eq_ignore_ascii_case("data")
+            ));
+        }
+    }
+
+    #[test]
+    fn configured_source_rejects_a_different_filesystem_at_the_saved_smb_path() {
+        let base = std::env::temp_dir().join(format!(
+            "classick-source-identity-verification-{}",
+            std::process::id()
+        ));
+        let source = base.join("mounted-source");
+        std::fs::create_dir_all(&source).unwrap();
+        let config_path = base.join("config.toml");
+        config_file::save(
+            &config_path,
+            &config_file::PersistedConfig {
+                source: Some(source.clone()),
+                source_location: Some(SourceLocation {
+                    resolved_path: source.clone(),
+                    identity: SourceIdentity::Smb {
+                        host: "jupiter".into(),
+                        share: "data".into(),
+                        subpath: Some(
+                            crate::portable_path::PortablePath::parse("media/music").unwrap(),
+                        ),
+                    },
+                }),
+                ..config_file::PersistedConfig::default()
+            },
+        )
+        .unwrap();
+        let mut config = test_config_for_preflight(source);
+        config.manifest_path = base.join("manifest.json");
+
+        let error = configured_source_location(&config).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("resolved source is a different SMB location"));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     /// encoder_str is what `run` feeds into `manifest::diff` as the target

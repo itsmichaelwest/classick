@@ -1368,11 +1368,22 @@ Automatic recovery attempts always suppress platform UI and publish
 uncorrelated lifecycle events. Authentication UI is permitted only after the
 client sends `retry_source_mount` with the required `allow_ui` field set to
 `true`; omission is a decode error and `false` retains suppress-UI behavior.
+When an `allow_ui: true` retry coalesces behind an automatic suppress-UI
+attempt, an `auth_required` result starts exactly one UI-authorized attempt;
+the daemon retains every coalesced request id until that attempt reaches a
+terminal state. A non-authentication terminal result does not escalate.
 `remounting` is an uncorrelated lifecycle broadcast. The terminal
 `available`, `auth_required`, or `unavailable` event for an explicit retry
 carries that command's `request_id` as `acknowledged_request_id`. If several
 explicit retries coalesce behind one physical mount attempt, the daemon emits
 one terminal correlated event per request id.
+
+After `hello`, every newly connected client receives the current status,
+device inventory, and one uncorrelated `source_availability` snapshot when a
+source is configured. This replay includes terminal startup failures, so a UI
+that opens after an automatic recovery attempt still renders the correct
+recovery action. These three initial events are scoped to that connection;
+existing clients do not receive another client's replay.
 
 ```json
 {"type":"source_availability","state":"remounting"}

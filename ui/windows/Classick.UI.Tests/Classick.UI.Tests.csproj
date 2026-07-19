@@ -47,6 +47,8 @@
              Link="LinkedViewModels\PopoverViewModel.cs" />
     <Compile Include="..\Classick.UI\ViewModels\PopoverViewModel.SyncSession.cs"
              Link="LinkedViewModels\PopoverViewModel.SyncSession.cs" />
+    <Compile Include="..\Classick.UI\ViewModels\PopoverViewModel.SourceRecovery.cs"
+             Link="LinkedViewModels\PopoverViewModel.SourceRecovery.cs" />
     <Compile Include="..\Classick.UI\ViewModels\HistoryEntryViewModel.cs"
              Link="LinkedViewModels\HistoryEntryViewModel.cs" />
     <Compile Include="..\Classick.UI\Notifications\NotificationDecision.cs"

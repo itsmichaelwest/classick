@@ -93,6 +93,7 @@ public partial class App : Application
         Router.DeviceConnected += OnDeviceConnected;
         Router.DeviceDisconnected += OnDeviceDisconnected;
         Router.DeviceInventorySnapshotReceived += OnDeviceInventorySnapshot;
+        Router.SourceAvailabilityUpdated += OnSourceAvailabilityUpdated;
         Router.SyncEventReceived += OnSyncEvent;
         Router.Start();
 
@@ -192,6 +193,12 @@ public partial class App : Application
     {
         LatestHistory = h;
         DispatcherQueue.TryEnqueue(() => _popoverState.ApplyHistory(h));
+    }
+
+    private void OnSourceAvailabilityUpdated(SourceAvailabilityEvent availability)
+    {
+        DispatcherQueue.TryEnqueue(
+            () => _popoverState.ApplySourceAvailability(availability));
     }
     private void OnDeviceConnected(DeviceConnectedEvent dc)
     {

@@ -18,6 +18,7 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(ReplaceLibraryCommand), "replace_library")]
 [JsonDerivedType(typeof(GetLibraryCommand), "get_library")]
 [JsonDerivedType(typeof(ScanLibraryCommand), "scan_library")]
+[JsonDerivedType(typeof(RetrySourceMountCommand), "retry_source_mount")]
 [JsonDerivedType(typeof(PreviewSelectionCommand), "preview_selection")]
 [JsonDerivedType(typeof(ListPlaylistsCommand), "list_playlists")]
 [JsonDerivedType(typeof(GetPlaylistCommand), "get_playlist")]
@@ -108,6 +109,11 @@ public sealed record GetLibraryCommand(
 ) : DaemonCommand;
 
 public sealed record ScanLibraryCommand(
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record RetrySourceMountCommand(
+    [property: JsonRequired, JsonPropertyName("allow_ui")] bool AllowUi,
     [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
 ) : DaemonCommand;
 
