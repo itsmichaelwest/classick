@@ -4,12 +4,23 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct AtomicFileWriter;
+#[derive(Debug, Clone, Default)]
+pub struct AtomicFileWriter {
+    fail_before_replace: Option<PathBuf>,
+}
 
 impl AtomicFileWriter {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Deterministic fault injection for integration tests that need to prove
+    /// the old file survives a failure after the temporary file is durable.
+    #[doc(hidden)]
+    pub fn failing_before_replace(path: PathBuf) -> Self {
+        Self {
+            fail_before_replace: Some(path),
+        }
     }
 
     pub fn write(&self, path: &Path, contents: &[u8]) -> Result<()> {
@@ -25,6 +36,12 @@ impl AtomicFileWriter {
             file.sync_all()
                 .with_context(|| format!("sync atomic temp file {}", temporary.display()))?;
             drop(file);
+            if self.fail_before_replace.as_deref() == Some(path) {
+                anyhow::bail!(
+                    "injected failure before atomic replace for {}",
+                    path.display()
+                );
+            }
             replace(&temporary, path).with_context(|| {
                 format!("replace {} with {}", path.display(), temporary.display())
             })?;

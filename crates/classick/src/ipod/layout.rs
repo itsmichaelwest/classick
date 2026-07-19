@@ -14,6 +14,7 @@ pub const ITUNES_DB: &str = "iTunesDB";
 pub const PLAY_COUNTS_BAK: &str = "Play Counts.bak";
 pub const CLASSICK: &str = "classick";
 pub const PLAYLISTS: &str = "playlists";
+pub const MANAGED_PLAYLISTS: &str = "managed_playlists.json";
 
 /// `<mount>\iPod_Control\Device\SysInfo` — the flat-text key/value file we
 /// read FirewireGuid + ModelNumStr from. Present on every iPod we support.
@@ -43,6 +44,14 @@ pub fn play_counts_bak_path(mount: &Path) -> PathBuf {
 /// `adopt_from_ipod`.
 pub fn playlists_mirror_dir(mount: &Path) -> PathBuf {
     mount.join(IPOD_CONTROL).join(CLASSICK).join(PLAYLISTS)
+}
+
+/// Device-authoritative record of the normal playlists Classick may mutate.
+pub fn managed_playlists_path(mount: &Path) -> PathBuf {
+    mount
+        .join(IPOD_CONTROL)
+        .join(CLASSICK)
+        .join(MANAGED_PLAYLISTS)
 }
 
 /// Canonical "is this a usable iPod mount?" predicate. Requires BOTH the

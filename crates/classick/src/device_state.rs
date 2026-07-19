@@ -140,6 +140,27 @@ pub fn managed_playlists_path_in(root: &Path, serial: &str) -> Result<PathBuf> {
     Ok(device_dir_in(root, serial)?.join("managed_playlists.json"))
 }
 
+/// Host-cache path without creating its parent. Connected-device authority
+/// reads must not mutate host state merely by discovering that no record exists.
+pub fn managed_playlists_cache_path(serial: &str) -> Result<PathBuf> {
+    let config_root = dirs::config_dir()
+        .ok_or_else(|| anyhow!("could not resolve config dir via dirs::config_dir"))?
+        .join(crate::PROJECT_DIR);
+    Ok(managed_playlists_cache_path_in(&config_root, serial))
+}
+
+/// Test/override variant of [`managed_playlists_cache_path`].
+pub fn managed_playlists_cache_path_in(root: &Path, serial: &str) -> PathBuf {
+    root.join("devices")
+        .join(sanitize_serial(serial))
+        .join("managed_playlists.json")
+}
+
+/// Retained pre-device-authority host record. Its IDs are diagnostics only.
+pub fn retained_legacy_managed_playlists_path(host_cache: &Path) -> PathBuf {
+    host_cache.with_file_name("managed_playlists.legacy.json")
+}
+
 /// One-time migration of the legacy flat `manifest.json` into the per-device
 /// layout. If `legacy_path` exists and the per-device manifest does not,
 /// moves it there (rename, falling back to copy+delete across filesystems).
