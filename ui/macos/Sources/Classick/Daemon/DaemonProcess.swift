@@ -27,6 +27,22 @@ final class DaemonProcess {
     self.socketPath = socketPath
   }
 
+  private var ownsDaemon: Bool {
+    process?.isRunning == true
+  }
+
+  /// Stops an owned daemon, but only detaches from a daemon started elsewhere.
+  func stopForQuit(
+    client: DaemonClient,
+    ownedShutdownTimeout: Duration = .seconds(130)
+  ) async -> Bool {
+    guard ownsDaemon else {
+      await client.stop()
+      return true
+    }
+    return await client.shutdownAndWait(timeout: ownedShutdownTimeout)
+  }
+
   /// Attaches to an already-running daemon if one answers on the socket;
   /// otherwise locates and spawns a new `classick --daemon` process.
   func ensureRunning() async {

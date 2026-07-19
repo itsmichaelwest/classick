@@ -83,6 +83,46 @@ private func readCommandsUntilShutdown(from fd: Int32, into sink: ShutdownComman
 }
 
 final class DaemonClientShutdownTests: XCTestCase {
+  @MainActor
+  func testQuitDetachesFromUnownedDaemonWithoutSendingShutdown() async {
+    let path = NSTemporaryDirectory() + "cdsu_\(UUID().uuidString.prefix(8)).sock"
+    defer { unlink(path) }
+    let listenFd = makeShutdownListener(path: path)
+    defer { close(listenFd) }
+    let sink = ShutdownCommandSink()
+    let disconnected = expectation(description: "client detached")
+
+    Thread {
+      let clientFd = accept(listenFd, nil, nil)
+      guard clientFd >= 0 else { return }
+      writeShutdownLine(
+        #"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n",
+        to: clientFd)
+      readCommandsUntilShutdown(from: clientFd, into: sink)
+      close(clientFd)
+      disconnected.fulfill()
+    }.start()
+
+    let client = DaemonClient(socketPath: path)
+    let stream = await client.events()
+    let consumer = Task { for await _ in stream {} }
+    await client.start()
+    let deadline = Date().addingTimeInterval(1)
+    while !sink.text.contains("get_config"), Date() < deadline {
+      try? await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertTrue(sink.text.contains("get_config"))
+
+    let detached = await DaemonProcess(socketPath: path).stopForQuit(
+      client: client,
+      ownedShutdownTimeout: .seconds(1))
+
+    await fulfillment(of: [disconnected], timeout: 1)
+    consumer.cancel()
+    XCTAssertTrue(detached)
+    XCTAssertFalse(sink.text.contains(#"{"type":"shutdown"}"#))
+  }
+
   func testAttachedShutdownRequestedBeforeHelloSendsOnceAndWaitsForEOF() async {
     let path = NSTemporaryDirectory() + "cdsh_\(UUID().uuidString.prefix(8)).sock"
     defer { unlink(path) }
@@ -190,17 +230,51 @@ final class DaemonClientShutdownTests: XCTestCase {
     XCTAssertLessThan(elapsed, .seconds(1))
   }
 
-  func testDisconnectedShutdownWaitsForBoundedInactivityBeforeFailure() async {
+  func testDisconnectedShutdownFailsWithoutWaitingForDrainTimeout() async {
     let client = DaemonClient(socketPath: "/tmp/classick-missing-\(UUID().uuidString).sock")
     let clock = ContinuousClock()
     let started = clock.now
 
-    let cleanExit = await client.shutdownAndWait(timeout: .milliseconds(50))
+    let cleanExit = await client.shutdownAndWait(timeout: .seconds(2))
     let elapsed = started.duration(to: clock.now)
 
     XCTAssertFalse(cleanExit)
+    XCTAssertLessThan(elapsed, .milliseconds(500))
+  }
+
+  func testUnhandshakenShutdownUsesShortConnectionGrace() async {
+    let path = NSTemporaryDirectory() + "cdsg_\(UUID().uuidString.prefix(8)).sock"
+    defer { unlink(path) }
+    let listenFd = makeShutdownListener(path: path)
+    defer { close(listenFd) }
+    let accepted = expectation(description: "socket accepted without hello")
+    let releaseConnection = DispatchSemaphore(value: 0)
+
+    Thread {
+      let clientFd = accept(listenFd, nil, nil)
+      guard clientFd >= 0 else { return }
+      accepted.fulfill()
+      releaseConnection.wait()
+      close(clientFd)
+    }.start()
+
+    let client = DaemonClient(socketPath: path)
+    let stream = await client.events()
+    let consumer = Task { for await _ in stream {} }
+    await client.start()
+    await fulfillment(of: [accepted], timeout: 1)
+    let clock = ContinuousClock()
+    let started = clock.now
+
+    let cleanExit = await client.shutdownAndWait(
+      timeout: .seconds(2), connectionGrace: .milliseconds(60))
+    let elapsed = started.duration(to: clock.now)
+    releaseConnection.signal()
+    consumer.cancel()
+
+    XCTAssertFalse(cleanExit)
     XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(40))
-    XCTAssertLessThan(elapsed, .seconds(1))
+    XCTAssertLessThan(elapsed, .milliseconds(500))
   }
 
   func testShutdownProgressExtendsTheInactivityWaitUntilEOF() async {

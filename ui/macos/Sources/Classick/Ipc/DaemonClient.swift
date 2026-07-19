@@ -135,7 +135,11 @@ actor DaemonClient {
   /// Disables reconnect, writes one graceful shutdown request, and waits for
   /// EOF on that exact connection. Valid daemon events reset the inactivity
   /// deadline so a healthy finalization is never cut off while progressing.
-  func shutdownAndWait(timeout: Duration) async -> Bool {
+  /// A connected socket gets only a short grace period to finish its handshake.
+  func shutdownAndWait(
+    timeout: Duration,
+    connectionGrace: Duration = .seconds(1)
+  ) async -> Bool {
     if let shutdownResult { return shutdownResult }
 
     return await withCheckedContinuation { continuation in
@@ -145,8 +149,13 @@ actor DaemonClient {
       isRunning = false
       shutdownConnectionGeneration = connectionGeneration
       shutdownInactivityTimeout = timeout
-      scheduleShutdownTimeout()
-      sendPendingShutdownIfReady()
+      guard fd >= 0 else {
+        completeShutdown(result: false)
+        return
+      }
+      if !sendPendingShutdownIfReady() {
+        scheduleShutdownTimeout(after: connectionGrace)
+      }
     }
   }
 
@@ -327,7 +336,7 @@ actor DaemonClient {
     }
 
     if shutdownCommandSent, shutdownConnectionGeneration == connectionGeneration {
-      scheduleShutdownTimeout()
+      scheduleShutdownInactivityTimeout()
     }
 
     if isFirstLine {
@@ -393,15 +402,18 @@ actor DaemonClient {
 
     shutdownCommandSent = sendCommand(.shutdown) == .sent
     if shutdownCommandSent {
-      scheduleShutdownTimeout()
+      scheduleShutdownInactivityTimeout()
     }
     return shutdownCommandSent
   }
 
-  private func scheduleShutdownTimeout() {
-    guard let timeout = shutdownInactivityTimeout,
-      let shutdownConnectionGeneration
-    else { return }
+  private func scheduleShutdownInactivityTimeout() {
+    guard let timeout = shutdownInactivityTimeout else { return }
+    scheduleShutdownTimeout(after: timeout)
+  }
+
+  private func scheduleShutdownTimeout(after timeout: Duration) {
+    guard let shutdownConnectionGeneration else { return }
 
     shutdownTimeoutTask?.cancel()
     shutdownTimeoutTask = Task {
