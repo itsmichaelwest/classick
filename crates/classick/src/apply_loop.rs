@@ -2111,21 +2111,17 @@ pub(crate) fn build_rebuild_manifest_from_handles(
     }
 }
 
-/// Core of Task 6's end-of-run playlist reconcile: joins `desired`'s source
-/// paths to this run's dbids via `manifest`, then calls
-/// `device_playlists::reconcile`. `desired` is `(slug, display name,
+/// Joins desired source paths to this run's DBIDs, loads the connected
+/// device's ownership authority, and returns an in-memory reconcile candidate
+/// for coordinated checkpoint publication. `desired` is `(slug, display name,
 /// resolved source paths)` — `slug` is threaded through as the
 /// managed-identity join key (Fix 2: `reconcile` used to key on display
 /// name alone, which collapses two distinct playlists that happen to share
 /// a name via `PlaylistStore::unique_slug`'s `-2` disambiguation). Extracted
 /// from `run` so every fallible step in here — the dbid join is infallible,
-/// but the `reconcile` call (which covers `ensure_managed_playlist`/removal
-/// calls and the final `ManagedPlaylists::save`) is not — surfaces through a
-/// single `Result` that the caller handles warn-only (see spec §6: playlist
-/// problems are fail-visible but must NEVER fail the sync, same rationale as
-/// `mirror_to_ipod`'s doc comment). This function itself still returns
-/// `Err` on failure; it's the CALLER's job to catch it rather than bubble
-/// it into the final `db.write()`.
+/// while display names are presentation only. Mutation failures propagate so
+/// the checkpoint can roll back the candidate DB; ownership is never written
+/// here.
 ///
 /// `pub` (not `pub(crate)`) so integration tests can drive the full
 /// slug→display-name / manifest→dbid seam without duplicating it — see
@@ -2138,15 +2134,25 @@ pub fn reconcile_playlists_step(
     serial: &str,
     progress: &Progress,
 ) -> Result<()> {
+    reconcile_playlists_candidate_step(db, desired, manifest, serial, progress).map(drop)
+}
+
+pub fn reconcile_playlists_candidate_step(
+    db: &OwnedDb,
+    desired: &[(String, String, Vec<PathBuf>)],
+    manifest: &Manifest,
+    serial: &str,
+    progress: &Progress,
+) -> Result<crate::ipod::device_playlists::PlaylistReconcileOutcome> {
     let root = dirs::config_dir()
         .ok_or_else(|| anyhow!("could not resolve config dir"))?
         .join(crate::PROJECT_DIR);
-    reconcile_playlists_step_in(db, desired, manifest, &root, serial, progress)
+    reconcile_playlists_candidate_step_in(db, desired, manifest, &root, serial, progress)
 }
 
-/// Test/override variant of [`reconcile_playlists_step`]: reconciles against
-/// `root/devices/<serial>/managed_playlists.json` (via
-/// `device_playlists::reconcile_in`) instead of the real config dir.
+/// Test/override variant of [`reconcile_playlists_step`]. `root` selects only
+/// the inert host-cache location; connected-device ownership remains the sole
+/// authority loaded from the DB's mount.
 pub fn reconcile_playlists_step_in(
     db: &OwnedDb,
     desired: &[(String, String, Vec<PathBuf>)],
@@ -2155,30 +2161,59 @@ pub fn reconcile_playlists_step_in(
     serial: &str,
     progress: &Progress,
 ) -> Result<()> {
+    reconcile_playlists_candidate_step_in(db, desired, manifest, root, serial, progress).map(drop)
+}
+
+pub fn reconcile_playlists_candidate_step_in(
+    db: &OwnedDb,
+    desired: &[(String, String, Vec<PathBuf>)],
+    manifest: &Manifest,
+    root: &Path,
+    serial: &str,
+    progress: &Progress,
+) -> Result<crate::ipod::device_playlists::PlaylistReconcileOutcome> {
     let dbid_by_source_path: std::collections::HashMap<&Path, u64> = manifest
         .tracks
         .iter()
         .map(|e| (e.source_path.as_path(), e.ipod_dbid))
         .collect();
-    let desired: Vec<(String, String, Vec<u64>)> = desired
+    let desired: Vec<crate::ipod::device_playlists::DesiredPlaylist> = desired
         .iter()
         .map(|(slug, name, paths)| {
             let dbids: Vec<u64> = paths
                 .iter()
                 .filter_map(|p| dbid_by_source_path.get(p.as_path()).copied())
                 .collect();
-            (slug.clone(), name.clone(), dbids)
+            crate::ipod::device_playlists::DesiredPlaylist {
+                slug: slug.clone(),
+                display_name: name.clone(),
+                ordered_dbids: dbids,
+            }
         })
         .collect();
-    let stats = crate::ipod::device_playlists::reconcile_in(db, &desired, root, serial)
+    let mount = db
+        .mount_path()
+        .context("resolve iPod mount for playlist ownership")?;
+    let host_cache = crate::device_state::managed_playlists_path_in(root, serial)?;
+    let ownership_store = crate::ipod::playlist_ownership::DeviceOwnershipStore::new(
+        mount,
+        serial.to_string(),
+        host_cache,
+        crate::atomic_file::AtomicFileWriter::new(),
+    );
+    let previous = ownership_store
+        .load_device_read_only()
+        .context("load device-authoritative playlist ownership")?;
+    let outcome = crate::ipod::device_playlists::reconcile_candidate(db, &desired, &previous)
         .context("reconcile Classick-managed iTunesDB playlists")?;
+    let stats = outcome.stats;
     if stats.created + stats.updated + stats.removed > 0 {
         progress.log(format!(
             "playlists: {} created, {} updated, {} removed",
             stats.created, stats.updated, stats.removed
         ));
     }
-    Ok(())
+    Ok(outcome)
 }
 
 /// Guard against a raw source walk that found zero audio files. An empty

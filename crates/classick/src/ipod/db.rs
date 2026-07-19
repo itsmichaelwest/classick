@@ -26,6 +26,14 @@ pub enum TrackFileDisposition {
     Keep,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaylistStructuralKind {
+    Normal,
+    Master,
+    Podcast,
+    Smart,
+}
+
 /// Read-only snapshot of every per-track artwork signal exposed by libgpod.
 /// Kept as raw facts so audit policy and failure ordering remain pure/testable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -488,7 +496,7 @@ impl OwnedDb {
             .collect()
     }
 
-    fn mount_path(&self) -> Option<PathBuf> {
+    pub fn mount_path(&self) -> Option<PathBuf> {
         unsafe {
             let mount = ffi::itdb_get_mountpoint(self.0);
             (!mount.is_null())
@@ -723,6 +731,27 @@ pub fn list_playlists(db: &OwnedDb) -> Vec<(String, bool)> {
     out
 }
 
+impl OwnedDb {
+    pub fn playlist_kind_by_id(&self, id: u64) -> Option<PlaylistStructuralKind> {
+        unsafe {
+            let playlist = ffi::itdb_playlist_by_id(self.0, id);
+            if playlist.is_null() {
+                return None;
+            }
+            Some(if ffi::itdb_playlist_is_mpl(playlist) != 0 {
+                PlaylistStructuralKind::Master
+            } else if ffi::itdb_playlist_is_podcasts(playlist) != 0 || (*playlist).podcastflag != 0
+            {
+                PlaylistStructuralKind::Podcast
+            } else if (*playlist).is_spl != 0 {
+                PlaylistStructuralKind::Smart
+            } else {
+                PlaylistStructuralKind::Normal
+            })
+        }
+    }
+}
+
 /// Find-or-create a Classick-managed playlist by **recorded itdb id**,
 /// never by name, and make its membership exactly `dbids`, in order.
 /// Returns the resulting playlist's itdb id so the caller
@@ -795,9 +824,8 @@ pub fn ensure_managed_playlist(
     unsafe {
         let mut pl: *mut ffi::Itdb_Playlist = ptr::null_mut();
         if let Some(id) = recorded_id {
-            let candidate = ffi::itdb_playlist_by_id(db.as_ptr(), id);
-            if !candidate.is_null() && ffi::itdb_playlist_is_mpl(candidate) == 0 {
-                pl = candidate;
+            if db.playlist_kind_by_id(id) == Some(PlaylistStructuralKind::Normal) {
+                pl = ffi::itdb_playlist_by_id(db.as_ptr(), id);
             }
         }
 
@@ -869,58 +897,23 @@ pub fn ensure_managed_playlist(
     }
 }
 
-/// Remove the playlist named `name`, if present. Name-based fallback used
-/// only for legacy (pre-migration) `managed_playlists.json` entries that
-/// have no recorded id — see `remove_playlist_by_id` for the id-based path
-/// every entry uses once it has one.
-///
-/// # Failure paths
-/// - No playlist named `name` exists: `Ok(false)` — idempotent, matching
-///   `delete_track`'s "already gone" semantics; a previous partial run or a
-///   user's own deletion isn't an error.
-/// - `name` contains an interior NUL byte: `Err`, nothing touched.
-/// - `name` resolves to the iPod's master playlist: `Err`, nothing
-///   touched — never let a name collision wipe the Songs view.
-pub fn remove_playlist_by_name(db: &OwnedDb, name: &str) -> Result<bool> {
-    let name_c = CString::new(name)
-        .map_err(|_| anyhow!("playlist name contains interior NUL byte: {name:?}"))?;
-    unsafe {
-        let pl = ffi::itdb_playlist_by_name(db.as_ptr(), name_c.as_ptr() as *mut _);
-        if pl.is_null() {
-            return Ok(false);
-        }
-        if ffi::itdb_playlist_is_mpl(pl) != 0 {
-            return Err(anyhow!(
-                "refusing to remove playlist {name:?}: itdb_playlist_by_name resolved it to \
-                 the master playlist"
-            ));
-        }
-        // Frees the Itdb_Playlist and unlinks it from db.playlists.
-        ffi::itdb_playlist_remove(pl);
-    }
-    Ok(true)
-}
-
-/// Remove the playlist with itdb id `id`, if present. Id-based counterpart
-/// to `remove_playlist_by_name` — the primary removal path once a managed
-/// record entry has a recorded id, since id resolution has no
-/// false-positive-by-name hazard at all.
+/// Remove the normal playlist with itdb id `id`, if present. No name-based
+/// removal exists because only a device-authoritative exact ID grants
+/// mutation authority.
 ///
 /// # Failure paths
 /// - No playlist with itdb id `id` exists: `Ok(false)` — same idempotent
 ///   "already gone" semantics as `remove_playlist_by_name`.
-/// - `id` resolves to the iPod's master playlist: `Err`, nothing touched
-///   (structurally shouldn't happen, guarded anyway).
+/// - `id` resolves to master, podcast, or smart: `Err`, nothing touched.
 pub fn remove_playlist_by_id(db: &OwnedDb, id: u64) -> Result<bool> {
     unsafe {
         let pl = ffi::itdb_playlist_by_id(db.as_ptr(), id);
         if pl.is_null() {
             return Ok(false);
         }
-        if ffi::itdb_playlist_is_mpl(pl) != 0 {
+        if db.playlist_kind_by_id(id) != Some(PlaylistStructuralKind::Normal) {
             return Err(anyhow!(
-                "refusing to remove playlist id {id}: itdb_playlist_by_id resolved it to \
-                 the master playlist"
+                "refusing to remove playlist id {id}: target is not a normal playlist"
             ));
         }
         ffi::itdb_playlist_remove(pl);

@@ -27,7 +27,8 @@ use classick::device_config::Subscriptions;
 use classick::ffi;
 use classick::fit::DeferredAlbum;
 use classick::ipod::db::OwnedDb;
-use classick::ipod::device_playlists::{self, ReconcileStats};
+use classick::ipod::device_playlists::{reconcile_candidate, DesiredPlaylist, ReconcileStats};
+use classick::ipod::playlist_ownership::ManagedPlaylistOwnership;
 use classick::library_index::{IndexedTrack, LibraryIndex};
 use classick::manifest::{Action, Manifest};
 use classick::manifest_store::{LoadedManifest, ManifestOrigin};
@@ -299,15 +300,13 @@ fn sorted_playlist_names(db: &OwnedDb) -> Vec<String> {
 fn desired_playlists(
     manifest: &Manifest,
     playlist_tracks: &[(String, String, Vec<PathBuf>)],
-) -> Vec<(String, String, Vec<u64>)> {
+) -> Vec<DesiredPlaylist> {
     playlist_tracks
         .iter()
-        .map(|(slug, name, paths)| {
-            (
-                slug.clone(),
-                name.clone(),
-                paths.iter().map(|p| dbid_for(manifest, p)).collect(),
-            )
+        .map(|(slug, name, paths)| DesiredPlaylist {
+            slug: slug.clone(),
+            display_name: name.clone(),
+            ordered_dbids: paths.iter().map(|p| dbid_for(manifest, p)).collect(),
         })
         .collect()
 }
@@ -449,10 +448,14 @@ fn playlist_track_outside_scope_syncs_and_reconciles_as_playlist_member() {
     // now reconcile the device-side playlist against the manifest dbids the
     // real commit produced.
     let desired = desired_playlists(&f.manifest, &effective.playlist_tracks);
-    let stats = device_playlists::reconcile_in(&f.db, &desired, &f.state_root, &f.serial)
-        .expect("reconcile should succeed");
+    let outcome = reconcile_candidate(
+        &f.db,
+        &desired,
+        &ManagedPlaylistOwnership::empty_for_serial(&f.serial),
+    )
+    .expect("reconcile should succeed");
     assert_eq!(
-        stats,
+        outcome.stats,
         ReconcileStats {
             created: 1,
             updated: 0,
@@ -577,11 +580,14 @@ fn unsubscribe_drops_device_playlist_and_diff_plans_track_removal() {
         &f.source_root,
     );
     let desired_subscribed = desired_playlists(&f.manifest, &effective_subscribed.playlist_tracks);
-    let stats =
-        device_playlists::reconcile_in(&f.db, &desired_subscribed, &f.state_root, &f.serial)
-            .unwrap();
+    let outcome = reconcile_candidate(
+        &f.db,
+        &desired_subscribed,
+        &ManagedPlaylistOwnership::empty_for_serial(&f.serial),
+    )
+    .unwrap();
     assert_eq!(
-        stats,
+        outcome.stats,
         ReconcileStats {
             created: 1,
             updated: 0,
@@ -623,11 +629,10 @@ fn unsubscribe_drops_device_playlist_and_diff_plans_track_removal() {
     let desired_unsubscribed =
         desired_playlists(&f.manifest, &effective_unsubscribed.playlist_tracks);
     assert!(desired_unsubscribed.is_empty());
-    let stats2 =
-        device_playlists::reconcile_in(&f.db, &desired_unsubscribed, &f.state_root, &f.serial)
-            .unwrap();
+    let outcome2 =
+        reconcile_candidate(&f.db, &desired_unsubscribed, &outcome.candidate_ownership).unwrap();
     assert_eq!(
-        stats2,
+        outcome2.stats,
         ReconcileStats {
             created: 0,
             updated: 0,
