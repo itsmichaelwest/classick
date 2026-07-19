@@ -17,6 +17,7 @@ pub mod library_watcher;
 pub mod lifecycle;
 #[cfg(target_os = "macos")]
 pub mod macos_netfs;
+pub(crate) mod playlist_commands;
 pub mod runtime;
 pub mod runtime_state;
 pub mod scheduler;

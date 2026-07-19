@@ -30,7 +30,7 @@ use crate::ipc_daemon::{
     DaemonCommand, DaemonEvent, DaemonStateLabel, PlaylistKind, SourceAvailabilityState,
     TriggerSource,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -769,6 +769,11 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
         config_file::device_registry_path(&config_path),
         legacy_identity.as_ref(),
     )?;
+    crate::daemon::playlist_commands::recover_pending_playlist_mutations(
+        &mut registry,
+        device_state_root(&config_path),
+    )
+    .context("recover pending playlist mutations")?;
     if let Some(serial) = unique_configured_serial(&registry) {
         history.migrate_legacy_entries(&serial)?;
     }
@@ -2503,13 +2508,13 @@ fn handle_client_command(
             );
         }
         DaemonCommand::GetPlaylist { slug, request_id } => {
-            let _ = reply.send(build_playlist_detail(&slug, request_id));
+            let _ = reply.send(build_playlist_detail(config_path, &slug, request_id));
         }
         DaemonCommand::SavePlaylist {
             playlist,
             request_id,
         } => {
-            let Ok(store) = open_playlist_store() else {
+            let Ok(store) = open_playlist_store(config_path) else {
                 tracing::warn!(
                     "daemon: client {client_id} save_playlist: could not open playlist store"
                 );
@@ -2565,21 +2570,41 @@ fn handle_client_command(
             );
         }
         DaemonCommand::DeletePlaylist { slug, request_id } => {
-            match open_playlist_store() {
-                Ok(store) => {
-                    if let Err(e) = store.delete(&slug) {
-                        tracing::error!(
-                            "daemon: client {client_id} delete_playlist({slug}) failed: {e:#}"
-                        );
+            let outcome = open_playlist_store(config_path).and_then(|store| {
+                crate::daemon::playlist_commands::delete_and_scrub_subscriptions(
+                    &store,
+                    registry,
+                    device_state_root(config_path),
+                    &slug,
+                    &request_id,
+                )
+            });
+            match outcome {
+                Ok(outcome) => {
+                    tracing::info!(
+                        request_id = %outcome.request_id,
+                        deleted = outcome.deleted,
+                        changed_devices = outcome.changed_revisions.len(),
+                        "daemon: playlist deletion committed"
+                    );
+                    for serial in outcome.changed_revisions.keys() {
+                        let _ = event_tx.send(build_device_config_update(
+                            config_path,
+                            serial,
+                            request_id.clone(),
+                        ));
                     }
+                    let _ = event_tx.send(
+                        build_playlists_update(config_path)
+                            .with_acknowledged_request_id(Some(request_id)),
+                    );
                 }
-                Err(e) => {
-                    tracing::warn!("daemon: client {client_id} delete_playlist: could not open playlist store ({e:#})");
+                Err(error) => {
+                    tracing::error!(
+                        "daemon: client {client_id} delete_playlist({slug}) failed: {error:#}"
+                    );
                 }
             }
-            let _ = event_tx.send(
-                build_playlists_update(config_path).with_acknowledged_request_id(Some(request_id)),
-            );
         }
         DaemonCommand::GetDeviceConfig {
             serial: _,
@@ -2793,9 +2818,9 @@ fn load_cached_index(config_path: &std::path::Path) -> crate::library_index::Lib
     }
 }
 
-/// Open (creating on demand) the one playlist store at its default root.
-fn open_playlist_store() -> Result<crate::playlist::PlaylistStore> {
-    crate::playlist::PlaylistStore::default_root().and_then(crate::playlist::PlaylistStore::open)
+/// Open (creating on demand) the playlist store beside the active config.
+fn open_playlist_store(config_path: &Path) -> Result<crate::playlist::PlaylistStore> {
+    crate::playlist::PlaylistStore::open(device_state_root(config_path).join("playlists"))
 }
 
 /// `list_playlists` reply / `save_playlist`+`delete_playlist` broadcast
@@ -2804,7 +2829,7 @@ fn open_playlist_store() -> Result<crate::playlist::PlaylistStore> {
 /// an empty list with a logged warning rather than failing the arm.
 fn build_playlists_update(config_path: &std::path::Path) -> DaemonEvent {
     let index = load_cached_index(config_path);
-    match open_playlist_store() {
+    match open_playlist_store(config_path) {
         Ok(store) => DaemonEvent::PlaylistsUpdate {
             playlists: crate::daemon::library::build_playlist_summaries(&store, &index),
             acknowledged_request_id: None,
@@ -2828,8 +2853,12 @@ fn build_playlists_update(config_path: &std::path::Path) -> DaemonEvent {
 /// parse all reply with `error` set (and every content field `None`)
 /// rather than degrading to an empty result — see the `PlaylistDetail`
 /// and `GetPlaylist` doc comments in `ipc_daemon.rs`.
-fn build_playlist_detail(slug: &str, acknowledged_request_id: String) -> DaemonEvent {
-    let store = match open_playlist_store() {
+fn build_playlist_detail(
+    config_path: &Path,
+    slug: &str,
+    acknowledged_request_id: String,
+) -> DaemonEvent {
+    let store = match open_playlist_store(config_path) {
         Ok(store) => store,
         Err(e) => {
             tracing::warn!("daemon: get_playlist({slug}): could not open playlist store ({e:#})");
@@ -2952,7 +2981,7 @@ fn build_device_preview(
     let subs = crate::device_state::device_subscriptions_path_in(root, serial)
         .map(|p| crate::device_config::Subscriptions::load_or_default(&p))
         .unwrap_or_default();
-    let store = open_playlist_store();
+    let store = open_playlist_store(config_path);
     if let Err(e) = &store {
         tracing::warn!("daemon: preview_device({serial}): failed to open playlist store ({e:#}); playlist subscriptions ignored");
     }

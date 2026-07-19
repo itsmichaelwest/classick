@@ -1130,7 +1130,7 @@ host-side types these wire shapes mirror.
 | `list_playlists` | (none) | Replies `playlists_update`: every playlist in the store. |
 | `get_playlist` | `slug` | Replies `playlist_detail`: that playlist's full content (track list or rule set), for the editor. `error` is set instead when the slug doesn't exist, the store can't be opened, or the on-disk file fails to parse. |
 | `save_playlist` | `playlist` (a `PlaylistPayload`, below) | Create (absent `playlist.slug`) or replace (present `playlist.slug`) a playlist; persists atomically. No direct reply; broadcasts a fresh `playlists_update` to every client. |
-| `delete_playlist` | `slug` | Delete a playlist by slug; no-op (still broadcasts) if the slug doesn't exist. No direct reply; broadcasts a fresh `playlists_update`. Deleting a playlist that's still subscribed on one or more devices does NOT touch those devices' `subscriptions.playlists` — the subscription is left dangling. It surfaces via `device_preview.unresolved_subscriptions` (below) and via a sync-time log line when the sync-set builder can't resolve it; it's never fatal to a sync. |
+| `delete_playlist` | `slug` | Delete a playlist and atomically scrub its slug from every remembered device's `subscriptions.playlists`. A missing playlist is an acknowledged no-op. Success broadcasts `device_config_update` for each changed device, then a fresh `playlists_update`; a failed host transaction broadcasts neither. |
 | `get_device_config` | `serial` | Replies `device_config_update` for that device: its resolved selection + subscriptions + settings. Never fails — an unknown `serial` resolves to each part's default. |
 | `save_device_config` | `serial`, `selection?`, `subscriptions?`, `settings?` | Persists the provided parts (each field `None`/absent = "don't change", the same sentinel convention as `save_config`). No direct reply; broadcasts a fresh `device_config_update` to every client. If `serial` is the currently *configured* device, also broadcasts a refreshed `status_update` (a selection change may move "Y" in "X of Y synced"). |
 | `preview_device` | `serial` | Pure computation over the cached library index + that device's selection/subscriptions/playlist-store state — no filesystem walk, nothing persists. Replies `device_preview`. |
@@ -1172,7 +1172,7 @@ of the wire contract):
 | `playlists_update` | `playlists[]` — `{slug, name, kind, tracks, bytes, error?}`. `kind` is `"manual"` \| `"smart"`. `tracks`/`bytes` are computed against the **cached library index** (never a walk): manual playlists resolve their source-relative tracks against the index (an entry the index doesn't know about is dropped, same "oracle" idea as `sync_set::compute` but index- instead of walk-backed); smart playlists evaluate their rules directly against the index. Sorted by `slug`. A playlist FILE the store failed to parse still surfaces here — named from its filename, `tracks`/`bytes` `0`, `error` set to the parse failure — instead of silently vanishing from the list. |
 | `playlist_detail` | `slug`, `name?`, `kind?` (`"manual"` \| `"smart"`), `tracks?` (`string[]`, manual only), `rules?` (a `SmartRules` object, smart only), `error?`. Reply to `get_playlist`. On success `name`/`kind` are set together with the matching content field (`tracks` for manual, `rules` for smart) — unlike `playlists_update`'s summary, `tracks` here is the actual ordered path list, not a count. On failure (no playlist at `slug`, an unopenable store, or an on-disk file that fails to parse) `error` is set and `name`/`kind`/`tracks`/`rules` are all omitted. |
 | `device_config_update` | `serial`, `selection` (`{mode, rules}`), `subscriptions` (`{playlists}`), `settings` (`{auto_sync, rockbox_compat}`). |
-| `device_preview` | `selected_tracks`, `selected_bytes` (the scope-selection footprint, source-size estimate), `playlist_extra_tracks`, `playlist_extra_bytes` (subscribed-playlist members NOT already in the selection scope — the union's out-of-scope delta), `projected_free_bytes` (`u64 \| null`), `unresolved_subscriptions?` (`string[]`). `null` whenever the previewed `serial` isn't the device currently connected (no live `StorageInfo` to project from) — mirrors `library_update.scanned_at_unix_secs`'s "meaningful null" convention, not omission. When present, it's `current_free_bytes − (selected_bytes + playlist_extra_bytes)` — a conservative "as if syncing from empty" estimate, since this computation has no manifest/on-device knowledge of what's already synced. `unresolved_subscriptions` is the sorted set of this device's subscribed slugs that couldn't be resolved against the cached index (unknown slug, or a playlist-store load/open failure) — e.g. a subscription left dangling by `delete_playlist` (above). Those slugs contribute nothing to `playlist_extra_*`. The field is omitted from the wire entirely (not sent as `[]`) when every subscription resolved. See `daemon::library::compute_device_preview` for the exact math and its unit tests. |
+| `device_preview` | `selected_tracks`, `selected_bytes` (the scope-selection footprint, source-size estimate), `playlist_extra_tracks`, `playlist_extra_bytes` (subscribed-playlist members NOT already in the selection scope — the union's out-of-scope delta), `projected_free_bytes` (`u64 \| null`), `unresolved_subscriptions?` (`string[]`). `null` whenever the previewed `serial` isn't the device currently connected (no live `StorageInfo` to project from) — mirrors `library_update.scanned_at_unix_secs`'s "meaningful null" convention, not omission. When present, it's `current_free_bytes − (selected_bytes + playlist_extra_bytes)` — a conservative "as if syncing from empty" estimate, since this computation has no manifest/on-device knowledge of what's already synced. `unresolved_subscriptions` is the sorted set of this device's subscribed slugs that couldn't be resolved against the cached index (unknown slug or a playlist-store load/open failure). Those slugs contribute nothing to `playlist_extra_*`. The field is omitted from the wire entirely (not sent as `[]`) when every subscription resolved. See `daemon::library::compute_device_preview` for the exact math and its unit tests. |
 
 `playlist_detail` example payloads:
 
@@ -1343,6 +1343,19 @@ correlation id:
 ```json
 {"type":"trigger_sync","source":"manual"}
 ```
+
+`delete_playlist` is a host-only transaction; it never reads or writes
+`iPod_Control`. Before changing live files, the daemon stages the playlist
+and every affected `devices/<serial>/subscriptions.json`, records their
+BLAKE3 hashes and target subscription revisions in
+`devices/playlist-mutations/<request_id>.json`, and persists its publication
+phase. Startup resolves any retained journal before accepting IPC: a prepared
+journal restores original files, while a publishing journal rolls forward
+only when live/staged hashes and registry revisions match the recorded
+original or target state. Corrupt or otherwise unresolved journals fail daemon
+startup without guessing. A successful deletion broadcasts each changed
+`device_config_update` before its acknowledged `playlists_update`; a failed
+transaction emits no success broadcast.
 
 ### Events (daemon → UI)
 

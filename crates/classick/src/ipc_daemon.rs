@@ -536,11 +536,11 @@ pub enum DaemonCommand {
         playlist: PlaylistPayload,
         request_id: String,
     },
-    /// Delete a playlist by slug. No-op (still broadcasts) if the slug
-    /// doesn't exist. Broadcasts a fresh `playlists_update` to every
-    /// client even on a delete failure (logged) — the broadcast reflects
-    /// whatever's actually on disk, whether or not this delete succeeded.
-    /// No direct reply.
+    /// Delete a playlist by slug and remove that slug from every remembered
+    /// device's subscriptions in one recoverable host transaction. A missing
+    /// playlist is an acknowledged no-op. Successful deletion broadcasts the
+    /// changed device configs followed by `playlists_update`; failures log
+    /// without a success broadcast.
     DeletePlaylist {
         slug: String,
         request_id: String,
