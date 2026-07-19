@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import Classick
 
@@ -7,6 +8,7 @@ import XCTest
 /// behavior for both `SelectStyle`s. No SwiftUI involved — these are all
 /// static functions operating on plain values.
 final class LibraryBrowserLogicTests: XCTestCase {
+    private let dragNonce = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     private let library = [
         LibraryArtist(name: "Squarepusher", albums: [
             LibraryAlbum(name: "Go Plastic", genre: nil, tracks: 10, bytes: 100),
@@ -20,6 +22,31 @@ final class LibraryBrowserLogicTests: XCTestCase {
             LibraryAlbum(name: "", genre: nil, tracks: 1, bytes: 5),
         ]),
     ]
+
+    func testBrowseModeCreatesArtistAlbumAndGenrePayloads() throws {
+        let cases: [(SelectionRule, String)] = [
+            (.artist(name: "Birdy"), "Birdy"),
+            (.album(artist: "Birdy", album: "Fire Within"), "Fire Within"),
+            (.genre(name: "Alternative"), "Alternative"),
+        ]
+
+        for (rule, summary) in cases {
+            let payload = try XCTUnwrap(LibraryBrowser.dragPayload(
+                for: rule, summary: summary, mode: .browse, launchNonce: dragNonce))
+            XCTAssertEqual(payload.rules, [rule])
+            XCTAssertEqual(payload.summary, summary)
+            XCTAssertEqual(payload.launchNonce, dragNonce)
+        }
+    }
+
+    func testSelectionModeAndPlaylistFacetDoNotCreateDragPayloads() {
+        let checked = Binding.constant(Set<SelectionKey>())
+        XCTAssertNil(LibraryBrowser.dragPayload(
+            for: .artist(name: "Birdy"), summary: "Birdy",
+            mode: .select(checked: checked, style: .flat), launchNonce: dragNonce))
+        XCTAssertNil(LibraryBrowser.dragPayload(
+            for: nil, summary: "Favorites", mode: .browse, launchNonce: dragNonce))
+    }
 
     // MARK: - Grouping / ordering
 

@@ -120,6 +120,7 @@ struct SourceConnectIntent {
 @Observable
 @MainActor
 final class AppModel {
+  let libraryDragLaunchNonce = UUID()
   private(set) var device: DeviceState?
   private(set) var phase: Phase = .noDevice
   private(set) var pendingPrompt: PendingPrompt?

@@ -37,6 +37,22 @@ struct LibraryBrowser: View {
     var facet: Facet
     var mode: Mode
     var search: String = ""
+    var launchNonce: UUID? = nil
+
+    nonisolated static func dragPayload(
+        for rule: SelectionRule, summary: String, mode: Mode, launchNonce: UUID
+    ) -> LibraryDragPayload? {
+        guard case .browse = mode else { return nil }
+        return try? LibraryDragPayload.make(
+            rule: rule, summary: summary, launchNonce: launchNonce)
+    }
+
+    nonisolated static func dragPayload(
+        for rule: SelectionRule?, summary: String, mode: Mode, launchNonce: UUID
+    ) -> LibraryDragPayload? {
+        guard let rule else { return nil }
+        return dragPayload(for: rule, summary: summary, mode: mode, launchNonce: launchNonce)
+    }
 
     var body: some View {
         if facet == .albums {
@@ -138,6 +154,9 @@ struct LibraryBrowser: View {
             switch mode {
             case .browse:
                 rowLabel(title: title, columns: columns, isChecked: false, onToggle: nil)
+                    .libraryDragSource(
+                        payload(for: .artist(name: artist.name), summary: title),
+                        systemImage: "person.fill")
             case let .select(checked, style):
                 let state = Self.checkState(for: artist, checked: checked.wrappedValue)
                 rowLabel(title: title, columns: columns, isChecked: state != .off, isMixed: state == .mixed) {
@@ -154,6 +173,9 @@ struct LibraryBrowser: View {
         switch mode {
         case .browse:
             rowLabel(title: title, columns: columns, isChecked: false, onToggle: nil)
+                .libraryDragSource(
+                    payload(for: .album(artist: artist.name, album: album.name), summary: title),
+                    systemImage: "opticaldisc.fill")
         case let .select(checked, style):
             let key = SelectionKey.album(artist: artist.name, album: album.name)
             let isChecked = Self.containsCaseInsensitive(.artist(name: artist.name), in: checked.wrappedValue)
@@ -184,6 +206,9 @@ struct LibraryBrowser: View {
             switch mode {
             case .browse:
                 rowLabel(title: title, columns: columns, isChecked: false, onToggle: nil)
+                    .libraryDragSource(
+                        payload(for: .genre(name: genre.name), summary: title),
+                        systemImage: "tag.fill")
             case let .select(checked, _):
                 let state = Self.genreCheckState(genre.name, artists: library.artists, checked: checked.wrappedValue)
                 rowLabel(title: title, columns: columns, isChecked: state != .off, isMixed: state == .mixed) {
@@ -201,6 +226,11 @@ struct LibraryBrowser: View {
         switch mode {
         case .browse:
             rowLabel(title: "\(title) — \(subtitleArtist)", columns: columns, isChecked: false, onToggle: nil)
+                .libraryDragSource(
+                    payload(
+                        for: .album(artist: entry.artistName, album: entry.album.name),
+                        summary: title),
+                    systemImage: "opticaldisc.fill")
         case let .select(checked, style):
             let key = SelectionKey.album(artist: entry.artistName, album: entry.album.name)
             let isChecked = Self.containsCaseInsensitive(.genre(name: genre), in: checked.wrappedValue)
@@ -216,6 +246,12 @@ struct LibraryBrowser: View {
 
     private func trackCountText(_ n: Int) -> String {
         "\(n) track\(n == 1 ? "" : "s")"
+    }
+
+    private func payload(for rule: SelectionRule, summary: String) -> LibraryDragPayload? {
+        guard let launchNonce else { return nil }
+        return Self.dragPayload(
+            for: rule, summary: summary, mode: mode, launchNonce: launchNonce)
     }
 
     /// Shared row chrome. `onToggle == nil` renders NO checkbox at all —

@@ -80,7 +80,9 @@ struct LibraryView: View {
       libraryEmptyState(path: path)
     case .browse:
       if let library = model.library {
-        LibraryBrowser(library: library, facet: facet, mode: .browse, search: "")
+        LibraryBrowser(
+          library: library, facet: facet, mode: .browse, search: "",
+          launchNonce: model.libraryDragLaunchNonce)
       }
     }
   }

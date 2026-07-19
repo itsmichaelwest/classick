@@ -32,5 +32,18 @@
 	<string>https://itsmichaelwest.github.io/classick/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>kwXF853KSBy2ltj2p3pYRZwlnmqY2zMdznEjKgxmPaY=</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Classick Library Selection</string>
+			<key>UTTypeIdentifier</key>
+			<string>st.michaelwe.classick.library-selection</string>
+		</dict>
+	</array>
 </dict>
 </plist>
