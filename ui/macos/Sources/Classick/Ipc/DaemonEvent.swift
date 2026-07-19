@@ -51,6 +51,7 @@ struct DaemonSettings: Codable, Equatable, Sendable {
   var scheduleMinutes: UInt32
   var notifyOn: String  // "all" | "errors_only" | "none"
   var rockboxCompat: Bool
+  var dropSyncBehavior: DropSyncBehaviorWire
 
   enum CodingKeys: String, CodingKey {
     case enabled
@@ -60,6 +61,7 @@ struct DaemonSettings: Codable, Equatable, Sendable {
     case scheduleMinutes = "schedule_minutes"
     case notifyOn = "notify_on"
     case rockboxCompat = "rockbox_compat"
+    case dropSyncBehavior = "drop_sync_behavior"
   }
 
   init(
@@ -69,7 +71,8 @@ struct DaemonSettings: Codable, Equatable, Sendable {
     subsequentSyncMode: String,
     scheduleMinutes: UInt32,
     notifyOn: String,
-    rockboxCompat: Bool = false
+    rockboxCompat: Bool = false,
+    dropSyncBehavior: DropSyncBehaviorWire = .immediate
   ) {
     self.enabled = enabled
     self.autostartWithWindows = autostartWithWindows
@@ -78,6 +81,7 @@ struct DaemonSettings: Codable, Equatable, Sendable {
     self.scheduleMinutes = scheduleMinutes
     self.notifyOn = notifyOn
     self.rockboxCompat = rockboxCompat
+    self.dropSyncBehavior = dropSyncBehavior
   }
 
   init(from decoder: Decoder) throws {
@@ -89,6 +93,8 @@ struct DaemonSettings: Codable, Equatable, Sendable {
     scheduleMinutes = try container.decode(UInt32.self, forKey: .scheduleMinutes)
     notifyOn = try container.decode(String.self, forKey: .notifyOn)
     rockboxCompat = try container.decode(Bool.self, forKey: .rockboxCompat)
+    dropSyncBehavior = try container.decodeIfPresent(
+      DropSyncBehaviorWire.self, forKey: .dropSyncBehavior) ?? .immediate
   }
 }
 

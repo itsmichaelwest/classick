@@ -82,4 +82,29 @@ final class AcknowledgedDraftTests: XCTestCase {
     XCTAssertTrue(draft.isDirty)
     XCTAssertNotNil(draft.submitted["local-save"])
   }
+
+  func testExternalDropAdvancesCanonicalWithoutErasingDirtyDeviceEdit() {
+    var draft = AcknowledgedDraft(canonical: "original", revision: 4)
+    draft.edit("local")
+
+    draft.reconcile(canonical: "dropped", revision: 5, acknowledgedRequestID: "drop")
+
+    XCTAssertEqual(draft.value, "local")
+    XCTAssertEqual(draft.canonicalRevision, 5)
+    XCTAssertTrue(draft.isDirty)
+  }
+
+  func testDropAckBeforeLaterEditorAckPreservesGenerationTruth() {
+    var draft = AcknowledgedDraft(canonical: "original", revision: 4)
+    draft.edit("local")
+    draft.markSubmitted(requestID: "save-b")
+
+    draft.reconcile(canonical: "dropped", revision: 5, acknowledgedRequestID: "drop-a")
+    XCTAssertEqual(draft.value, "local")
+    XCTAssertTrue(draft.isDirty)
+
+    draft.reconcile(canonical: "local", revision: 6, acknowledgedRequestID: "save-b")
+    XCTAssertEqual(draft.value, "local")
+    XCTAssertFalse(draft.isDirty)
+  }
 }

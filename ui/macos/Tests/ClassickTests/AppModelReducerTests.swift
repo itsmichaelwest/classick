@@ -23,6 +23,7 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertEqual(
       model.devices["A"]?.config?.selection,
       SelectionState(mode: .include, rules: [.artist(name: "Birdy")]))
+    XCTAssertEqual(model.deviceConfigAcknowledgedRequestIDs["A"], "wrong")
   }
 
   func testCorrelatedDeviceDropClearsPendingAndPublishesDeliveryOutcome() {
@@ -134,6 +135,8 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertFalse(model.isLibraryDropAdding(target: target))
     XCTAssertEqual(model.dropOutcome, .appended(slug: "mix", count: 2))
     XCTAssertEqual(model.playlistDetail?.tracks, ["a.flac", "b.flac"])
+    XCTAssertEqual(
+      model.playlistAcknowledgedRequestID, requestID.uuidString.lowercased())
   }
 
   func testPersistedDropAcknowledgementIsRecordedOnceOnlyForCorrelatedTerminalEvent() {

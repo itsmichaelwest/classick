@@ -1,5 +1,10 @@
 import Foundation
 
+enum DropSyncBehaviorWire: String, Codable, CaseIterable, Sendable {
+  case immediate
+  case nextSync = "next_sync"
+}
+
 // MARK: - Library selection (daemon protocol v1.4.0)
 
 enum SelectionMode: String, Codable, Equatable, Sendable {

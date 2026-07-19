@@ -454,6 +454,7 @@ final class AppModel {
         deviceState.config = config
         deviceState.selectionRevision = reply.selectionRevision
         devices[reply.serial] = deviceState
+        deviceConfigAcknowledgedRequestIDs[reply.serial] = reply.acknowledgedRequestID
         let completed = libraryDropState.completeDevice(
           requestID: reply.acknowledgedRequestID,
           serial: reply.serial,
@@ -465,6 +466,7 @@ final class AppModel {
       let acceptsRevision = reply.playlistRevision >= playlistRevision
       if acceptsRevision {
         playlistRevision = reply.playlistRevision
+        playlistAcknowledgedRequestID = reply.acknowledgedRequestID
         if let index = playlists.firstIndex(where: { $0.slug == reply.slug }) {
           playlists[index].name = reply.playlist.name
           playlists[index].tracks = reply.playlist.tracks.count

@@ -3,6 +3,14 @@ import XCTest
 @testable import Classick
 
 final class WireCodecTests: XCTestCase {
+  func testLegacyDaemonSettingsDefaultDropBehaviorToImmediate() throws {
+    let json = #"{"enabled":true,"autostart_with_windows":false,"first_sync_mode":"review","subsequent_sync_mode":"auto_apply","schedule_minutes":60,"notify_on":"all","rockbox_compat":false}"#
+
+    let decoded = try JSONDecoder().decode(DaemonSettings.self, from: Data(json.utf8))
+
+    XCTAssertEqual(decoded.dropSyncBehavior, .immediate)
+  }
+
   func testLibraryDropCommandAndEventWireShapes() throws {
     let id = UUID(uuidString: "018F9D7E-2F2B-7B52-9F1D-F78BDB2F8740")!
     let command = String(decoding: try JSONEncoder().encode(
@@ -178,10 +186,12 @@ final class WireCodecTests: XCTestCase {
       subsequentSyncMode: "auto_apply",
       scheduleMinutes: 0,
       notifyOn: "all",
-      rockboxCompat: true)
+      rockboxCompat: true,
+      dropSyncBehavior: .nextSync)
     let data = try JSONEncoder().encode(settings)
     let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
     XCTAssertEqual(obj["rockbox_compat"] as? Bool, true)
+    XCTAssertEqual(obj["drop_sync_behavior"] as? String, "next_sync")
     let decoded = try JSONDecoder().decode(DaemonSettings.self, from: data)
     XCTAssertEqual(decoded, settings)
   }

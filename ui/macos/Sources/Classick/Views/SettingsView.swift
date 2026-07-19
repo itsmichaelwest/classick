@@ -34,13 +34,17 @@ private struct GeneralTab: View {
         var sourcePath: String?
         var scheduleMinutes: UInt32
         var launchAtLogin: Bool
+        var dropSyncBehavior: DropSyncBehaviorWire
     }
 
     @State private var sourcePath: String?
     @State private var scheduleMinutes: UInt32 = 0
     @State private var launchAtLogin = false
+    @State private var dropSyncBehavior: DropSyncBehaviorWire = .immediate
     @State private var acknowledgedDraft = AcknowledgedDraft(
-        canonical: GlobalSettingsDraft(sourcePath: nil, scheduleMinutes: 0, launchAtLogin: false),
+        canonical: GlobalSettingsDraft(
+            sourcePath: nil, scheduleMinutes: 0, launchAtLogin: false,
+            dropSyncBehavior: .immediate),
         revision: 0)
     @State private var hasCanonicalDraft = false
     @State private var isPickingFolder = false
@@ -93,6 +97,17 @@ private struct GeneralTab: View {
                     }
                 ))
 
+            Picker(
+                "After adding music to an iPod",
+                selection: Binding(
+                    get: { dropSyncBehavior },
+                    set: { value in edit { $0.dropSyncBehavior = value } }
+                )
+            ) {
+                Text("Sync immediately").tag(DropSyncBehaviorWire.immediate)
+                Text("On next sync").tag(DropSyncBehaviorWire.nextSync)
+            }
+
         }
         .formStyle(.grouped)
         .padding(20)
@@ -111,13 +126,15 @@ private struct GeneralTab: View {
         let canonical = GlobalSettingsDraft(
             sourcePath: config.source,
             scheduleMinutes: config.daemon?.scheduleMinutes ?? 0,
-            launchAtLogin: config.daemon?.autostartWithWindows ?? false)
+            launchAtLogin: config.daemon?.autostartWithWindows ?? false,
+            dropSyncBehavior: config.daemon?.dropSyncBehavior ?? .immediate)
         acknowledgedDraft.reconcile(
             canonical: canonical, revision: model.configRevision,
             acknowledgedRequestID: model.configAcknowledgedRequestID)
         sourcePath = acknowledgedDraft.value.sourcePath
         scheduleMinutes = acknowledgedDraft.value.scheduleMinutes
         launchAtLogin = acknowledgedDraft.value.launchAtLogin
+        dropSyncBehavior = acknowledgedDraft.value.dropSyncBehavior
         hasCanonicalDraft = true
     }
 
@@ -141,7 +158,8 @@ private struct GeneralTab: View {
                 subsequentSyncMode: model.config?.daemon?.subsequentSyncMode ?? "auto_apply",
                 scheduleMinutes: scheduleMinutes,
                 notifyOn: model.config?.daemon?.notifyOn ?? "all",
-                rockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
+                rockboxCompat: model.config?.daemon?.rockboxCompat ?? false,
+                dropSyncBehavior: dropSyncBehavior)
             let requestID = onSave(sourcePath, daemon)
             acknowledgedDraft.markSubmitted(requestID: requestID)
         }
@@ -156,6 +174,7 @@ private struct GeneralTab: View {
         sourcePath = acknowledgedDraft.value.sourcePath
         scheduleMinutes = acknowledgedDraft.value.scheduleMinutes
         launchAtLogin = acknowledgedDraft.value.launchAtLogin
+        dropSyncBehavior = acknowledgedDraft.value.dropSyncBehavior
         scheduleSave()
     }
 
