@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+#[path = "support/full_integrity_fixture.rs"]
+mod full_integrity_fixture;
+use full_integrity_fixture::FullIntegrityFixture;
+
 struct UnlinkFixture {
     mount: PathBuf,
     db: OwnedDb,
@@ -97,6 +101,34 @@ fn keep_unlinks_every_membership_but_preserves_audio() {
     for name in ["Foreign", "Foreign Smart", "Managed"] {
         assert_eq!(playlist_dbids(&reopened, name), vec![fixture.retained_dbid]);
     }
+}
+
+#[test]
+fn coordinated_publication_preserves_every_non_owned_non_exact_playlist() {
+    let mut fixture = FullIntegrityFixture::new();
+    let preserved_before = fixture.foreign_payloads();
+    let exact_before = fixture.exact_profile_payload();
+
+    let publication = fixture.stage_delete_and_playlist_update();
+    let expected_ownership = publication.candidate_ownership.clone();
+    fixture.publish(publication).unwrap();
+    let reopened = fixture.reopen();
+
+    assert_eq!(
+        fixture.foreign_payloads_from(&reopened),
+        preserved_before.without_deleted_track(fixture.doomed_dbid())
+    );
+    assert_eq!(fixture.exact_profile_count(&reopened), 1);
+    assert_eq!(fixture.exact_profile_payload_from(&reopened), exact_before);
+    assert_eq!(
+        fixture.verified_managed_order(&reopened, "mix"),
+        fixture.desired_mix_dbids()
+    );
+    assert_eq!(fixture.device_ownership(), expected_ownership);
+    assert_eq!(
+        expected_ownership.playlists["mix"].expected_kind,
+        classick::ipod::playlist_ownership::ManagedPlaylistKind::Normal
+    );
 }
 
 fn fake_mount() -> PathBuf {
