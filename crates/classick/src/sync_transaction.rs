@@ -327,7 +327,7 @@ impl CheckpointCoordinator<'_> {
             bail!("candidate database preparation failed and was restored: {message}");
         }
 
-        if let Err(error) = db.write().context("write candidate iTunesDB and artwork") {
+        if let Err(error) = write_coordinated_database(&db) {
             drop(db);
             self.rollback_to_ready(journal, store, snapshot, options, error)?;
             bail!("database publication failed; database and artwork restored");
@@ -487,6 +487,12 @@ impl CheckpointCoordinator<'_> {
             host_cache_warning,
         }
     }
+}
+
+fn write_coordinated_database(db: &crate::ipod::db::OwnedDb) -> Result<()> {
+    crate::ipod::playlist_normalize::normalize_firmware_playlists(db)
+        .context("normalize exact firmware playlist duplicates")?;
+    db.write().context("write candidate iTunesDB and artwork")
 }
 
 fn apply_device_identity(

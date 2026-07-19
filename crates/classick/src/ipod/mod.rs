@@ -5,6 +5,7 @@ pub mod layout;
 #[cfg(target_os = "macos")]
 pub mod macos_iokit;
 pub mod playlist_audit;
+pub mod playlist_normalize;
 pub mod playlist_ownership;
 pub mod playlist_profile;
 pub mod sysinfo_provision;

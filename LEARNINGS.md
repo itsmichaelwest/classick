@@ -7,6 +7,7 @@ Per global AGENTS.md: record discovered conventions, gotchas, debugging insights
 - **Durable sync recovery must run before diff planning:** enumerate only mount-scoped pending journals, require exact filename/session/raw-serial identity, and reject cleanup paths outside that session's staging directory or `iPod_Control/Music`; unsafe journals stay untouched and block a fresh transaction.
 - **Playlist deletion is a host transaction, not device work:** stage the playlist plus every affected subscription under `devices/playlist-mutations`, persist hashes/revision targets before renames, recover before daemon IPC, block every iPod-mutating session while any host journal remains, and broadcast only after the playlist, subscriptions, and registry revisions are durable.
 - **Per-device config content and registry revisions are one host transaction:** journal exact originals before publishing component files; before original-revision rollback require every live component to equal its recorded original or target (including absence), accept only exact target bytes when revisions advanced, and never correlate a partial-state broadcast with the failed request ID.
+- **libgpod seeds smart playlists with a default rule:** `itdb_playlist_new(..., smart = 1)` creates an initial rule, so exact captured-profile fixtures must remove generated rules before applying the captured rule set.
 
 ## iTunes will always reject a libgpod-managed iPod (2026-05-24)
 
