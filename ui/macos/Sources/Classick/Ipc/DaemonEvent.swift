@@ -386,7 +386,7 @@ enum DaemonEvent: Decodable, Sendable {
   case deviceConfigUpdate(
     serial: String, selection: SelectionState, subscriptions: SubscriptionsWire,
     settings: DeviceSettingsWire, selectionRevision: UInt64, settingsRevision: UInt64,
-    subscriptionsRevision: UInt64, acknowledgedRequestID: String)
+    subscriptionsRevision: UInt64, acknowledgedRequestID: String?)
   case devicePreview(DevicePreview)
   case sourceAvailability(SourceAvailabilityInfo)
   /// Reply to `resolve_tracks`. An empty `tracks` array is a valid reply
@@ -633,7 +633,8 @@ enum DaemonEvent: Decodable, Sendable {
         selectionRevision: try container.decode(UInt64.self, forKey: .selectionRevision),
         settingsRevision: try container.decode(UInt64.self, forKey: .settingsRevision),
         subscriptionsRevision: try container.decode(UInt64.self, forKey: .subscriptionsRevision),
-        acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID))
+        acknowledgedRequestID: try container.decodeIfPresent(
+          String.self, forKey: .acknowledgedRequestID))
     case "device_preview":
       try requirePresence(of: .projectedFreeBytes)
       self = .devicePreview(
@@ -724,10 +725,12 @@ extension DaemonEvent {
     case .deviceConfigUpdate(
       _, _, _, _, let selectionRevision, let settingsRevision, let subscriptionsRevision,
       let requestID):
-      DurableAcknowledgement(
-        requestID: requestID,
-        revision: max(selectionRevision, max(settingsRevision, subscriptionsRevision)),
-        configState: nil)
+      requestID.map {
+        DurableAcknowledgement(
+          requestID: $0,
+          revision: max(selectionRevision, max(settingsRevision, subscriptionsRevision)),
+          configState: nil)
+      }
     case .deviceSelectionAdded(let reply):
       DurableAcknowledgement(
         requestID: reply.acknowledgedRequestID, revision: reply.selectionRevision,

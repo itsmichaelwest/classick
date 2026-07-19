@@ -2,21 +2,10 @@ using System.Text.Json.Serialization;
 
 namespace Classick_UI.Ipc;
 
-// TODO(windows): pause/resume + X-of-Y not yet wired on Windows.
-// Subprocess protocol bumped to 1.1.0 with a new `pause` command
-// ({"type":"pause"}, no payload) and a new terminal `paused` event
-// ({"type":"paused"}) — see docs/ipc-protocol.md §5.6 / §4.12. This
-// IpcCommand hierarchy has no PauseCommand yet, and IpcEvent (see
-// IpcEvent.cs) has no Paused case. Mirror the Rust core
-// (crates/classick/src/ipc.rs) and the macOS client
-// (ui/macos/Sources/Classick/Ipc/WireModels.swift, `DaemonCommand.pause` /
-// `SyncEvent.paused`) plus a Pause/Resume affordance in the tray UI. Can't
-// build/verify Windows in this environment — see docs/ipc-protocol.md.
-
 /// <summary>
 /// Base type for commands sent by the UI on the core's stdin in --ipc-mode.
 /// Wire format: newline-delimited JSON, snake_case "type" discriminator.
-/// See docs/ipc-protocol.md §5 for the authoritative schema.
+/// See docs/ipc/subprocess.md for the authoritative schema.
 /// </summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(StartCommand), "start")]
@@ -24,6 +13,7 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(PromptDecisionCommand), "prompt_decision")]
 [JsonDerivedType(typeof(FormDecisionCommand), "form_decision")]
 [JsonDerivedType(typeof(CancelCommand), "cancel")]
+[JsonDerivedType(typeof(PauseSyncCommand), "pause")]
 public abstract record IpcCommand;
 
 /// <summary>
@@ -72,3 +62,6 @@ public sealed record FormDecisionCommand(
 
 /// <summary>Graceful shutdown request. See §5.5.</summary>
 public sealed record CancelCommand : IpcCommand;
+
+/// <summary>Gracefully pause after publishing admitted work. See §5.6.</summary>
+public sealed record PauseSyncCommand : IpcCommand;

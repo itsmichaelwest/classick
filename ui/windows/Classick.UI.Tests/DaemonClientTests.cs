@@ -4,6 +4,17 @@ using Xunit;
 
 public class DaemonClientWireFormatTests
 {
+    [Theory]
+    [InlineData("2.0.0", true)]
+    [InlineData("2.9.4", true)]
+    [InlineData("1.99.0", false)]
+    [InlineData("3.0.0", false)]
+    [InlineData("not-semver", false)]
+    public void Handshake_accepts_only_daemon_protocol_major_two(string version, bool expected)
+    {
+        Assert.Equal(expected, DaemonClient.IsProtocolVersionSupported(version));
+    }
+
     [Fact]
     public void StatusUpdate_event_deserializes_via_DaemonEvent()
     {
@@ -107,7 +118,7 @@ public class DaemonClientWireFormatTests
     [Fact]
     public void Sync_event_requires_session_and_preserves_optional_serial()
     {
-        const string json = """{"type":"sync_event","line":"{\"type\":\"track_done\"}","serial":"A","session_id":9}""";
+        const string json = """{"type":"sync_event","line":"{\"type\":\"track_done\",\"result\":\"applied\"}","serial":"A","session_id":9}""";
 
         var evt = JsonSerializer.Deserialize<DaemonEvent>(json);
 
@@ -216,6 +227,19 @@ public class DaemonClientWireFormatTests
     }
 
     [Fact]
+    public void Daemon_settings_default_drop_sync_behavior_to_immediate()
+    {
+        const string oldJson = """{"type":"config_update","source":"/music","daemon":{"enabled":true,"autostart_with_windows":false,"first_sync_mode":"review","subsequent_sync_mode":"auto_apply","schedule_minutes":30,"notify_on":"all","rockbox_compat":false},"ipod":null,"config_revision":1}""";
+        const string nextSyncJson = """{"type":"config_update","source":"/music","daemon":{"enabled":true,"autostart_with_windows":false,"first_sync_mode":"review","subsequent_sync_mode":"auto_apply","schedule_minutes":30,"notify_on":"all","rockbox_compat":false,"drop_sync_behavior":"next_sync"},"ipod":null,"config_revision":2}""";
+
+        var oldConfig = Assert.IsType<ConfigUpdateEvent>(JsonSerializer.Deserialize<DaemonEvent>(oldJson));
+        var nextSync = Assert.IsType<ConfigUpdateEvent>(JsonSerializer.Deserialize<DaemonEvent>(nextSyncJson));
+
+        Assert.Equal(DropSyncBehavior.Immediate, oldConfig.Daemon!.DropSyncBehavior);
+        Assert.Equal(DropSyncBehavior.NextSync, nextSync.Daemon!.DropSyncBehavior);
+    }
+
+    [Fact]
     public void V2_remaining_command_payloads_have_exact_shapes()
     {
         var selection = new SelectionState(SelectionMode.Include, [new ArtistSelectionRule("Bowie")]);
@@ -235,6 +259,8 @@ public class DaemonClientWireFormatTests
         Assert.Equal("""{"type":"save_device_config","serial":"A","selection":{"mode":"include","rules":[{"kind":"artist","name":"Bowie"}]},"request_id":"save-device"}""", JsonSerializer.Serialize<DaemonCommand>(new SaveDeviceConfigCommand("A", selection, null, null, "save-device")));
         Assert.Equal("""{"type":"preview_device","serial":"A","request_id":"preview-device"}""", JsonSerializer.Serialize<DaemonCommand>(new PreviewDeviceCommand("A", "preview-device")));
         Assert.Equal("""{"type":"resolve_tracks","rules":[{"kind":"artist","name":"Bowie"}],"request_id":"resolve"}""", JsonSerializer.Serialize<DaemonCommand>(new ResolveTracksCommand([new ArtistSelectionRule("Bowie")], "resolve")));
+        Assert.Equal("""{"type":"add_selection_to_device","serial":"A","rules":[{"kind":"artist","name":"Bowie"}],"request_id":"add-device"}""", JsonSerializer.Serialize<DaemonCommand>(new AddSelectionToDeviceCommand("A", [new ArtistSelectionRule("Bowie")], "add-device")));
+        Assert.Equal("""{"type":"append_selection_to_playlist","slug":"favourites","rules":[{"kind":"artist","name":"Bowie"}],"request_id":"append-playlist"}""", JsonSerializer.Serialize<DaemonCommand>(new AppendSelectionToPlaylistCommand("favourites", [new ArtistSelectionRule("Bowie")], "append-playlist")));
     }
 
     [Fact]
@@ -245,9 +271,9 @@ public class DaemonClientWireFormatTests
             """{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"genres":[],"total_tracks":0,"total_bytes":0,"acknowledged_request_id":"library"}""",
             """{"type":"selection_update","mode":"all","rules":[],"serial":"A","acknowledged_request_id":"selection"}""",
             """{"type":"selection_preview","selected_tracks":1,"selected_bytes":2,"adds":3,"removes":4,"serial":"A","acknowledged_request_id":"preview"}""",
-            """{"type":"playlists_update","playlists":[{"slug":"favourites","name":"Favourites","kind":"manual","tracks":1,"bytes":2}],"acknowledged_request_id":"playlists"}""",
-            """{"type":"playlist_detail","slug":"favourites","name":"Favourites","kind":"manual","tracks":["Bowie/Heroes.flac"],"acknowledged_request_id":"detail"}""",
-            """{"type":"device_config_update","serial":"A","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"acknowledged_request_id":"config"}""",
+            """{"type":"playlists_update","playlists":[{"slug":"favourites","name":"Favourites","kind":"manual","tracks":1,"bytes":2}],"playlist_revision":7,"acknowledged_request_id":"playlists"}""",
+            """{"type":"playlist_detail","slug":"favourites","name":"Favourites","kind":"manual","tracks":["Bowie/Heroes.flac"],"playlist_revision":7,"acknowledged_request_id":"detail"}""",
+            """{"type":"device_config_update","serial":"A","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"settings_revision":4,"subscriptions_revision":5}""",
             """{"type":"device_preview","serial":"A","selected_tracks":1,"selected_bytes":2,"playlist_extra_tracks":3,"playlist_extra_bytes":4,"projected_free_bytes":null,"acknowledged_request_id":"device-preview"}""",
             """{"type":"resolved_tracks","tracks":["Bowie/Heroes.flac"],"acknowledged_request_id":"resolve"}""",
         };
@@ -263,5 +289,34 @@ public class DaemonClientWireFormatTests
             item => Assert.IsType<DeviceConfigUpdateEvent>(item),
             item => Assert.IsType<DevicePreviewEvent>(item),
             item => Assert.IsType<ResolvedTracksEvent>(item));
+    }
+
+    [Fact]
+    public void V2_additive_mutation_events_decode_complete_canonical_results()
+    {
+        var added = Assert.IsType<DeviceSelectionAddedEvent>(JsonSerializer.Deserialize<DaemonEvent>(
+            """{"type":"device_selection_added","acknowledged_request_id":"add-device","serial":"A","matched_tracks":12,"missing_tracks":4,"selection_changed":true,"selection_revision":8,"selection":{"mode":"include","rules":[{"kind":"artist","name":"Birdy"}]},"delivery":"added_and_syncing"}"""));
+        var appended = Assert.IsType<PlaylistSelectionAppendedEvent>(JsonSerializer.Deserialize<DaemonEvent>(
+            """{"type":"playlist_selection_appended","acknowledged_request_id":"append","slug":"favorites","appended_tracks":2,"playlist_revision":9,"playlist":{"slug":"favorites","name":"Favorites","tracks":["Birdy/01.flac","Birdy/02.flac"]}}"""));
+        var rejected = Assert.IsType<LibraryMutationRejectedEvent>(JsonSerializer.Deserialize<DaemonEvent>(
+            """{"type":"library_mutation_rejected","acknowledged_request_id":"reject","target":{"kind":"device_selection","serial":"A"},"code":"invalid_rules","message":"drop rules must not be empty"}"""));
+        var failed = Assert.IsType<CommandFailedEvent>(JsonSerializer.Deserialize<DaemonEvent>(
+            """{"type":"command_failed","acknowledged_request_id":"save","error":"could not persist"}"""));
+
+        Assert.Equal(DropDelivery.AddedAndSyncing, added.Delivery);
+        Assert.Equal(8UL, added.SelectionRevision);
+        Assert.Equal(9UL, appended.PlaylistRevision);
+        Assert.Equal(2, appended.Playlist.Tracks.Count);
+        Assert.IsType<DeviceSelectionMutationTarget>(rejected.Target);
+        Assert.Equal("could not persist", failed.Error);
+    }
+
+    [Theory]
+    [InlineData("""{"type":"playlists_update","playlists":[]}""")]
+    [InlineData("""{"type":"playlist_detail","slug":"x","acknowledged_request_id":"get"}""")]
+    [InlineData("""{"type":"device_config_update","serial":"A","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false}}""")]
+    public void V2_revisioned_events_reject_missing_revisions(string json)
+    {
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<DaemonEvent>(json));
     }
 }

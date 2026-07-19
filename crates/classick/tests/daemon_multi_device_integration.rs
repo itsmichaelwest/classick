@@ -902,7 +902,7 @@ async fn failed_registry_forget_keeps_legacy_input_and_registry_consistent() {
 }
 
 #[tokio::test]
-async fn failed_registry_configure_acknowledges_only_actual_global_and_device_authorities() {
+async fn failed_registry_configure_broadcasts_canonical_state_without_acknowledgement() {
     let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
     let mut sandbox = Sandbox::start(&[("RAW-A", true), ("RAW-B", false)]).await;
     let mut client = sandbox.connect().await;
@@ -922,9 +922,21 @@ async fn failed_registry_configure_acknowledges_only_actual_global_and_device_au
             "request_id": "registry-configure-failure"
         }))
         .await;
-    let update = client.next_type("config_update").await;
+    let mut update = None;
+    let mut failed = None;
+    while update.is_none() || failed.is_none() {
+        let event = client.next().await;
+        match event["type"].as_str() {
+            Some("config_update") => update = Some(event),
+            Some("command_failed") => failed = Some(event),
+            _ => {}
+        }
+    }
+    let update = update.unwrap();
+    let failed = failed.unwrap();
+    assert!(update["acknowledged_request_id"].is_null());
     assert_eq!(
-        update["acknowledged_request_id"],
+        failed["acknowledged_request_id"],
         "registry-configure-failure"
     );
     assert_eq!(update["source"], replacement.to_string_lossy().as_ref());

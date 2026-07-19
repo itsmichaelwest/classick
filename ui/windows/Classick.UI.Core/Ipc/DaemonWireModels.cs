@@ -142,3 +142,42 @@ public sealed record DeviceSettings(
     [property: JsonPropertyName("auto_sync")] bool AutoSync,
     [property: JsonPropertyName("rockbox_compat")] bool RockboxCompat
 );
+
+[JsonConverter(typeof(JsonStringEnumConverter<DropSyncBehavior>))]
+public enum DropSyncBehavior
+{
+    [JsonStringEnumMemberName("immediate")]
+    Immediate,
+    [JsonStringEnumMemberName("next_sync")]
+    NextSync,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<DropDelivery>))]
+public enum DropDelivery
+{
+    [JsonStringEnumMemberName("added_and_syncing")]
+    AddedAndSyncing,
+    [JsonStringEnumMemberName("added_for_next_sync")]
+    AddedForNextSync,
+    [JsonStringEnumMemberName("already_present")]
+    AlreadyPresent,
+}
+
+public sealed record ManualPlaylist(
+    [property: JsonRequired, JsonPropertyName("slug")] string Slug,
+    [property: JsonRequired, JsonPropertyName("name")] string Name,
+    [property: JsonRequired, JsonPropertyName("tracks")] IReadOnlyList<string> Tracks
+);
+
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
+[JsonDerivedType(typeof(DeviceSelectionMutationTarget), "device_selection")]
+[JsonDerivedType(typeof(ManualPlaylistMutationTarget), "manual_playlist")]
+public abstract record LibraryMutationTarget;
+
+public sealed record DeviceSelectionMutationTarget(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial
+) : LibraryMutationTarget;
+
+public sealed record ManualPlaylistMutationTarget(
+    [property: JsonRequired, JsonPropertyName("slug")] string Slug
+) : LibraryMutationTarget;

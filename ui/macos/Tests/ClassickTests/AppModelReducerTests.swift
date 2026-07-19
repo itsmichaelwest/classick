@@ -972,6 +972,26 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.rules, [.artist(name: "Broadcast")])
   }
 
+  func testUncorrelatedDeviceConfigBroadcastAppliesWithoutAcknowledgingPendingSave() {
+    let m = AppModel()
+    seedDevices(["0xA"], in: m)
+    m.willRequestDeviceConfig(serial: "0xA", requestID: "pending-save", intent: .write)
+
+    m.apply(
+      .deviceConfigUpdate(
+        serial: "0xA",
+        selection: SelectionState(mode: .include, rules: [.artist(name: "Persisted")]),
+        subscriptions: SubscriptionsWire(playlists: ["persisted"]),
+        settings: DeviceSettingsWire(autoSync: false, rockboxCompat: true),
+        selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1,
+        acknowledgedRequestID: nil))
+
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.rules, [.artist(name: "Persisted")])
+    XCTAssertEqual(m.deviceConfigs["0xA"]?.subscriptions.playlists, ["persisted"])
+    XCTAssertTrue(m.deviceConfigs["0xA"]?.settings.rockboxCompat == true)
+    XCTAssertNil(m.deviceConfigAcknowledgedRequestIDs["0xA"])
+  }
+
   func testExternalConfigBroadcastInvalidatesPendingLocalRead() {
     let m = AppModel()
     seedDevices(["0xA"], in: m)

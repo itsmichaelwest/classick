@@ -96,7 +96,8 @@ public class DaemonEventRouterTests
             revision: 1,
             ("A", "idle", null),
             ("B", "syncing", 11)));
-        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""track_done""}", "b", 11));
+        await channel.Writer.WriteAsync(new SyncEventEnvelope(
+            @"{""type"":""track_done"",""result"":""applied""}", "b", 11));
 
         var routed = await received.Task.WaitAsync(TimeSpan.FromSeconds(1));
         Assert.IsType<TrackDoneEvent>(routed.Event);
@@ -116,7 +117,8 @@ public class DaemonEventRouterTests
 
         router.Start();
         await channel.Writer.WriteAsync(Inventory(revision: 1, ("B", "syncing", 12)));
-        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""track_done""}", "B", 11));
+        await channel.Writer.WriteAsync(new SyncEventEnvelope(
+            @"{""type"":""track_done"",""result"":""applied""}", "B", 11));
         await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""paused""}", "B", 12));
 
         var routed = await received.Task.WaitAsync(TimeSpan.FromSeconds(1));

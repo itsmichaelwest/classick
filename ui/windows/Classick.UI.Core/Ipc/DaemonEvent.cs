@@ -27,6 +27,10 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(DevicePreviewEvent), "device_preview")]
 [JsonDerivedType(typeof(ResolvedTracksEvent), "resolved_tracks")]
 [JsonDerivedType(typeof(SourceAvailabilityEvent), "source_availability")]
+[JsonDerivedType(typeof(CommandFailedEvent), "command_failed")]
+[JsonDerivedType(typeof(DeviceSelectionAddedEvent), "device_selection_added")]
+[JsonDerivedType(typeof(PlaylistSelectionAppendedEvent), "playlist_selection_appended")]
+[JsonDerivedType(typeof(LibraryMutationRejectedEvent), "library_mutation_rejected")]
 public abstract record DaemonEvent;
 
 public sealed record StatusUpdateEvent(
@@ -157,6 +161,7 @@ public sealed record SelectionPreviewEvent(
 
 public sealed record PlaylistsUpdateEvent(
     [property: JsonRequired, JsonPropertyName("playlists")] IReadOnlyList<PlaylistSummary> Playlists,
+    [property: JsonRequired, JsonPropertyName("playlist_revision")] ulong PlaylistRevision,
     [property: JsonPropertyName("acknowledged_request_id")] string? AcknowledgedRequestId = null
 ) : DaemonEvent;
 
@@ -167,6 +172,7 @@ public sealed record PlaylistDetailEvent(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("tracks")] IReadOnlyList<string>? Tracks,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("rules")] SmartRules? Rules,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("error")] string? Error,
+    [property: JsonRequired, JsonPropertyName("playlist_revision")] ulong PlaylistRevision,
     [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId
 ) : DaemonEvent;
 
@@ -175,7 +181,10 @@ public sealed record DeviceConfigUpdateEvent(
     [property: JsonRequired, JsonPropertyName("selection")] SelectionState Selection,
     [property: JsonRequired, JsonPropertyName("subscriptions")] Subscriptions Subscriptions,
     [property: JsonRequired, JsonPropertyName("settings")] DeviceSettings Settings,
-    [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId
+    [property: JsonRequired, JsonPropertyName("selection_revision")] ulong SelectionRevision,
+    [property: JsonRequired, JsonPropertyName("settings_revision")] ulong SettingsRevision,
+    [property: JsonRequired, JsonPropertyName("subscriptions_revision")] ulong SubscriptionsRevision,
+    [property: JsonPropertyName("acknowledged_request_id")] string? AcknowledgedRequestId = null
 ) : DaemonEvent;
 
 public sealed record DevicePreviewEvent(
@@ -192,6 +201,37 @@ public sealed record DevicePreviewEvent(
 public sealed record ResolvedTracksEvent(
     [property: JsonRequired, JsonPropertyName("tracks")] IReadOnlyList<string> Tracks,
     [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId
+) : DaemonEvent;
+
+public sealed record CommandFailedEvent(
+    [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId,
+    [property: JsonRequired, JsonPropertyName("error")] string Error
+) : DaemonEvent;
+
+public sealed record DeviceSelectionAddedEvent(
+    [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId,
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("matched_tracks")] int MatchedTracks,
+    [property: JsonRequired, JsonPropertyName("missing_tracks")] int MissingTracks,
+    [property: JsonRequired, JsonPropertyName("selection_changed")] bool SelectionChanged,
+    [property: JsonRequired, JsonPropertyName("selection_revision")] ulong SelectionRevision,
+    [property: JsonRequired, JsonPropertyName("selection")] SelectionState Selection,
+    [property: JsonRequired, JsonPropertyName("delivery")] DropDelivery Delivery
+) : DaemonEvent;
+
+public sealed record PlaylistSelectionAppendedEvent(
+    [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId,
+    [property: JsonRequired, JsonPropertyName("slug")] string Slug,
+    [property: JsonRequired, JsonPropertyName("appended_tracks")] int AppendedTracks,
+    [property: JsonRequired, JsonPropertyName("playlist_revision")] ulong PlaylistRevision,
+    [property: JsonRequired, JsonPropertyName("playlist")] ManualPlaylist Playlist
+) : DaemonEvent;
+
+public sealed record LibraryMutationRejectedEvent(
+    [property: JsonRequired, JsonPropertyName("acknowledged_request_id")] string AcknowledgedRequestId,
+    [property: JsonRequired, JsonPropertyName("target")] LibraryMutationTarget Target,
+    [property: JsonRequired, JsonPropertyName("code")] string Code,
+    [property: JsonRequired, JsonPropertyName("message")] string Message
 ) : DaemonEvent;
 
 [JsonConverter(typeof(SourceAvailabilityStateJsonConverter))]
@@ -311,7 +351,8 @@ public sealed record DaemonSettings(
     [property: JsonRequired, JsonPropertyName("subsequent_sync_mode")] string SubsequentSyncMode,
     [property: JsonRequired, JsonPropertyName("schedule_minutes")] uint ScheduleMinutes,
     [property: JsonRequired, JsonPropertyName("notify_on")] string NotifyOn,
-    [property: JsonRequired, JsonPropertyName("rockbox_compat")] bool RockboxCompat
+    [property: JsonRequired, JsonPropertyName("rockbox_compat")] bool RockboxCompat,
+    [property: JsonPropertyName("drop_sync_behavior")] DropSyncBehavior DropSyncBehavior = DropSyncBehavior.Immediate
 );
 
 public sealed record IpodIdentity(

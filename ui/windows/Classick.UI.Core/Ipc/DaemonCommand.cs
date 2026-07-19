@@ -28,6 +28,8 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(SaveDeviceConfigCommand), "save_device_config")]
 [JsonDerivedType(typeof(PreviewDeviceCommand), "preview_device")]
 [JsonDerivedType(typeof(ResolveTracksCommand), "resolve_tracks")]
+[JsonDerivedType(typeof(AddSelectionToDeviceCommand), "add_selection_to_device")]
+[JsonDerivedType(typeof(AppendSelectionToPlaylistCommand), "append_selection_to_playlist")]
 [JsonDerivedType(typeof(ShutdownCommand), "shutdown")]
 public abstract record DaemonCommand;
 
@@ -163,6 +165,18 @@ public sealed record PreviewDeviceCommand(
 
 public sealed record ResolveTracksCommand(
     [property: JsonPropertyName("rules")] IReadOnlyList<SelectionRule> Rules,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record AddSelectionToDeviceCommand(
+    [property: JsonRequired, JsonPropertyName("serial")] string Serial,
+    [property: JsonRequired, JsonPropertyName("rules")] IReadOnlyList<SelectionRule> Rules,
+    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
+) : DaemonCommand;
+
+public sealed record AppendSelectionToPlaylistCommand(
+    [property: JsonRequired, JsonPropertyName("slug")] string Slug,
+    [property: JsonRequired, JsonPropertyName("rules")] IReadOnlyList<SelectionRule> Rules,
     [property: JsonRequired, JsonPropertyName("request_id")] string RequestId
 ) : DaemonCommand;
 

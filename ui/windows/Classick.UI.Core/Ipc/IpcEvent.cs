@@ -6,7 +6,7 @@ namespace Classick_UI.Ipc;
 /// <summary>
 /// Base type for events emitted by the Rust core on stdout in --ipc-mode.
 /// Wire format: newline-delimited JSON, snake_case "type" discriminator.
-/// See docs/ipc-protocol.md §4 for the authoritative schema.
+/// See docs/ipc/subprocess.md for the authoritative schema.
 /// </summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(HelloEvent), "hello")]
@@ -17,6 +17,8 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(FormEvent), "form")]
 [JsonDerivedType(typeof(TrackStartEvent), "track_start")]
 [JsonDerivedType(typeof(TrackDoneEvent), "track_done")]
+[JsonDerivedType(typeof(FinalizingEvent), "finalizing")]
+[JsonDerivedType(typeof(CancelledEvent), "cancelled")]
 [JsonDerivedType(typeof(LogEvent), "log")]
 [JsonDerivedType(typeof(ErrorEvent), "error")]
 [JsonDerivedType(typeof(FinishEvent), "finish")]
@@ -80,11 +82,40 @@ public sealed record FormEvent(
 public sealed record TrackStartEvent(
     [property: JsonPropertyName("current")] int Current,
     [property: JsonPropertyName("total")] int Total,
-    [property: JsonPropertyName("label")] string Label
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("eta_secs")] ulong? EtaSecs = null
 ) : IpcEvent;
 
 /// <summary>Per-track operation end. See §4.8.</summary>
-public sealed record TrackDoneEvent : IpcEvent;
+public sealed record TrackDoneEvent(
+    [property: JsonRequired, JsonPropertyName("result")] TrackResult Result
+) : IpcEvent;
+
+[JsonConverter(typeof(JsonStringEnumConverter<TrackResult>))]
+public enum TrackResult
+{
+    [JsonStringEnumMemberName("applied")]
+    Applied,
+    [JsonStringEnumMemberName("skipped")]
+    Skipped,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<FinalizationReason>))]
+public enum FinalizationReason
+{
+    [JsonStringEnumMemberName("cancelled")]
+    Cancelled,
+    [JsonStringEnumMemberName("paused")]
+    Paused,
+}
+
+public sealed record FinalizingEvent(
+    [property: JsonRequired, JsonPropertyName("reason")] FinalizationReason Reason,
+    [property: JsonRequired, JsonPropertyName("staged_albums")] int StagedAlbums,
+    [property: JsonRequired, JsonPropertyName("staged_tracks")] int StagedTracks
+) : IpcEvent;
+
+public sealed record CancelledEvent : IpcEvent;
 
 /// <summary>Graceful sync checkpoint reached after a pause request.</summary>
 public sealed record PausedEvent : IpcEvent;
@@ -102,5 +133,20 @@ public sealed record ErrorEvent(
 
 /// <summary>Final event of a run. See §4.11.</summary>
 public sealed record FinishEvent(
-    [property: JsonPropertyName("success")] bool Success
+    [property: JsonRequired, JsonPropertyName("success")] bool Success,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("skipped_for_space")] SkippedForSpaceSummary? SkippedForSpace = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("artwork")] ArtworkSummary? Artwork = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault), JsonPropertyName("db_restored")] bool DbRestored = false
 ) : IpcEvent;
+
+public sealed record SkippedForSpaceSummary(
+    [property: JsonRequired, JsonPropertyName("albums")] int Albums,
+    [property: JsonRequired, JsonPropertyName("tracks")] int Tracks,
+    [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes
+);
+
+public sealed record ArtworkSummary(
+    [property: JsonRequired, JsonPropertyName("embedded")] int Embedded,
+    [property: JsonRequired, JsonPropertyName("eligible")] int Eligible,
+    [property: JsonRequired, JsonPropertyName("failed_sources")] int FailedSources
+);

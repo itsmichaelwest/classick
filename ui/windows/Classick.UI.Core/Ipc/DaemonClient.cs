@@ -81,7 +81,7 @@ public sealed class DaemonClient : IAsyncDisposable
                     await client.DisposeAsync().ConfigureAwait(false);
                     throw new InvalidOperationException($"expected hello, got {first.GetType().Name}");
                 }
-                if (!string.Equals(hello.ProtocolVersion, "2.0.0", StringComparison.Ordinal))
+                if (!IsProtocolVersionSupported(hello.ProtocolVersion))
                 {
                     await client.DisposeAsync().ConfigureAwait(false);
                     throw new InvalidOperationException(
@@ -98,6 +98,11 @@ public sealed class DaemonClient : IAsyncDisposable
         }
         throw new InvalidOperationException(
             $"daemon unreachable after {ReconnectBackoff.Length} attempts", lastException);
+    }
+
+    public static bool IsProtocolVersionSupported(string protocolVersion)
+    {
+        return Version.TryParse(protocolVersion, out var version) && version.Major == 2;
     }
 
     private static async Task ReaderLoop(NamedPipeClientStream pipe, ChannelWriter<object> writer, CancellationToken ct)
@@ -132,6 +137,8 @@ public sealed class DaemonClient : IAsyncDisposable
         "selection_update", "selection_preview", "playlists_update",
         "playlist_detail", "device_config_update", "device_preview",
         "resolved_tracks", "source_availability",
+        "command_failed", "device_selection_added",
+        "playlist_selection_appended", "library_mutation_rejected",
     };
 
     private static bool TryDeserialize(string line, out object? evt)

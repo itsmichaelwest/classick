@@ -381,7 +381,7 @@ final class WireCodecTests: XCTestCase {
   }
 
   func testDecodesPlaylistDetailManual() throws {
-    // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- playlist_detail example payloads"
+    // Doc-shaped playlist_detail payload from docs/ipc/daemon.md.
     let json =
       #"{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":["Artist/Album/01.flac","B/02.flac"],"playlist_revision":7,"acknowledged_request_id":"request-a"}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
@@ -396,7 +396,7 @@ final class WireCodecTests: XCTestCase {
   }
 
   func testDecodesPlaylistDetailSmart() throws {
-    // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- playlist_detail example payloads"
+    // Doc-shaped playlist_detail payload from docs/ipc/daemon.md.
     let json =
       #"{"type":"playlist_detail","slug":"recent-idm","name":"Recent IDM","kind":"smart","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0},"playlist_revision":8,"acknowledged_request_id":"request-a"}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
@@ -413,7 +413,7 @@ final class WireCodecTests: XCTestCase {
   }
 
   func testDecodesPlaylistDetailErrorOnlySetsSlugAndError() throws {
-    // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- playlist_detail example payloads"
+    // Doc-shaped playlist_detail payload from docs/ipc/daemon.md.
     let json =
       #"{"type":"playlist_detail","slug":"ghost","error":"no such playlist","playlist_revision":8,"acknowledged_request_id":"request-a"}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
@@ -448,6 +448,19 @@ final class WireCodecTests: XCTestCase {
     XCTAssertEqual(settingsRevision, 4)
     XCTAssertEqual(subscriptionsRevision, 5)
     XCTAssertEqual(requestID, "request-a")
+  }
+
+  func testDecodesUncorrelatedDeviceConfigUpdateWithoutAcknowledgement() throws {
+    let json =
+      #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"settings_revision":4,"subscriptions_revision":5}"#
+
+    let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+
+    guard case .deviceConfigUpdate(_, _, _, _, _, _, _, let requestID) = event else {
+      return XCTFail("expected deviceConfigUpdate")
+    }
+    XCTAssertNil(requestID)
+    XCTAssertNil(event.durableAcknowledgement)
   }
 
   func testDecodesCorrelatedCommandFailureWithoutRevision() throws {
@@ -525,7 +538,7 @@ final class WireCodecTests: XCTestCase {
   }
 
   func testDecodesDevicePreviewWithProjection() throws {
-    // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- device_preview example payloads"
+    // Doc-shaped device_preview payload from docs/ipc/daemon.md.
     let json =
       #"{"type":"device_preview","serial":"RAW-A","selected_tracks":412,"selected_bytes":5123456789,"playlist_extra_tracks":3,"playlist_extra_bytes":90000000,"projected_free_bytes":1200000000,"acknowledged_request_id":"request-a"}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
@@ -539,7 +552,7 @@ final class WireCodecTests: XCTestCase {
   }
 
   func testDecodesDevicePreviewWithUnresolvedSubscriptionsAndNullProjection() throws {
-    // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- device_preview example payloads"
+    // Doc-shaped device_preview payload from docs/ipc/daemon.md.
     let json =
       #"{"type":"device_preview","serial":"RAW-A","selected_tracks":412,"selected_bytes":5123456789,"playlist_extra_tracks":0,"playlist_extra_bytes":0,"projected_free_bytes":null,"unresolved_subscriptions":["deleted-favorites"],"acknowledged_request_id":"request-a"}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))

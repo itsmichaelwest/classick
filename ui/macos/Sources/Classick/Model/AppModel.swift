@@ -725,8 +725,8 @@ final class AppModel {
     return request.serial == serial && latestGeneration[serial] == request.generation
   }
 
-  private func shouldApplyDeviceConfigResponse(serial: DeviceSerial, requestID: String) -> Bool {
-    guard let request = deviceConfigRequests[requestID] else {
+  private func shouldApplyDeviceConfigResponse(serial: DeviceSerial, requestID: String?) -> Bool {
+    guard let requestID, let request = deviceConfigRequests[requestID] else {
       invalidateLatestDeviceConfigRead(for: serial)
       return true
     }

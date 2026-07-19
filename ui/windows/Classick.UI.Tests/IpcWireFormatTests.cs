@@ -96,18 +96,49 @@ public class IpcWireFormatTests
     }
 
     [Fact]
-    public void TrackDone_event_deserializes_with_type_only()
+    public void TrackDone_event_deserializes_result()
     {
-        var json = """{"type":"track_done"}""";
+        var json = """{"type":"track_done","result":"skipped"}""";
         var evt = JsonSerializer.Deserialize<IpcEvent>(json);
-        Assert.IsType<TrackDoneEvent>(evt);
+        var done = Assert.IsType<TrackDoneEvent>(evt);
+        Assert.Equal(TrackResult.Skipped, done.Result);
     }
 
     [Fact]
-    public void TrackDone_event_serializes_with_type_only()
+    public void TrackDone_event_serializes_result()
     {
-        var json = JsonSerializer.Serialize<IpcEvent>(new TrackDoneEvent());
-        Assert.Contains("\"type\":\"track_done\"", json);
+        var json = JsonSerializer.Serialize<IpcEvent>(new TrackDoneEvent(TrackResult.Applied));
+        Assert.Equal("""{"type":"track_done","result":"applied"}""", json);
+    }
+
+    [Fact]
+    public void TrackDone_event_rejects_missing_result()
+    {
+        Assert.Throws<JsonException>(() =>
+            JsonSerializer.Deserialize<IpcEvent>("""{"type":"track_done"}"""));
+    }
+
+    [Fact]
+    public void TrackStart_event_decodes_optional_eta()
+    {
+        var evt = JsonSerializer.Deserialize<IpcEvent>(
+            """{"type":"track_start","current":2,"total":4,"label":"Song","eta_secs":19}""");
+
+        Assert.Equal(19UL, Assert.IsType<TrackStartEvent>(evt).EtaSecs);
+    }
+
+    [Fact]
+    public void Finalization_events_decode_stop_state()
+    {
+        var finalizing = JsonSerializer.Deserialize<IpcEvent>(
+            """{"type":"finalizing","reason":"cancelled","staged_albums":2,"staged_tracks":17}""");
+        var cancelled = JsonSerializer.Deserialize<IpcEvent>("""{"type":"cancelled"}""");
+
+        var state = Assert.IsType<FinalizingEvent>(finalizing);
+        Assert.Equal(FinalizationReason.Cancelled, state.Reason);
+        Assert.Equal(2, state.StagedAlbums);
+        Assert.Equal(17, state.StagedTracks);
+        Assert.IsType<CancelledEvent>(cancelled);
     }
 
     [Fact]
@@ -156,6 +187,20 @@ public class IpcWireFormatTests
         var evt = JsonSerializer.Deserialize<IpcEvent>(json);
         var finish = Assert.IsType<FinishEvent>(evt);
         Assert.True(finish.Success);
+    }
+
+    [Fact]
+    public void Finish_event_deserializes_optional_rollups()
+    {
+        const string json = """{"type":"finish","success":true,"skipped_for_space":{"albums":2,"tracks":9,"bytes":1234},"artwork":{"embedded":7,"eligible":8,"failed_sources":1},"db_restored":true}""";
+
+        var finish = Assert.IsType<FinishEvent>(JsonSerializer.Deserialize<IpcEvent>(json));
+
+        Assert.Equal(2, finish.SkippedForSpace!.Albums);
+        Assert.Equal(1234UL, finish.SkippedForSpace.Bytes);
+        Assert.Equal(7, finish.Artwork!.Embedded);
+        Assert.Equal(1, finish.Artwork.FailedSources);
+        Assert.True(finish.DbRestored);
     }
 
     [Fact]
@@ -246,6 +291,13 @@ public class IpcWireFormatTests
     {
         var json = JsonSerializer.Serialize<IpcCommand>(new CancelCommand());
         Assert.Contains("\"type\":\"cancel\"", json);
+    }
+
+    [Fact]
+    public void Pause_command_serializes_with_type_only()
+    {
+        var json = JsonSerializer.Serialize<IpcCommand>(new PauseSyncCommand());
+        Assert.Equal("""{"type":"pause"}""", json);
     }
 
     [Fact]

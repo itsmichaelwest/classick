@@ -2329,7 +2329,7 @@ fn handle_client_command(
                         Some(current),
                         registry,
                         persisted_revision,
-                        Some(request_id.clone()),
+                        None,
                     ));
                     let _ = reply.send(command_failed(request_id, "unknown device"));
                     return false;
@@ -2354,7 +2354,7 @@ fn handle_client_command(
                             Some(current),
                             registry,
                             persisted_revision,
-                            Some(request_id.clone()),
+                            None,
                         ));
                         let _ = reply.send(command_failed(
                             request_id,
