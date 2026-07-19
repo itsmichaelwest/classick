@@ -22,6 +22,9 @@ pub(crate) fn target_rejection(
     registry: &DeviceRegistry,
     state: &RuntimeState,
 ) -> Option<SyncRejectReason> {
+    if matches!(command, DaemonCommand::AddSelectionToDevice { .. }) {
+        return None;
+    }
     let requested = command.target_serial()?;
     let Some(record) = registry.record(requested) else {
         return Some(SyncRejectReason::NotConfigured);
@@ -70,7 +73,8 @@ pub(crate) fn target_rejection(
         DaemonCommand::PreviewSelection { .. }
         | DaemonCommand::GetDeviceConfig { .. }
         | DaemonCommand::SaveDeviceConfig { .. }
-        | DaemonCommand::PreviewDevice { .. } => None,
+        | DaemonCommand::PreviewDevice { .. }
+        | DaemonCommand::AddSelectionToDevice { .. } => None,
         _ => return None,
     }
 }

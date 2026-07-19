@@ -11,9 +11,11 @@ use classick::daemon::source_availability::{
 };
 use classick::daemon::sync_orchestrator::OrchestratorOutcome;
 use classick::ipod::device::DetectedIpod;
+use classick::library_index::{IndexedTrack, LibraryIndex, INDEX_VERSION};
 use classick::portable_path::PortablePath;
 use classick::source_location::{SourceIdentity, SourceLocation};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -371,6 +373,39 @@ fn completed(summary: Option<SyncSummary>) -> OrchestratorOutcome {
     }
 }
 
+fn write_drop_index(config_path: &Path) {
+    let source = classick::config_file::load(config_path)
+        .unwrap()
+        .unwrap()
+        .source
+        .unwrap();
+    let mut files = BTreeMap::new();
+    files.insert(
+        source.join("Birdy/Fire Within/01.flac"),
+        IndexedTrack {
+            mtime: 1,
+            size: 1,
+            artist: "Birdy".into(),
+            album_artist: "Birdy".into(),
+            album: "Fire Within".into(),
+            genre: "Pop".into(),
+            title: "One".into(),
+            duration_ms: 1,
+            year: Some(2013),
+        },
+    );
+    classick::library_index::save_atomic(
+        &config_path.with_file_name("library-index.json"),
+        &LibraryIndex {
+            version: INDEX_VERSION,
+            source_root: source,
+            scanned_at_unix_secs: Some(1),
+            files,
+        },
+    )
+    .unwrap();
+}
+
 fn devices(snapshot: &Value) -> &[Value] {
     snapshot["devices"].as_array().unwrap()
 }
@@ -380,6 +415,74 @@ fn snapshot_device<'a>(snapshot: &'a Value, serial: &str) -> &'a Value {
         .iter()
         .find(|device| device["identity"]["serial"] == serial)
         .unwrap_or_else(|| panic!("snapshot missing {serial}: {snapshot}"))
+}
+
+#[tokio::test]
+async fn drop_acknowledges_durable_selection_then_admits_only_one_serial_session() {
+    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut sandbox = Sandbox::start(&[("RAW-A", true), ("RAW-B", true)]).await;
+    write_drop_index(&sandbox.config_path);
+    let selection_path =
+        classick::selection::effective_device_selection_path_in(&sandbox.base, "RAW-A").unwrap();
+    std::fs::create_dir_all(selection_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        selection_path,
+        br#"{"version":1,"mode":"include","rules":[]}"#,
+    )
+    .unwrap();
+    let mut client = sandbox.connect().await;
+    let _ = client.next_type("device_inventory_snapshot").await;
+    sandbox.finish_startup_scan().await;
+    sandbox.attach("RAW-A", "/Volumes/A").await;
+    let _ = client
+        .next_snapshot_where(|snapshot| snapshot_device(snapshot, "RAW-A")["connected"] == true)
+        .await;
+
+    let request_id = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740";
+    client
+        .send(json!({
+            "type": "add_selection_to_device",
+            "request_id": request_id,
+            "serial": "raw-a",
+            "rules": [{"kind":"artist", "name":"Birdy"}]
+        }))
+        .await;
+    let added = client.next_type("device_selection_added").await;
+    assert_eq!(added["acknowledged_request_id"], request_id);
+    assert_eq!(added["serial"], "RAW-A");
+    assert_eq!(added["selection_revision"], 1);
+    assert_eq!(added["delivery"], "added_and_syncing");
+    let persisted: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            classick::selection::effective_device_selection_path_in(&sandbox.base, "RAW-A")
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted["rules"][0]["name"], "Birdy");
+
+    let active = sandbox.spawn_rx.recv().await.unwrap();
+    assert_eq!(active.serial, "RAW-A");
+    client
+        .send(json!({
+            "type": "add_selection_to_device",
+            "request_id": "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8741",
+            "serial": "RAW-B",
+            "rules": [{"kind":"artist", "name":"Birdy"}]
+        }))
+        .await;
+    let busy = client.next_type("device_selection_added").await;
+    assert_eq!(busy["serial"], "RAW-B");
+    assert_eq!(busy["delivery"], "added_for_next_sync");
+    active.finish.send(completed(None)).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), sandbox.spawn_rx.recv())
+            .await
+            .is_err(),
+        "busy drop must not queue a later session"
+    );
+    sandbox.shutdown().await;
 }
 
 #[tokio::test]

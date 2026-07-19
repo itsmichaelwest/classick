@@ -4,6 +4,9 @@ ffmpeg = "ffmpeg"
 no_delete = false
 no_tui = false
 
+[daemon]
+drop_sync_behavior = "immediate"
+
 [source_location]
 resolved_path = "\\\\<host>\\data\\media\\music"
 

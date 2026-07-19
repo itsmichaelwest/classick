@@ -7,7 +7,7 @@
 //! `run_daemon_with_deps` exists so the integration suite can inject
 //! a scripted device watcher and a fake spawn-fn.
 
-use crate::config_file::{self, PersistedConfig};
+use crate::config_file::{self, DropSyncBehavior, PersistedConfig};
 use crate::daemon::command_handler::{command_failed, same_serial, target_rejection};
 use crate::daemon::device_registry::DeviceRegistry;
 use crate::daemon::device_snapshot::DeviceSnapshotPublisher;
@@ -27,8 +27,8 @@ use crate::daemon::source_availability::{
 use crate::daemon::state::SessionKind;
 use crate::daemon::sync_orchestrator::{self, OrchestratorOutcome};
 use crate::ipc_daemon::{
-    DaemonCommand, DaemonEvent, DaemonStateLabel, PlaylistKind, SourceAvailabilityState,
-    TriggerSource,
+    DaemonCommand, DaemonEvent, DaemonStateLabel, ManualPlaylistPayload, PlaylistKind,
+    SelectionPayload, SourceAvailabilityState, TriggerSource,
 };
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -798,6 +798,17 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
         device_state_root(&config_path),
     )
     .context("recover pending playlist mutations")?;
+    {
+        let mut mutations = crate::daemon::library_mutations::LibraryMutationService::open(
+            device_state_root(&config_path).to_path_buf(),
+            load_cached_index(&config_path),
+        )?;
+        mutations
+            .recover_pending()
+            .context("recover pending library mutations")?;
+        registry =
+            DeviceRegistry::load_or_migrate(config_file::device_registry_path(&config_path), None)?;
+    }
     if let Some(serial) = unique_configured_serial(&registry) {
         history.migrate_legacy_entries(&serial)?;
     }
@@ -905,6 +916,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &mut state,
                     &event_tx,
                     &mut registry,
+                    &spawn_sync,
                     &spawn_backfill,
                     &spawn_replace_library,
                     &internal_tx,
@@ -1624,6 +1636,31 @@ fn start_sync_session(
     let Ok(session) = state.try_admit_device(trigger, &serial, std::path::Path::new(&drive)) else {
         return;
     };
+    launch_admitted_sync_session(
+        session,
+        serial,
+        drive,
+        state,
+        event_tx,
+        spawn_sync,
+        internal_tx,
+        config_path,
+        library_count_cache,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_admitted_sync_session(
+    session: crate::daemon::state::SyncSession,
+    serial: String,
+    drive: String,
+    state: &mut RuntimeState,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    spawn_sync: &SpawnFn,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    config_path: &Path,
+    library_count_cache: Option<usize>,
+) {
     let _ = event_tx.send(DaemonEvent::StatusUpdate {
         state: DaemonStateLabel::Syncing,
         configured: true,
@@ -2059,6 +2096,7 @@ fn count_source_library(config_path: &std::path::Path) -> Option<usize> {
 enum PendingHostMutation {
     Playlist,
     DeviceConfig,
+    Library,
 }
 
 fn command_requires_settled_host_state(command: &DaemonCommand) -> bool {
@@ -2076,6 +2114,10 @@ fn command_requires_settled_host_state(command: &DaemonCommand) -> bool {
 }
 
 fn pending_host_mutation(state_root: &Path) -> Result<Option<PendingHostMutation>> {
+    let library_root = state_root.join("devices").join("library-mutations");
+    if directory_has_json(&library_root)? {
+        return Ok(Some(PendingHostMutation::Library));
+    }
     let playlist_root = state_root.join("devices").join("playlist-mutations");
     if directory_has_json(&playlist_root)? {
         return Ok(Some(PendingHostMutation::Playlist));
@@ -2123,6 +2165,7 @@ fn handle_client_command(
     state: &mut RuntimeState,
     event_tx: &broadcast::Sender<DaemonEvent>,
     registry: &mut DeviceRegistry,
+    spawn_sync: &SpawnFn,
     spawn_backfill: &SpawnFn,
     spawn_replace_library: &SpawnFn,
     internal_tx: &mpsc::UnboundedSender<InternalEvent>,
@@ -2172,6 +2215,17 @@ fn handle_client_command(
                 let _ = reply.send(command_failed(
                     request_id,
                     "device configuration recovery is pending; restart Classick",
+                ));
+                return false;
+            }
+            Ok(Some(PendingHostMutation::Library)) => {
+                let request_id = command
+                    .request_id()
+                    .expect("blocked mutation commands carry request ids")
+                    .to_string();
+                let _ = reply.send(command_failed(
+                    request_id,
+                    "library mutation recovery is pending; restart Classick",
                 ));
                 return false;
             }
@@ -2986,12 +3040,184 @@ fn handle_client_command(
                 acknowledged_request_id: request_id,
             });
         }
+        DaemonCommand::AddSelectionToDevice {
+            request_id,
+            serial,
+            rules,
+        } => {
+            let index = load_cached_index(config_path);
+            let mut service = match crate::daemon::library_mutations::LibraryMutationService::open(
+                device_state_root(config_path).to_path_buf(),
+                index,
+            ) {
+                Ok(service) => service,
+                Err(error) => {
+                    let _ = reply.send(library_mutation_rejected(
+                        request_id,
+                        crate::daemon::library_mutations::MutationTarget::DeviceSelection {
+                            serial,
+                        },
+                        "persistence_failed",
+                        error.to_string(),
+                    ));
+                    return false;
+                }
+            };
+            if let Err(error) = service.recover_pending() {
+                let _ = reply.send(library_mutation_rejected(
+                    request_id,
+                    crate::daemon::library_mutations::MutationTarget::DeviceSelection { serial },
+                    "persistence_failed",
+                    error.to_string(),
+                ));
+                return false;
+            }
+            for device in state.connected_devices() {
+                service.set_connected_mount(&device.serial, Some(PathBuf::from(&device.drive)));
+            }
+            match service.add_selection_to_device(&request_id, &serial, &rules) {
+                Err(failure) => {
+                    let _ = reply.send(mutation_failure_event(failure));
+                }
+                Ok(outcome) => {
+                    if let Ok(reloaded) = DeviceRegistry::load_or_migrate(
+                        config_file::device_registry_path(config_path),
+                        None,
+                    ) {
+                        *registry = reloaded;
+                    }
+                    let behavior = config_file::load(config_path)
+                        .ok()
+                        .flatten()
+                        .and_then(|config| config.daemon)
+                        .map(|daemon| daemon.drop_sync_behavior)
+                        .unwrap_or(DropSyncBehavior::Immediate);
+                    let source_ready = configured_source_location_at(config_path)
+                        .is_some_and(|location| location.resolved_path.is_dir());
+                    let device = state.connected_device(&outcome.serial).cloned();
+                    let admission = crate::daemon::session_admission::admit_drop_device(
+                        state,
+                        behavior,
+                        outcome.missing_tracks,
+                        &outcome.serial,
+                        device
+                            .as_ref()
+                            .filter(|_| source_ready)
+                            .map(|device| Path::new(&device.drive)),
+                    );
+                    let event = DaemonEvent::DeviceSelectionAdded {
+                        acknowledged_request_id: outcome.request_id,
+                        serial: outcome.serial.clone(),
+                        matched_tracks: outcome.matched_tracks,
+                        missing_tracks: outcome.missing_tracks,
+                        selection_changed: outcome.selection_changed,
+                        selection_revision: outcome.selection_revision,
+                        selection: SelectionPayload {
+                            mode: outcome.selection.mode,
+                            rules: outcome.selection.rules,
+                        },
+                        delivery: admission.delivery,
+                    };
+                    let _ = reply.send(event);
+                    if let (Some(session), Some(device)) = (admission.session, device) {
+                        launch_admitted_sync_session(
+                            session,
+                            outcome.serial,
+                            device.drive,
+                            state,
+                            event_tx,
+                            spawn_sync,
+                            internal_tx,
+                            config_path,
+                            *library_count_cache,
+                        );
+                    }
+                }
+            }
+        }
+        DaemonCommand::AppendSelectionToPlaylist {
+            request_id,
+            slug,
+            rules,
+        } => {
+            let mut service = match crate::daemon::library_mutations::LibraryMutationService::open(
+                device_state_root(config_path).to_path_buf(),
+                load_cached_index(config_path),
+            ) {
+                Ok(service) => service,
+                Err(error) => {
+                    let _ = reply.send(library_mutation_rejected(
+                        request_id,
+                        crate::daemon::library_mutations::MutationTarget::ManualPlaylist { slug },
+                        "persistence_failed",
+                        error.to_string(),
+                    ));
+                    return false;
+                }
+            };
+            if let Err(error) = service.recover_pending() {
+                let _ = reply.send(library_mutation_rejected(
+                    request_id,
+                    crate::daemon::library_mutations::MutationTarget::ManualPlaylist { slug },
+                    "persistence_failed",
+                    error.to_string(),
+                ));
+                return false;
+            }
+            match service.append_selection_to_playlist(&request_id, &slug, &rules) {
+                Err(failure) => {
+                    let _ = reply.send(mutation_failure_event(failure));
+                }
+                Ok(outcome) => {
+                    let _ = reply.send(DaemonEvent::PlaylistSelectionAppended {
+                        acknowledged_request_id: outcome.request_id,
+                        slug: outcome.slug.clone(),
+                        appended_tracks: outcome.appended_tracks,
+                        playlist_revision: outcome.playlist_revision,
+                        playlist: ManualPlaylistPayload {
+                            slug: outcome.slug,
+                            name: outcome.playlist.name,
+                            tracks: outcome
+                                .playlist
+                                .tracks
+                                .into_iter()
+                                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                                .collect(),
+                        },
+                    });
+                }
+            }
+        }
         DaemonCommand::Shutdown => {
             tracing::info!("daemon: shutdown requested by client {client_id}; exiting loop");
             return true;
         }
     }
     false
+}
+
+fn mutation_failure_event(
+    failure: crate::daemon::library_mutations::MutationFailure,
+) -> DaemonEvent {
+    let code = serde_json::to_value(failure.code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "persistence_failed".to_string());
+    library_mutation_rejected(failure.request_id, failure.target, &code, failure.message)
+}
+
+fn library_mutation_rejected(
+    request_id: String,
+    target: crate::daemon::library_mutations::MutationTarget,
+    code: &str,
+    message: String,
+) -> DaemonEvent {
+    DaemonEvent::LibraryMutationRejected {
+        acknowledged_request_id: request_id,
+        target,
+        code: code.to_string(),
+        message,
+    }
 }
 
 fn build_config_update(
@@ -3036,9 +3262,12 @@ fn load_cached_index(config_path: &std::path::Path) -> crate::library_index::Lib
         .ok()
         .flatten()
         .and_then(|c| c.source);
-    match (source, crate::library_index::default_index_path()) {
-        (Some(root), Ok(p)) => crate::library_index::load_or_empty(&p, &root),
-        _ => crate::library_index::LibraryIndex::empty(PathBuf::new()),
+    match source {
+        Some(root) => crate::library_index::load_or_empty(
+            &config_path.with_file_name("library-index.json"),
+            &root,
+        ),
+        None => crate::library_index::LibraryIndex::empty(PathBuf::new()),
     }
 }
 
@@ -4019,6 +4248,7 @@ mod tests {
             &mut state,
             &event_tx,
             registry,
+            &spawn,
             &spawn,
             &spawn,
             &internal_tx,

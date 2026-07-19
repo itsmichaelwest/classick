@@ -25,6 +25,14 @@ pub enum NotifyLevel {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DropSyncBehavior {
+    #[default]
+    Immediate,
+    NextSync,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonSettings {
     #[serde(default = "default_true")]
@@ -44,6 +52,8 @@ pub struct DaemonSettings {
     /// false. See the Rockbox-compatibility design.
     #[serde(default)]
     pub rockbox_compat: bool,
+    #[serde(default)]
+    pub drop_sync_behavior: DropSyncBehavior,
 }
 
 impl Default for DaemonSettings {
@@ -56,6 +66,7 @@ impl Default for DaemonSettings {
             schedule_minutes: 30,
             notify_on: NotifyLevel::All,
             rockbox_compat: false,
+            drop_sync_behavior: DropSyncBehavior::Immediate,
         }
     }
 }
@@ -223,6 +234,10 @@ mod tests {
         assert_eq!(cfg.ffmpeg.as_deref().unwrap().to_string_lossy(), "ffmpeg");
         assert_eq!(cfg.no_delete, Some(false));
         assert_eq!(cfg.no_tui, Some(false));
+        assert_eq!(
+            cfg.daemon.unwrap().drop_sync_behavior,
+            DropSyncBehavior::Immediate
+        );
         assert_eq!(
             cfg.source_location,
             Some(SourceLocation {
@@ -539,7 +554,27 @@ encoder = "ffmpeg"
         assert_eq!(daemon.subsequent_sync_mode, SyncMode::AutoApply);
         assert_eq!(daemon.schedule_minutes, 30);
         assert_eq!(daemon.notify_on, NotifyLevel::All);
+        assert_eq!(
+            daemon.drop_sync_behavior,
+            DropSyncBehavior::Immediate,
+            "older config files must retain immediate delivery"
+        );
         assert!(cfg.ipod_identity.is_none());
+    }
+
+    #[test]
+    fn drop_sync_behavior_next_sync_round_trips() {
+        let settings = DaemonSettings {
+            drop_sync_behavior: DropSyncBehavior::NextSync,
+            ..DaemonSettings::default()
+        };
+
+        let encoded = toml::to_string(&settings).unwrap();
+        assert!(encoded.contains("drop_sync_behavior = \"next_sync\""));
+        assert_eq!(
+            toml::from_str::<DaemonSettings>(&encoded).unwrap(),
+            settings
+        );
     }
 
     #[test]
@@ -553,6 +588,7 @@ encoder = "ffmpeg"
                 schedule_minutes: 60,
                 notify_on: NotifyLevel::ErrorsOnly,
                 rockbox_compat: true,
+                drop_sync_behavior: DropSyncBehavior::NextSync,
             }),
             ipod_identity: Some(IpodIdentity {
                 serial: "EXAMPLE1234".to_string(),

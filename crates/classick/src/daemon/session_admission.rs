@@ -1,7 +1,9 @@
+use crate::config_file::DropSyncBehavior;
 use crate::daemon::history::SyncTrigger;
 use crate::daemon::state::SessionKind;
 pub use crate::daemon::state::SyncSession;
 use crate::ipc_daemon::DaemonEvent;
+use crate::ipc_daemon::DropDelivery;
 pub use crate::ipc_device::SessionId;
 use crate::progress::StopReason;
 use std::collections::BTreeMap;
@@ -50,6 +52,46 @@ pub struct SessionAdmission {
     capacity: usize,
     sessions: BTreeMap<SessionId, SyncSession>,
     phases: BTreeMap<SessionId, SessionPhase>,
+}
+
+pub(crate) struct DropAdmission {
+    pub(crate) delivery: DropDelivery,
+    pub(crate) session: Option<SyncSession>,
+}
+
+pub(crate) fn admit_drop_device(
+    state: &mut crate::daemon::runtime_state::RuntimeState,
+    behavior: DropSyncBehavior,
+    missing_tracks: usize,
+    serial: &str,
+    drive: Option<&Path>,
+) -> DropAdmission {
+    if missing_tracks == 0 {
+        return DropAdmission {
+            delivery: DropDelivery::AlreadyPresent,
+            session: None,
+        };
+    }
+    if behavior == DropSyncBehavior::NextSync || drive.is_none() {
+        return DropAdmission {
+            delivery: DropDelivery::AddedForNextSync,
+            session: None,
+        };
+    }
+    match state.try_admit_device(
+        SyncTrigger::Manual,
+        serial,
+        drive.expect("connected drop has a drive"),
+    ) {
+        Ok(session) => DropAdmission {
+            delivery: DropDelivery::AddedAndSyncing,
+            session: Some(session),
+        },
+        Err(_) => DropAdmission {
+            delivery: DropDelivery::AddedForNextSync,
+            session: None,
+        },
+    }
 }
 
 impl SessionAdmission {
@@ -205,6 +247,55 @@ mod tests {
         assert!(admission
             .try_admit_device("RAW-A", Path::new("/Volumes/A"))
             .is_ok());
+    }
+
+    #[test]
+    fn drop_sync_policy_never_queues_and_only_claims_successful_admission() {
+        let mut state = crate::daemon::runtime_state::RuntimeState::new();
+        let already = admit_drop_device(
+            &mut state,
+            DropSyncBehavior::Immediate,
+            0,
+            "A",
+            Some(Path::new("/Volumes/A")),
+        );
+        assert_eq!(already.delivery, DropDelivery::AlreadyPresent);
+        assert!(already.session.is_none());
+
+        let deferred = admit_drop_device(
+            &mut state,
+            DropSyncBehavior::NextSync,
+            2,
+            "A",
+            Some(Path::new("/Volumes/A")),
+        );
+        assert_eq!(deferred.delivery, DropDelivery::AddedForNextSync);
+        assert!(deferred.session.is_none());
+
+        let admitted = admit_drop_device(
+            &mut state,
+            DropSyncBehavior::Immediate,
+            2,
+            "A",
+            Some(Path::new("/Volumes/A")),
+        );
+        assert_eq!(admitted.delivery, DropDelivery::AddedAndSyncing);
+        let active = admitted.session.expect("idle connected device admitted");
+
+        let busy = admit_drop_device(
+            &mut state,
+            DropSyncBehavior::Immediate,
+            1,
+            "B",
+            Some(Path::new("/Volumes/B")),
+        );
+        assert_eq!(busy.delivery, DropDelivery::AddedForNextSync);
+        assert!(busy.session.is_none());
+        assert!(state.finish(active.id).is_some());
+        assert!(state.is_idle(), "busy drop was not queued");
+
+        let disconnected = admit_drop_device(&mut state, DropSyncBehavior::Immediate, 1, "A", None);
+        assert_eq!(disconnected.delivery, DropDelivery::AddedForNextSync);
     }
 
     #[test]

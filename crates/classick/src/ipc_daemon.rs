@@ -12,6 +12,7 @@
 use crate::config_file::{DaemonSettings, IpodIdentity};
 use crate::daemon::device_storage::StorageInfo;
 use crate::daemon::history::HistoryEntry;
+use crate::daemon::library_mutations::MutationTarget;
 use crate::ipc_device::DeviceInventorySnapshot;
 use crate::selection::{SelectionMode, SelectionRule};
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,29 @@ pub enum DaemonEvent {
     CommandFailed {
         acknowledged_request_id: String,
         error: String,
+    },
+    DeviceSelectionAdded {
+        acknowledged_request_id: String,
+        serial: String,
+        matched_tracks: usize,
+        missing_tracks: usize,
+        selection_changed: bool,
+        selection_revision: u64,
+        selection: SelectionPayload,
+        delivery: DropDelivery,
+    },
+    PlaylistSelectionAppended {
+        acknowledged_request_id: String,
+        slug: String,
+        appended_tracks: usize,
+        playlist_revision: u64,
+        playlist: ManualPlaylistPayload,
+    },
+    LibraryMutationRejected {
+        acknowledged_request_id: String,
+        target: MutationTarget,
+        code: String,
+        message: String,
     },
     /// Forwarded sync-subprocess event. `line` is the raw JSON line
     /// the subprocess emitted on its stdout, unparsed. UI clients
@@ -616,6 +640,16 @@ pub enum DaemonCommand {
         rules: Vec<crate::selection::SelectionRule>,
         request_id: String,
     },
+    AddSelectionToDevice {
+        request_id: String,
+        serial: String,
+        rules: Vec<crate::selection::SelectionRule>,
+    },
+    AppendSelectionToPlaylist {
+        request_id: String,
+        slug: String,
+        rules: Vec<crate::selection::SelectionRule>,
+    },
     Shutdown,
 }
 
@@ -633,6 +667,7 @@ impl DaemonCommand {
             | Self::GetDeviceConfig { serial, .. }
             | Self::SaveDeviceConfig { serial, .. }
             | Self::PreviewDevice { serial, .. } => Some(serial),
+            Self::AddSelectionToDevice { serial, .. } => Some(serial),
             _ => None,
         }
     }
@@ -662,9 +697,26 @@ impl DaemonCommand {
             | Self::SaveDeviceConfig { request_id, .. }
             | Self::PreviewDevice { request_id, .. }
             | Self::ResolveTracks { request_id, .. } => Some(request_id.as_str()),
+            Self::AddSelectionToDevice { request_id, .. }
+            | Self::AppendSelectionToPlaylist { request_id, .. } => Some(request_id.as_str()),
             Self::SubscribeDeviceEvents | Self::UnsubscribeDeviceEvents | Self::Shutdown => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DropDelivery {
+    AddedAndSyncing,
+    AddedForNextSync,
+    AlreadyPresent,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ManualPlaylistPayload {
+    pub slug: String,
+    pub name: String,
+    pub tracks: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -1597,6 +1649,113 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&rejected).unwrap(),
             r#"{"type":"sync_rejected","reason":"already_syncing","serial":"RAW-A","acknowledged_request_id":"req-sync"}"#,
+        );
+    }
+
+    #[test]
+    fn library_drop_commands_deserialize_with_exact_targets_and_correlation() {
+        let device: DaemonCommand = serde_json::from_str(
+            r#"{"type":"add_selection_to_device","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740","serial":"A","rules":[{"kind":"artist","name":"Birdy"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(device.target_serial(), Some("A"));
+        assert_eq!(
+            device.request_id(),
+            Some("018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740")
+        );
+        assert!(matches!(
+            device,
+            DaemonCommand::AddSelectionToDevice { rules, .. }
+                if rules == vec![SelectionRule::Artist { name: "Birdy".into() }]
+        ));
+
+        let playlist: DaemonCommand = serde_json::from_str(
+            r#"{"type":"append_selection_to_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740","slug":"favorites","rules":[{"kind":"album","artist":"Birdy","album":"Fire Within"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(playlist.target_serial(), None);
+        assert_eq!(
+            playlist.request_id(),
+            Some("018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740")
+        );
+        assert!(matches!(
+            playlist,
+            DaemonCommand::AppendSelectionToPlaylist { slug, rules, .. }
+                if slug == "favorites"
+                    && rules == vec![SelectionRule::Album {
+                        artist: "Birdy".into(),
+                        album: "Fire Within".into(),
+                    }]
+        ));
+    }
+
+    #[test]
+    fn library_drop_commands_require_target_and_request_id() {
+        assert!(serde_json::from_str::<DaemonCommand>(
+            r#"{"type":"add_selection_to_device","serial":"A","rules":[]}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<DaemonCommand>(
+            r#"{"type":"add_selection_to_device","request_id":"req","rules":[]}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<DaemonCommand>(
+            r#"{"type":"append_selection_to_playlist","request_id":"req","rules":[]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn device_selection_added_serializes_doc_literal_shape() {
+        let event = DaemonEvent::DeviceSelectionAdded {
+            acknowledged_request_id: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740".into(),
+            serial: "A".into(),
+            matched_tracks: 12,
+            missing_tracks: 4,
+            selection_changed: true,
+            selection_revision: 8,
+            selection: SelectionPayload {
+                mode: SelectionMode::Include,
+                rules: vec![SelectionRule::Artist {
+                    name: "Birdy".into(),
+                }],
+            },
+            delivery: DropDelivery::AddedAndSyncing,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"device_selection_added","acknowledged_request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740","serial":"A","matched_tracks":12,"missing_tracks":4,"selection_changed":true,"selection_revision":8,"selection":{"mode":"include","rules":[{"kind":"artist","name":"Birdy"}]},"delivery":"added_and_syncing"}"#
+        );
+    }
+
+    #[test]
+    fn playlist_append_and_rejection_events_serialize_exactly() {
+        let appended = DaemonEvent::PlaylistSelectionAppended {
+            acknowledged_request_id: "req-playlist".into(),
+            slug: "favorites".into(),
+            appended_tracks: 2,
+            playlist_revision: 9,
+            playlist: ManualPlaylistPayload {
+                slug: "favorites".into(),
+                name: "Favorites".into(),
+                tracks: vec!["Birdy/Fire Within/01.flac".into()],
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&appended).unwrap(),
+            r#"{"type":"playlist_selection_appended","acknowledged_request_id":"req-playlist","slug":"favorites","appended_tracks":2,"playlist_revision":9,"playlist":{"slug":"favorites","name":"Favorites","tracks":["Birdy/Fire Within/01.flac"]}}"#
+        );
+
+        let rejected = DaemonEvent::LibraryMutationRejected {
+            acknowledged_request_id: "req-device".into(),
+            target: MutationTarget::DeviceSelection { serial: "A".into() },
+            code: "stale_library_index".into(),
+            message: "Scan the library and try again".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&rejected).unwrap(),
+            r#"{"type":"library_mutation_rejected","acknowledged_request_id":"req-device","target":{"kind":"device_selection","serial":"A"},"code":"stale_library_index","message":"Scan the library and try again"}"#
         );
     }
 }

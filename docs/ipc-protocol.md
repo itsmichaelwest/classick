@@ -1313,6 +1313,7 @@ subscription migrations are independent of this wire break and remain intact.
 | `save_playlist` | `playlist`, `request_id` | — | Global |
 | `delete_playlist` | `slug`, `request_id` | — | Global |
 | `resolve_tracks` | `rules`, `request_id` | — | Global |
+| `append_selection_to_playlist` | `slug`, `rules`, `request_id` | — | Global playlist mutation |
 | `forget_ipod` | `serial`, `request_id` | — | Device |
 | `trigger_sync` | `source`, `serial`, `request_id` | — | Device |
 | `cancel_sync` | `serial`, `request_id` | — | Active device sync |
@@ -1324,6 +1325,7 @@ subscription migrations are independent of this wire break and remain intact.
 | `get_device_config` | `serial`, `request_id` | — | Device |
 | `save_device_config` | `serial`, `request_id` | `selection`, `subscriptions`, `settings` (absent means “do not change”) | Device |
 | `preview_device` | `serial`, `request_id` | — | Device |
+| `add_selection_to_device` | `serial`, `rules`, `request_id` | — | Device selection mutation |
 | `subscribe_device_events` | — | — | Global handshake |
 | `unsubscribe_device_events` | — | — | Global handshake |
 | `shutdown` | — | — | Global |
@@ -1335,6 +1337,8 @@ Examples:
 {"type":"get_history","limit":50,"request_id":"req-history"}
 {"type":"preview_selection","mode":"include","rules":[],"serial":"RAW-A","request_id":"req-preview"}
 {"type":"retry_source_mount","allow_ui":true,"request_id":"req-source"}
+{"type":"add_selection_to_device","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740","serial":"A","rules":[{"kind":"artist","name":"Birdy"}]}
+{"type":"append_selection_to_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740","slug":"favorites","rules":[{"kind":"album","artist":"Birdy","album":"Fire Within"}]}
 ```
 
 The following v1 payload is invalid in v2 because it has neither a target nor
@@ -1376,6 +1380,9 @@ real domain state.
 | `device_config_update` | `serial`, `selection`, `subscriptions`, `settings`, `selection_revision`, `settings_revision`, `subscriptions_revision` | `acknowledged_request_id` (present only when every component requested by that command persisted) |
 | `device_preview` | `serial`, existing preview fields, `acknowledged_request_id` | `projected_free_bytes` may be `null`; `unresolved_subscriptions` is omitted when empty |
 | `resolved_tracks` | `tracks`, `acknowledged_request_id` | — |
+| `device_selection_added` | `acknowledged_request_id`, `serial`, `matched_tracks`, `missing_tracks`, `selection_changed`, `selection_revision`, `selection`, `delivery` | — |
+| `playlist_selection_appended` | `acknowledged_request_id`, `slug`, `appended_tracks`, `playlist_revision`, `playlist` | — |
+| `library_mutation_rejected` | `acknowledged_request_id`, `target`, `code`, `message` | — |
 | `command_failed` | `acknowledged_request_id`, `error` | —; deliberately has no revision and is not a durable acknowledgement |
 | `source_availability` | `state`; `source_root` when `state` is `available` | `acknowledged_request_id` (terminal reply to an explicit retry only) |
 
@@ -1428,6 +1435,60 @@ Examples:
 {"type":"device_config_update","serial":"RAW-A","selection":{"mode":"include","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"settings_revision":4,"subscriptions_revision":5,"acknowledged_request_id":"req-device"}
 {"type":"command_failed","acknowledged_request_id":"req-playlist","error":"could not persist the playlist"}
 ```
+
+### Native library-drop mutations
+
+`add_selection_to_device` and `append_selection_to_playlist` apply an array of
+the existing `SelectionRule` objects directly against the daemon's
+authoritative cached library index. Both commands require a `request_id`.
+The device command additionally requires the raw device `serial`; the playlist
+command is global and instead requires the manual-playlist `slug`. Missing
+targets, missing correlation IDs, and malformed rules are decode errors. The
+daemon validates semantic constraints (including an empty or stale index,
+unknown devices, missing playlists, and non-manual playlists) before changing
+durable state.
+
+The success event is the canonical persistence acknowledgement. A replay of
+the same request remains idempotent and acknowledges the current canonical
+payload and revision. `device_selection_added.selection` and
+`playlist_selection_appended.playlist` are complete post-mutation values, so
+an open editor can reconcile without issuing a follow-up read.
+
+```json
+{"type":"device_selection_added","acknowledged_request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740","serial":"A","matched_tracks":12,"missing_tracks":4,"selection_changed":true,"selection_revision":8,"selection":{"mode":"include","rules":[{"kind":"artist","name":"Birdy"}]},"delivery":"added_and_syncing"}
+{"type":"playlist_selection_appended","acknowledged_request_id":"req-playlist","slug":"favorites","appended_tracks":2,"playlist_revision":9,"playlist":{"slug":"favorites","name":"Favorites","tracks":["Birdy/Fire Within/01.flac","Birdy/Fire Within/02.flac"]}}
+{"type":"library_mutation_rejected","acknowledged_request_id":"req-device","target":{"kind":"device_selection","serial":"A"},"code":"invalid_rules","message":"drop rules must not be empty"}
+```
+
+`target.kind` is `device_selection` with `serial`, or `manual_playlist` with
+`slug`. `code` is one of `invalid_request_id`, `invalid_rules`,
+`unknown_device`, `unconfigured_device`, `no_library_matches`,
+`missing_playlist`, `non_manual_playlist`, `corrupt_playlist`,
+`request_id_collision`, or `persistence_failed`. A rejection is correlated
+and terminal for that exact mutation intent, but carries no success revision.
+
+`DaemonSettings.drop_sync_behavior` is serialized as `immediate` or
+`next_sync` and defaults to `immediate` when absent from older config files or
+wire payloads. It is part of the existing global `daemon` object used by
+`save_config` and `config_update`:
+
+```json
+{"type":"save_config","request_id":"req-config","daemon":{"enabled":true,"autostart_with_windows":false,"first_sync_mode":"review","subsequent_sync_mode":"auto_apply","schedule_minutes":30,"notify_on":"all","rockbox_compat":false,"drop_sync_behavior":"next_sync"}}
+```
+
+For a device drop, delivery and follow-up behavior are:
+
+| Setting/state/result | `delivery` | Follow-up |
+|---|---|---|
+| Any setting; `missing_tracks == 0` | `already_present` | No sync. |
+| `next_sync`; any device state | `added_for_next_sync` | No sync. |
+| `immediate`; connected and idle | `added_and_syncing` | Admit the existing serial-targeted manual sync. |
+| `immediate`; disconnected, busy, paused, finalizing, or admission lost to a race | `added_for_next_sync` | No sync is queued. |
+
+The daemon sends `device_selection_added` to the requesting connection before
+announcing or forwarding the admitted sync session. It never reports
+`added_and_syncing` unless admission succeeded. Playlist drops never trigger a
+sync by themselves.
 
 ### Cancellation finalization
 
