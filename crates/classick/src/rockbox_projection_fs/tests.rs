@@ -294,3 +294,34 @@ fn cleanup_failure_retains_only_the_deterministic_authorized_quarantine() {
         .unwrap());
     assert!(!fs.root().join(quarantine).exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn missing_delete_retry_still_syncs_the_directory_after_post_unlink_failure() {
+    let mount = temp_dir("delete-post-unlink-sync-retry");
+    let fs = DeviceProjectionFs::new(mount.clone());
+    fs.validate_managed_root().unwrap();
+    let name = "Gym--0123456789.m3u8";
+    let expected_hash = hash(b"owned");
+    std::fs::write(fs.root().join(name), b"owned").unwrap();
+    let authorized = HashSet::from([name.to_string()]);
+    DeviceProjectionFs::fail_once_for_mount(
+        mount.clone(),
+        super::ProjectionFailurePoint::DeleteSync,
+    );
+
+    assert!(fs
+        .remove_recorded(name, &expected_hash, &authorized)
+        .is_err());
+    assert!(!fs.root().join(name).exists());
+    assert_eq!(std::fs::read_dir(fs.root()).unwrap().count(), 0);
+
+    let syncs_before_retry = DeviceProjectionFs::delete_sync_count_for_mount(&mount);
+    assert!(!fs
+        .remove_recorded(name, &expected_hash, &authorized)
+        .unwrap());
+    assert_eq!(
+        DeviceProjectionFs::delete_sync_count_for_mount(&mount),
+        syncs_before_retry + 1
+    );
+}

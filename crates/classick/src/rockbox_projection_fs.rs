@@ -13,11 +13,7 @@ mod unix_common;
 
 #[path = "rockbox_projection_fs/common.rs"]
 mod common;
-#[cfg(unix)]
-use common::deletion_quarantine_name;
-use common::{
-    entry_content_matches, recorded_entry_state, sync_after_delete, validate_recorded_hash,
-};
+use common::*;
 
 #[cfg(target_os = "macos")]
 #[path = "rockbox_projection_fs/macos.rs"]
@@ -43,6 +39,7 @@ pub enum ProjectionFailurePoint {
     Rename,
     Delete,
     DeleteCleanup,
+    DeleteSync,
 }
 
 fn injected_failures() -> &'static Mutex<HashMap<PathBuf, ProjectionFailurePoint>> {
@@ -114,6 +111,11 @@ impl DeviceProjectionFs {
     #[doc(hidden)]
     pub fn fail_once_for_mount(mount: PathBuf, point: ProjectionFailurePoint) {
         injected_failures().lock().unwrap().insert(mount, point);
+    }
+
+    #[doc(hidden)]
+    pub fn delete_sync_count_for_mount(mount: &std::path::Path) -> usize {
+        delete_sync_count(mount)
     }
 
     #[cfg(unix)]
@@ -240,12 +242,16 @@ impl DeviceProjectionFs {
             directory
                 .remove_file(&quarantine)
                 .with_context(|| format!("remove recorded deletion quarantine {quarantine:?}"))?;
-            sync_after_delete(directory, name)?;
+            self.inject(ProjectionFailurePoint::DeleteSync)?;
+            sync_after_delete(directory, name, &self.mount)?;
             return Ok(true);
         }
 
         match target_state {
-            platform::EntryKind::Missing => return Ok(false),
+            platform::EntryKind::Missing => {
+                sync_after_delete(directory, name, &self.mount)?;
+                return Ok(false);
+            }
             platform::EntryKind::Other => {
                 bail!("recorded projection target {name:?} is not an exact regular file")
             }
@@ -283,7 +289,8 @@ impl DeviceProjectionFs {
         directory
             .remove_file(&quarantine)
             .with_context(|| format!("remove recorded deletion quarantine {quarantine:?}"))?;
-        sync_after_delete(directory, name)?;
+        self.inject(ProjectionFailurePoint::DeleteSync)?;
+        sync_after_delete(directory, name, &self.mount)?;
         Ok(true)
     }
 
@@ -295,7 +302,10 @@ impl DeviceProjectionFs {
         expected_hash: &str,
     ) -> Result<bool> {
         match recorded_entry_state(directory, name)? {
-            platform::EntryKind::Missing => return Ok(false),
+            platform::EntryKind::Missing => {
+                sync_after_delete(directory, name, &self.mount)?;
+                return Ok(false);
+            }
             platform::EntryKind::Other => {
                 bail!("recorded projection target {name:?} is not an exact regular file")
             }
@@ -306,7 +316,8 @@ impl DeviceProjectionFs {
         }
         self.inject(ProjectionFailurePoint::Delete)?;
         directory.remove_recorded_handle(name, expected_hash)?;
-        sync_after_delete(directory, name)?;
+        self.inject(ProjectionFailurePoint::DeleteSync)?;
+        sync_after_delete(directory, name, &self.mount)?;
         Ok(true)
     }
 }

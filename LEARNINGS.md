@@ -651,12 +651,16 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
 
 - **Make every projection publication no-replace.** If a recorded same-name
   target has the wrong bytes, choose the next deterministic collision filename,
-  publish it first, and delete the previous record afterward; path replacement
-  cannot atomically prove the destination inode on every supported filesystem.
+  publish it first, and delete the previous record only when its bytes still
+  match the persisted old hash; externally modified bytes lose delete authority
+  and remain unrecorded. Path replacement cannot atomically prove the
+  destination inode on every supported filesystem.
 - **A deletion quarantine must be derivable from durable authority.** Derive its
   hidden name from the pending previous filename and content hash, validate the
   quarantined bytes on retry, and do not advance the published phase until it is
-  gone; random PID/sequence names become unauthorized orphans after a crash.
+  gone and the directory is synced. A retry where both target and quarantine
+  are missing must still sync before advancing because the prior unlink may not
+  have been durable; random PID/sequence names become unauthorized orphans.
 - **Projection finalization is single-writer.** Directory handles prevent root
   redirection and handle-bound Windows operations narrow leaf races, but
   macOS/Linux have no supported inode-CAS unlink; hostile same-user leaf swaps

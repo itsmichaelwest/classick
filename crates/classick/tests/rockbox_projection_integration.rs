@@ -122,6 +122,77 @@ fn rename_publishes_new_before_removing_old_and_settles_new_record() {
 }
 
 #[test]
+fn externally_modified_record_is_preserved_while_repair_settles_at_new_name() {
+    let mut h = Harness::new();
+    let first = h.sync(true, vec![playlist("stable", "Mix", &[0])]).unwrap();
+    let old = first.ownership.playlists["stable"].rockbox.clone().unwrap();
+    let modified = b"/externally/modified.m4a\n";
+    std::fs::write(h.projection_path(&old), modified).unwrap();
+
+    let repaired = h.sync(true, vec![playlist("stable", "Mix", &[1])]).unwrap();
+    let new = repaired.ownership.playlists["stable"]
+        .rockbox
+        .clone()
+        .unwrap();
+    assert!(repaired.completed);
+    assert_ne!(new.relative_filename, old.relative_filename);
+    assert_eq!(std::fs::read(h.projection_path(&old)).unwrap(), modified);
+    assert_eq!(
+        rendered_lines(&h.read_projection(&new)),
+        support::normalized_paths(&repaired.verified[0])
+    );
+    assert_eq!(
+        new.content_hash,
+        blake3::hash(&h.read_projection(&new)).to_hex().to_string()
+    );
+    assert!(repaired
+        .ownership
+        .playlists
+        .values()
+        .all(|entry| { entry.rockbox.as_ref().is_none_or(|record| record != &old) }));
+
+    let new_bytes = h.read_projection(&new);
+    let new_modified = std::fs::metadata(h.projection_path(&new))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let second = h.sync(true, vec![playlist("stable", "Mix", &[1])]).unwrap();
+    assert!(second.completed);
+    assert_eq!(
+        second.ownership.playlists["stable"].rockbox,
+        Some(new.clone())
+    );
+    assert_eq!(std::fs::read(h.projection_path(&old)).unwrap(), modified);
+    assert_eq!(h.read_projection(&new), new_bytes);
+    assert_eq!(
+        std::fs::metadata(h.projection_path(&new))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        new_modified
+    );
+    assert!(h.journal().is_none());
+}
+
+#[test]
+fn legitimate_same_name_content_update_removes_the_verified_previous_record() {
+    let mut h = Harness::new();
+    let first = h.sync(true, vec![playlist("stable", "Mix", &[0])]).unwrap();
+    let old = first.ownership.playlists["stable"].rockbox.clone().unwrap();
+
+    let updated = h.sync(true, vec![playlist("stable", "Mix", &[1])]).unwrap();
+    let new = updated.ownership.playlists["stable"]
+        .rockbox
+        .clone()
+        .unwrap();
+
+    assert!(updated.completed);
+    assert_ne!(new.relative_filename, old.relative_filename);
+    assert!(!h.projection_exists(&old));
+    assert!(h.projection_exists(&new));
+}
+
+#[test]
 fn unsubscribe_removes_apple_and_exact_rockbox_but_preserves_foreign() {
     let mut h = Harness::new();
     h.write_foreign("Handmade.m3u8", b"/foreign/path.m4a\n");
@@ -205,6 +276,51 @@ fn delete_cleanup_restart_consumes_the_journal_derived_quarantine() {
     let recovered = h.recover().unwrap();
     assert!(recovered.completed);
     assert!(h.journal().is_none());
+    assert_eq!(
+        std::fs::read_dir(managed_root)
+            .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".classick-"))
+            .count(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn post_unlink_sync_failure_restarts_with_directory_sync_before_phase_advance() {
+    let mut h = Harness::new();
+    let first = h.sync(true, vec![playlist("stable", "Old", &[0])]).unwrap();
+    let old = first.ownership.playlists["stable"].rockbox.clone().unwrap();
+    h.fail_once(FailurePoint::ProjectionDeleteSync);
+
+    assert!(h.sync(true, vec![playlist("stable", "New", &[0])]).is_err());
+
+    assert!(!h.projection_exists(&old));
+    assert!(h.journal().is_some());
+    assert_eq!(h.delete_sync_count(), 0);
+    let managed_root = h.mount.join("Playlists/Classick");
+    assert_eq!(
+        std::fs::read_dir(&managed_root)
+            .unwrap()
+            .filter(|entry| entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".classick-"))
+            .count(),
+        0
+    );
+
+    let recovered = h.recover().unwrap();
+    assert!(recovered.completed);
+    assert!(h.journal().is_none());
+    assert_eq!(h.delete_sync_count(), 1);
     assert_eq!(
         std::fs::read_dir(managed_root)
             .unwrap()

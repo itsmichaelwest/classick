@@ -42,6 +42,7 @@ pub enum FailurePoint {
     ProjectionRename,
     ProjectionDelete,
     ProjectionDeleteCleanup,
+    ProjectionDeleteSync,
 }
 
 pub struct SyncResult {
@@ -227,6 +228,13 @@ impl Harness {
                 );
                 None
             }
+            Some(FailurePoint::ProjectionDeleteSync) => {
+                DeviceProjectionFs::fail_once_for_mount(
+                    self.mount.clone(),
+                    ProjectionFailurePoint::DeleteSync,
+                );
+                None
+            }
             None => None,
         }
     }
@@ -290,6 +298,10 @@ impl Harness {
 
     pub fn foreign_hash(&self, name: &str) -> blake3::Hash {
         blake3::hash(&std::fs::read(self.mount.join("Playlists/Classick").join(name)).unwrap())
+    }
+
+    pub fn delete_sync_count(&self) -> usize {
+        DeviceProjectionFs::delete_sync_count_for_mount(&self.mount)
     }
 
     #[cfg(unix)]

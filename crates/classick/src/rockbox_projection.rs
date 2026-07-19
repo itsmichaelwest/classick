@@ -62,6 +62,7 @@ pub fn plan_projection(
             .playlists
             .get(&slug)
             .and_then(|entry| entry.rockbox.clone());
+        let previous_for_delete = verified_previous_for_delete(previous.as_ref(), &authorized, io)?;
         let (desired_record, target_state, target_content_matches) = choose_record(
             &slug,
             &item.display_name,
@@ -86,7 +87,7 @@ pub fn plan_projection(
             operations.insert(
                 slug,
                 PendingRockboxOp {
-                    previous,
+                    previous: previous_for_delete,
                     desired: Some(desired_record),
                 },
             );
@@ -111,6 +112,44 @@ pub fn plan_projection(
         candidate_ownership: enriched,
         operations,
     })
+}
+
+fn verified_previous_for_delete(
+    previous: Option<&RockboxProjectionRecord>,
+    authorized: &HashSet<String>,
+    io: &dyn ProjectionIo,
+) -> Result<Option<RockboxProjectionRecord>> {
+    let Some(previous) = previous else {
+        return Ok(None);
+    };
+    let state = io
+        .target_state(&previous.relative_filename, authorized)
+        .with_context(|| {
+            format!(
+                "inspect previous projection {:?} before granting delete authority",
+                previous.relative_filename
+            )
+        })?;
+    match state {
+        TargetState::Missing => Ok(Some(previous.clone())),
+        TargetState::RecordedFile
+            if io
+                .content_matches(
+                    &previous.relative_filename,
+                    &previous.content_hash,
+                    authorized,
+                )
+                .with_context(|| {
+                    format!(
+                        "verify previous projection {:?} before granting delete authority",
+                        previous.relative_filename
+                    )
+                })? =>
+        {
+            Ok(Some(previous.clone()))
+        }
+        TargetState::RecordedFile | TargetState::ForeignFile => Ok(None),
+    }
 }
 
 struct PreparedDesired {
