@@ -16,6 +16,13 @@ pub const CLASSICK: &str = "classick";
 pub const PLAYLISTS: &str = "playlists";
 pub const MANAGED_PLAYLISTS: &str = "managed_playlists.json";
 
+/// `/Playlists/Classick/` — Rockbox-compatible playlist projections.
+pub fn rockbox_playlists_dir(mount: &Path) -> PathBuf {
+    crate::rockbox_playlist::ROCKBOX_PLAYLIST_DIR
+        .split('/')
+        .fold(mount.to_path_buf(), |path, component| path.join(component))
+}
+
 /// `<mount>\iPod_Control\Device\SysInfo` — the flat-text key/value file we
 /// read FirewireGuid + ModelNumStr from. Present on every iPod we support.
 pub fn sysinfo_path(mount: &Path) -> PathBuf {
@@ -61,4 +68,17 @@ pub fn managed_playlists_path(mount: &Path) -> PathBuf {
 /// sync to it. See findings F-09.
 pub fn is_ipod_mount(mount: &Path) -> bool {
     sysinfo_path(mount).exists() && itunes_db_path(mount).exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rockbox_playlist_directory_uses_host_path_components() {
+        assert_eq!(
+            rockbox_playlists_dir(Path::new("mount")),
+            Path::new("mount").join("Playlists").join("Classick")
+        );
+    }
 }
