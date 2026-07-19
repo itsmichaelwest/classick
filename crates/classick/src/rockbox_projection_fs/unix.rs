@@ -1,61 +1,107 @@
 use std::ffi::CString;
-use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::os::fd::RawFd;
 
-pub(super) fn rename_atomic(source: &Path, destination: &Path, replace: bool) -> io::Result<()> {
+pub(super) use super::unix_common::{EntryIdentity, EntryKind, ManagedDirectory};
+
+pub(super) fn exchange_atomic_at(
+    directory: RawFd,
+    source: &str,
+    destination: &str,
+) -> io::Result<()> {
+    let source = c_name(source)?;
+    let destination = c_name(destination)?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                directory,
+                source.as_ptr(),
+                directory,
+                destination.as_ptr(),
+                2_u32,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        return Err(io::Error::last_os_error());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic projection target exchange is unavailable",
+    ))
+}
+
+pub(super) fn rename_atomic_at(
+    directory: RawFd,
+    source: &str,
+    destination: &str,
+    replace: bool,
+) -> io::Result<()> {
+    let source = c_name(source)?;
+    let destination = c_name(destination)?;
     if replace {
-        return fs::rename(source, destination);
+        return renameat(directory, &source, &destination);
     }
 
     #[cfg(target_os = "linux")]
     {
-        return rename_no_replace_linux(source, destination);
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                directory,
+                source.as_ptr(),
+                directory,
+                destination.as_ptr(),
+                1_u32,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENOSYS) {
+            return Err(error);
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        link_then_unlink(source, destination)
-    }
-}
 
-#[cfg(target_os = "linux")]
-fn rename_no_replace_linux(source: &Path, destination: &Path) -> io::Result<()> {
-    const RENAME_NOREPLACE: libc::c_uint = 1;
-    let source = c_path(source)?;
-    let destination = c_path(destination)?;
-    let renamed = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
+    let linked = unsafe {
+        libc::linkat(
+            directory,
             source.as_ptr(),
-            libc::AT_FDCWD,
+            directory,
             destination.as_ptr(),
-            RENAME_NOREPLACE,
+            0,
         )
     };
-    if renamed == 0 {
-        return Ok(());
+    if linked == -1 {
+        return Err(io::Error::last_os_error());
     }
+    let removed = unsafe { libc::unlinkat(directory, source.as_ptr(), 0) };
+    if removed == -1 {
+        let error = io::Error::last_os_error();
+        let _ = unsafe { libc::unlinkat(directory, destination.as_ptr(), 0) };
+        return Err(error);
+    }
+    Ok(())
+}
 
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ENOSYS) {
-        link_then_unlink(
-            Path::new(std::ffi::OsStr::from_bytes(source.as_bytes())),
-            Path::new(std::ffi::OsStr::from_bytes(destination.as_bytes())),
-        )
+fn renameat(directory: RawFd, source: &CString, destination: &CString) -> io::Result<()> {
+    let result =
+        unsafe { libc::renameat(directory, source.as_ptr(), directory, destination.as_ptr()) };
+    if result == 0 {
+        Ok(())
     } else {
-        Err(error)
+        Err(io::Error::last_os_error())
     }
 }
 
-#[cfg(target_os = "linux")]
-fn c_path(path: &Path) -> io::Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
-}
-
-fn link_then_unlink(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::hard_link(source, destination)?;
-    fs::remove_file(source)
+fn c_name(name: &str) -> io::Result<CString> {
+    CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "filename contains NUL"))
 }

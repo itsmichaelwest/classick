@@ -297,3 +297,17 @@ fn symlink_swap_after_staging_cannot_escape_managed_root() {
     assert!(h.journal().is_some());
     assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn managed_root_swap_between_validation_and_mutation_retains_journal() {
+    let mut h = Harness::new();
+    let outside = h.root.join("outside-race");
+    std::fs::create_dir_all(&outside).unwrap();
+    h.swap_managed_root_before_projection_mutation(&outside);
+
+    assert!(h.sync(true, vec![playlist("mix", "Mix", &[0])]).is_err());
+
+    assert!(h.journal().is_some());
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+}

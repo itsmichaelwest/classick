@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Default)]
 struct MemoryIo {
     states: HashMap<String, TargetState>,
+    content_matches: HashMap<String, bool>,
     probes: Cell<usize>,
     probed_authority: RefCell<Vec<HashSet<String>>>,
 }
@@ -25,10 +26,16 @@ impl MemoryIo {
     }
 
     fn recorded(records: impl IntoIterator<Item = RockboxProjectionRecord>) -> Self {
+        let records = records.into_iter().collect::<Vec<_>>();
         Self {
             states: records
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|record| (record.relative_filename, TargetState::RecordedFile))
+                .collect(),
+            content_matches: records
+                .into_iter()
+                .map(|record| (record.relative_filename, true))
                 .collect(),
             ..Self::default()
         }
@@ -58,6 +65,16 @@ impl ProjectionIo for MemoryIo {
 
     fn remove_recorded(&self, _name: &str, _authorized: &HashSet<String>) -> Result<bool> {
         panic!("pure planner must not delete")
+    }
+
+    fn content_matches(
+        &self,
+        name: &str,
+        _expected_hash: &str,
+        authorized: &HashSet<String>,
+    ) -> Result<bool> {
+        assert!(authorized.contains(name));
+        Ok(self.content_matches.get(name).copied().unwrap_or(false))
     }
 }
 
@@ -242,6 +259,33 @@ fn unchanged_name_and_hash_reuses_same_slug_and_can_be_zero_op() {
             .unwrap()
             .content_hash,
         exact_hash
+    );
+}
+
+#[test]
+fn unchanged_record_with_modified_bytes_stages_repair_without_writing() {
+    let desired = vec![desired("Mix", "mix", 1, &[])];
+    let filename = candidate_filename("Mix", "mix", 0);
+    let exact_hash = blake3::hash(b"").to_hex().to_string();
+    let exact = RockboxProjectionRecord {
+        relative_filename: filename.clone(),
+        content_hash: exact_hash,
+    };
+    let mut settled = ownership("SERIAL", [("mix".into(), 1)]);
+    settled.playlists.get_mut("mix").unwrap().rockbox = Some(exact.clone());
+    let mut candidate = settled.clone();
+    candidate.playlists.get_mut("mix").unwrap().rockbox = None;
+    let mut io = MemoryIo::recorded([exact.clone()]);
+    io.content_matches.insert(filename, false);
+
+    let plan = plan_projection("SERIAL", true, &desired, &settled, &candidate, &io).unwrap();
+
+    assert_eq!(
+        plan.operations["mix"],
+        PendingRockboxOp {
+            previous: Some(exact.clone()),
+            desired: Some(exact),
+        }
     );
 }
 

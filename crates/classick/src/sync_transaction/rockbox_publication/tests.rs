@@ -91,6 +91,9 @@ impl ProjectionIo for RecordingIo {
         self.events
             .borrow_mut()
             .push(format!("write:{name}:{replace_recorded}"));
+        if !replace_recorded && self.files.borrow().contains_key(name) {
+            bail!("no-replace destination already exists")
+        }
         self.files
             .borrow_mut()
             .insert(name.to_string(), bytes.to_vec());
@@ -219,6 +222,29 @@ fn rename_writes_new_before_deleting_old() {
         ]
     );
     assert_eq!(journal.phase, PendingPhase::RockboxProjectionsPublished);
+}
+
+#[test]
+fn rename_destination_that_appears_after_planning_is_not_replaced() {
+    let (store, mut journal, ownership, io, verified) = prepared_rename(false);
+    let desired_name = journal.pending_rockbox_ops["stable"]
+        .desired
+        .as_ref()
+        .unwrap()
+        .relative_filename
+        .clone();
+    io.files
+        .borrow_mut()
+        .insert(desired_name.clone(), b"raced foreign".to_vec());
+
+    assert!(
+        publish_playlist_finalization(&store, &mut journal, &ownership, &io, &verified).is_err()
+    );
+
+    assert_eq!(io.files.borrow()[&desired_name], b"raced foreign");
+    assert!(io.files.borrow().contains_key("Old--0123456789.m3u8"));
+    assert_eq!(journal.phase, PendingPhase::PlaylistOwnershipPublished);
+    assert!(store.load(journal.session_id).is_ok());
 }
 
 #[test]

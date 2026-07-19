@@ -55,6 +55,20 @@ fn durable_write_has_exact_bytes_and_leaves_no_temp() {
 }
 
 #[test]
+fn target_state_probe_does_not_create_the_managed_root() {
+    let mount = temp_dir("read-only-probe");
+    let fs = DeviceProjectionFs::new(mount);
+    let name = "Gym--0123456789.m3u8";
+
+    assert_eq!(
+        fs.target_state(name, &HashSet::from([name.to_string()]))
+            .unwrap(),
+        TargetState::Missing
+    );
+    assert!(!fs.root().exists());
+}
+
+#[test]
 fn foreign_collision_is_classified_and_never_replaced() {
     let fs = fixture();
     let name = "Mix--0123456789.m3u8";
@@ -91,6 +105,31 @@ fn replacement_requires_an_existing_authorized_regular_file() {
 }
 
 #[test]
+fn differently_cased_directory_entry_never_receives_recorded_authority() {
+    let fs = fixture();
+    let recorded = "Mix--0123456789.m3u8";
+    let foreign_variant = "mix--0123456789.m3u8";
+    std::fs::write(fs.root().join(foreign_variant), b"foreign").unwrap();
+    if std::fs::symlink_metadata(fs.root().join(recorded)).is_err() {
+        return;
+    }
+    let authorized = HashSet::from([recorded.to_string()]);
+
+    assert_eq!(
+        fs.target_state(recorded, &authorized).unwrap(),
+        TargetState::ForeignFile
+    );
+    assert!(fs
+        .write_durable(recorded, b"classick", &authorized, true)
+        .is_err());
+    assert!(fs.remove_recorded(recorded, &authorized).is_err());
+    assert_eq!(
+        std::fs::read(fs.root().join(foreign_variant)).unwrap(),
+        b"foreign"
+    );
+}
+
+#[test]
 fn injected_publish_failure_preserves_old_file_and_removes_temp() {
     let mount = temp_dir("injected-failure");
     let name = "Mix--0123456789.m3u8";
@@ -105,6 +144,46 @@ fn injected_publish_failure_preserves_old_file_and_removes_temp() {
         .file_name()
         .to_string_lossy()
         .contains(".classick-")));
+}
+
+#[cfg(unix)]
+#[test]
+fn target_swap_between_validation_and_mutation_cannot_touch_escape() {
+    let mount = temp_dir("target-swap-mount");
+    let fs = DeviceProjectionFs::new(mount.clone());
+    fs.validate_managed_root().unwrap();
+    let name = "Mix--0123456789.m3u8";
+    std::fs::write(fs.root().join(name), b"recorded").unwrap();
+    let outside = temp_dir("target-swap-outside").join("outside.m3u8");
+    std::fs::write(&outside, b"outside").unwrap();
+    DeviceProjectionFs::swap_target_before_mutation_once(mount, name.to_string(), outside.clone());
+    let authorized = HashSet::from([name.to_string()]);
+
+    assert!(fs
+        .write_durable(name, b"replacement", &authorized, true)
+        .is_err());
+
+    assert_eq!(std::fs::read(outside).unwrap(), b"outside");
+    assert_eq!(std::fs::read(fs.root().join(name)).unwrap(), b"outside");
+}
+
+#[cfg(unix)]
+#[test]
+fn target_swap_between_validation_and_delete_cannot_touch_escape() {
+    let mount = temp_dir("target-delete-swap-mount");
+    let fs = DeviceProjectionFs::new(mount.clone());
+    fs.validate_managed_root().unwrap();
+    let name = "Mix--0123456789.m3u8";
+    std::fs::write(fs.root().join(name), b"recorded").unwrap();
+    let outside = temp_dir("target-delete-swap-outside").join("outside.m3u8");
+    std::fs::write(&outside, b"outside").unwrap();
+    DeviceProjectionFs::swap_target_before_mutation_once(mount, name.to_string(), outside.clone());
+    let authorized = HashSet::from([name.to_string()]);
+
+    assert!(fs.remove_recorded(name, &authorized).is_err());
+
+    assert_eq!(std::fs::read(outside).unwrap(), b"outside");
+    assert_eq!(std::fs::read(fs.root().join(name)).unwrap(), b"outside");
 }
 
 #[test]

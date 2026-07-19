@@ -290,6 +290,14 @@ impl Harness {
         std::fs::remove_dir_all(&root).unwrap();
         std::os::unix::fs::symlink(outside, root).unwrap();
     }
+
+    #[cfg(unix)]
+    pub fn swap_managed_root_before_projection_mutation(&self, outside: &Path) {
+        DeviceProjectionFs::swap_managed_root_before_mutation_once(
+            self.mount.clone(),
+            outside.to_path_buf(),
+        );
+    }
 }
 
 impl Drop for Harness {

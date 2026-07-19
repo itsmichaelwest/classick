@@ -79,8 +79,20 @@ pub fn plan_projection(
             .expect("validated candidate entry")
             .rockbox = Some(desired_record.clone());
 
-        let already_settled =
-            previous.as_ref() == Some(&desired_record) && target_state == TargetState::RecordedFile;
+        let already_settled = previous.as_ref() == Some(&desired_record)
+            && target_state == TargetState::RecordedFile
+            && io
+                .content_matches(
+                    &desired_record.relative_filename,
+                    &desired_record.content_hash,
+                    &authorized,
+                )
+                .with_context(|| {
+                    format!(
+                        "verify settled projection content for {:?}",
+                        desired_record.relative_filename
+                    )
+                })?;
         if !already_settled {
             operations.insert(
                 slug,

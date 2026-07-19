@@ -1,11 +1,16 @@
 use crate::rockbox_playlist::validate_recorded_filename;
 use anyhow::{bail, Context, Result};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+#[cfg(unix)]
+#[path = "rockbox_projection_fs/unix_common.rs"]
+mod unix_common;
 
 #[cfg(target_os = "macos")]
 #[path = "rockbox_projection_fs/macos.rs"]
@@ -35,6 +40,18 @@ pub enum ProjectionFailurePoint {
 fn injected_failures() -> &'static Mutex<HashMap<PathBuf, ProjectionFailurePoint>> {
     static FAILURES: OnceLock<Mutex<HashMap<PathBuf, ProjectionFailurePoint>>> = OnceLock::new();
     FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+enum MutationSwap {
+    ManagedRoot { outside: PathBuf },
+    Target { name: String, outside: PathBuf },
+}
+
+#[cfg(unix)]
+fn injected_mutation_swaps() -> &'static Mutex<HashMap<PathBuf, MutationSwap>> {
+    static SWAPS: OnceLock<Mutex<HashMap<PathBuf, MutationSwap>>> = OnceLock::new();
+    SWAPS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub trait ProjectionIo {
@@ -86,36 +103,34 @@ impl DeviceProjectionFs {
         injected_failures().lock().unwrap().insert(mount, point);
     }
 
+    #[cfg(unix)]
+    #[doc(hidden)]
+    pub fn swap_managed_root_before_mutation_once(mount: PathBuf, outside: PathBuf) {
+        injected_mutation_swaps()
+            .lock()
+            .unwrap()
+            .insert(mount, MutationSwap::ManagedRoot { outside });
+    }
+
+    #[cfg(unix)]
+    #[doc(hidden)]
+    pub fn swap_target_before_mutation_once(mount: PathBuf, name: String, outside: PathBuf) {
+        injected_mutation_swaps()
+            .lock()
+            .unwrap()
+            .insert(mount, MutationSwap::Target { name, outside });
+    }
+
     pub fn root(&self) -> PathBuf {
         self.mount.join("Playlists").join("Classick")
     }
 
     pub fn validate_managed_root(&self) -> Result<PathBuf> {
-        let mount_metadata = fs::symlink_metadata(&self.mount)
-            .with_context(|| format!("inspect projection mount {}", self.mount.display()))?;
-        require_plain_directory(&self.mount, &mount_metadata)?;
-        let canonical_mount = self
-            .mount
-            .canonicalize()
-            .with_context(|| format!("canonicalize projection mount {}", self.mount.display()))?;
-
-        let mut current = self.mount.clone();
-        for component in ["Playlists", "Classick"] {
-            current.push(component);
-            ensure_plain_directory(&current)?;
-        }
-
-        let canonical_root = current
-            .canonicalize()
-            .with_context(|| format!("canonicalize managed playlist root {}", current.display()))?;
-        if !canonical_root.starts_with(&canonical_mount) || canonical_root == canonical_mount {
-            bail!(
-                "managed playlist root {} escapes mount {}",
-                canonical_root.display(),
-                canonical_mount.display()
-            );
-        }
-        Ok(current)
+        let directory = self.open_managed_directory()?;
+        directory
+            .ensure_path_identity()
+            .with_context(|| format!("validate managed playlist root {}", self.root().display()))?;
+        Ok(self.root())
     }
 
     fn require_authorized<'a>(
@@ -142,24 +157,76 @@ impl DeviceProjectionFs {
         )
         .into())
     }
+
+    fn open_managed_directory(&self) -> Result<platform::ManagedDirectory> {
+        platform::ManagedDirectory::open_or_create(&self.mount).with_context(|| {
+            format!(
+                "open managed playlist root {} without following links",
+                self.root().display()
+            )
+        })
+    }
+
+    fn open_existing_managed_directory(&self) -> std::io::Result<platform::ManagedDirectory> {
+        platform::ManagedDirectory::open_existing(&self.mount)
+    }
+
+    #[cfg(unix)]
+    fn run_mutation_swap(&self) -> Result<()> {
+        let Some(swap) = injected_mutation_swaps()
+            .lock()
+            .unwrap()
+            .remove(&self.mount)
+        else {
+            return Ok(());
+        };
+        let root = self.root();
+        match swap {
+            MutationSwap::ManagedRoot { outside } => {
+                static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+                let moved = self.mount.join("Playlists").join(format!(
+                    ".Classick-swapped-{}-{}",
+                    std::process::id(),
+                    SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                ));
+                std::fs::rename(&root, &moved)?;
+                std::os::unix::fs::symlink(outside, root)?;
+            }
+            MutationSwap::Target { name, outside } => {
+                std::fs::remove_file(root.join(&name))?;
+                std::fs::hard_link(outside, root.join(name))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn run_mutation_swap(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl ProjectionIo for DeviceProjectionFs {
     fn target_state(&self, name: &str, authorized: &HashSet<String>) -> Result<TargetState> {
         validate_recorded_filename(name)?;
-        let root = self.validate_managed_root()?;
-        let target = root.join(name);
-        match fs::symlink_metadata(&target) {
-            Ok(metadata) => {
-                if authorized.contains(name) && is_plain_regular_file(&metadata) {
-                    Ok(TargetState::RecordedFile)
-                } else {
-                    Ok(TargetState::ForeignFile)
-                }
+        let directory = match self.open_existing_managed_directory() {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(TargetState::Missing);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(TargetState::Missing),
-            Err(error) => Err(error)
-                .with_context(|| format!("inspect Rockbox projection {}", target.display())),
+            Err(error) => return Err(error).context("open existing managed playlist root"),
+        };
+        directory.ensure_path_identity()?;
+        match directory.entry_kind(name)? {
+            platform::EntryKind::Missing => Ok(TargetState::Missing),
+            platform::EntryKind::Regular
+                if authorized.contains(name) && directory.has_exact_entry(name)? =>
+            {
+                Ok(TargetState::RecordedFile)
+            }
+            platform::EntryKind::Regular | platform::EntryKind::Other => {
+                Ok(TargetState::ForeignFile)
+            }
         }
     }
 
@@ -171,60 +238,123 @@ impl ProjectionIo for DeviceProjectionFs {
         replace_recorded: bool,
     ) -> Result<()> {
         self.require_authorized(name, authorized)?;
-        let root = self.validate_managed_root()?;
-        let target = root.join(name);
-        validate_write_target(&target, replace_recorded)?;
-        let (temporary, mut file) = create_unique_temporary(&root, name)?;
+        let directory = self.open_managed_directory()?;
+        directory.ensure_path_identity()?;
+        validate_write_target(&directory, name, replace_recorded)?;
+        let (temporary, mut file) = create_unique_temporary(&directory, name)?;
+        let cleanup_temporary = Cell::new(true);
         let result = (|| {
             self.inject(ProjectionFailurePoint::Write)?;
             file.write_all(bytes)
-                .with_context(|| format!("write projection temp {}", temporary.display()))?;
+                .with_context(|| format!("write projection temp {temporary:?}"))?;
             file.sync_all()
-                .with_context(|| format!("sync projection temp {}", temporary.display()))?;
+                .with_context(|| format!("sync projection temp {temporary:?}"))?;
             drop(file);
 
-            self.validate_managed_root()?;
-            validate_write_target(&target, replace_recorded)?;
+            directory.ensure_path_identity().with_context(|| {
+                format!("revalidate managed root before publishing projection {name:?}")
+            })?;
+            validate_write_target(&directory, name, replace_recorded)?;
+            #[cfg(unix)]
+            let expected_target = if replace_recorded {
+                Some(directory.entry_identity(name)?.ok_or_else(|| {
+                    anyhow::anyhow!("recorded replacement target {name:?} disappeared")
+                })?)
+            } else {
+                None
+            };
+            self.run_mutation_swap()?;
+            directory.ensure_path_identity().with_context(|| {
+                format!("confirm managed root before publishing projection {name:?}")
+            })?;
+            #[cfg(not(unix))]
+            validate_write_target(&directory, name, replace_recorded)?;
             self.inject(ProjectionFailurePoint::Rename)?;
             if self.fail_before_rename.as_deref() == Some(name) {
                 bail!("injected failure before projection rename for {name:?}");
             }
-            platform::rename_atomic(&temporary, &target, replace_recorded).with_context(|| {
-                format!(
-                    "publish Rockbox projection {} from {}",
-                    target.display(),
-                    temporary.display()
-                )
+            #[cfg(unix)]
+            if let Some(expected_target) = expected_target {
+                cleanup_temporary.set(false);
+                directory
+                    .replace_if_identity(&temporary, name, expected_target)
+                    .with_context(|| {
+                        format!("publish Rockbox projection {name:?} from {temporary:?}")
+                    })?;
+            } else {
+                directory
+                    .rename_atomic(&temporary, name, false)
+                    .with_context(|| {
+                        format!("publish Rockbox projection {name:?} from {temporary:?}")
+                    })?;
+            }
+            #[cfg(not(unix))]
+            directory
+                .rename_atomic(&temporary, name, replace_recorded)
+                .with_context(|| {
+                    format!("publish Rockbox projection {name:?} from {temporary:?}")
+                })?;
+            directory
+                .sync()
+                .context("sync managed projection directory")?;
+            directory.ensure_path_identity().with_context(|| {
+                format!("revalidate managed root after publishing projection {name:?}")
             })?;
-            sync_directory(&root)?;
             Ok(())
         })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
+        if result.is_err() && cleanup_temporary.get() {
+            let _ = directory.remove_file(&temporary);
         }
         result
     }
 
     fn remove_recorded(&self, name: &str, authorized: &HashSet<String>) -> Result<bool> {
         self.require_authorized(name, authorized)?;
-        let root = self.validate_managed_root()?;
-        let target = root.join(name);
-        match fs::symlink_metadata(&target) {
+        let directory = match self.open_existing_managed_directory() {
+            Ok(directory) => directory,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("inspect recorded projection {}", target.display()));
+            Err(error) => return Err(error).context("open existing managed playlist root"),
+        };
+        directory.ensure_path_identity()?;
+        match recorded_entry_state(&directory, name)? {
+            platform::EntryKind::Missing => return Ok(false),
+            platform::EntryKind::Regular => {}
+            platform::EntryKind::Other => {
+                bail!("recorded projection target {name:?} is not an exact regular file")
             }
-            Ok(metadata) if is_plain_regular_file(&metadata) => {}
-            Ok(_) => bail!(
-                "recorded projection target {} is not a regular non-link file",
-                target.display()
-            ),
+        }
+        directory.ensure_path_identity().with_context(|| {
+            format!("revalidate managed root before deleting projection {name:?}")
+        })?;
+        if recorded_entry_state(&directory, name)? != platform::EntryKind::Regular {
+            bail!("recorded projection target {name:?} changed before deletion");
+        }
+        #[cfg(unix)]
+        let expected_target = directory
+            .entry_identity(name)?
+            .ok_or_else(|| anyhow::anyhow!("recorded projection target {name:?} disappeared"))?;
+        self.run_mutation_swap()?;
+        directory
+            .ensure_path_identity()
+            .with_context(|| format!("confirm managed root before deleting projection {name:?}"))?;
+        #[cfg(not(unix))]
+        if recorded_entry_state(&directory, name)? != platform::EntryKind::Regular {
+            bail!("recorded projection target {name:?} changed before deletion");
         }
         self.inject(ProjectionFailurePoint::Delete)?;
-        fs::remove_file(&target)
-            .with_context(|| format!("remove recorded projection {}", target.display()))?;
-        sync_directory(&root)?;
+        #[cfg(unix)]
+        remove_identity_bound(&directory, name, expected_target)
+            .with_context(|| format!("remove recorded projection {name:?}"))?;
+        #[cfg(not(unix))]
+        directory
+            .remove_file(name)
+            .with_context(|| format!("remove recorded projection {name:?}"))?;
+        directory
+            .sync()
+            .context("sync managed projection directory")?;
+        directory.ensure_path_identity().with_context(|| {
+            format!("revalidate managed root after deleting projection {name:?}")
+        })?;
         Ok(true)
     }
 
@@ -235,111 +365,65 @@ impl ProjectionIo for DeviceProjectionFs {
         authorized: &HashSet<String>,
     ) -> Result<bool> {
         self.require_authorized(name, authorized)?;
-        let root = self.validate_managed_root()?;
-        let target = root.join(name);
-        let metadata = fs::symlink_metadata(&target)
-            .with_context(|| format!("inspect recorded projection {}", target.display()))?;
-        if !is_plain_regular_file(&metadata) {
-            bail!(
-                "recorded projection target {} is not a regular non-link file",
-                target.display()
-            );
+        let directory = self
+            .open_existing_managed_directory()
+            .context("open existing managed playlist root")?;
+        directory.ensure_path_identity()?;
+        if recorded_entry_state(&directory, name)? != platform::EntryKind::Regular {
+            bail!("recorded projection target {name:?} is not an exact regular file");
         }
-        let bytes = fs::read(&target)
-            .with_context(|| format!("read recorded projection {}", target.display()))?;
+        let bytes = directory
+            .read(name)
+            .with_context(|| format!("read recorded projection {name:?}"))?;
         Ok(blake3::hash(&bytes).to_hex().as_str() == expected_hash)
     }
 }
 
-fn ensure_plain_directory(path: &Path) -> Result<()> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match fs::create_dir(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("create managed directory {}", path.display()));
-                }
-            }
-            fs::symlink_metadata(path)
-                .with_context(|| format!("reinspect managed directory {}", path.display()))?
+fn validate_write_target(
+    directory: &platform::ManagedDirectory,
+    name: &str,
+    replace_recorded: bool,
+) -> Result<()> {
+    match recorded_entry_state(directory, name)? {
+        platform::EntryKind::Regular if replace_recorded => Ok(()),
+        platform::EntryKind::Missing if !replace_recorded => Ok(()),
+        platform::EntryKind::Missing => {
+            bail!("recorded replacement target {name:?} does not exist")
         }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("inspect managed directory {}", path.display()));
+        platform::EntryKind::Regular | platform::EntryKind::Other if replace_recorded => {
+            bail!("replacement target {name:?} is not an exact regular file")
         }
-    };
-    require_plain_directory(path, &metadata)
-}
-
-fn require_plain_directory(path: &Path, metadata: &fs::Metadata) -> Result<()> {
-    if is_link_or_reparse(metadata) || !metadata.file_type().is_dir() {
-        bail!(
-            "managed path {} is not a regular non-link directory",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
-fn is_plain_regular_file(metadata: &fs::Metadata) -> bool {
-    metadata.file_type().is_file() && !is_link_or_reparse(metadata)
-}
-
-#[cfg(windows)]
-fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-
-    metadata.file_type().is_symlink()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
-}
-
-fn validate_write_target(target: &Path, replace_recorded: bool) -> Result<()> {
-    match fs::symlink_metadata(target) {
-        Ok(metadata) if replace_recorded && is_plain_regular_file(&metadata) => Ok(()),
-        Ok(_) if replace_recorded => bail!(
-            "replacement target {} is not a regular non-link file",
-            target.display()
-        ),
-        Ok(_) => bail!("projection target {} already exists", target.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !replace_recorded => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => bail!(
-            "recorded replacement target {} does not exist",
-            target.display()
-        ),
-        Err(error) => {
-            Err(error).with_context(|| format!("inspect projection target {}", target.display()))
+        platform::EntryKind::Regular | platform::EntryKind::Other => {
+            bail!("projection target {name:?} already exists")
         }
     }
 }
 
-fn create_unique_temporary(root: &Path, name: &str) -> Result<(PathBuf, File)> {
+fn recorded_entry_state(
+    directory: &platform::ManagedDirectory,
+    name: &str,
+) -> Result<platform::EntryKind> {
+    let kind = directory.entry_kind(name)?;
+    if kind == platform::EntryKind::Regular && !directory.has_exact_entry(name)? {
+        return Ok(platform::EntryKind::Other);
+    }
+    Ok(kind)
+}
+
+fn create_unique_temporary(
+    directory: &platform::ManagedDirectory,
+    name: &str,
+) -> Result<(String, File)> {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     for _ in 0..128 {
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let temporary = root.join(format!(
-            ".{name}.classick-{}-{sequence}.tmp",
-            std::process::id()
-        ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
+        let temporary = format!(".{name}.classick-{}-{sequence}.tmp", std::process::id());
+        match directory.create_new(&temporary) {
             Ok(file) => return Ok((temporary, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("create unique projection temp {}", temporary.display())
-                });
+                return Err(error)
+                    .with_context(|| format!("create unique projection temp {temporary:?}"));
             }
         }
     }
@@ -347,16 +431,25 @@ fn create_unique_temporary(root: &Path, name: &str) -> Result<(PathBuf, File)> {
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)
-        .with_context(|| format!("open managed directory {} for sync", path.display()))?
-        .sync_all()
-        .with_context(|| format!("sync managed directory {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<()> {
-    Ok(())
+fn remove_identity_bound(
+    directory: &platform::ManagedDirectory,
+    name: &str,
+    expected: platform::EntryIdentity,
+) -> Result<()> {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..128 {
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let quarantine = format!(
+            ".{name}.classick-delete-{}-{sequence}.tmp",
+            std::process::id()
+        );
+        match directory.remove_if_identity(name, &quarantine, expected) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    bail!("could not allocate a unique deletion quarantine for {name:?}")
 }
 
 #[cfg(test)]
