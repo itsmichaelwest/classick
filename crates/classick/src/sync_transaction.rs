@@ -38,6 +38,41 @@ impl CheckpointCoordinator<'_> {
         self.publish_with_options(journal, manifest, progress, PublishOptions::default())
     }
 
+    pub fn recover_pending_with_options(
+        &self,
+        manifest: &mut crate::manifest::Manifest,
+        progress: &crate::progress::Progress,
+        options: PublishOptions<'_>,
+    ) -> Result<Vec<CheckpointResult>> {
+        let store = crate::pending_session::PendingSessionStore::new(self.mount);
+        let discovery = store.discover(self.serial)?;
+        let mut recovered = Vec::with_capacity(discovery.sessions.len());
+        for mut journal in discovery.sessions {
+            progress.log(format!(
+                "Recovering interrupted sync session {} from {:?}",
+                journal.session_id, journal.phase
+            ));
+            let result = if journal.phase == crate::pending_session::PendingPhase::Staging {
+                self.abandon_interrupted_staging(&mut journal, &store)?
+            } else {
+                self.publish_with_options(&mut journal, manifest, progress, options)?
+            };
+            recovered.push(result);
+        }
+        if !discovery.rejected.is_empty() {
+            let details = discovery
+                .rejected
+                .iter()
+                .map(|rejected| format!("{}: {}", rejected.path.display(), rejected.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            bail!(
+                "unsafe pending-session journal(s) must be resolved before a fresh sync: {details}"
+            );
+        }
+        Ok(recovered)
+    }
+
     pub fn publish_with_options(
         &self,
         journal: &mut crate::pending_session::PendingSession,
@@ -107,16 +142,35 @@ impl CheckpointCoordinator<'_> {
 
     fn validate_journal(&self, journal: &crate::pending_session::PendingSession) -> Result<()> {
         journal.validate()?;
-        if crate::device_state::sanitize_serial(&journal.serial)
-            != crate::device_state::sanitize_serial(self.serial)
-        {
+        if journal.serial != self.serial {
             bail!(
-                "pending-session serial {:?} does not match connected device {:?}",
+                "pending-session serial {:?} does not exactly match connected device {:?}",
                 journal.serial,
                 self.serial
             );
         }
         Ok(())
+    }
+
+    fn abandon_interrupted_staging(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+    ) -> Result<CheckpointResult> {
+        self.validate_journal(journal)?;
+        let live = crate::ipod::db::OwnedDb::open(self.mount)
+            .context("inspect live iTunesDB before abandoning interrupted staging")?;
+        let referenced = live
+            .referenced_paths(self.mount)
+            .into_iter()
+            .collect::<crate::pending_session::ReferencedPaths>();
+        crate::pending_session::cleanup_unreferenced_staged_files(journal, &referenced)?;
+        journal.phase = crate::pending_session::PendingPhase::CleanupComplete;
+        store.save(journal)?;
+        let result = self.result(journal, None);
+        store.remove(journal.session_id)?;
+        remove_dir_if_present(&store.snapshot_dir(journal.session_id))?;
+        Ok(result)
     }
 
     fn prepare_all_artwork(

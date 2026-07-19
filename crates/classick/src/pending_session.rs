@@ -168,14 +168,29 @@ impl PendingSession {
 
 #[derive(Debug, Clone)]
 pub struct PendingSessionStore {
+    mount: PathBuf,
     root: PathBuf,
     writer: AtomicFileWriter,
 }
 
+#[derive(Debug)]
+pub struct PendingSessionDiscovery {
+    pub sessions: Vec<PendingSession>,
+    pub rejected: Vec<RejectedPendingSession>,
+}
+
+#[derive(Debug)]
+pub struct RejectedPendingSession {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
 impl PendingSessionStore {
     pub fn new(mount: impl AsRef<Path>) -> Self {
+        let mount = mount.as_ref().to_path_buf();
         Self {
-            root: crate::device_state::pending_sessions_dir(mount.as_ref()),
+            root: crate::device_state::pending_sessions_dir(&mount),
+            mount,
             writer: AtomicFileWriter::new(),
         }
     }
@@ -204,6 +219,118 @@ impl PendingSessionStore {
             .with_context(|| format!("decode pending-session journal {}", path.display()))?;
         session.validate()?;
         Ok(session)
+    }
+
+    pub fn discover(&self, serial: &str) -> Result<PendingSessionDiscovery> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(PendingSessionDiscovery {
+                    sessions: Vec::new(),
+                    rejected: Vec::new(),
+                });
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read pending-session dir {}", self.root.display()));
+            }
+        };
+        let mut journal_paths = Vec::new();
+        for entry in entries {
+            let path = entry
+                .with_context(|| format!("read entry in {}", self.root.display()))?
+                .path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                journal_paths.push(path);
+            }
+        }
+        journal_paths.sort();
+
+        let mut discovery = PendingSessionDiscovery {
+            sessions: Vec::new(),
+            rejected: Vec::new(),
+        };
+        for path in journal_paths {
+            let loaded = (|| -> Result<PendingSession> {
+                let file_session_id = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .context("pending-session filename is not valid UTF-8")?
+                    .parse::<SessionId>()
+                    .context("pending-session filename is not a session id")?;
+                let bytes = std::fs::read(&path)
+                    .with_context(|| format!("read pending-session journal {}", path.display()))?;
+                let session: PendingSession =
+                    serde_json::from_slice(&bytes).with_context(|| {
+                        format!("decode pending-session journal {}", path.display())
+                    })?;
+                session.validate()?;
+                if session.session_id != file_session_id {
+                    bail!(
+                        "pending-session filename id {} does not match journal id {}",
+                        file_session_id,
+                        session.session_id
+                    );
+                }
+                if session.serial != serial {
+                    bail!(
+                        "pending-session serial {:?} does not exactly match connected device {:?}",
+                        session.serial,
+                        serial
+                    );
+                }
+                self.validate_discovered_paths(&session)?;
+                Ok(session)
+            })();
+            match loaded {
+                Ok(session) => discovery.sessions.push(session),
+                Err(error) => discovery.rejected.push(RejectedPendingSession {
+                    path,
+                    reason: format!("{error:#}"),
+                }),
+            }
+        }
+        discovery.sessions.sort_by_key(|session| session.session_id);
+        discovery
+            .rejected
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(discovery)
+    }
+
+    fn validate_discovered_paths(&self, session: &PendingSession) -> Result<()> {
+        let staged_root = self.root.join(format!("{}.staged", session.session_id));
+        let music_root = self.mount.join("iPod_Control").join("Music");
+        for staged in &session.staged_files {
+            if !is_descendant(&staged.pending_path, &staged_root) {
+                bail!(
+                    "pending-session staged path {} is outside {}",
+                    staged.pending_path.display(),
+                    staged_root.display()
+                );
+            }
+            if let Some(path) = &staged.final_ipod_path {
+                if !is_descendant(path, &music_root) {
+                    bail!(
+                        "pending-session published path {} is outside {}",
+                        path.display(),
+                        music_root.display()
+                    );
+                }
+            }
+        }
+        for obsolete in &session.obsolete_files {
+            if !is_descendant(&obsolete.path, &music_root) {
+                bail!(
+                    "pending-session obsolete path {} is outside {}",
+                    obsolete.path.display(),
+                    music_root.display()
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn remove(&self, session_id: SessionId) -> Result<()> {
@@ -263,6 +390,17 @@ fn remove_if_unreferenced(path: &Path, referenced: &ReferencedPaths) -> Result<(
 
 fn normalize_path(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
+}
+
+fn is_descendant(path: &Path, root: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let components = relative.components().collect::<Vec<_>>();
+    !components.is_empty()
+        && components
+            .iter()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 #[cfg(test)]

@@ -362,7 +362,7 @@ pub fn run(
     let manifest_path = device_state::portable_manifest_path(Path::new(&mount));
 
     // 3. Load (or rebuild) manifest.
-    let loaded = if config.rebuild_manifest {
+    let mut loaded = if config.rebuild_manifest {
         let db = open_with_auto_restore(Path::new(&mount), || {
             progress.log("Restored iPod database from backup after detecting corruption");
             progress.note_db_restored();
@@ -373,6 +373,31 @@ pub fn run(
     } else {
         manifest_store.load(&source_location)?
     };
+    let recovery_cache = crate::artwork_cache::ArtworkCache::new(
+        config
+            .manifest_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("artwork-cache"),
+    );
+    let recovery = crate::sync_transaction::CheckpointCoordinator {
+        mount: Path::new(&mount),
+        serial: &identity.firewire_guid,
+        manifest_store: &manifest_store,
+        artwork_cache: recovery_cache,
+    }
+    .recover_pending_with_options(
+        &mut loaded.manifest,
+        progress,
+        crate::sync_transaction::PublishOptions {
+            desired_playlists: desired_playlists.as_deref(),
+            playlist_state_root: None,
+            device_identity: Some(&identity),
+        },
+    )?;
+    if !recovery.is_empty() {
+        loaded = manifest_store.load(&source_location)?;
+    }
     let needs_device_publish = loaded.needs_device_publish;
     let source_changed = source_change_requires_confirmation(&loaded, &source_location);
     let mut manifest = loaded.manifest;
@@ -641,7 +666,7 @@ pub fn run(
         progress,
         decision_rx,
         Path::new(&mount),
-        &serial,
+        &identity.firewire_guid,
         &identity,
         &manifest_store,
         &mut manifest,
