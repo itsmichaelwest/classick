@@ -8,10 +8,12 @@ use classick::ipod::playlist_ownership::{
 use classick::manifest::{Manifest, ManifestEntry};
 use classick::manifest_store::ManifestStore;
 use classick::pending_session::{
-    PendingPhase, PendingRockboxOp, PendingSession, PendingSessionStore,
+    DeviceManifestPreimage, PendingPhase, PendingRockboxOp, PendingSession, PendingSessionStore,
 };
 use classick::progress::Progress;
-use classick::sync_transaction::{CheckpointCoordinator, PublishOptions, RollbackSnapshot};
+use classick::sync_transaction::{
+    CheckpointCoordinator, PlaylistFailurePoint, PublishOptions, RollbackSnapshot,
+};
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
@@ -96,6 +98,7 @@ fn device_manifest_published_future_ops_remain_byte_exact_when_recovery_rejects_
     let mut journal = PendingSession::new(1, SERIAL, Vec::new());
     journal.phase = PendingPhase::DeviceManifestPublished;
     journal.candidate_manifest = Some(fixture.manifest.clone());
+    journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
     journal.candidate_playlist_ownership = Some(empty_ownership());
     journal.pending_rockbox_ops.insert(
         "future".into(),
@@ -159,6 +162,7 @@ fn database_verified_mismatch_blocks_reconcile_on_every_restart() {
     let mut journal = PendingSession::new(2, SERIAL, Vec::new());
     journal.phase = PendingPhase::DatabaseVerified;
     journal.candidate_manifest = Some(candidate);
+    journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
     journal.candidate_playlist_ownership = Some(ManagedPlaylistOwnership {
         schema_version: MANAGED_PLAYLIST_OWNERSHIP_VERSION,
         device_serial: SERIAL.into(),
@@ -280,49 +284,79 @@ fn database_verified_mismatch_blocks_reconcile_on_every_restart() {
 }
 
 #[test]
-fn device_manifest_published_playlist_mismatch_restores_and_keeps_journal() {
-    let mut fixture = fixture("published-mismatch");
-    let store = PendingSessionStore::new(&fixture.mount);
-    RollbackSnapshot::create(&fixture.mount, &store.snapshot_dir(3)).unwrap();
-    let mut journal = PendingSession::new(3, SERIAL, Vec::new());
-    journal.phase = PendingPhase::DeviceManifestPublished;
-    journal.candidate_manifest = Some(fixture.manifest.clone());
-    journal.candidate_playlist_ownership = Some(ManagedPlaylistOwnership {
-        schema_version: MANAGED_PLAYLIST_OWNERSHIP_VERSION,
-        device_serial: SERIAL.into(),
-        playlists: BTreeMap::from([(
-            "mix".into(),
-            ManagedPlaylistEntry {
-                apple_playlist_id: 41,
-                expected_kind: ManagedPlaylistKind::Normal,
-                rockbox: None,
-            },
-        )]),
-    });
-    journal
-        .desired_playlist_memberships
-        .insert("mix".into(), Vec::new());
-    journal.verified_playlist_memberships = vec![VerifiedPlaylistMembership {
-        slug: "mix".into(),
-        apple_playlist_id: 41,
-        ordered_dbids: Vec::new(),
-        ordered_ipod_paths: Vec::new(),
-    }];
-    store.save(&journal).unwrap();
+fn published_mismatch_restores_exact_preexisting_device_manifest_on_every_restart() {
+    assert_published_mismatch_restores_manifest("manifest-present", Some(b"exact old manifest\n"));
+}
+
+#[test]
+fn published_mismatch_restores_originally_absent_device_manifest_on_every_restart() {
+    assert_published_mismatch_restores_manifest("manifest-absent", None);
+}
+
+fn assert_published_mismatch_restores_manifest(label: &str, previous: Option<&[u8]>) {
+    let mut fixture = fixture(label);
+    let manifest_path = classick::device_state::portable_manifest_path(&fixture.mount);
+    if let Some(bytes) = previous {
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(&manifest_path, bytes).unwrap();
+    }
     let original_db =
         std::fs::read(classick::ipod::layout::itunes_db_path(&fixture.mount)).unwrap();
     let desired = vec![("mix".to_string(), "Mix".to_string(), Vec::new())];
     let state_root = fixture.host.join("state");
-    let (progress, _decisions) = Progress::start(false, false).unwrap();
+    let store = PendingSessionStore::new(&fixture.mount);
+    let mut journal = PendingSession::new(3, SERIAL, Vec::new());
     let coordinator = CheckpointCoordinator {
         mount: &fixture.mount,
         serial: SERIAL,
         manifest_store: &fixture.manifest_store,
         artwork_cache: fixture.cache.clone(),
     };
+    let (progress, _decisions) = Progress::start(false, false).unwrap();
 
-    let error = coordinator
-        .recover_pending_with_options(
+    coordinator
+        .publish_with_options(
+            &mut journal,
+            &mut fixture.manifest,
+            &progress,
+            PublishOptions {
+                desired_playlists: Some(&desired),
+                playlist_state_root: Some(&state_root),
+                device_identity: None,
+                playlist_failure_point: Some(PlaylistFailurePoint::BeforeProjectionPlanPersist),
+            },
+        )
+        .unwrap_err();
+    progress.finish(false).unwrap();
+    let published = store.load(3).unwrap();
+    assert_eq!(published.phase, PendingPhase::DeviceManifestPublished);
+    assert_eq!(
+        published
+            .device_manifest_preimage
+            .as_ref()
+            .unwrap()
+            .contents
+            .as_deref(),
+        previous
+    );
+    assert!(manifest_path.exists());
+    if let Some(bytes) = previous {
+        assert_ne!(std::fs::read(&manifest_path).unwrap(), bytes);
+    }
+    let candidate_id = published
+        .candidate_playlist_ownership
+        .as_ref()
+        .unwrap()
+        .playlists["mix"]
+        .apple_playlist_id;
+    let db = classick::ipod::db::OwnedDb::open(&fixture.mount).unwrap();
+    classick::ipod::db::remove_playlist_by_id(&db, candidate_id).unwrap();
+    db.write().unwrap();
+    drop(db);
+
+    for _restart in 0..2 {
+        let (progress, _decisions) = Progress::start(false, false).unwrap();
+        let result = coordinator.recover_pending_with_options(
             &mut fixture.manifest,
             &progress,
             PublishOptions {
@@ -331,16 +365,29 @@ fn device_manifest_published_playlist_mismatch_restores_and_keeps_journal() {
                 device_identity: None,
                 playlist_failure_point: None,
             },
-        )
-        .unwrap_err();
-    progress.finish(false).unwrap();
-
-    assert!(format!("{error:#}").contains("database verification failed"));
-    assert_eq!(store.load(3).unwrap().phase, PendingPhase::RollbackComplete);
-    assert_eq!(
-        std::fs::read(classick::ipod::layout::itunes_db_path(&fixture.mount)).unwrap(),
-        original_db
-    );
+        );
+        progress.finish(result.is_ok()).unwrap();
+        assert!(result.is_err());
+        let retained = store.load(3).unwrap();
+        assert_eq!(retained.phase, PendingPhase::RollbackComplete);
+        assert_eq!(
+            retained
+                .candidate_playlist_ownership
+                .as_ref()
+                .unwrap()
+                .playlists["mix"]
+                .apple_playlist_id,
+            candidate_id
+        );
+        assert_eq!(
+            std::fs::read(classick::ipod::layout::itunes_db_path(&fixture.mount)).unwrap(),
+            original_db
+        );
+        match previous {
+            Some(bytes) => assert_eq!(std::fs::read(&manifest_path).unwrap(), bytes),
+            None => assert!(!manifest_path.exists()),
+        }
+    }
 }
 
 #[test]
@@ -351,6 +398,7 @@ fn database_verified_recovery_is_database_byte_stable_when_verification_succeeds
     let mut journal = PendingSession::new(4, SERIAL, Vec::new());
     journal.phase = PendingPhase::DatabaseVerified;
     journal.candidate_manifest = Some(fixture.manifest.clone());
+    journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
     store.save(&journal).unwrap();
     let database = classick::ipod::layout::itunes_db_path(&fixture.mount);
     let before = std::fs::read(&database).unwrap();
@@ -368,4 +416,35 @@ fn database_verified_recovery_is_database_byte_stable_when_verification_succeeds
     progress.finish(true).unwrap();
 
     assert_eq!(std::fs::read(database).unwrap(), before);
+}
+
+#[test]
+fn legacy_verified_journal_without_manifest_preimage_fails_closed_unchanged() {
+    let mut fixture = fixture("legacy-missing-preimage");
+    let store = PendingSessionStore::new(&fixture.mount);
+    RollbackSnapshot::create(&fixture.mount, &store.snapshot_dir(5)).unwrap();
+    let mut journal = PendingSession::new(5, SERIAL, Vec::new());
+    journal.phase = PendingPhase::DatabaseVerified;
+    journal.candidate_manifest = Some(fixture.manifest.clone());
+    store.save(&journal).unwrap();
+    let journal_before = std::fs::read(store.path(5)).unwrap();
+    let database = classick::ipod::layout::itunes_db_path(&fixture.mount);
+    let database_before = std::fs::read(&database).unwrap();
+    let (progress, _decisions) = Progress::start(false, false).unwrap();
+    let coordinator = CheckpointCoordinator {
+        mount: &fixture.mount,
+        serial: SERIAL,
+        manifest_store: &fixture.manifest_store,
+        artwork_cache: fixture.cache.clone(),
+    };
+
+    let error = coordinator
+        .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
+        .unwrap_err();
+    progress.finish(false).unwrap();
+
+    assert!(format!("{error:#}").contains("has no safe preimage"));
+    assert_eq!(std::fs::read(store.path(5)).unwrap(), journal_before);
+    assert_eq!(std::fs::read(database).unwrap(), database_before);
+    assert!(store.load(5).unwrap().device_manifest_preimage.is_none());
 }

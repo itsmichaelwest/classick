@@ -2,7 +2,7 @@
 
 Per global AGENTS.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
-- **A verified mismatch rollback must be terminal:** restore the full snapshot, retain candidate playlist diagnostics, and persist `RollbackComplete`; demoting to replayable `ReadyToPublish` lets the next startup reconcile replacement playlist IDs.
+- **A verified mismatch rollback must be terminal and cross-authority complete:** restore DB/artwork plus the exact pre-publication device-manifest bytes or absence, retain candidate playlist diagnostics, and persist `RollbackComplete`; demoting to replayable `ReadyToPublish` allocates replacement IDs, while leaving the candidate manifest beside the restored DB freezes inconsistent authority.
 - **Artwork-safe checkpoints need a complete rollback set:** snapshot and hash-validate `iTunesDB`, `ArtworkDB`, and every `.ithmb` before deleting stale artwork output; retain old audio until DB/art verification and device-manifest publication, and remove only paths explicitly owned by the pending-session journal.
 - **Fresh publication DBs need the full transaction context:** a checkpoint that reopens `OwnedDb` must reapply FirewireGuid/ModelNumStr, resolve playlists against post-staging DBIDs, and snapshot playlist ownership before reconciliation so rollback restores both device and host authority.
 - **Durable sync recovery must run before diff planning:** enumerate only mount-scoped pending journals, require exact filename/session/raw-serial identity, and reject cleanup paths outside that session's staging directory or `iPod_Control/Music`; unsafe journals stay untouched and block a fresh transaction.

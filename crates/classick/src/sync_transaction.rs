@@ -101,6 +101,7 @@ impl CheckpointCoordinator<'_> {
             store.save(journal)?;
         }
 
+        self.ensure_device_manifest_preimage(journal, &store)?;
         let snapshot = self.ensure_snapshot(&store, journal)?;
         if journal.phase == PendingPhase::ReadyToPublish {
             self.resume_or_publish_database(
@@ -307,6 +308,37 @@ impl CheckpointCoordinator<'_> {
         RollbackSnapshot::create(self.mount, &path).context("create complete DB/artwork rollback")
     }
 
+    fn ensure_device_manifest_preimage(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+    ) -> Result<()> {
+        use crate::pending_session::{DeviceManifestPreimage, PendingPhase};
+
+        if journal.device_manifest_preimage.is_some() {
+            return Ok(());
+        }
+        if journal.phase >= PendingPhase::DatabaseVerified {
+            bail!(
+                "pending sync {} may have published its device manifest but has no safe preimage",
+                journal.session_id
+            );
+        }
+        let path = crate::device_state::portable_manifest_path(self.mount);
+        let contents = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("capture device manifest {}", path.display()));
+            }
+        };
+        journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents });
+        store
+            .save(journal)
+            .context("persist device manifest rollback preimage")
+    }
+
     fn resume_or_publish_database(
         &self,
         journal: &mut crate::pending_session::PendingSession,
@@ -494,6 +526,7 @@ impl CheckpointCoordinator<'_> {
             .restore(self.mount)
             .with_context(|| format!("restore rollback after {cause:#}"))?;
         self.cleanup_after_rollback(journal)?;
+        self.restore_device_manifest_preimage(journal)?;
         reset_staged_publication(journal);
         journal.phase = crate::pending_session::PendingPhase::ReadyToPublish;
         store.save(journal)
@@ -510,8 +543,28 @@ impl CheckpointCoordinator<'_> {
             .restore(self.mount)
             .with_context(|| format!("restore rollback after {cause:#}"))?;
         self.cleanup_after_rollback(journal)?;
+        self.restore_device_manifest_preimage(journal)?;
         journal.phase = crate::pending_session::PendingPhase::RollbackComplete;
         store.save(journal)
+    }
+
+    fn restore_device_manifest_preimage(
+        &self,
+        journal: &crate::pending_session::PendingSession,
+    ) -> Result<()> {
+        let preimage = journal
+            .device_manifest_preimage
+            .as_ref()
+            .context("verified rollback has no device manifest preimage")?;
+        let path = crate::device_state::portable_manifest_path(self.mount);
+        match preimage.contents.as_deref() {
+            Some(bytes) => crate::atomic_file::AtomicFileWriter::new()
+                .write(&path, bytes)
+                .context("restore exact device manifest preimage"),
+            None => {
+                remove_file_if_present(&path).context("restore absent device manifest preimage")
+            }
+        }
     }
 
     fn cleanup_after_rollback(
@@ -645,7 +698,9 @@ mod tests {
     use crate::manifest::{Manifest, ManifestEntry};
     use crate::manifest_store::ManifestStore;
     use crate::pending_session::PendingPhase;
-    use crate::pending_session::{PendingAlbum, PendingSession, PendingSessionStore, StagedFile};
+    use crate::pending_session::{
+        DeviceManifestPreimage, PendingAlbum, PendingSession, PendingSessionStore, StagedFile,
+    };
     use std::ffi::CString;
     use std::path::PathBuf;
     use std::ptr;
@@ -817,16 +872,23 @@ mod tests {
 
     #[test]
     fn device_manifest_failure_restores_snapshot_and_keeps_ready_journal() {
-        let (mount, _host, store, cache, mut manifest) = coordinator_fixture("rollback");
+        let (mount, host, _store, cache, mut manifest) = coordinator_fixture("rollback");
         let journal_store = PendingSessionStore::new(&mount);
         let snapshot = RollbackSnapshot::create(&mount, &journal_store.snapshot_dir(12)).unwrap();
         let original_db = std::fs::read(crate::ipod::layout::itunes_db_path(&mount)).unwrap();
         let mut journal = PendingSession::new(12, "SERIAL", Vec::new());
         journal.phase = PendingPhase::DatabaseVerified;
         journal.candidate_manifest = Some(manifest.clone());
+        journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
         journal_store.save(&journal).unwrap();
         let manifest_path = crate::device_state::portable_manifest_path(&mount);
-        std::fs::create_dir_all(&manifest_path).unwrap();
+        let store = ManifestStore::new(
+            mount.clone(),
+            "SERIAL".into(),
+            host.join("manifest.json"),
+            host.join("legacy.json"),
+            AtomicFileWriter::failing_before_replace(manifest_path),
+        );
         let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
         let coordinator = CheckpointCoordinator {
             mount: &mount,

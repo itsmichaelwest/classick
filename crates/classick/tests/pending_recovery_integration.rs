@@ -3,7 +3,8 @@ use classick::atomic_file::AtomicFileWriter;
 use classick::manifest::Manifest;
 use classick::manifest_store::ManifestStore;
 use classick::pending_session::{
-    PendingAlbum, PendingPhase, PendingSession, PendingSessionStore, StagedFile,
+    DeviceManifestPreimage, PendingAlbum, PendingPhase, PendingSession, PendingSessionStore,
+    StagedFile,
 };
 use classick::progress::Progress;
 use classick::sync_transaction::{CheckpointCoordinator, PublishOptions, RollbackSnapshot};
@@ -97,6 +98,7 @@ fn save_phase(fixture: &Fixture, id: u64, phase: PendingPhase) -> PendingSession
         let mut candidate = fixture.manifest.clone();
         candidate.version = 7;
         journal.candidate_manifest = Some(candidate);
+        journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
     }
     store.save(&journal).unwrap();
     if phase >= PendingPhase::ReadyToPublish {
@@ -188,10 +190,16 @@ fn restart_keeps_loaded_manifest_when_database_verified_publish_fails() {
     let mut fixture = fixture("database-verified-publish-failure");
     let store = save_phase(&fixture, 108, PendingPhase::DatabaseVerified);
     let device_manifest = classick::device_state::portable_manifest_path(&fixture.mount);
-    std::fs::create_dir_all(&device_manifest).unwrap();
+    let failing_manifest_store = ManifestStore::new(
+        fixture.mount.clone(),
+        SERIAL.into(),
+        fixture.host.join("manifest.json"),
+        fixture.host.join("legacy.json"),
+        AtomicFileWriter::failing_before_replace(device_manifest),
+    );
     let (progress, _decisions) = Progress::start(false, false).unwrap();
 
-    let error = coordinator(&fixture.mount, &fixture.store, &fixture.cache)
+    let error = coordinator(&fixture.mount, &failing_manifest_store, &fixture.cache)
         .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
         .unwrap_err();
     progress.finish(false).unwrap();

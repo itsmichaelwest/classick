@@ -99,6 +99,12 @@ pub struct ManagedPlaylistRecordSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct DeviceManifestPreimage {
+    pub contents: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PendingSession {
     pub version: u32,
     pub session_id: SessionId,
@@ -108,6 +114,8 @@ pub struct PendingSession {
     pub staged_files: Vec<StagedFile>,
     pub obsolete_files: Vec<ObsoleteFile>,
     pub candidate_manifest: Option<Manifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_manifest_preimage: Option<DeviceManifestPreimage>,
     #[serde(default)]
     pub managed_playlist_record_snapshot: Option<ManagedPlaylistRecordSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +143,7 @@ impl PendingSession {
             staged_files: Vec::new(),
             obsolete_files: Vec::new(),
             candidate_manifest: None,
+            device_manifest_preimage: None,
             managed_playlist_record_snapshot: None,
             candidate_playlist_ownership: None,
             desired_playlist_memberships: BTreeMap::new(),
