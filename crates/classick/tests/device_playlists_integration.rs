@@ -19,8 +19,10 @@ use classick::fit::DeferredAlbum;
 use classick::ipod::db::{ensure_managed_playlist, list_playlists, OwnedDb};
 use classick::ipod::device_playlists::{self, ReconcileStats};
 use classick::manifest::Manifest;
+use classick::manifest_store::ManifestStore;
 use classick::progress::Progress;
 use classick::source::SourceEntry;
+use classick::source_location::{SourceIdentity, SourceLocation};
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -102,7 +104,12 @@ fn make_album(source_root: &Path, track_count: usize) -> Vec<SourceEntry> {
 }
 
 fn album_key_for(tracks: &[SourceEntry]) -> String {
-    tracks[0].path.parent().unwrap().to_string_lossy().into_owned()
+    tracks[0]
+        .path
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn test_config() -> Config {
@@ -141,7 +148,11 @@ fn seed_tracks_with_manifest(db: &OwnedDb, source_root: &Path, track_count: usiz
     let tracks = make_album(source_root, track_count);
     let total_bytes: u64 = tracks.iter().map(|t| t.size).sum();
     let key = album_key_for(&tracks);
-    let deferred = vec![DeferredAlbum { key, tracks: tracks.len(), bytes: total_bytes }];
+    let deferred = vec![DeferredAlbum {
+        key,
+        tracks: tracks.len(),
+        bytes: total_bytes,
+    }];
 
     let config = test_config();
     let refalac_version: Option<String> = None;
@@ -165,8 +176,15 @@ fn seed_tracks_with_manifest(db: &OwnedDb, source_root: &Path, track_count: usiz
         &mut artwork_counts,
     )
     .expect("seed commit should succeed");
-    assert!(result.is_empty(), "seed album should not be deferred: {result:?}");
-    assert_eq!(db.track_count(), track_count, "sanity: all seed tracks committed");
+    assert!(
+        result.is_empty(),
+        "seed album should not be deferred: {result:?}"
+    );
+    assert_eq!(
+        db.track_count(),
+        track_count,
+        "sanity: all seed tracks committed"
+    );
     manifest
 }
 
@@ -192,7 +210,10 @@ fn playlist_member_dbids(db: &OwnedDb, name: &str) -> Vec<u64> {
 }
 
 fn sorted_playlist_names(db: &OwnedDb) -> Vec<String> {
-    let mut names: Vec<String> = list_playlists(db).into_iter().map(|(name, _)| name).collect();
+    let mut names: Vec<String> = list_playlists(db)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     names.sort();
     names
 }
@@ -258,23 +279,47 @@ fn reconcile_creates_updates_and_removes_without_touching_foreign_or_mpl() {
     let serial = "0xTESTSERIAL01";
 
     // --- Step 1: reconcile with desired = [("gym", "Gym", [dbid0, dbid1])]. ---
-    let desired = vec![("gym".to_string(), "Gym".to_string(), vec![dbids[0], dbids[1]])];
+    let desired = vec![(
+        "gym".to_string(),
+        "Gym".to_string(),
+        vec![dbids[0], dbids[1]],
+    )];
     let stats = device_playlists::reconcile_in(&db, &desired, &state_root, serial)
         .expect("reconcile should succeed");
-    assert_eq!(stats, ReconcileStats { created: 1, updated: 0, removed: 0 });
+    assert_eq!(
+        stats,
+        ReconcileStats {
+            created: 1,
+            updated: 0,
+            removed: 0
+        }
+    );
 
     db.write().expect("db.write after first reconcile");
     drop(db);
 
     // Reparse from disk: "Gym" exists with exactly 2 members, MPL untouched.
     let reopened = OwnedDb::open(&mount).unwrap();
-    assert_eq!(sorted_playlist_names(&reopened), vec!["Gym".to_string(), "iPod".to_string()]);
-    assert_eq!(playlist_member_dbids(&reopened, "Gym"), vec![dbids[0], dbids[1]]);
+    assert_eq!(
+        sorted_playlist_names(&reopened),
+        vec!["Gym".to_string(), "iPod".to_string()]
+    );
+    assert_eq!(
+        playlist_member_dbids(&reopened, "Gym"),
+        vec![dbids[0], dbids[1]]
+    );
     let mpl_is_still_mpl = list_playlists(&reopened)
         .into_iter()
         .any(|(name, is_mpl)| name == "iPod" && is_mpl);
-    assert!(mpl_is_still_mpl, "master playlist should be untouched (still flagged is_mpl)");
-    assert_eq!(reopened.track_count(), 3, "reconcile must never touch track count");
+    assert!(
+        mpl_is_still_mpl,
+        "master playlist should be untouched (still flagged is_mpl)"
+    );
+    assert_eq!(
+        reopened.track_count(),
+        3,
+        "reconcile must never touch track count"
+    );
 
     // --- Step 2: reconcile again, this time also managing "Foreign" (so it
     // gets created for real via `ensure_playlist` and lands in the managed
@@ -283,17 +328,32 @@ fn reconcile_creates_updates_and_removes_without_touching_foreign_or_mpl() {
     // name heuristics": even a name reconcile itself just created is
     // untouchable once the record says otherwise. ---
     let desired_with_foreign = vec![
-        ("gym".to_string(), "Gym".to_string(), vec![dbids[0], dbids[1]]),
+        (
+            "gym".to_string(),
+            "Gym".to_string(),
+            vec![dbids[0], dbids[1]],
+        ),
         ("foreign".to_string(), "Foreign".to_string(), vec![dbids[2]]),
     ];
-    let stats2 = device_playlists::reconcile_in(&reopened, &desired_with_foreign, &state_root, serial)
-        .expect("second reconcile should succeed");
-    assert_eq!(stats2, ReconcileStats { created: 1, updated: 1, removed: 0 });
+    let stats2 =
+        device_playlists::reconcile_in(&reopened, &desired_with_foreign, &state_root, serial)
+            .expect("second reconcile should succeed");
+    assert_eq!(
+        stats2,
+        ReconcileStats {
+            created: 1,
+            updated: 1,
+            removed: 0
+        }
+    );
     reopened.write().expect("db.write after second reconcile");
 
     let managed_path = device_state::managed_playlists_path_in(&state_root, serial).unwrap();
     let recorded = std::fs::read_to_string(&managed_path).unwrap();
-    assert!(recorded.contains("Foreign"), "sanity: Foreign really was recorded as managed");
+    assert!(
+        recorded.contains("Foreign"),
+        "sanity: Foreign really was recorded as managed"
+    );
     // Rewrite the record as if "Foreign" was never ours.
     std::fs::write(&managed_path, r#"{"names":["Gym"]}"#).unwrap();
     drop(reopened);
@@ -304,7 +364,15 @@ fn reconcile_creates_updates_and_removes_without_touching_foreign_or_mpl() {
     let reopened2 = OwnedDb::open(&mount).unwrap();
     let stats3 = device_playlists::reconcile_in(&reopened2, &[], &state_root, serial)
         .expect("third reconcile should succeed");
-    assert_eq!(stats3, ReconcileStats { created: 0, updated: 0, removed: 1 }, "only Gym should be removed");
+    assert_eq!(
+        stats3,
+        ReconcileStats {
+            created: 0,
+            updated: 0,
+            removed: 1
+        },
+        "only Gym should be removed"
+    );
 
     reopened2.write().expect("db.write after third reconcile");
     drop(reopened2);
@@ -316,7 +384,11 @@ fn reconcile_creates_updates_and_removes_without_touching_foreign_or_mpl() {
         vec!["Foreign".to_string(), "iPod".to_string()],
         "Gym gone, Foreign + MPL untouched"
     );
-    assert_eq!(final_db.track_count(), 3, "reconcile must never touch track count");
+    assert_eq!(
+        final_db.track_count(),
+        3,
+        "reconcile must never touch track count"
+    );
 }
 
 /// Fix 2 regression: `PlaylistStore::unique_slug` lets two distinct
@@ -350,18 +422,29 @@ fn reconcile_keeps_distinct_slugs_sharing_a_display_name_independent() {
     let first = device_playlists::reconcile_in(&db, &desired, &state_root, serial).unwrap();
     assert_eq!(
         first,
-        ReconcileStats { created: 2, updated: 0, removed: 0 },
+        ReconcileStats {
+            created: 2,
+            updated: 0,
+            removed: 0
+        },
         "both distinctly-slugged playlists must be created"
     );
     db.write().expect("db.write after first reconcile");
 
     let gyms = playlists_named(&db, "Gym");
-    assert_eq!(gyms.len(), 2, "two distinct on-device playlists, both named \"Gym\"");
+    assert_eq!(
+        gyms.len(),
+        2,
+        "two distinct on-device playlists, both named \"Gym\""
+    );
     let mut members: Vec<Vec<u64>> = gyms.iter().map(|(_, _, m)| m.clone()).collect();
     members.sort();
     let mut expected = vec![vec![dbid0], vec![dbid1]];
     expected.sort();
-    assert_eq!(members, expected, "each keeps its own distinct membership, never merged");
+    assert_eq!(
+        members, expected,
+        "each keeps its own distinct membership, never merged"
+    );
 
     let managed_path = device_state::managed_playlists_path_in(&state_root, serial).unwrap();
     let recorded: serde_json::Value =
@@ -384,15 +467,26 @@ fn reconcile_keeps_distinct_slugs_sharing_a_display_name_independent() {
     let second = device_playlists::reconcile_in(&db, &desired, &state_root, serial).unwrap();
     assert_eq!(
         second,
-        ReconcileStats { created: 0, updated: 2, removed: 0 },
+        ReconcileStats {
+            created: 0,
+            updated: 2,
+            removed: 0
+        },
         "steady-state re-run: both update in place, none created or removed"
     );
 
     let gyms_after = playlists_named(&db, "Gym");
-    assert_eq!(gyms_after.len(), 2, "no orphan created, no playlist lost on the steady-state run");
+    assert_eq!(
+        gyms_after.len(),
+        2,
+        "no orphan created, no playlist lost on the steady-state run"
+    );
     let mut members_after: Vec<Vec<u64>> = gyms_after.iter().map(|(_, _, m)| m.clone()).collect();
     members_after.sort();
-    assert_eq!(members_after, expected, "membership unchanged by the steady-state run");
+    assert_eq!(
+        members_after, expected,
+        "membership unchanged by the steady-state run"
+    );
 }
 
 #[test]
@@ -408,16 +502,32 @@ fn ensure_managed_playlist_never_adopts_the_master_playlist_by_name() {
     let new_id = ensure_managed_playlist(&db, "iPod", &[], None)
         .expect("a name collision with the MPL must not be an error");
 
-    let mpl_is_still_mpl =
-        list_playlists(&db).into_iter().any(|(name, is_mpl)| name == "iPod" && is_mpl);
-    assert!(mpl_is_still_mpl, "master playlist should remain flagged is_mpl");
+    let mpl_is_still_mpl = list_playlists(&db)
+        .into_iter()
+        .any(|(name, is_mpl)| name == "iPod" && is_mpl);
+    assert!(
+        mpl_is_still_mpl,
+        "master playlist should remain flagged is_mpl"
+    );
 
     let ipod_named = playlists_named(&db, "iPod");
-    assert_eq!(ipod_named.len(), 2, "expected the MPL plus the newly created playlist");
-    let mpl_entry = ipod_named.iter().find(|(_, is_mpl, _)| *is_mpl).expect("MPL entry present");
-    assert_ne!(mpl_entry.0, new_id, "the new playlist must be a distinct id from the MPL");
+    assert_eq!(
+        ipod_named.len(),
+        2,
+        "expected the MPL plus the newly created playlist"
+    );
+    let mpl_entry = ipod_named
+        .iter()
+        .find(|(_, is_mpl, _)| *is_mpl)
+        .expect("MPL entry present");
+    assert_ne!(
+        mpl_entry.0, new_id,
+        "the new playlist must be a distinct id from the MPL"
+    );
     assert!(
-        ipod_named.iter().any(|(id, is_mpl, _)| *id == new_id && !is_mpl),
+        ipod_named
+            .iter()
+            .any(|(id, is_mpl, _)| *id == new_id && !is_mpl),
         "the new non-MPL playlist should be present with the returned id"
     );
 }
@@ -437,12 +547,26 @@ fn reconcile_managed_record_is_stable_across_a_no_op_run() {
     let desired = vec![("solo".to_string(), "Solo".to_string(), vec![dbid])];
 
     let first = device_playlists::reconcile_in(&db, &desired, &state_root, serial).unwrap();
-    assert_eq!(first, ReconcileStats { created: 1, updated: 0, removed: 0 });
+    assert_eq!(
+        first,
+        ReconcileStats {
+            created: 1,
+            updated: 0,
+            removed: 0
+        }
+    );
 
     // Re-running with the SAME desired set should update (idempotent
     // membership rewrite), never re-create or remove.
     let second = device_playlists::reconcile_in(&db, &desired, &state_root, serial).unwrap();
-    assert_eq!(second, ReconcileStats { created: 0, updated: 1, removed: 0 });
+    assert_eq!(
+        second,
+        ReconcileStats {
+            created: 0,
+            updated: 1,
+            removed: 0
+        }
+    );
 
     assert_eq!(playlist_member_dbids(&db, "Solo"), vec![dbid]);
 }
@@ -474,14 +598,25 @@ fn reconcile_never_adopts_a_foreign_playlist_with_a_colliding_name() {
     let desired = vec![("gym".to_string(), "Gym".to_string(), vec![dbid])];
     let stats = device_playlists::reconcile_in(&db, &desired, &state_root, serial)
         .expect("reconcile should succeed");
-    assert_eq!(stats, ReconcileStats { created: 1, updated: 0, removed: 0 });
+    assert_eq!(
+        stats,
+        ReconcileStats {
+            created: 1,
+            updated: 0,
+            removed: 0
+        }
+    );
 
     db.write().expect("db.write after reconcile");
     drop(db);
 
     let reopened = OwnedDb::open(&mount).unwrap();
     let gyms = playlists_named(&reopened, "Gym");
-    assert_eq!(gyms.len(), 2, "the foreign Gym and Classick's new Gym should both exist");
+    assert_eq!(
+        gyms.len(),
+        2,
+        "the foreign Gym and Classick's new Gym should both exist"
+    );
 
     let foreign = gyms
         .iter()
@@ -495,14 +630,23 @@ fn reconcile_never_adopts_a_foreign_playlist_with_a_colliding_name() {
     let managed_path = device_state::managed_playlists_path_in(&state_root, serial).unwrap();
     let recorded: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&managed_path).unwrap()).unwrap();
-    let recorded_id = recorded["names"][0]["id"].as_u64().expect("recorded id present");
-    assert_ne!(recorded_id, foreign_id, "the recorded id must be the NEW playlist, not the foreign one");
+    let recorded_id = recorded["names"][0]["id"]
+        .as_u64()
+        .expect("recorded id present");
+    assert_ne!(
+        recorded_id, foreign_id,
+        "the recorded id must be the NEW playlist, not the foreign one"
+    );
 
     let managed = gyms
         .iter()
         .find(|(id, _, _)| *id == recorded_id)
         .expect("the recorded id should resolve to a \"Gym\" playlist on-device");
-    assert_eq!(managed.2, vec![dbid], "the new managed Gym should carry the desired membership");
+    assert_eq!(
+        managed.2,
+        vec![dbid],
+        "the new managed Gym should carry the desired membership"
+    );
 }
 
 /// Once a managed playlist's id is known, changing its desired display name
@@ -525,14 +669,23 @@ fn reconcile_renames_in_place_when_recorded_id_still_resolves() {
 
     let desired = vec![("gym".to_string(), "Gym".to_string(), vec![dbid])];
     let first = device_playlists::reconcile_in(&db, &desired, &state_root, serial).unwrap();
-    assert_eq!(first, ReconcileStats { created: 1, updated: 0, removed: 0 });
+    assert_eq!(
+        first,
+        ReconcileStats {
+            created: 1,
+            updated: 0,
+            removed: 0
+        }
+    );
     db.write().expect("db.write after first reconcile");
     drop(db);
 
     let managed_path = device_state::managed_playlists_path_in(&state_root, serial).unwrap();
     let recorded: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&managed_path).unwrap()).unwrap();
-    let original_id = recorded["names"][0]["id"].as_u64().expect("recorded id present");
+    let original_id = recorded["names"][0]["id"]
+        .as_u64()
+        .expect("recorded id present");
     assert_eq!(recorded["names"][0]["slug"].as_str(), Some("gym"));
 
     // Same slug, new display name — the rename signal.
@@ -542,7 +695,11 @@ fn reconcile_renames_in_place_when_recorded_id_still_resolves() {
         device_playlists::reconcile_in(&reopened, &desired_renamed, &state_root, serial).unwrap();
     assert_eq!(
         second,
-        ReconcileStats { created: 0, updated: 1, removed: 0 },
+        ReconcileStats {
+            created: 0,
+            updated: 1,
+            removed: 0
+        },
         "a rename via the same slug must be an update, not a create"
     );
 
@@ -592,7 +749,14 @@ fn reconcile_removes_a_legacy_name_only_recorded_playlist() {
     // desired = [] drops "Gym"; the legacy record has no id, so removal
     // must fall back to `remove_playlist_by_name`.
     let stats = device_playlists::reconcile_in(&reopened, &[], &state_root, serial).unwrap();
-    assert_eq!(stats, ReconcileStats { created: 0, updated: 0, removed: 1 });
+    assert_eq!(
+        stats,
+        ReconcileStats {
+            created: 0,
+            updated: 0,
+            removed: 1
+        }
+    );
 
     reopened.write().expect("db.write after reconcile");
     drop(reopened);
@@ -610,10 +774,17 @@ fn reconcile_removes_a_legacy_name_only_recorded_playlist() {
 /// `subscriptions.json`, simulating a prior machine/install having synced
 /// and mirrored playlists to this iPod.
 fn seed_device_mirror(mount: &Path) {
-    let mirror_dir = mount.join("iPod_Control").join("classick").join("playlists");
+    let mirror_dir = mount
+        .join("iPod_Control")
+        .join("classick")
+        .join("playlists");
     std::fs::create_dir_all(&mirror_dir).unwrap();
     std::fs::write(mirror_dir.join("gym.m3u8"), b"#EXTM3U\n").unwrap();
-    std::fs::write(mirror_dir.join("subscriptions.json"), br#"{"playlists":["gym"]}"#).unwrap();
+    std::fs::write(
+        mirror_dir.join("subscriptions.json"),
+        br#"{"playlists":["gym"]}"#,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -630,11 +801,20 @@ fn adopt_from_ipod_adopts_when_both_local_artifacts_are_absent() {
     let adopted = device_playlists::adopt_from_ipod(&mount, &playlists_root, &subscriptions_path);
     assert_eq!(adopted, 1, "the one mirrored .m3u8 should be adopted");
     assert!(playlists_root.join("gym.m3u8").exists());
-    assert!(subscriptions_path.exists(), "subscriptions.json should also be adopted");
+    assert!(
+        subscriptions_path.exists(),
+        "subscriptions.json should also be adopted"
+    );
     assert_eq!(
         std::fs::read(&subscriptions_path).unwrap(),
-        std::fs::read(mount.join("iPod_Control").join("classick").join("playlists").join("subscriptions.json"))
-            .unwrap()
+        std::fs::read(
+            mount
+                .join("iPod_Control")
+                .join("classick")
+                .join("playlists")
+                .join("subscriptions.json")
+        )
+        .unwrap()
     );
 }
 
@@ -658,7 +838,10 @@ fn adopt_from_ipod_skips_when_local_subscriptions_json_already_exists() {
     std::fs::write(&subscriptions_path, original_subs).unwrap();
 
     let adopted = device_playlists::adopt_from_ipod(&mount, &playlists_root, &subscriptions_path);
-    assert_eq!(adopted, 0, "existing local subscriptions.json must block adoption entirely");
+    assert_eq!(
+        adopted, 0,
+        "existing local subscriptions.json must block adoption entirely"
+    );
     assert!(
         !playlists_root.join("gym.m3u8").exists(),
         "playlists must not be adopted either, per the EITHER-artifact-exists gate"
@@ -667,5 +850,57 @@ fn adopt_from_ipod_skips_when_local_subscriptions_json_already_exists() {
         std::fs::read(&subscriptions_path).unwrap(),
         original_subs,
         "the existing local subscriptions.json must be byte-for-byte untouched"
+    );
+}
+
+#[test]
+fn device_authority_remains_serial_correct_for_followup_consumers() {
+    let source = SourceLocation {
+        resolved_path: scratch_dir("serial-source"),
+        identity: SourceIdentity::Local {
+            library_id: "serial-library".into(),
+        },
+    };
+    let root = scratch_dir("serial-state");
+    let mount_a = scratch_dir("serial-mount-a");
+    let mount_b = scratch_dir("serial-mount-b");
+    let store_a = ManifestStore::new(
+        mount_a,
+        "SERIAL-A".into(),
+        root.join("devices/SERIAL-A/manifest.json"),
+        root.join("manifest.json"),
+        classick::atomic_file::AtomicFileWriter::new(),
+    );
+    let store_b = ManifestStore::new(
+        mount_b,
+        "SERIAL-B".into(),
+        root.join("devices/SERIAL-B/manifest.json"),
+        root.join("manifest.json"),
+        classick::atomic_file::AtomicFileWriter::new(),
+    );
+    let mut manifest_a = Manifest::empty();
+    manifest_a.ipod_serial = Some("SERIAL-A".into());
+    let mut manifest_b = Manifest::empty();
+    manifest_b.ipod_serial = Some("SERIAL-B".into());
+    store_a.publish(&manifest_a, &source).unwrap();
+    store_b.publish(&manifest_b, &source).unwrap();
+
+    assert_eq!(
+        store_a
+            .load(&source)
+            .unwrap()
+            .manifest
+            .ipod_serial
+            .as_deref(),
+        Some("SERIAL-A")
+    );
+    assert_eq!(
+        store_b
+            .load(&source)
+            .unwrap()
+            .manifest
+            .ipod_serial
+            .as_deref(),
+        Some("SERIAL-B")
     );
 }

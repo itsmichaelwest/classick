@@ -617,3 +617,12 @@ User flagged: "we might want to make the UX a bit more interactive so that all i
   Manual playlists intentionally normalize Windows separators and tolerate `.`
   components; manifest paths reject both so persisted device state has one
   unambiguous cross-platform representation.
+- **Disconnected manifest reads must explicitly bypass the last known mount.**
+  A volume can remain mounted after removal or later represent another
+  attachment; connected counts and previews receive the live serial-correlated
+  mount and read device authority, while disconnected display reads only the
+  serial-keyed host cache.
+- **Warning-only sync failures must use a log event, not a progress error.**
+  The daemon's failure-rate tracker counts every subprocess `error` event as a
+  failed track and may cancel the session, so a host-cache refresh warning
+  after a validated device publish must remain a visible `log` event.

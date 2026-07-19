@@ -1068,7 +1068,11 @@ fn start_sync_session(
         last_sync: None,
         next_scheduled_unix_secs: None,
         storage: device_storage::query_storage(&drive),
-        synced_count: synced_track_count_at(config_path, Some(&serial)),
+        synced_count: synced_track_count_at_mount(
+            config_path,
+            Some(&serial),
+            Some(Path::new(&drive)),
+        ),
         library_count: library_count_cache,
         acknowledged_request_id: None,
     });
@@ -1301,7 +1305,14 @@ fn build_status_update(
             .as_deref()
             .and_then(|serial| state.connected_device(serial))
             .and_then(|device| device_storage::query_storage(&device.drive)),
-        synced_count: synced_track_count_at(config_path, count_serial.as_deref()),
+        synced_count: synced_track_count_at_mount(
+            config_path,
+            count_serial.as_deref(),
+            count_serial
+                .as_deref()
+                .and_then(|serial| state.connected_device(serial))
+                .map(|device| Path::new(&device.drive)),
+        ),
         library_count,
         acknowledged_request_id,
     }
@@ -1321,14 +1332,31 @@ fn build_status_update(
 /// the configured (paired) one. The legacy path is used only by callers that
 /// are genuinely unscoped; an explicit serial never inherits another
 /// device's pre-migration facts.
-pub(crate) fn synced_track_count_at(config_path: &Path, serial: Option<&str>) -> usize {
+pub(crate) fn synced_track_count_at_mount(
+    config_path: &Path,
+    serial: Option<&str>,
+    connected_mount: Option<&Path>,
+) -> usize {
     let config_root = device_state_root(config_path);
     let legacy_path = config_root.join("manifest.json");
-    synced_track_count_in(config_root, &legacy_path, serial)
+    let source = configured_source_location_at(config_path);
+    synced_track_count_in(
+        config_root,
+        &legacy_path,
+        serial,
+        connected_mount,
+        source.as_ref(),
+    )
 }
 
-fn synced_track_count_in(config_root: &Path, legacy_path: &Path, serial: Option<&str>) -> usize {
-    load_manifest_for_device_in(config_root, legacy_path, serial)
+fn synced_track_count_in(
+    config_root: &Path,
+    legacy_path: &Path,
+    serial: Option<&str>,
+    connected_mount: Option<&Path>,
+    source: Option<&crate::source_location::SourceLocation>,
+) -> usize {
+    load_manifest_for_device_in(config_root, legacy_path, serial, connected_mount, source)
         .tracks
         .len()
 }
@@ -1336,10 +1364,18 @@ fn synced_track_count_in(config_root: &Path, legacy_path: &Path, serial: Option<
 fn load_manifest_for_device_at(
     config_path: &Path,
     serial: Option<&str>,
+    connected_mount: Option<&Path>,
 ) -> crate::manifest::Manifest {
     let config_root = device_state_root(config_path);
     let legacy_path = config_root.join("manifest.json");
-    load_manifest_for_device_in(config_root, &legacy_path, serial)
+    let source = configured_source_location_at(config_path);
+    load_manifest_for_device_in(
+        config_root,
+        &legacy_path,
+        serial,
+        connected_mount,
+        source.as_ref(),
+    )
 }
 
 fn device_state_root(config_path: &Path) -> &Path {
@@ -1350,16 +1386,58 @@ fn load_manifest_for_device_in(
     config_root: &Path,
     legacy_path: &Path,
     serial: Option<&str>,
+    connected_mount: Option<&Path>,
+    source: Option<&crate::source_location::SourceLocation>,
 ) -> crate::manifest::Manifest {
-    let manifest_path = match serial {
-        Some(serial) => match crate::device_state::device_manifest_path_in(config_root, serial) {
-            Ok(path) => path,
-            Err(_) => return crate::manifest::Manifest::empty(),
-        },
-        None => legacy_path.to_path_buf(),
+    let Some(serial) = serial else {
+        return crate::manifest::load_or_default(legacy_path)
+            .unwrap_or_else(|_| crate::manifest::Manifest::empty());
     };
-    crate::manifest::load_or_default(&manifest_path)
-        .unwrap_or_else(|_| crate::manifest::Manifest::empty())
+    let Some(source) = source else {
+        return crate::manifest::Manifest::empty();
+    };
+    let Ok(host_cache) = crate::device_state::device_manifest_path_in(config_root, serial) else {
+        return crate::manifest::Manifest::empty();
+    };
+    let store = crate::manifest_store::ManifestStore::new(
+        connected_mount.unwrap_or(config_root).to_path_buf(),
+        serial.to_string(),
+        host_cache,
+        legacy_path.to_path_buf(),
+        crate::atomic_file::AtomicFileWriter::new(),
+    );
+    let loaded = match connected_mount {
+        Some(_) => store.load_device_or_host_cache(source),
+        None => store.load_host_cache(source),
+    };
+    loaded
+        .map(|loaded| loaded.manifest)
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                serial,
+                "daemon: failed to load manifest authority: {error:#}"
+            );
+            crate::manifest::Manifest::empty()
+        })
+}
+
+fn configured_source_location_at(
+    config_path: &Path,
+) -> Option<crate::source_location::SourceLocation> {
+    let persisted = config_file::load(config_path).ok().flatten()?;
+    if let Some(mut location) = persisted.source_location {
+        if let Some(source) = persisted.source {
+            location.resolved_path = source;
+        }
+        return Some(location);
+    }
+    let source = persisted.source?;
+    Some(crate::source_location::SourceLocation {
+        resolved_path: source.clone(),
+        identity: crate::source_location::SourceIdentity::Local {
+            library_id: format!("legacy-root:{}", source.display()),
+        },
+    })
 }
 
 /// Kick off an off-thread walk of the configured source library to fill the
@@ -1854,7 +1932,13 @@ fn handle_client_command(
                 (Some(root), Ok(p)) => crate::library_index::load_or_empty(&p, &root),
                 _ => crate::library_index::LibraryIndex::empty(std::path::PathBuf::new()),
             };
-            let manifest = load_manifest_for_device_at(config_path, Some(raw_serial));
+            let manifest = load_manifest_for_device_at(
+                config_path,
+                Some(raw_serial),
+                state
+                    .connected_device(raw_serial)
+                    .map(|device| Path::new(&device.drive)),
+            );
             let (selected_tracks, selected_bytes, adds, removes) =
                 crate::daemon::library::preview(&index, &manifest, mode, &rules);
             let _ = reply.send(DaemonEvent::SelectionPreview {
@@ -2332,12 +2416,17 @@ fn build_device_preview(
     // What's already on the device, from its manifest — so the projection
     // only counts genuinely-new bytes (a fully-synced selection projects no
     // change instead of a phantom "pending" band on the capacity bar).
-    let already_synced: std::collections::HashSet<PathBuf> =
-        load_manifest_for_device_at(config_path, Some(serial))
-            .tracks
-            .into_iter()
-            .map(|track| track.source_path)
-            .collect();
+    let already_synced: std::collections::HashSet<PathBuf> = load_manifest_for_device_at(
+        config_path,
+        Some(serial),
+        state
+            .connected_device(serial)
+            .map(|device| Path::new(&device.drive)),
+    )
+    .tracks
+    .into_iter()
+    .map(|track| track.source_path)
+    .collect();
     crate::daemon::library::compute_device_preview(
         &index,
         &selection,
@@ -2738,27 +2827,98 @@ mod tests {
         crate::manifest::save_atomic(&legacy_path, &manifest_with_track_count(1)).unwrap();
         let device_path = crate::device_state::device_manifest_path_in(&root, "SERIAL-1").unwrap();
         crate::manifest::save_atomic(&device_path, &manifest_with_track_count(3)).unwrap();
+        let source = crate::source_location::SourceLocation {
+            resolved_path: PathBuf::from("/music"),
+            identity: crate::source_location::SourceIdentity::Local {
+                library_id: "library-test".into(),
+            },
+        };
 
         assert_eq!(
-            synced_track_count_in(&root, &legacy_path, Some("SERIAL-1")),
+            synced_track_count_in(&root, &legacy_path, Some("SERIAL-1"), None, Some(&source),),
             3
         );
-        assert_eq!(synced_track_count_in(&root, &legacy_path, None), 1);
+        assert_eq!(
+            synced_track_count_in(&root, &legacy_path, None, None, Some(&source)),
+            1
+        );
 
-        let preview_manifest = load_manifest_for_device_in(&root, &legacy_path, Some("SERIAL-1"));
+        let preview_manifest =
+            load_manifest_for_device_in(&root, &legacy_path, Some("SERIAL-1"), None, Some(&source));
         assert_eq!(preview_manifest.tracks.len(), 3);
         assert_eq!(
-            synced_track_count_in(&root, &legacy_path, Some("SERIAL-B")),
+            synced_track_count_in(&root, &legacy_path, Some("SERIAL-B"), None, Some(&source),),
             0,
             "missing B state must not inherit legacy synced facts"
         );
         assert!(
-            load_manifest_for_device_in(&root, &legacy_path, Some("SERIAL-B"))
-                .tracks
-                .is_empty(),
+            load_manifest_for_device_in(
+                &root,
+                &legacy_path,
+                Some("SERIAL-B"),
+                None,
+                Some(&source),
+            )
+            .tracks
+            .is_empty(),
             "explicit B preview must be empty when B has no manifest"
         );
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn connected_preview_uses_device_authority_and_disconnected_preview_uses_cache() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let root = std::env::temp_dir().join(format!(
+            "classick-authority-preview-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mount = root.join("mount");
+        std::fs::create_dir_all(&mount).unwrap();
+        let legacy_path = root.join("manifest.json");
+        let source = crate::source_location::SourceLocation {
+            resolved_path: root.join("music"),
+            identity: crate::source_location::SourceIdentity::Local {
+                library_id: "library-test".into(),
+            },
+        };
+        let mut host = manifest_with_track_count(2);
+        host.last_source_root = Some(source.resolved_path.clone());
+        for (index, track) in host.tracks.iter_mut().enumerate() {
+            track.source_path = source.resolved_path.join(format!("{index}.flac"));
+        }
+        let mut device = manifest_with_track_count(5);
+        device.last_source_root = Some(source.resolved_path.clone());
+        for (index, track) in device.tracks.iter_mut().enumerate() {
+            track.source_path = source.resolved_path.join(format!("{index}.flac"));
+        }
+        let host_path = crate::device_state::device_manifest_path_in(&root, "SERIAL-1").unwrap();
+        crate::atomic_file::AtomicFileWriter::new()
+            .write(&host_path, &host.encode_v2(&source, "SERIAL-1").unwrap())
+            .unwrap();
+        crate::atomic_file::AtomicFileWriter::new()
+            .write(
+                &crate::device_state::portable_manifest_path(&mount),
+                &device.encode_v2(&source, "SERIAL-1").unwrap(),
+            )
+            .unwrap();
+
+        let connected = load_manifest_for_device_in(
+            &root,
+            &legacy_path,
+            Some("SERIAL-1"),
+            Some(&mount),
+            Some(&source),
+        );
+        let disconnected =
+            load_manifest_for_device_in(&root, &legacy_path, Some("SERIAL-1"), None, Some(&source));
+
+        assert_eq!(connected.tracks.len(), 5);
+        assert_eq!(disconnected.tracks.len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 

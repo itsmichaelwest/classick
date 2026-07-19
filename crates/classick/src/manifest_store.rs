@@ -86,15 +86,42 @@ impl ManifestStore {
         if self.legacy_flat.exists() {
             return self.load_host(&self.legacy_flat, ManifestOrigin::LegacyV1, source);
         }
+        Ok(self.missing())
+    }
+
+    /// Load connected display state without adopting an unscoped legacy
+    /// manifest. Sync migration uses [`Self::load`]; serial-targeted daemon
+    /// reads must not let a second device inherit the first device's flat v1
+    /// facts.
+    pub fn load_device_or_host_cache(&self, source: &SourceLocation) -> Result<LoadedManifest> {
+        let device_path = device_state::portable_manifest_path(&self.mount);
+        if device_path.exists() {
+            return self.load_device(&device_path, source);
+        }
+        self.load_host_cache(source)
+    }
+
+    /// Load display-only state when the device is disconnected. This never
+    /// consults the last known mount path: a volume can remain mounted after
+    /// device removal or be reused by a different attachment, while the host
+    /// cache is explicitly serial-keyed.
+    pub fn load_host_cache(&self, source: &SourceLocation) -> Result<LoadedManifest> {
+        if self.host_cache.exists() {
+            return self.load_host(&self.host_cache, ManifestOrigin::HostV1, source);
+        }
+        Ok(self.missing())
+    }
+
+    fn missing(&self) -> LoadedManifest {
         let mut manifest = Manifest::empty();
         manifest.version = 2;
         manifest.ipod_serial = Some(self.serial.clone());
-        Ok(LoadedManifest {
+        LoadedManifest {
             manifest,
             origin: ManifestOrigin::Missing,
             needs_device_publish: true,
             source_identity: None,
-        })
+        }
     }
 
     pub fn publish(
@@ -378,6 +405,26 @@ mod tests {
         }
     }
 
+    fn v2_with_count(source: &SourceLocation, count: usize) -> Vec<u8> {
+        let mut manifest = rebuilt_manifest();
+        manifest.tracks = (0..count)
+            .map(|index| ManifestEntry {
+                source_path: source.resolved_path.join(format!("{index}.flac")),
+                source_mtime: 0,
+                source_size: 1,
+                source_fingerprint: format!("fp-{index}"),
+                ipod_dbid: index as u64 + 1,
+                ipod_relpath: format!("iPod_Control/Music/F00/{index}.m4a"),
+                source_known: true,
+                audio_fingerprint: String::new(),
+                encoder: "unknown".into(),
+                encoder_version: String::new(),
+                source_format: "flac".into(),
+            })
+            .collect();
+        manifest.encode_v2(source, "SERIAL-1").unwrap()
+    }
+
     #[test]
     fn valid_device_v2_wins_over_stale_host_cache() {
         let s = Sandbox::new();
@@ -392,6 +439,20 @@ mod tests {
         assert_eq!(loaded.origin, ManifestOrigin::DeviceV2);
         assert_eq!(loaded.manifest.tracks.len(), 1);
         assert!(!loaded.needs_device_publish);
+    }
+
+    #[test]
+    fn disconnected_load_uses_host_cache_even_if_the_last_mount_still_exists() {
+        let sandbox = Sandbox::new();
+        let store = sandbox.store();
+        let source = source("/Volumes/data/media/music");
+        Sandbox::write(&sandbox.device_manifest(), &v2_with_count(&source, 7));
+        Sandbox::write(&sandbox.host, &v2_with_count(&source, 3));
+
+        let loaded = store.load_host_cache(&source).unwrap();
+
+        assert_eq!(loaded.origin, ManifestOrigin::HostV2);
+        assert_eq!(loaded.manifest.tracks.len(), 3);
     }
 
     #[test]

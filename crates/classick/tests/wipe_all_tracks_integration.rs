@@ -17,8 +17,10 @@ use classick::ffi;
 use classick::fit::DeferredAlbum;
 use classick::ipod::db::{wipe_all_tracks, OwnedDb};
 use classick::manifest::Manifest;
+use classick::manifest_store::ManifestStore;
 use classick::progress::Progress;
 use classick::source::SourceEntry;
+use classick::source_location::{SourceIdentity, SourceLocation};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -99,7 +101,12 @@ fn make_album(source_root: &Path, track_count: usize) -> Vec<SourceEntry> {
 }
 
 fn album_key_for(tracks: &[SourceEntry]) -> String {
-    tracks[0].path.parent().unwrap().to_string_lossy().into_owned()
+    tracks[0]
+        .path
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn test_config() -> Config {
@@ -137,7 +144,11 @@ fn seed_tracks(db: &OwnedDb, source_root: &Path, track_count: usize) {
     let tracks = make_album(source_root, track_count);
     let total_bytes: u64 = tracks.iter().map(|t| t.size).sum();
     let key = album_key_for(&tracks);
-    let deferred = vec![DeferredAlbum { key, tracks: tracks.len(), bytes: total_bytes }];
+    let deferred = vec![DeferredAlbum {
+        key,
+        tracks: tracks.len(),
+        bytes: total_bytes,
+    }];
 
     let config = test_config();
     let refalac_version: Option<String> = None;
@@ -161,8 +172,15 @@ fn seed_tracks(db: &OwnedDb, source_root: &Path, track_count: usize) {
         &mut artwork_counts,
     )
     .expect("seed commit should succeed");
-    assert!(result.is_empty(), "seed album should not be deferred: {result:?}");
-    assert_eq!(db.track_count(), track_count, "sanity: all seed tracks committed");
+    assert!(
+        result.is_empty(),
+        "seed album should not be deferred: {result:?}"
+    );
+    assert_eq!(
+        db.track_count(),
+        track_count,
+        "sanity: all seed tracks committed"
+    );
 }
 
 #[test]
@@ -176,11 +194,21 @@ fn wipe_all_tracks_removes_every_track_and_its_file() {
 
     let music_f00 = mount.join("iPod_Control").join("Music").join("F00");
     let files_before = std::fs::read_dir(&music_f00).unwrap().count();
-    assert_eq!(files_before, 2, "sanity: both audio files landed on disk before wipe");
+    assert_eq!(
+        files_before, 2,
+        "sanity: both audio files landed on disk before wipe"
+    );
 
     let removed = wipe_all_tracks(&db).expect("wipe_all_tracks should succeed");
-    assert_eq!(removed, 2, "wipe_all_tracks should report the pre-wipe track count");
-    assert_eq!(db.track_count(), 0, "in-memory DB should have zero tracks after wipe");
+    assert_eq!(
+        removed, 2,
+        "wipe_all_tracks should report the pre-wipe track count"
+    );
+    assert_eq!(
+        db.track_count(),
+        0,
+        "in-memory DB should have zero tracks after wipe"
+    );
 
     let files_after = std::fs::read_dir(&music_f00).unwrap().count();
     assert_eq!(files_after, 0, "audio files should be deleted from disk");
@@ -188,7 +216,11 @@ fn wipe_all_tracks_removes_every_track_and_its_file() {
     db.write().unwrap();
     drop(db);
     let reopened = OwnedDb::open(&mount).unwrap();
-    assert_eq!(reopened.track_count(), 0, "reparsed DB should show zero tracks after wipe + write");
+    assert_eq!(
+        reopened.track_count(),
+        0,
+        "reparsed DB should show zero tracks after wipe + write"
+    );
 }
 
 #[test]
@@ -201,4 +233,41 @@ fn wipe_all_tracks_on_empty_db_is_a_noop() {
     let removed = wipe_all_tracks(&db).expect("wipe_all_tracks on an empty DB should succeed");
     assert_eq!(removed, 0);
     assert_eq!(db.track_count(), 0);
+}
+
+#[test]
+fn replace_commit_writes_empty_db_before_empty_authoritative_manifest() {
+    let mount = fake_mount();
+    write_valid_itunesdb(&mount);
+    let db = OwnedDb::open(&mount).unwrap();
+    let source_root = scratch_dir("replace-source");
+    seed_tracks(&db, &source_root, 2);
+    let source = SourceLocation {
+        resolved_path: source_root,
+        identity: SourceIdentity::Local {
+            library_id: "replace-library".into(),
+        },
+    };
+    let store = ManifestStore::new(
+        mount.clone(),
+        "SERIAL-REPLACE".into(),
+        scratch_dir("replace-cache").join("manifest.json"),
+        scratch_dir("replace-legacy").join("manifest.json"),
+        classick::atomic_file::AtomicFileWriter::new(),
+    );
+
+    wipe_all_tracks(&db).unwrap();
+    db.write().unwrap();
+    let mut empty = Manifest::empty();
+    empty.ipod_serial = Some("SERIAL-REPLACE".into());
+    store.publish(&empty, &source).unwrap();
+    drop(db);
+
+    assert_eq!(OwnedDb::open(&mount).unwrap().track_count(), 0);
+    let loaded = store.load(&source).unwrap();
+    assert!(loaded.manifest.tracks.is_empty());
+    assert_eq!(
+        loaded.manifest.ipod_serial.as_deref(),
+        Some("SERIAL-REPLACE")
+    );
 }

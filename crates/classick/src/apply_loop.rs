@@ -21,10 +21,12 @@ use crate::ipod::db::{open_with_auto_restore, OwnedDb, TrackHandle};
 use crate::ipod::device;
 use crate::library_index;
 use crate::manifest::{self, Action, Manifest, ManifestEntry};
+use crate::manifest_store::{LoadedManifest, ManifestStore};
 use crate::pipeline::OrderedTranscoder;
 use crate::preflight;
 use crate::progress::{ActionPlanSummary, Decision, Progress, ReviewDecision};
 use crate::source::{self, SourceEntry};
+use crate::source_location::{SourceIdentity, SourceLocation};
 use crate::tags::tags_from_probe;
 use crate::transcode::{self, has_embedded_art, ProbeOutput, SourceAction};
 use crate::try_with_prompt::{await_prompt, PromptOutcome};
@@ -98,6 +100,92 @@ pub(crate) fn effective_rockbox(
 pub enum RunOutcome {
     Completed,
     Paused,
+}
+
+pub fn source_change_requires_confirmation(
+    loaded: &LoadedManifest,
+    current: &SourceLocation,
+) -> bool {
+    if loaded.manifest.tracks.is_empty() {
+        return false;
+    }
+    match loaded.source_identity.as_ref() {
+        Some(recorded) => recorded != &current.identity,
+        None => loaded
+            .manifest
+            .last_source_root
+            .as_deref()
+            .is_some_and(|recorded| recorded != current.resolved_path),
+    }
+}
+
+pub(crate) fn configured_source_location(config: &Config) -> SourceLocation {
+    let config_path = config
+        .manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("config.toml");
+    let persisted = config_file::load(&config_path).ok().flatten();
+    if let Some(mut location) = persisted
+        .as_ref()
+        .and_then(|persisted| persisted.source_location.clone())
+    {
+        let persisted_root_matches = persisted
+            .as_ref()
+            .and_then(|persisted| persisted.source.as_deref())
+            == Some(config.source.as_path());
+        if location.resolved_path == config.source || persisted_root_matches {
+            location.resolved_path = config.source.clone();
+            return location;
+        }
+    }
+    SourceLocation {
+        resolved_path: config.source.clone(),
+        identity: SourceIdentity::Local {
+            library_id: format!("legacy-root:{}", config.source.display()),
+        },
+    }
+}
+
+pub(crate) fn manifest_store(config: &Config, mount: &Path, serial: &str) -> Result<ManifestStore> {
+    Ok(ManifestStore::new(
+        mount.to_path_buf(),
+        serial.to_string(),
+        device_state::device_manifest_path_in(
+            config
+                .manifest_path
+                .parent()
+                .unwrap_or_else(|| Path::new(".")),
+            serial,
+        )?,
+        config.manifest_path.clone(),
+        crate::atomic_file::AtomicFileWriter::new(),
+    ))
+}
+
+fn publish_manifest(
+    store: &ManifestStore,
+    manifest: &Manifest,
+    source: &SourceLocation,
+    progress: &Progress,
+) -> Result<()> {
+    let outcome = store.publish(manifest, source)?;
+    if let Some(warning) = outcome.host_cache_warning {
+        tracing::warn!("manifest host cache refresh failed after device publish: {warning}");
+        progress.log(format!(
+            "Warning: iPod manifest was saved, but the host cache could not be refreshed: {warning}"
+        ));
+    }
+    Ok(())
+}
+
+fn persisted_config_for_sync(
+    config: &Config,
+    source_location: &SourceLocation,
+) -> config_file::PersistedConfig {
+    let mut persisted = config.to_persisted();
+    persisted.source_location = Some(source_location.clone());
+    persisted
 }
 
 pub fn run(
@@ -256,48 +344,25 @@ pub fn run(
         }
     };
     let _ = &effective_set; // sources + missing/error counts already consumed above
-                            // One-time move of the legacy flat manifest.json into the per-device
-                            // trust-package layout; a no-op once migrated. `config.manifest_path`
-                            // keeps meaning "the legacy/root path" (still test-overridable) — the
-                            // per-device path returned here is what load/save actually use.
-    let manifest_path = device_state::migrate_legacy_manifest(&config.manifest_path, &serial)?;
+    let source_location = configured_source_location(config);
+    let manifest_store = manifest_store(config, Path::new(&mount), &serial)?;
+    let manifest_path = device_state::portable_manifest_path(Path::new(&mount));
 
     // 3. Load (or rebuild) manifest.
-    let mut manifest = if config.rebuild_manifest {
+    let loaded = if config.rebuild_manifest {
         let db = open_with_auto_restore(Path::new(&mount), || {
             progress.log("Restored iPod database from backup after detecting corruption");
             progress.note_db_restored();
         })?;
-        let rebuilt = build_rebuild_manifest(&db, &serial);
-        // Save eagerly so a crash after this point doesn't lose the rebuild.
-        manifest::save_atomic(&manifest_path, &rebuilt)?;
-        rebuilt
+        manifest_store.reconcile_from_live_db(&source_location, || {
+            Ok(build_rebuild_manifest(&db, &serial))
+        })?
     } else {
-        let mut loaded = manifest::load_or_default(&manifest_path)?;
-        if manifest_is_foreign(&loaded, &serial) {
-            tracing::warn!(
-                manifest_serial = ?loaded.ipod_serial,
-                device_serial = %serial,
-                manifest_path = %manifest_path.display(),
-                "manifest belongs to a different iPod; treating as empty for this run",
-            );
-            progress.error(format!(
-                "Manifest at {} was last synced to a different iPod (recorded serial {:?}, \
-                 connected device serial {serial}). Treating it as empty for this run rather \
-                 than risk mismatched track ownership.",
-                manifest_path.display(),
-                loaded.ipod_serial,
-            ));
-            for line in RECOVERY_HINT_LINES {
-                progress.error((*line).to_string());
-            }
-            loaded = Manifest::empty();
-        }
-        // Stamp/adopt this device on every load — covers both a fresh
-        // manifest (ipod_serial was None) and the foreign-reset case above.
-        loaded.ipod_serial = Some(serial.clone());
-        loaded
+        manifest_store.load(&source_location)?
     };
+    let needs_device_publish = loaded.needs_device_publish;
+    let source_changed = source_change_requires_confirmation(&loaded, &source_location);
+    let mut manifest = loaded.manifest;
 
     // 4. Diff. Pass `source::fingerprint` as the slow-path hash callback;
     //    it only fires for entries whose (mtime, size) doesn't match the
@@ -422,18 +487,17 @@ pub fn run(
         unchanged,
     };
 
-    // Source-change safeguard: if the manifest's last_source_root is set
-    // AND differs from the current config.source, AND the manifest has tracks,
-    // loudly confirm before letting the diff's Remove actions fire. This
-    // catches the catastrophic case where the user typo'd --source or pointed
-    // at a different library entirely — without this, every existing track
-    // would be Removed (because it's "missing" from the wrong source root).
+    // A portable logical identity wins over mount spelling. Legacy manifests
+    // without one retain the original root comparison as their safeguard.
     let mut safeguard_force_no_delete = false;
-    if !manifest.tracks.is_empty() {
-        if let Some(last) = &manifest.last_source_root {
-            if last != &config.source {
-                let msg = format!(
-                    "Source root has changed since the last sync.\n\n\
+    if source_changed {
+        let previous = manifest
+            .last_source_root
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "a different logical source".to_string());
+        let msg = format!(
+            "Source root has changed since the last sync.\n\n\
                      Previous: {}\n\
                      Current : {}\n\n\
                      The current diff would REMOVE {} track(s) (everything in the manifest \
@@ -442,40 +506,37 @@ pub fn run(
                      pointing at a different library, choose Abort. If you want to add new \
                      tracks from the new source without touching the iPod's existing tracks, \
                      choose --no-delete mode.",
-                    last.display(),
-                    config.source.display(),
-                    remove,
+            previous,
+            config.source.display(),
+            remove,
+        );
+        let outcome = await_prompt(
+            progress,
+            decision_rx,
+            msg,
+            &[
+                "Continue (apply Remove + Add normally)",
+                "Use --no-delete for this run",
+                "Abort",
+            ],
+            &[
+                PromptOutcome::Retry,
+                PromptOutcome::Skip,
+                PromptOutcome::Abort,
+            ],
+        )?;
+        match outcome {
+            PromptOutcome::Retry => {
+                progress.log("Source-change safeguard: user chose Continue.".to_string());
+            }
+            PromptOutcome::Skip => {
+                progress.log(
+                    "Source-change safeguard: applying with --no-delete for this run.".to_string(),
                 );
-                let outcome = await_prompt(
-                    progress,
-                    decision_rx,
-                    msg,
-                    &[
-                        "Continue (apply Remove + Add normally)",
-                        "Use --no-delete for this run",
-                        "Abort",
-                    ],
-                    &[
-                        PromptOutcome::Retry,
-                        PromptOutcome::Skip,
-                        PromptOutcome::Abort,
-                    ],
-                )?;
-                match outcome {
-                    PromptOutcome::Retry => {
-                        progress.log("Source-change safeguard: user chose Continue.".to_string());
-                    }
-                    PromptOutcome::Skip => {
-                        progress.log(
-                            "Source-change safeguard: applying with --no-delete for this run."
-                                .to_string(),
-                        );
-                        safeguard_force_no_delete = true;
-                    }
-                    _ => {
-                        return Err(anyhow!("source-change safeguard aborted"));
-                    }
-                }
+                safeguard_force_no_delete = true;
+            }
+            _ => {
+                return Err(anyhow!("source-change safeguard aborted"));
             }
         }
     }
@@ -546,6 +607,7 @@ pub fn run(
         && metadata_only == 0
         && (remove == 0 || effective_no_delete)
         && !marker_present_before_apply
+        && !needs_device_publish
     {
         // Deferred albums still count as "nothing else to do" here — free
         // space hasn't changed since the fit pass queried it moments ago, so
@@ -989,8 +1051,8 @@ pub fn run(
                     db.write().context("checkpoint: db.write")
                 })?;
                 manifest.last_source_root = Some(config.source.clone());
-                manifest::save_atomic(&manifest_path, &manifest)
-                    .context("checkpoint: manifest save")?;
+                publish_manifest(&manifest_store, &manifest, &source_location, progress)
+                    .context("checkpoint: manifest publish")?;
                 // Task 13: this `db.write()` is a `parsed`-DB write — libgpod
                 // drops existing tracks' F1069 thumbnails on it (see the
                 // `rebuild_apple_artwork` doc comment below). Mark the device
@@ -1117,7 +1179,7 @@ pub fn run(
         // Stamp the current source root onto the manifest so the next run's
         // source-change safeguard has something to compare against.
         manifest.last_source_root = Some(config.source.clone());
-        manifest::save_atomic(&manifest_path, &manifest)?;
+        publish_manifest(&manifest_store, &manifest, &source_location, progress)?;
 
         if paused {
             progress
@@ -1233,9 +1295,9 @@ pub fn run(
     // and a failure here is a warning (config-file write), not a reason to
     // print the orphan-files recovery block.
     if sync_result.is_ok() && config.save_config {
-        match config_file::default_path()
-            .and_then(|p| config_file::save(&p, &config.to_persisted()).map(|()| p))
-        {
+        match config_file::default_path().and_then(|p| {
+            config_file::save(&p, &persisted_config_for_sync(config, &source_location)).map(|()| p)
+        }) {
             Ok(config_path) => {
                 progress.log(format!("config saved to {}", config_path.display()));
             }
@@ -1312,6 +1374,8 @@ pub fn replace_library(
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
     let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
     let serial = device_state::sanitize_serial(&identity.firewire_guid);
+    let source_location = configured_source_location(config);
+    let manifest_store = manifest_store(config, Path::new(&mount), &serial)?;
 
     // Validate the source BEFORE wiping anything: an empty/unreachable
     // source must never destroy the device's existing library. Walk it now
@@ -1363,10 +1427,11 @@ pub fn replace_library(
     db.write().context("write iPod DB after wipe")?;
     drop(db);
 
-    let manifest_path = device_state::migrate_legacy_manifest(&config.manifest_path, &serial)?;
     let mut manifest = Manifest::empty();
     manifest.ipod_serial = Some(serial);
-    manifest::save_atomic(&manifest_path, &manifest).context("save reset manifest after wipe")?;
+    manifest.last_source_root = Some(config.source.clone());
+    publish_manifest(&manifest_store, &manifest, &source_location, progress)
+        .context("publish reset manifest after wipe")?;
 
     progress.log("Library erased; syncing the current selection…".to_string());
     run(config, progress, decision_rx)
@@ -2049,8 +2114,10 @@ pub fn backfill_rockbox(
     // would silently operate on a stale/legacy copy of the track list.
     let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
     let serial = device_state::sanitize_serial(&identity.firewire_guid);
-    let manifest_path = device_state::migrate_legacy_manifest(&config.manifest_path, &serial)?;
-    let manifest = manifest::load_or_default(&manifest_path)?;
+    let source_location = configured_source_location(config);
+    let manifest = manifest_store(config, Path::new(&mount), &serial)?
+        .load(&source_location)?
+        .manifest;
     let entries: Vec<&crate::manifest::ManifestEntry> = manifest
         .tracks
         .iter()
@@ -2209,8 +2276,8 @@ pub(crate) fn build_rebuild_manifest_from_handles(
         })
         .collect();
     // last_source_root is intentionally None: the iPod's DB doesn't carry
-    // the original source library root. The next normal sync's
-    // manifest::save_atomic populates it from config.source.
+    // the original source library root. The authority store resolves the
+    // current source when it encodes this runtime model as portable v2.
     Manifest {
         version: 1,
         ipod_serial: Some(serial.to_string()),
@@ -2320,15 +2387,6 @@ pub(crate) fn guard_nonempty_walk(sources: &[SourceEntry], root: &Path) -> Resul
         );
     }
     Ok(())
-}
-
-/// True if `manifest.ipod_serial` names a specific device (i.e. is `Some`)
-/// that differs from the currently-connected, already-sanitized `serial`.
-/// A `None` `ipod_serial` — a fresh manifest, or a legacy manifest that
-/// predates this field — is NOT foreign: the sync adopts the device rather
-/// than refusing to proceed.
-pub(crate) fn manifest_is_foreign(manifest: &Manifest, serial: &str) -> bool {
-    matches!(&manifest.ipod_serial, Some(s) if s != serial)
 }
 
 /// Task 13: whether the end-of-run Apple ArtworkDB rebuild (`rebuild_apple_artwork`)
@@ -2457,6 +2515,83 @@ impl ArtworkCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn loaded_with_identity(
+        identity: Option<crate::source_location::SourceIdentity>,
+        legacy_root: &str,
+    ) -> crate::manifest_store::LoadedManifest {
+        crate::manifest_store::LoadedManifest {
+            manifest: Manifest {
+                version: 2,
+                ipod_serial: Some("SERIAL".into()),
+                last_source_root: Some(PathBuf::from(legacy_root)),
+                tracks: vec![crate::manifest::ManifestEntry {
+                    source_path: PathBuf::from(legacy_root).join("track.flac"),
+                    source_mtime: 0,
+                    source_size: 1,
+                    source_fingerprint: "fp".into(),
+                    ipod_dbid: 1,
+                    ipod_relpath: "iPod_Control/Music/F00/track.m4a".into(),
+                    source_known: true,
+                    audio_fingerprint: String::new(),
+                    encoder: "unknown".into(),
+                    encoder_version: String::new(),
+                    source_format: "flac".into(),
+                }],
+            },
+            origin: crate::manifest_store::ManifestOrigin::DeviceV2,
+            needs_device_publish: false,
+            source_identity: identity,
+        }
+    }
+
+    fn smb_source(root: &str, share: &str) -> crate::source_location::SourceLocation {
+        crate::source_location::SourceLocation {
+            resolved_path: PathBuf::from(root),
+            identity: crate::source_location::SourceIdentity::Smb {
+                host: "jupiter".into(),
+                share: share.into(),
+                subpath: Some(crate::portable_path::PortablePath::parse("media/music").unwrap()),
+            },
+        }
+    }
+
+    #[test]
+    fn source_safeguard_accepts_same_smb_identity_at_an_alternate_mount() {
+        let source = smb_source("/Volumes/data-1/media/music", "data");
+        let loaded =
+            loaded_with_identity(Some(source.identity.clone()), "/Volumes/data/media/music");
+
+        assert!(!source_change_requires_confirmation(&loaded, &source));
+    }
+
+    #[test]
+    fn source_safeguard_rejects_a_different_smb_share_before_legacy_root() {
+        let recorded = smb_source("/Volumes/data/media/music", "archive");
+        let current = smb_source("/Volumes/data/media/music", "data");
+        let loaded = loaded_with_identity(Some(recorded.identity), "/Volumes/data/media/music");
+
+        assert!(source_change_requires_confirmation(&loaded, &current));
+    }
+
+    #[test]
+    fn source_safeguard_falls_back_to_legacy_root_without_logical_identity() {
+        let current = smb_source("/Volumes/data-1/media/music", "data");
+        let loaded = loaded_with_identity(None, "/Volumes/data/media/music");
+
+        assert!(source_change_requires_confirmation(&loaded, &current));
+    }
+
+    #[test]
+    fn save_config_projection_preserves_the_logical_source_identity() {
+        let mut config = test_config_for_preflight(PathBuf::from("/Volumes/data-1/media/music"));
+        config.save_config = true;
+        let source = smb_source("/Volumes/data-1/media/music", "data");
+
+        let persisted = persisted_config_for_sync(&config, &source);
+
+        assert_eq!(persisted.source_location, Some(source));
+    }
 
     /// encoder_str is what `run` feeds into `manifest::diff` as the target
     /// encoder name and what `transcode_one` records on each new entry. Mismatches
@@ -2692,32 +2827,6 @@ mod tests {
         let json = r#"{"streams":[],"format":{}}"#;
         let probe: ProbeOutput = serde_json::from_str(json).unwrap();
         assert_eq!(source_format_from_probe(&probe), "unknown");
-    }
-
-    // -- manifest_is_foreign truth table --------------------------------
-
-    #[test]
-    fn manifest_is_foreign_true_when_serial_mismatches() {
-        let mut m = Manifest::empty();
-        m.ipod_serial = Some("AAA111".to_string());
-        assert!(manifest_is_foreign(&m, "BBB222"));
-    }
-
-    #[test]
-    fn manifest_is_foreign_false_when_serial_matches() {
-        let mut m = Manifest::empty();
-        m.ipod_serial = Some("AAA111".to_string());
-        assert!(!manifest_is_foreign(&m, "AAA111"));
-    }
-
-    #[test]
-    fn manifest_is_foreign_false_when_serial_is_none() {
-        // Covers both a brand-new manifest and a legacy (pre-Task-2)
-        // manifest whose `ipod_serial` field predates this feature and
-        // deserializes as None via #[serde(default)] — both cases adopt
-        // the connected device rather than being treated as foreign.
-        let m = Manifest::empty();
-        assert!(!manifest_is_foreign(&m, "AAA111"));
     }
 
     // -- build_rebuild_manifest stamps ipod_serial -----------------------

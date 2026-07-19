@@ -25,7 +25,6 @@ use crate::device_state;
 use crate::ffi;
 use crate::ipod::db::OwnedDb;
 use crate::ipod::device;
-use crate::manifest;
 use crate::preflight;
 use crate::progress::Progress;
 use crate::transcode;
@@ -168,8 +167,10 @@ pub fn verify_artwork(config: &Config, progress: &Progress) -> Result<ArtAuditRe
     let identity = device::resolve_libgpod_identity(Path::new(&mount))
         .context("resolving device identity for artwork audit")?;
     let serial = device_state::sanitize_serial(&identity.firewire_guid);
-    let manifest_path = device_state::migrate_legacy_manifest(&config.manifest_path, &serial)?;
-    let loaded_manifest = manifest::load_or_default(&manifest_path)?;
+    let source_location = crate::apply_loop::configured_source_location(config);
+    let loaded_manifest = crate::apply_loop::manifest_store(config, Path::new(&mount), &serial)?
+        .load(&source_location)?
+        .manifest;
 
     let db = OwnedDb::open(Path::new(&mount)).context("opening iTunesDB for artwork audit")?;
     let artwork_by_dbid = collect_has_artwork(&db);
@@ -461,11 +462,10 @@ mod tests {
     // flags; asserting `has_artwork` reads back `false` for a track added
     // WITHOUT thumbnails already exercises the real FFI struct-field read
     // this function exists for. The full `verify_artwork` pipeline glues
-    // this together with `device_state::migrate_legacy_manifest`, which
-    // resolves through the real (non-test-overridable) `dirs::config_dir()`
-    // — same limitation `apply_loop::run()`'s own tests avoid by calling
-    // inner functions directly instead of `run()` — so this test stops at
-    // the FFI-touching unit rather than driving `verify_artwork` end-to-end.
+    // this together with mounted `ManifestStore` authority and device
+    // identity resolution, which still requires real hardware, so this test
+    // stops at the FFI-touching unit rather than driving `verify_artwork`
+    // end-to-end.
     // `resolve_mount`, `missing_ithmb`, `classify`, and `build_report` above
     // cover the rest of the pipeline's logic without needing real hardware
     // or the real config dir.

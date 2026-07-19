@@ -30,10 +30,13 @@ use classick::ipod::db::OwnedDb;
 use classick::ipod::device_playlists::{self, ReconcileStats};
 use classick::library_index::{IndexedTrack, LibraryIndex};
 use classick::manifest::{Action, Manifest};
+use classick::manifest_store::{LoadedManifest, ManifestOrigin};
 use classick::playlist::{ManualPlaylist, Playlist, PlaylistStore};
+use classick::portable_path::PortablePath;
 use classick::progress::Progress;
 use classick::selection::{Selection, SelectionMode, SelectionRule};
 use classick::source::SourceEntry;
+use classick::source_location::{SourceIdentity, SourceLocation};
 use classick::sync_set;
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
@@ -152,6 +155,58 @@ fn indexed(mtime: i64, size: u64, artist: &str) -> IndexedTrack {
         duration_ms: 0,
         year: None,
     }
+}
+
+#[test]
+fn source_safeguard_uses_logical_smb_identity_across_mount_roots() {
+    let source = SourceLocation {
+        resolved_path: PathBuf::from("/Volumes/data-1/media/music"),
+        identity: SourceIdentity::Smb {
+            host: "jupiter".into(),
+            share: "data".into(),
+            subpath: Some(PortablePath::parse("media/music").unwrap()),
+        },
+    };
+    let loaded = LoadedManifest {
+        manifest: Manifest {
+            version: 2,
+            ipod_serial: Some("SERIAL-1".into()),
+            last_source_root: Some(PathBuf::from("/Volumes/data/media/music")),
+            tracks: vec![classick::manifest::ManifestEntry {
+                source_path: PathBuf::from("/Volumes/data-1/media/music/track.flac"),
+                source_mtime: 0,
+                source_size: 1,
+                source_fingerprint: "fp".into(),
+                ipod_dbid: 1,
+                ipod_relpath: "iPod_Control/Music/F00/track.m4a".into(),
+                source_known: true,
+                audio_fingerprint: String::new(),
+                encoder: "unknown".into(),
+                encoder_version: String::new(),
+                source_format: "flac".into(),
+            }],
+        },
+        origin: ManifestOrigin::DeviceV2,
+        needs_device_publish: false,
+        source_identity: Some(source.identity.clone()),
+    };
+
+    assert!(!classick::apply_loop::source_change_requires_confirmation(
+        &loaded, &source,
+    ));
+
+    let different_share = SourceLocation {
+        identity: SourceIdentity::Smb {
+            host: "jupiter".into(),
+            share: "archive".into(),
+            subpath: Some(PortablePath::parse("media/music").unwrap()),
+        },
+        ..source
+    };
+    assert!(classick::apply_loop::source_change_requires_confirmation(
+        &loaded,
+        &different_share,
+    ));
 }
 
 /// Commit `tracks` to `db`/`manifest` via the real `retry_deferred` path —
@@ -381,7 +436,11 @@ fn playlist_track_outside_scope_syncs_and_reconciles_as_playlist_member() {
     );
     assert_eq!(
         effective.playlist_tracks,
-        vec![("mix".to_string(), "Mix".to_string(), vec![f.skip.path.clone()])],
+        vec![(
+            "mix".to_string(),
+            "Mix".to_string(),
+            vec![f.skip.path.clone()]
+        )],
         "playlist_tracks carries both the slug (identity) and the display name (Fix 2)"
     );
 

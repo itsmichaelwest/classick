@@ -101,9 +101,10 @@ fn build_snapshot(
                 session_id: active.map(|session| session.id),
                 storage: connected
                     .and_then(|device| crate::daemon::device_storage::query_storage(&device.drive)),
-                synced_count: crate::daemon::runtime::synced_track_count_at(
+                synced_count: crate::daemon::runtime::synced_track_count_at_mount(
                     config_path,
                     Some(&record.serial),
+                    connected.map(|device| Path::new(&device.drive)),
                 ),
                 library_count: crate::daemon::library::selected_library_count(
                     config_path,

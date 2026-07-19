@@ -17,8 +17,10 @@ use classick::ffi;
 use classick::fit::DeferredAlbum;
 use classick::ipod::db::OwnedDb;
 use classick::manifest::Manifest;
+use classick::manifest_store::ManifestStore;
 use classick::progress::Progress;
 use classick::source::SourceEntry;
+use classick::source_location::{SourceIdentity, SourceLocation};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -103,7 +105,12 @@ fn make_album(source_root: &Path, track_count: usize) -> Vec<SourceEntry> {
 }
 
 fn album_key_for(tracks: &[SourceEntry]) -> String {
-    tracks[0].path.parent().unwrap().to_string_lossy().into_owned()
+    tracks[0]
+        .path
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn test_config() -> Config {
@@ -145,7 +152,11 @@ fn retry_deferred_commits_album_when_budget_is_sufficient() {
     let total_bytes: u64 = tracks.iter().map(|t| t.size).sum();
     let key = album_key_for(&tracks);
 
-    let deferred = vec![DeferredAlbum { key, tracks: tracks.len(), bytes: total_bytes }];
+    let deferred = vec![DeferredAlbum {
+        key,
+        tracks: tracks.len(),
+        bytes: total_bytes,
+    }];
 
     let config = test_config();
     let refalac_version: Option<String> = None;
@@ -170,16 +181,34 @@ fn retry_deferred_commits_album_when_budget_is_sufficient() {
     )
     .expect("retry_deferred should succeed");
 
-    assert!(result.is_empty(), "album should no longer be deferred: {result:?}");
-    assert_eq!(manifest.tracks.len(), 2, "both tracks should land in the manifest");
-    assert_eq!(db.track_count(), 2, "both tracks should land in the in-memory DB");
-    assert!(bytes_written > 0, "bytes_written tally should reflect the committed audio");
+    assert!(
+        result.is_empty(),
+        "album should no longer be deferred: {result:?}"
+    );
+    assert_eq!(
+        manifest.tracks.len(),
+        2,
+        "both tracks should land in the manifest"
+    );
+    assert_eq!(
+        db.track_count(),
+        2,
+        "both tracks should land in the in-memory DB"
+    );
+    assert!(
+        bytes_written > 0,
+        "bytes_written tally should reflect the committed audio"
+    );
 
     // Reparse from disk to confirm the commit is real, not just in-memory.
     db.write().unwrap();
     drop(db);
     let reopened = OwnedDb::open(&mount).unwrap();
-    assert_eq!(reopened.track_count(), 2, "tracks should persist across a reparse");
+    assert_eq!(
+        reopened.track_count(),
+        2,
+        "tracks should persist across a reparse"
+    );
 }
 
 #[test]
@@ -193,7 +222,11 @@ fn retry_deferred_leaves_album_deferred_when_budget_is_insufficient() {
     let total_bytes: u64 = tracks.iter().map(|t| t.size).sum();
     let key = album_key_for(&tracks);
 
-    let deferred = vec![DeferredAlbum { key: key.clone(), tracks: tracks.len(), bytes: total_bytes }];
+    let deferred = vec![DeferredAlbum {
+        key: key.clone(),
+        tracks: tracks.len(),
+        bytes: total_bytes,
+    }];
 
     let config = test_config();
     let refalac_version: Option<String> = None;
@@ -218,11 +251,58 @@ fn retry_deferred_leaves_album_deferred_when_budget_is_insufficient() {
     )
     .expect("retry_deferred should succeed (a deferral is not an error)");
 
-    assert_eq!(result.len(), 1, "album should still be reported as deferred");
+    assert_eq!(
+        result.len(),
+        1,
+        "album should still be reported as deferred"
+    );
     assert_eq!(result[0].key, key);
     assert_eq!(result[0].tracks, 2);
     assert_eq!(result[0].bytes, total_bytes);
-    assert!(manifest.tracks.is_empty(), "nothing should have been committed to the manifest");
-    assert_eq!(db.track_count(), 0, "nothing should have been added to the DB");
+    assert!(
+        manifest.tracks.is_empty(),
+        "nothing should have been committed to the manifest"
+    );
+    assert_eq!(
+        db.track_count(),
+        0,
+        "nothing should have been added to the DB"
+    );
     assert_eq!(bytes_written, 0, "bytes_written should be untouched");
+}
+
+#[test]
+fn checkpoint_publishes_device_authority_before_warning_only_host_cache() {
+    let mount = fake_mount();
+    write_valid_itunesdb(&mount);
+    let db = OwnedDb::open(&mount).unwrap();
+    let source_root = scratch_dir("src-checkpoint");
+    let source = SourceLocation {
+        resolved_path: source_root.clone(),
+        identity: SourceIdentity::Local {
+            library_id: "fit-retry-library".into(),
+        },
+    };
+    let blocked_root = scratch_dir("blocked-cache");
+    std::fs::create_dir_all(&blocked_root).unwrap();
+    let host_parent = blocked_root.join("not-a-directory");
+    std::fs::write(&host_parent, b"block child creation").unwrap();
+    let host_cache = host_parent.join("manifest.json");
+    let store = ManifestStore::new(
+        mount.clone(),
+        "SERIAL-CHECKPOINT".into(),
+        host_cache.clone(),
+        scratch_dir("legacy").join("manifest.json"),
+        classick::atomic_file::AtomicFileWriter::new(),
+    );
+    let mut manifest = Manifest::empty();
+    manifest.ipod_serial = Some("SERIAL-CHECKPOINT".into());
+
+    db.write().expect("database checkpoint must commit first");
+    let outcome = store.publish(&manifest, &source).unwrap();
+
+    assert!(outcome.device_validated);
+    assert!(outcome.host_cache_warning.is_some());
+    assert!(classick::device_state::portable_manifest_path(&mount).exists());
+    assert!(!host_cache.exists());
 }
