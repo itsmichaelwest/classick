@@ -22,10 +22,17 @@ struct DurableIntentOutbox: Sendable {
   var requestIDs: [String] { intents.map(\.requestID) }
 
   mutating func upsert(_ command: DaemonCommand) throws {
-    let command = command.normalizedForDurableEncoding()
+    var command = command.normalizedForDurableEncoding()
     guard let key = command.durableIntentKey, let requestID = command.requestID else { return }
     guard !intents.contains(where: { $0.requestID == requestID }) else { return }
 
+    if let incomingRules = command.additiveRules,
+      let queued = intents.last(where: { $0.key == key && $0.lastWrittenConnection == nil }),
+      let queuedRules = queued.command.additiveRules
+    {
+      command = command.replacingAdditiveRules(
+        DaemonCommand.canonicalAdditiveRules(queuedRules + incomingRules))
+    }
     intents.removeAll { $0.key == key && $0.lastWrittenConnection == nil }
     var bytes = try JSONEncoder().encode(command)
     bytes.append(0x0A)
@@ -64,7 +71,11 @@ struct DurableIntentOutbox: Sendable {
         $0.requestID == acknowledgement.requestID && $0.lastWrittenConnection != nil
       })
     else { return false }
-    guard intents[index].command.isCommitted(by: acknowledgement) else { return false }
+    if acknowledgement.terminalFailure {
+      guard acknowledgement.target == intents[index].key else { return false }
+    } else {
+      guard intents[index].command.isCommitted(by: acknowledgement) else { return false }
+    }
     intents.remove(at: index)
     return true
   }

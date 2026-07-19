@@ -352,6 +352,8 @@ enum DurableIntentKey: Hashable, Sendable {
   case deviceConfig(serial: String)
   case playlist(String)
   case deviceRemoval(serial: String)
+  case deviceSelectionAddition(serial: String)
+  case playlistAppend(slug: String)
 }
 
 enum DaemonCommand: Encodable, Sendable {
@@ -399,6 +401,8 @@ enum DaemonCommand: Encodable, Sendable {
   /// there is no other way to turn a picked album into literal `.m3u8`
   /// entries. Replies with `resolved_tracks`.
   case resolveTracks(rules: [SelectionRule], requestID: String)
+  case addSelectionToDevice(serial: String, rules: [SelectionRule], requestID: String)
+  case appendSelectionToPlaylist(slug: String, rules: [SelectionRule], requestID: String)
 
   enum Trigger: String, Encodable, Sendable {
     case manual, scheduled
@@ -443,7 +447,9 @@ enum DaemonCommand: Encodable, Sendable {
       .listPlaylists(let requestID), .getPlaylist(_, let requestID),
       .savePlaylist(_, let requestID), .deletePlaylist(_, let requestID),
       .getDeviceConfig(_, let requestID), .saveDeviceConfig(_, _, _, _, let requestID),
-      .previewDevice(_, let requestID), .resolveTracks(_, let requestID):
+      .previewDevice(_, let requestID), .resolveTracks(_, let requestID),
+      .addSelectionToDevice(_, _, let requestID),
+      .appendSelectionToPlaylist(_, _, let requestID):
       requestID
     case .saveConfig(_, _, _, let requestID):
       requestID
@@ -462,6 +468,10 @@ enum DaemonCommand: Encodable, Sendable {
       .playlist(slug)
     case .saveDeviceConfig(let serial, _, _, _, _):
       .deviceConfig(serial: serial)
+    case .addSelectionToDevice(let serial, _, _):
+      .deviceSelectionAddition(serial: serial)
+    case .appendSelectionToPlaylist(let slug, _, _):
+      .playlistAppend(slug: slug)
     default:
       nil
     }
@@ -526,6 +536,12 @@ enum DaemonCommand: Encodable, Sendable {
       return true
     case .forgetIpod, .savePlaylist, .deletePlaylist, .saveDeviceConfig:
       return acknowledgement.revision != nil
+    case .addSelectionToDevice(let serial, _, _):
+      return acknowledgement.revision != nil
+        && acknowledgement.target == .deviceSelectionAddition(serial: serial)
+    case .appendSelectionToPlaylist(let slug, _, _):
+      return acknowledgement.revision != nil
+        && acknowledgement.target == .playlistAppend(slug: slug)
     default:
       return true
     }
@@ -636,6 +652,70 @@ enum DaemonCommand: Encodable, Sendable {
       try container.encode("resolve_tracks", forKey: .type)
       try container.encode(rules, forKey: .rules)
       try container.encode(requestID, forKey: .requestID)
+    case .addSelectionToDevice(let serial, let rules, let requestID):
+      try container.encode("add_selection_to_device", forKey: .type)
+      try container.encode(serial, forKey: .serial)
+      try container.encode(rules, forKey: .rules)
+      try container.encode(requestID, forKey: .requestID)
+    case .appendSelectionToPlaylist(let slug, let rules, let requestID):
+      try container.encode("append_selection_to_playlist", forKey: .type)
+      try container.encode(slug, forKey: .slug)
+      try container.encode(rules, forKey: .rules)
+      try container.encode(requestID, forKey: .requestID)
+    }
+  }
+}
+
+extension DaemonCommand {
+  static func addSelectionToDevice(
+    requestID: UUID, serial: String, rules: [SelectionRule]
+  ) -> Self {
+    .addSelectionToDevice(
+      serial: serial, rules: rules, requestID: requestID.uuidString.lowercased())
+  }
+
+  static func appendSelectionToPlaylist(
+    requestID: UUID, slug: String, rules: [SelectionRule]
+  ) -> Self {
+    .appendSelectionToPlaylist(
+      slug: slug, rules: rules, requestID: requestID.uuidString.lowercased())
+  }
+
+  var additiveRules: [SelectionRule]? {
+    switch self {
+    case .addSelectionToDevice(_, let rules, _), .appendSelectionToPlaylist(_, let rules, _): rules
+    default: nil
+    }
+  }
+
+  func replacingAdditiveRules(_ rules: [SelectionRule]) -> Self {
+    switch self {
+    case .addSelectionToDevice(let serial, _, let requestID):
+      .addSelectionToDevice(serial: serial, rules: rules, requestID: requestID)
+    case .appendSelectionToPlaylist(let slug, _, let requestID):
+      .appendSelectionToPlaylist(slug: slug, rules: rules, requestID: requestID)
+    default: self
+    }
+  }
+
+  static func canonicalAdditiveRules(_ rules: [SelectionRule]) -> [SelectionRule] {
+    let unique = Dictionary(grouping: rules, by: additiveRuleKey).compactMap { $0.value.first }
+    let artists = Set(unique.compactMap { rule -> String? in
+      guard case .artist(let name) = rule else { return nil }
+      return name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    })
+    return unique.filter { rule in
+      guard case .album(let artist, _) = rule else { return true }
+      return !artists.contains(artist.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }.sorted { additiveRuleKey($0) < additiveRuleKey($1) }
+  }
+
+  private static func additiveRuleKey(_ rule: SelectionRule) -> String {
+    switch rule {
+    case .artist(let name): return "0\u{0}\(name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
+    case .album(let artist, let album):
+      return "1\u{0}\(artist.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())\u{0}\(album.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
+    case .genre(let name): return "2\u{0}\(name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
     }
   }
 }

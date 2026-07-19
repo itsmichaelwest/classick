@@ -4,6 +4,193 @@ import XCTest
 
 @MainActor
 final class AppModelReducerTests: XCTestCase {
+  func testLibraryDropSuccessRequiresExpectedRequestTargetAndRevision() {
+    let model = AppModel()
+    seedDevices(["A"], in: model)
+    let target = LibraryDropTarget.device(serial: "A", displayName: "A")
+    model.markLibraryDropAdding(
+      requestID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, target: target)
+    model.apply(
+      .deviceSelectionAdded(
+        .init(
+          acknowledgedRequestID: "wrong", serial: "A", matchedTracks: 1, missingTracks: 0,
+          selectionChanged: true, selectionRevision: 2,
+          selection: .init(mode: .include, rules: [.artist(name: "Birdy")]),
+          delivery: .addedAndSyncing)))
+    XCTAssertTrue(model.isLibraryDropAdding(target: target))
+    XCTAssertNil(model.dropOutcome)
+    XCTAssertEqual(model.devices["A"]?.selectionRevision, 2)
+    XCTAssertEqual(
+      model.devices["A"]?.config?.selection,
+      SelectionState(mode: .include, rules: [.artist(name: "Birdy")]))
+  }
+
+  func testCorrelatedDeviceDropClearsPendingAndPublishesDeliveryOutcome() {
+    let model = AppModel()
+    seedDevices(["A"], in: model)
+    let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    let target = LibraryDropTarget.device(serial: "A", displayName: "My iPod")
+    model.markLibraryDropAdding(requestID: requestID, target: target)
+
+    model.apply(
+      .deviceSelectionAdded(
+        .init(
+          acknowledgedRequestID: requestID.uuidString.lowercased(), serial: "A",
+          matchedTracks: 1, missingTracks: 0, selectionChanged: true, selectionRevision: 2,
+          selection: .init(mode: .include, rules: [.artist(name: "Birdy")]),
+          delivery: .addedForNextSync)))
+
+    XCTAssertFalse(model.isLibraryDropAdding(target: target))
+    XCTAssertEqual(model.dropOutcome, .addedForNextSync(serial: "A"))
+  }
+
+  func testStaleDeviceDropDoesNotOverwriteCanonicalStateOrClearPending() {
+    let model = AppModel()
+    seedDevices(["A"], in: model)
+    model.apply(
+      .deviceSelectionAdded(
+        .init(
+          acknowledgedRequestID: "unrelated", serial: "A", matchedTracks: 1, missingTracks: 0,
+          selectionChanged: true, selectionRevision: 4,
+          selection: .init(mode: .include, rules: [.genre(name: "Pop")]),
+          delivery: .alreadyPresent)))
+    let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+    let target = LibraryDropTarget.device(serial: "A", displayName: "A")
+    model.markLibraryDropAdding(requestID: requestID, target: target)
+
+    model.apply(
+      .deviceSelectionAdded(
+        .init(
+          acknowledgedRequestID: requestID.uuidString.lowercased(), serial: "A",
+          matchedTracks: 1, missingTracks: 0, selectionChanged: true, selectionRevision: 3,
+          selection: .init(mode: .include, rules: [.artist(name: "Birdy")]),
+          delivery: .addedAndSyncing)))
+
+    XCTAssertTrue(model.isLibraryDropAdding(target: target))
+    XCTAssertNil(model.dropOutcome)
+    XCTAssertEqual(model.devices["A"]?.selectionRevision, 4)
+    XCTAssertEqual(
+      model.devices["A"]?.config?.selection,
+      SelectionState(mode: .include, rules: [.genre(name: "Pop")]))
+  }
+
+  func testLibraryMutationRejectionRequiresExactRequestAndTarget() {
+    let model = AppModel()
+    seedDevices(["A", "B"], in: model)
+    let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
+    let target = LibraryDropTarget.device(serial: "A", displayName: "My iPod")
+    model.markLibraryDropAdding(requestID: requestID, target: target)
+
+    model.apply(
+      .libraryMutationRejected(
+        .init(
+          acknowledgedRequestID: requestID.uuidString.lowercased(),
+          target: .deviceSelection(serial: "B"), code: "invalid_rules", message: "Wrong target")))
+    model.apply(
+      .libraryMutationRejected(
+        .init(
+          acknowledgedRequestID: "wrong", target: .deviceSelection(serial: "A"),
+          code: "invalid_rules", message: "Wrong request")))
+    XCTAssertTrue(model.isLibraryDropAdding(target: target))
+    XCTAssertNil(model.dropOutcome)
+
+    model.apply(
+      .libraryMutationRejected(
+        .init(
+          acknowledgedRequestID: requestID.uuidString.lowercased(),
+          target: .deviceSelection(serial: "A"), code: "invalid_rules", message: "No matches")))
+    XCTAssertFalse(model.isLibraryDropAdding(target: target))
+    XCTAssertEqual(model.dropOutcome, .rejected(target: target, message: "No matches"))
+  }
+
+  func testPlaylistDropRequiresNondecreasingRevisionBeforeCompleting() {
+    let model = AppModel()
+    model.apply(
+      .playlistsUpdate(
+        [
+          PlaylistSummary(slug: "mix", name: "Mix", kind: .manual, tracks: 1, bytes: 10, error: nil)
+        ],
+        playlistRevision: 5, acknowledgedRequestID: nil))
+    let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000004")!
+    let target = LibraryDropTarget.manualPlaylist(slug: "mix", displayName: "Mix")
+    model.markLibraryDropAdding(requestID: requestID, target: target)
+
+    model.apply(
+      .playlistSelectionAppended(
+        .init(
+          acknowledgedRequestID: requestID.uuidString.lowercased(), slug: "mix",
+          appendedTracks: 1, playlistRevision: 4,
+          playlist: .init(slug: "mix", name: "Mix", tracks: ["old.flac"]))))
+    XCTAssertTrue(model.isLibraryDropAdding(target: target))
+    XCTAssertNil(model.dropOutcome)
+    XCTAssertEqual(model.playlistRevision, 5)
+
+    model.apply(
+      .playlistSelectionAppended(
+        .init(
+          acknowledgedRequestID: requestID.uuidString.lowercased(), slug: "mix",
+          appendedTracks: 2, playlistRevision: 5,
+          playlist: .init(slug: "mix", name: "Mix", tracks: ["a.flac", "b.flac"]))))
+    XCTAssertFalse(model.isLibraryDropAdding(target: target))
+    XCTAssertEqual(model.dropOutcome, .appended(slug: "mix", count: 2))
+    XCTAssertEqual(model.playlistDetail?.tracks, ["a.flac", "b.flac"])
+  }
+
+  func testPersistedDropAcknowledgementIsRecordedOnceOnlyForCorrelatedTerminalEvent() {
+    let model = AppModel()
+    seedDevices(["A"], in: model)
+    let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000005")!
+    let target = LibraryDropTarget.device(serial: "A", displayName: "A")
+    model.markLibraryDropAdding(requestID: requestID, target: target)
+    let reply = DeviceSelectionAddedInfo(
+      acknowledgedRequestID: requestID.uuidString.lowercased(), serial: "A",
+      matchedTracks: 1, missingTracks: 0, selectionChanged: true, selectionRevision: 1,
+      selection: .init(mode: .include, rules: [.artist(name: "Birdy")]),
+      delivery: .addedAndSyncing)
+
+    model.apply(.deviceSelectionAdded(reply))
+    model.apply(.deviceSelectionAdded(reply))
+
+    XCTAssertEqual(model.persistedDropAcknowledgements, [requestID.uuidString.lowercased()])
+  }
+
+  func testLocalDropRejectionClearsOnlyExactPendingWithoutPersistedAcknowledgement() {
+    let model = AppModel()
+    let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000006")!
+    let secondID = UUID(uuidString: "00000000-0000-0000-0000-000000000007")!
+    let first = LibraryDropTarget.device(serial: "A", displayName: "A")
+    let second = LibraryDropTarget.manualPlaylist(slug: "mix", displayName: "Mix")
+    model.markLibraryDropAdding(requestID: firstID, target: first)
+    model.markLibraryDropAdding(requestID: secondID, target: second)
+
+    model.rejectLibraryDropLocally(requestID: firstID, target: second, message: "Wrong target")
+    XCTAssertTrue(model.isLibraryDropAdding(target: first))
+    XCTAssertTrue(model.isLibraryDropAdding(target: second))
+
+    model.rejectLibraryDropLocally(requestID: firstID, target: first, message: "Not sent")
+    XCTAssertFalse(model.isLibraryDropAdding(target: first))
+    XCTAssertTrue(model.isLibraryDropAdding(target: second))
+    XCTAssertEqual(model.dropOutcome, .rejected(target: first, message: "Not sent"))
+    XCTAssertTrue(model.persistedDropAcknowledgements.isEmpty)
+  }
+
+  func testDropOutcomeAccessibleMessagesAreExact() {
+    XCTAssertEqual(
+      DropOutcome.adding(target: .device(serial: "A", displayName: "A")).accessibleMessage,
+      "Adding…")
+    XCTAssertEqual(DropOutcome.addedAndSyncing(serial: "A").accessibleMessage, "Added and syncing")
+    XCTAssertEqual(
+      DropOutcome.addedForNextSync(serial: "A").accessibleMessage, "Added for next sync")
+    XCTAssertEqual(
+      DropOutcome.alreadyPresent(serial: "A").accessibleMessage, "Already on this iPod")
+    XCTAssertEqual(
+      DropOutcome.appended(slug: "mix", count: 2).accessibleMessage, "Appended 2 songs")
+    XCTAssertEqual(
+      DropOutcome.rejected(
+        target: .manualPlaylist(slug: "mix", displayName: "Mix"), message: "No matches"
+      ).accessibleMessage,
+      "No matches")
+  }
   /// Regression: the first-run setup wizard must NOT reset an enabled Rockbox
   /// compatibility toggle back to off (SaveConfig replaces the whole daemon
   /// blob, so the wizard has to carry the existing value through).

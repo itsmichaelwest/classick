@@ -295,6 +295,66 @@ struct SourceAvailabilityInfo: Equatable, Sendable {
   var acknowledgedRequestID: String?
 }
 
+enum DropDelivery: String, Decodable, Equatable, Sendable {
+  case addedAndSyncing = "added_and_syncing"
+  case addedForNextSync = "added_for_next_sync"
+  case alreadyPresent = "already_present"
+}
+
+typealias DeviceSelectionDelivery = DropDelivery
+
+struct DeviceSelectionAddedInfo: Equatable, Sendable {
+  var acknowledgedRequestID: String
+  var serial: String
+  var matchedTracks: Int
+  var missingTracks: Int
+  var selectionChanged: Bool
+  var selectionRevision: UInt64
+  var selection: SelectionState
+  var delivery: DropDelivery
+}
+
+struct PlaylistSelectionAppendedInfo: Equatable, Sendable {
+  var acknowledgedRequestID: String
+  var slug: String
+  var appendedTracks: Int
+  var playlistRevision: UInt64
+  var playlist: ManualPlaylistWire
+}
+
+struct ManualPlaylistWire: Decodable, Equatable, Sendable {
+  var slug: String
+  var name: String
+  var tracks: [String]
+}
+
+enum LibraryMutationTarget: Decodable, Equatable, Sendable {
+  case deviceSelection(serial: String)
+  case manualPlaylist(slug: String)
+
+  private enum CodingKeys: String, CodingKey { case kind, serial, slug }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    switch try container.decode(String.self, forKey: .kind) {
+    case "device_selection":
+      self = .deviceSelection(serial: try container.decode(String.self, forKey: .serial))
+    case "manual_playlist":
+      self = .manualPlaylist(slug: try container.decode(String.self, forKey: .slug))
+    case let kind:
+      throw DecodingError.dataCorruptedError(
+        forKey: .kind, in: container, debugDescription: "unknown mutation target \(kind)")
+    }
+  }
+}
+
+struct LibraryMutationRejectedInfo: Equatable, Sendable {
+  var acknowledgedRequestID: String
+  var target: LibraryMutationTarget
+  var code: String
+  var message: String
+}
+
 // MARK: - DaemonEvent (received)
 
 enum DaemonEvent: Decodable, Sendable {
@@ -327,6 +387,9 @@ enum DaemonEvent: Decodable, Sendable {
   /// (no rule matched anything in the index), not an error.
   case resolvedTracks(tracks: [String], acknowledgedRequestID: String)
   case commandFailed(acknowledgedRequestID: String, error: String)
+  case deviceSelectionAdded(DeviceSelectionAddedInfo)
+  case playlistSelectionAppended(PlaylistSelectionAppendedInfo)
+  case libraryMutationRejected(LibraryMutationRejectedInfo)
   case unknown  // forward-compat: log + ignore
 
   private enum CodingKeys: String, CodingKey {
@@ -363,7 +426,7 @@ enum DaemonEvent: Decodable, Sendable {
     case selectedBytes = "selected_bytes"
     case adds
     case removes
-    case playlists
+    case playlists, playlist
     case slug
     case kind
     case tracks
@@ -384,6 +447,11 @@ enum DaemonEvent: Decodable, Sendable {
     case settingsRevision = "settings_revision"
     case subscriptionsRevision = "subscriptions_revision"
     case acknowledgedRequestID = "acknowledged_request_id"
+    case matchedTracks = "matched_tracks"
+    case missingTracks = "missing_tracks"
+    case selectionChanged = "selection_changed"
+    case appendedTracks = "appended_tracks"
+    case delivery, target, code, message
   }
 
   init(from decoder: Decoder) throws {
@@ -583,6 +651,32 @@ enum DaemonEvent: Decodable, Sendable {
       self = .commandFailed(
         acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID),
         error: try container.decode(String.self, forKey: .error))
+    case "device_selection_added":
+      self = .deviceSelectionAdded(
+        DeviceSelectionAddedInfo(
+          acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID),
+          serial: try container.decode(String.self, forKey: .serial),
+          matchedTracks: try container.decode(Int.self, forKey: .matchedTracks),
+          missingTracks: try container.decode(Int.self, forKey: .missingTracks),
+          selectionChanged: try container.decode(Bool.self, forKey: .selectionChanged),
+          selectionRevision: try container.decode(UInt64.self, forKey: .selectionRevision),
+          selection: try container.decode(SelectionState.self, forKey: .selection),
+          delivery: try container.decode(DropDelivery.self, forKey: .delivery)))
+    case "playlist_selection_appended":
+      self = .playlistSelectionAppended(
+        PlaylistSelectionAppendedInfo(
+          acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID),
+          slug: try container.decode(String.self, forKey: .slug),
+          appendedTracks: try container.decode(Int.self, forKey: .appendedTracks),
+          playlistRevision: try container.decode(UInt64.self, forKey: .playlistRevision),
+          playlist: try container.decode(ManualPlaylistWire.self, forKey: .playlist)))
+    case "library_mutation_rejected":
+      self = .libraryMutationRejected(
+        LibraryMutationRejectedInfo(
+          acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID),
+          target: try container.decode(LibraryMutationTarget.self, forKey: .target),
+          code: try container.decode(String.self, forKey: .code),
+          message: try container.decode(String.self, forKey: .message)))
     default:
       self = .unknown
     }
@@ -593,6 +687,8 @@ struct DurableAcknowledgement: Equatable, Sendable {
   var requestID: String
   var revision: UInt64?
   var configState: ConfigCommitState?
+  var target: DurableIntentKey? = nil
+  var terminalFailure = false
 }
 
 struct ConfigCommitState: Equatable, Sendable {
@@ -626,8 +722,29 @@ extension DaemonEvent {
         requestID: requestID,
         revision: max(selectionRevision, max(settingsRevision, subscriptionsRevision)),
         configState: nil)
+    case .deviceSelectionAdded(let reply):
+      DurableAcknowledgement(
+        requestID: reply.acknowledgedRequestID, revision: reply.selectionRevision,
+        configState: nil, target: .deviceSelectionAddition(serial: reply.serial))
+    case .playlistSelectionAppended(let reply):
+      DurableAcknowledgement(
+        requestID: reply.acknowledgedRequestID, revision: reply.playlistRevision,
+        configState: nil, target: .playlistAppend(slug: reply.slug))
+    case .libraryMutationRejected(let reply):
+      DurableAcknowledgement(
+        requestID: reply.acknowledgedRequestID, revision: nil, configState: nil,
+        target: reply.target.durableIntentKey, terminalFailure: true)
     default:
       nil
+    }
+  }
+}
+
+extension LibraryMutationTarget {
+  fileprivate var durableIntentKey: DurableIntentKey {
+    switch self {
+    case .deviceSelection(let serial): .deviceSelectionAddition(serial: serial)
+    case .manualPlaylist(let slug): .playlistAppend(slug: slug)
     }
   }
 }

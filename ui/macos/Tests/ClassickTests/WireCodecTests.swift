@@ -3,6 +3,39 @@ import XCTest
 @testable import Classick
 
 final class WireCodecTests: XCTestCase {
+  func testLibraryDropCommandAndEventWireShapes() throws {
+    let id = UUID(uuidString: "018F9D7E-2F2B-7B52-9F1D-F78BDB2F8740")!
+    let command = String(decoding: try JSONEncoder().encode(
+      DaemonCommand.addSelectionToDevice(
+        requestID: id, serial: "A", rules: [.artist(name: "Birdy")])), as: UTF8.self)
+    XCTAssertEqual(
+      try JSONSerialization.jsonObject(with: Data(command.utf8)) as? NSDictionary,
+      ["type": "add_selection_to_device", "request_id": id.uuidString.lowercased(),
+       "serial": "A", "rules": [["kind": "artist", "name": "Birdy"]]] as NSDictionary)
+
+    let event = try JSONDecoder().decode(
+      DaemonEvent.self,
+      from: Data(#"{"type":"device_selection_added","acknowledged_request_id":"req","serial":"A","matched_tracks":12,"missing_tracks":4,"selection_changed":true,"selection_revision":8,"selection":{"mode":"include","rules":[{"kind":"artist","name":"Birdy"}]},"delivery":"added_and_syncing"}"#.utf8))
+    guard case .deviceSelectionAdded(let reply) = event else { return XCTFail("wrong event") }
+    XCTAssertEqual(reply.selectionRevision, 8)
+    XCTAssertEqual(reply.delivery, .addedAndSyncing)
+
+    let playlistEvent = try JSONDecoder().decode(
+      DaemonEvent.self,
+      from: Data(#"{"type":"playlist_selection_appended","acknowledged_request_id":"req-playlist","slug":"favorites","appended_tracks":2,"playlist_revision":9,"playlist":{"slug":"favorites","name":"Favorites","tracks":["Birdy/Fire Within/01.flac"]}}"#.utf8))
+    guard case .playlistSelectionAppended(let playlistReply) = playlistEvent else {
+      return XCTFail("wrong playlist event")
+    }
+    XCTAssertEqual(playlistReply.playlist.tracks, ["Birdy/Fire Within/01.flac"])
+
+    let rejection = try JSONDecoder().decode(
+      DaemonEvent.self,
+      from: Data(#"{"type":"library_mutation_rejected","acknowledged_request_id":"req-device","target":{"kind":"device_selection","serial":"A"},"code":"invalid_rules","message":"drop rules must not be empty"}"#.utf8))
+    guard case .libraryMutationRejected(let failure) = rejection else {
+      return XCTFail("wrong rejection event")
+    }
+    XCTAssertEqual(failure.target, .deviceSelection(serial: "A"))
+  }
   func testShutdownEncodesExactWireObject() throws {
     let data = try JSONEncoder().encode(DaemonCommand.shutdown)
     XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"type":"shutdown"}"#)

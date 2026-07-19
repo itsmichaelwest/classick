@@ -129,6 +129,12 @@ final class AppModel {
   private(set) var syncedCount: Int = 0
   private(set) var libraryCount: Int?
   private(set) var history: [HistoryEntry] = []
+  private var libraryDropState = LibraryDropState()
+  private(set) var persistedDropAcknowledgements: [String] = []
+
+  var dropOutcome: DropOutcome? {
+    libraryDropState.outcome
+  }
 
   // Protocol 1.5.0: the most recently completed run's `finish` rollups,
   // for immediate post-sync display (Task 17). These are separate from
@@ -439,6 +445,54 @@ final class AppModel {
       deviceState.config?.preview = preview
       devices[serial] = deviceState
 
+    case .deviceSelectionAdded(let reply):
+      guard var deviceState = devices[reply.serial] else { break }
+      let acceptsRevision = reply.selectionRevision >= deviceState.selectionRevision
+      if acceptsRevision {
+        var config = deviceState.config ?? .defaultState
+        config.selection = reply.selection
+        deviceState.config = config
+        deviceState.selectionRevision = reply.selectionRevision
+        devices[reply.serial] = deviceState
+        let completed = libraryDropState.completeDevice(
+          requestID: reply.acknowledgedRequestID,
+          serial: reply.serial,
+          delivery: reply.delivery)
+        recordPersistedDropAcknowledgement(reply.acknowledgedRequestID, if: completed)
+      }
+
+    case .playlistSelectionAppended(let reply):
+      let acceptsRevision = reply.playlistRevision >= playlistRevision
+      if acceptsRevision {
+        playlistRevision = reply.playlistRevision
+        if let index = playlists.firstIndex(where: { $0.slug == reply.slug }) {
+          playlists[index].name = reply.playlist.name
+          playlists[index].tracks = reply.playlist.tracks.count
+          playlists[index].error = nil
+        }
+        playlistDetail = PlaylistDetail(
+          slug: reply.playlist.slug,
+          name: reply.playlist.name,
+          kind: .manual,
+          tracks: reply.playlist.tracks,
+          rules: nil,
+          error: nil,
+          playlistRevision: reply.playlistRevision,
+          acknowledgedRequestID: reply.acknowledgedRequestID)
+        let completed = libraryDropState.completePlaylist(
+          requestID: reply.acknowledgedRequestID,
+          slug: reply.slug,
+          appendedTracks: reply.appendedTracks)
+        recordPersistedDropAcknowledgement(reply.acknowledgedRequestID, if: completed)
+      }
+
+    case .libraryMutationRejected(let rejection):
+      let completed = libraryDropState.reject(
+        requestID: rejection.acknowledgedRequestID,
+        target: rejection.target,
+        message: rejection.message)
+      recordPersistedDropAcknowledgement(rejection.acknowledgedRequestID, if: completed)
+
     case .configUpdate(let source, let daemon, let ipod, let revision, let acknowledgedRequestID):
       guard revision >= configRevision else { break }
       config = AppConfig(source: source, daemon: daemon, ipod: ipod)
@@ -521,6 +575,25 @@ final class AppModel {
   /// `decide_prompt` sent) so the same prompt isn't re-presented.
   func clearPendingPrompt() {
     pendingPrompt = nil
+  }
+
+  func markLibraryDropAdding(requestID: UUID, target: LibraryDropTarget) {
+    libraryDropState.markAdding(requestID: requestID, target: target)
+  }
+
+  func isLibraryDropAdding(target: LibraryDropTarget) -> Bool {
+    libraryDropState.isAdding(target: target)
+  }
+
+  func rejectLibraryDropLocally(
+    requestID: UUID, target: LibraryDropTarget, message: String
+  ) {
+    libraryDropState.rejectLocally(requestID: requestID, target: target, message: message)
+  }
+
+  private func recordPersistedDropAcknowledgement(_ requestID: String, if completed: Bool) {
+    guard completed, !persistedDropAcknowledgements.contains(requestID) else { return }
+    persistedDropAcknowledgements.append(requestID)
   }
 
   /// Clears the currently presented failure after the user dismisses Details.

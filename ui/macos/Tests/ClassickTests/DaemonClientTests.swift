@@ -66,6 +66,50 @@ private final class CommandSink: @unchecked Sendable {
 }
 
 final class DaemonClientTests: XCTestCase {
+  func testAdditiveIntentKeepsWrittenPredecessorAndMergesQueuedSuccessor() throws {
+    var outbox = DurableIntentOutbox()
+    try outbox.upsert(.addSelectionToDevice(
+      requestID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+      serial: "A", rules: [.artist(name: "Birdy")]))
+    outbox.markWritten(requestID: "00000000-0000-0000-0000-000000000001", connectionGeneration: 1)
+    try outbox.upsert(.addSelectionToDevice(
+      requestID: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+      serial: "A", rules: [.genre(name: "Pop")]))
+    try outbox.upsert(.addSelectionToDevice(
+      requestID: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!,
+      serial: "A", rules: [.album(artist: "Birdy", album: "Fire Within")]))
+    XCTAssertEqual(outbox.requestIDs, [
+      "00000000-0000-0000-0000-000000000001",
+      "00000000-0000-0000-0000-000000000003",
+    ])
+    XCTAssertEqual(outbox.nextIntent(for: 1)?.requestID, nil)
+
+    XCTAssertTrue(outbox.acknowledge(.init(
+      requestID: "00000000-0000-0000-0000-000000000001", revision: 2,
+      configState: nil, target: .deviceSelectionAddition(serial: "A"))))
+    XCTAssertEqual(
+      outbox.nextIntent(for: 1)?.requestID,
+      "00000000-0000-0000-0000-000000000003")
+  }
+
+  func testAdditiveCollisionRemovesOnlyExactTargetAndCommandFailureRetains() throws {
+    var outbox = DurableIntentOutbox()
+    try outbox.upsert(.appendSelectionToPlaylist(
+      requestID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+      slug: "favorites", rules: [.genre(name: "Pop")]))
+    outbox.markWritten(requestID: "00000000-0000-0000-0000-000000000001", connectionGeneration: 1)
+    XCTAssertFalse(outbox.acknowledge(.init(
+      requestID: "00000000-0000-0000-0000-000000000001", revision: nil,
+      configState: nil, target: nil)))
+    XCTAssertFalse(outbox.acknowledge(.init(
+      requestID: "00000000-0000-0000-0000-000000000001", revision: nil,
+      configState: nil, target: .deviceSelectionAddition(serial: "favorites"),
+      terminalFailure: true)))
+    XCTAssertTrue(outbox.acknowledge(.init(
+      requestID: "00000000-0000-0000-0000-000000000001", revision: nil,
+      configState: nil, target: .playlistAppend(slug: "favorites"), terminalFailure: true)))
+    XCTAssertTrue(outbox.requestIDs.isEmpty)
+  }
   func testHundredEventBurstPreservesExactWireOrder() async throws {
     let path = NSTemporaryDirectory() + "cdor_\(UUID().uuidString.prefix(8)).sock"
     defer { unlink(path) }
