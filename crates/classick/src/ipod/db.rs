@@ -20,6 +20,12 @@ pub struct TrackHandle {
     pub ipod_relpath: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackFileDisposition {
+    DeleteAfterCommit,
+    Keep,
+}
+
 /// Read-only snapshot of every per-track artwork signal exposed by libgpod.
 /// Kept as raw facts so audit policy and failure ordering remain pure/testable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -255,30 +261,64 @@ impl OwnedDb {
         Ok(handle)
     }
 
-    /// Remove a track from the iPod by dbid. Idempotent (returns Ok if not present).
-    /// Does NOT call `itdb_write`; the caller batches multiple removes + adds
-    /// then calls `write` once.
-    pub fn delete_track(&self, dbid: u64) -> Result<()> {
+    unsafe fn unlink_track_from_all_playlists(&self, track: *mut ffi::Itdb_Track) -> Result<usize> {
+        if track.is_null() {
+            return Err(anyhow!("cannot unlink a null track"));
+        }
+        let mut containing = Vec::new();
+        let mut node = (*self.0).playlists;
+        while !node.is_null() {
+            let playlist = (*node).data as *mut ffi::Itdb_Playlist;
+            if !playlist.is_null() && ffi::itdb_playlist_contains_track(playlist, track) != 0 {
+                containing.push(playlist);
+            }
+            node = (*node).next;
+        }
+        for playlist in &containing {
+            ffi::itdb_playlist_remove_track(*playlist, track);
+        }
+        Ok(containing.len())
+    }
+
+    /// Remove a track record after first unlinking every normal, smart, and
+    /// master-playlist membership. Does not write the database.
+    pub fn remove_track(&self, dbid: u64, disposition: TrackFileDisposition) -> Result<bool> {
         unsafe {
             let found = self.find_track_by_dbid(dbid);
             if found.is_null() {
-                return Ok(()); // already gone; idempotent
+                return Ok(false);
             }
-
-            // Delete the on-iPod file via libgpod's path helper.
             let fname_c = ffi::itdb_filename_on_ipod(found);
-            if !fname_c.is_null() {
-                let path_str = std::ffi::CStr::from_ptr(fname_c)
-                    .to_string_lossy()
-                    .into_owned();
-                let _ = std::fs::remove_file(std::path::Path::new(&path_str));
+            let file = if fname_c.is_null() {
+                None
+            } else {
+                let path = PathBuf::from(CStr::from_ptr(fname_c).to_string_lossy().as_ref());
                 ffi::g_free(fname_c as *mut std::os::raw::c_void);
-            }
-            // Remove from all playlists, then remove + free the track.
-            ffi::itdb_playlist_remove_track(std::ptr::null_mut(), found);
+                Some(path)
+            };
+            self.unlink_track_from_all_playlists(found)?;
             ffi::itdb_track_remove(found);
+            if disposition == TrackFileDisposition::DeleteAfterCommit {
+                if let Some(path) = file {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error).with_context(|| {
+                                format!("delete removed track audio {}", path.display())
+                            });
+                        }
+                    }
+                }
+            }
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Compatibility wrapper for callers that want immediate file deletion.
+    pub fn delete_track(&self, dbid: u64) -> Result<()> {
+        self.remove_track(dbid, TrackFileDisposition::DeleteAfterCommit)
+            .map(|_| ())
     }
 
     /// Remove a track record and playlist membership while retaining its
@@ -293,8 +333,7 @@ impl OwnedDb {
                 dbid,
                 ipod_relpath: read_ipod_relpath(found),
             };
-            ffi::itdb_playlist_remove_track(std::ptr::null_mut(), found);
-            ffi::itdb_track_remove(found);
+            self.remove_track(dbid, TrackFileDisposition::Keep)?;
             Ok(Some(handle))
         }
     }
@@ -636,35 +675,23 @@ impl Drop for OwnedDb {
 /// Used by `--replace-library` (Task 11) to erase the device before
 /// re-syncing the current selection from scratch. Proven sequence —
 /// see `examples/wipe-tracks.rs` and the 2026-05-17 LEARNINGS entry:
-/// `itdb_playlist_remove_track(NULL, track)` removes a track from every
-/// playlist in one call, and `itdb_track_remove` alone (no separate
-/// `itdb_track_unlink`) handles both the DB tracks-list removal and the
-/// struct free.
-///
-/// Track pointers are collected into a `Vec` before iterating rather than
-/// walking `(*node).next` while removing — `itdb_track_remove` frees the
-/// GList node out from under an in-progress walk otherwise.
+/// Track DBIDs are collected before removing because removal frees the GList
+/// node under an in-progress walk.
 pub fn wipe_all_tracks(db: &OwnedDb) -> Result<usize> {
-    let mut tracks: Vec<*mut ffi::Itdb_Track> = Vec::new();
+    let mut dbids = Vec::new();
     unsafe {
         let mut node = (*db.as_ptr()).tracks;
         while !node.is_null() {
-            tracks.push((*node).data as *mut ffi::Itdb_Track);
+            let track = (*node).data as *mut ffi::Itdb_Track;
+            if !track.is_null() {
+                dbids.push((*track).dbid);
+            }
             node = (*node).next;
         }
     }
-    let count = tracks.len();
-    unsafe {
-        for track in tracks {
-            let fname_c = ffi::itdb_filename_on_ipod(track);
-            if !fname_c.is_null() {
-                let path_str = CStr::from_ptr(fname_c).to_string_lossy().into_owned();
-                let _ = std::fs::remove_file(Path::new(&path_str));
-                ffi::g_free(fname_c as *mut std::os::raw::c_void);
-            }
-            ffi::itdb_playlist_remove_track(ptr::null_mut(), track);
-            ffi::itdb_track_remove(track);
-        }
+    let count = dbids.len();
+    for dbid in dbids {
+        db.remove_track(dbid, TrackFileDisposition::DeleteAfterCommit)?;
     }
     Ok(count)
 }

@@ -236,6 +236,55 @@ fn wipe_all_tracks_on_empty_db_is_a_noop() {
 }
 
 #[test]
+fn wipe_all_tracks_clears_normal_and_smart_memberships() {
+    let mount = fake_mount();
+    write_valid_itunesdb(&mount);
+    let db = OwnedDb::open(&mount).unwrap();
+    let source_root = scratch_dir("playlist-members");
+    seed_tracks(&db, &source_root, 2);
+
+    unsafe {
+        for (name, smart) in [("Foreign", 0), ("Foreign Smart", 1)] {
+            let name = CString::new(name).unwrap();
+            let playlist = ffi::itdb_playlist_new(name.as_ptr(), smart);
+            assert!(!playlist.is_null());
+            ffi::itdb_playlist_add(db.as_ptr(), playlist, -1);
+            let mut node = (*db.as_ptr()).tracks;
+            while !node.is_null() {
+                let track = (*node).data as *mut ffi::Itdb_Track;
+                assert!(!track.is_null());
+                ffi::itdb_playlist_add_track(playlist, track, -1);
+                node = (*node).next;
+            }
+        }
+    }
+
+    assert_eq!(wipe_all_tracks(&db).unwrap(), 2);
+    db.write().unwrap();
+    drop(db);
+    let reopened = OwnedDb::open(&mount).unwrap();
+    assert_eq!(playlist_member_count(&reopened, "Foreign"), 0);
+    assert_eq!(playlist_member_count(&reopened, "Foreign Smart"), 0);
+}
+
+fn playlist_member_count(db: &OwnedDb, name: &str) -> usize {
+    unsafe {
+        let mut node = (*db.as_ptr()).playlists;
+        while !node.is_null() {
+            let playlist = (*node).data as *mut ffi::Itdb_Playlist;
+            if !playlist.is_null()
+                && !(*playlist).name.is_null()
+                && std::ffi::CStr::from_ptr((*playlist).name).to_string_lossy() == name
+            {
+                return ffi::itdb_playlist_tracks_number(playlist) as usize;
+            }
+            node = (*node).next;
+        }
+    }
+    panic!("playlist {name:?} not found")
+}
+
+#[test]
 fn replace_commit_writes_empty_db_before_empty_authoritative_manifest() {
     let mount = fake_mount();
     write_valid_itunesdb(&mount);
