@@ -582,7 +582,7 @@ final class AppModelReducerTests: XCTestCase {
         [
           PlaylistSummary(
             slug: "gym", name: "Gym", kind: .manual, tracks: 12, bytes: 900, error: nil)
-        ], acknowledgedRequestID: nil))
+        ], playlistRevision: 0, acknowledgedRequestID: nil))
     XCTAssertEqual(m.playlists.map(\.slug), ["gym"])
 
     m.apply(
@@ -590,7 +590,7 @@ final class AppModelReducerTests: XCTestCase {
         [
           PlaylistSummary(
             slug: "chill", name: "Chill", kind: .smart, tracks: 5, bytes: 100, error: nil)
-        ], acknowledgedRequestID: nil))
+        ], playlistRevision: 0, acknowledgedRequestID: nil))
     XCTAssertEqual(
       m.playlists.map(\.slug), ["chill"], "playlists_update must replace the list, not append")
   }
@@ -601,7 +601,7 @@ final class AppModelReducerTests: XCTestCase {
       .playlistDetail(
         PlaylistDetail(
           slug: "gym", name: "Gym", kind: .manual, tracks: ["a.flac"], rules: nil, error: nil,
-          acknowledgedRequestID: "request-a")))
+          playlistRevision: 0, acknowledgedRequestID: "request-a")))
     XCTAssertEqual(m.playlistDetail?.slug, "gym")
     XCTAssertEqual(m.playlistDetail?.tracks, ["a.flac"])
   }
@@ -615,6 +615,7 @@ final class AppModelReducerTests: XCTestCase {
         selection: SelectionState(mode: .include, rules: [.artist(name: "Boards of Canada")]),
         subscriptions: SubscriptionsWire(playlists: ["gym"]),
         settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0,
         acknowledgedRequestID: "request-a"))
     XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.mode, .include)
     XCTAssertEqual(m.deviceConfigs["0xA"]?.subscriptions.playlists, ["gym"])
@@ -626,6 +627,7 @@ final class AppModelReducerTests: XCTestCase {
         selection: SelectionState(mode: .all, rules: []),
         subscriptions: SubscriptionsWire(playlists: []),
         settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0,
         acknowledgedRequestID: "request-b"))
     XCTAssertEqual(m.deviceConfigs.count, 2)
     XCTAssertEqual(
@@ -706,6 +708,7 @@ final class AppModelReducerTests: XCTestCase {
         selection: SelectionState(mode: .include, rules: [.genre(name: "New")]),
         subscriptions: SubscriptionsWire(playlists: ["new"]),
         settings: DeviceSettingsWire(autoSync: false, rockboxCompat: true),
+        selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0,
         acknowledgedRequestID: "new-save"))
     m.apply(
       .deviceConfigUpdate(
@@ -713,6 +716,7 @@ final class AppModelReducerTests: XCTestCase {
         selection: SelectionState(mode: .all, rules: []),
         subscriptions: SubscriptionsWire(playlists: ["old"]),
         settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0,
         acknowledgedRequestID: "old-get"))
 
     XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.rules, [.genre(name: "New")])
@@ -732,6 +736,7 @@ final class AppModelReducerTests: XCTestCase {
         selection: SelectionState(mode: .include, rules: [.artist(name: "Broadcast")]),
         subscriptions: SubscriptionsWire(playlists: []),
         settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0,
         acknowledgedRequestID: "another-client"))
 
     XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.rules, [.artist(name: "Broadcast")])
@@ -748,6 +753,7 @@ final class AppModelReducerTests: XCTestCase {
         selection: SelectionState(mode: .include, rules: [.artist(name: "External")]),
         subscriptions: SubscriptionsWire(playlists: ["external"]),
         settings: DeviceSettingsWire(autoSync: false, rockboxCompat: true),
+        selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0,
         acknowledgedRequestID: "another-client"))
     m.apply(
       .deviceConfigUpdate(
@@ -755,6 +761,7 @@ final class AppModelReducerTests: XCTestCase {
         selection: SelectionState(mode: .all, rules: []),
         subscriptions: SubscriptionsWire(playlists: ["stale"]),
         settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0,
         acknowledgedRequestID: "stale-get"))
 
     XCTAssertEqual(m.deviceConfigs["0xA"]?.selection.rules, [.artist(name: "External")])
@@ -772,6 +779,7 @@ final class AppModelReducerTests: XCTestCase {
         serial: "0xA", selection: .init(mode: .all, rules: []),
         subscriptions: .init(playlists: []),
         settings: .init(autoSync: true, rockboxCompat: false),
+        selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0,
         acknowledgedRequestID: "config"))
     m.willRequestDevicePreview(serial: "0xA", requestID: "preview")
     m.apply(
@@ -842,6 +850,7 @@ final class AppModelReducerTests: XCTestCase {
         selection: SelectionState(mode: .include, rules: [.genre(name: "Current")]),
         subscriptions: SubscriptionsWire(playlists: ["current"]),
         settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
+        selectionRevision: 0, settingsRevision: 0, subscriptionsRevision: 0,
         acknowledgedRequestID: "save"))
     m.apply(
       .devicePreview(
@@ -1015,9 +1024,9 @@ final class AppModelReducerTests: XCTestCase {
     let list = [
       PlaylistSummary(slug: "gym", name: "Gym", kind: .manual, tracks: 12, bytes: 900, error: nil)
     ]
-    m.apply(.playlistsUpdate(list, acknowledgedRequestID: nil))
+    m.apply(.playlistsUpdate(list, playlistRevision: 0, acknowledgedRequestID: nil))
     XCTAssertEqual(m.playlistsUpdateRevision, 1)
-    m.apply(.playlistsUpdate(list, acknowledgedRequestID: nil))
+    m.apply(.playlistsUpdate(list, playlistRevision: 0, acknowledgedRequestID: nil))
     XCTAssertEqual(
       m.playlistsUpdateRevision, 2, "revision must bump even when the list content is identical")
   }

@@ -1371,10 +1371,12 @@ real domain state.
 | `sync_event` | `line`, `session_id`; `serial` for every device session | `serial` is omitted only for a global scan session |
 | `device_inventory_snapshot` | `revision`, `devices` | Snapshot fields listed below |
 | `selection_preview` | `selected_tracks`, `selected_bytes`, `adds`, `removes`, `serial`, `acknowledged_request_id` | — |
-| `playlist_detail` | existing detail fields, `acknowledged_request_id` | content/error fields retain their documented result semantics |
-| `device_config_update` | `serial`, `selection`, `subscriptions`, `settings`, `acknowledged_request_id` | — |
+| `playlists_update` | `playlists`, `playlist_revision` | `acknowledged_request_id` (absent for an unsolicited broadcast) |
+| `playlist_detail` | existing detail fields, `playlist_revision`, `acknowledged_request_id` | content/error fields retain their documented result semantics |
+| `device_config_update` | `serial`, `selection`, `subscriptions`, `settings`, `selection_revision`, `settings_revision`, `subscriptions_revision`, `acknowledged_request_id` | — |
 | `device_preview` | `serial`, existing preview fields, `acknowledged_request_id` | `projected_free_bytes` may be `null`; `unresolved_subscriptions` is omitted when empty |
 | `resolved_tracks` | `tracks`, `acknowledged_request_id` | — |
+| `command_failed` | `acknowledged_request_id`, `error` | —; deliberately has no revision and is not a durable acknowledgement |
 | `source_availability` | `state`; `source_root` when `state` is `available` | `acknowledged_request_id` (terminal reply to an explicit retry only) |
 
 `status_update`, `library_update`, `selection_update`, and `playlists_update`
@@ -1388,6 +1390,36 @@ advances only after a content-changing config write succeeds; reads, failed
 writes, and no-op saves retain the current revision. A new `hello` starts a new
 connection epoch, so clients discard revision ordering from the prior daemon
 process rather than comparing across restarts.
+
+`playlist_revision` follows the same process-lifetime epoch. It advances only
+after a playlist save or an actual playlist deletion has been persisted. Reads,
+failed writes, and deletion of an already-missing slug retain the current
+revision. `selection_revision`, `settings_revision`, and
+`subscriptions_revision` are the durable per-device counters stored in the
+device registry; `save_device_config` publishes their post-write values.
+
+For `save_config`, `save_device_config`, `save_playlist`, and
+`delete_playlist`, the correlated canonical event is emitted only after the
+corresponding atomic store write succeeds. Its `acknowledged_request_id` and
+revision are therefore the evidence a durable-intent client uses to remove
+that request from its outbox. `get_playlist` returns the current playlist
+revision, while the pure `resolve_tracks` reply is correlated but does not
+carry a persistence revision.
+
+A rejected or failed editor command receives a private `command_failed` reply
+with the original request ID and a user-safe error string. It advances no
+revision, is never a canonical success event, and must not remove a durable
+intent from the client outbox. In particular, failed playlist deletion keeps
+the transaction's no-success-broadcast guarantee.
+
+Examples:
+
+```json
+{"type":"playlists_update","playlists":[],"playlist_revision":7,"acknowledged_request_id":"req-playlist"}
+{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":[],"playlist_revision":7,"acknowledged_request_id":"req-detail"}
+{"type":"device_config_update","serial":"RAW-A","selection":{"mode":"include","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"settings_revision":4,"subscriptions_revision":5,"acknowledged_request_id":"req-device"}
+{"type":"command_failed","acknowledged_request_id":"req-playlist","error":"could not persist the playlist"}
+```
 
 ### Cancellation finalization
 

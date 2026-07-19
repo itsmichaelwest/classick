@@ -8,7 +8,7 @@
 //! a scripted device watcher and a fake spawn-fn.
 
 use crate::config_file::{self, PersistedConfig};
-use crate::daemon::command_handler::{same_serial, target_rejection};
+use crate::daemon::command_handler::{command_failed, same_serial, target_rejection};
 use crate::daemon::device_registry::DeviceRegistry;
 use crate::daemon::device_snapshot::DeviceSnapshotPublisher;
 use crate::daemon::device_storage;
@@ -318,6 +318,25 @@ impl ConfigRevision {
     #[cfg(test)]
     fn advance_after_persist(&mut self) -> u64 {
         self.record_persisted_mutation(true)
+    }
+}
+
+#[derive(Debug, Default)]
+struct PlaylistRevision(u64);
+
+impl PlaylistRevision {
+    fn current(&self) -> u64 {
+        self.0
+    }
+
+    fn record_persisted_mutation(&mut self, did_mutate: bool) -> u64 {
+        if did_mutate {
+            self.0 = self
+                .0
+                .checked_add(1)
+                .expect("daemon playlist revision space exhausted");
+        }
+        self.0
     }
 }
 
@@ -780,6 +799,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let mut state = RuntimeState::new();
     let mut snapshot_publisher = DeviceSnapshotPublisher::default();
     let mut config_revision = ConfigRevision::default();
+    let mut playlist_revision = PlaylistRevision::default();
     let mut scheduler = SyncScheduler::new(deps.schedule_minutes);
     let mut debouncer = Debouncer::new(crate::daemon::DEVICE_DEBOUNCE_WINDOW);
     let source_availability = deps
@@ -886,6 +906,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                     &mut scheduler,
                     &mut library_count_cache,
                     &mut config_revision,
+                    &mut playlist_revision,
                     &mut source_recovery,
                     &source_availability,
                 );
@@ -2035,6 +2056,7 @@ fn handle_client_command(
     scheduler: &mut SyncScheduler,
     library_count_cache: &mut Option<usize>,
     config_revision: &mut ConfigRevision,
+    playlist_revision: &mut PlaylistRevision,
     source_recovery: &mut SourceRecoveryState,
     source_availability: &SourceAvailabilityService,
 ) -> bool {
@@ -2093,6 +2115,10 @@ fn handle_client_command(
                 Ok(config) => config.unwrap_or_default(),
                 Err(error) => {
                     tracing::error!("daemon: failed to load config before save: {error:#}");
+                    let _ = reply.send(command_failed(
+                        request_id,
+                        "could not load the current configuration",
+                    ));
                     return false;
                 }
             };
@@ -2100,12 +2126,7 @@ fn handle_client_command(
             if let Some(s) = source {
                 if let Err(error) = apply_explicit_source_update(&mut current, PathBuf::from(s)) {
                     tracing::error!("daemon: failed to resolve source identity: {error:#}");
-                    let _ = event_tx.send(build_config_update(
-                        Some(before),
-                        registry,
-                        config_revision.current(),
-                        Some(request_id),
-                    ));
+                    let _ = reply.send(command_failed(request_id, "invalid source location"));
                     return false;
                 }
             }
@@ -2118,6 +2139,10 @@ fn handle_client_command(
             if global_changed {
                 if let Err(e) = config_file::save(config_path, &current) {
                     tracing::error!("daemon: failed to save config: {e}");
+                    let _ = reply.send(command_failed(
+                        request_id,
+                        "could not persist the configuration",
+                    ));
                     return false;
                 }
                 if source_changed {
@@ -2130,14 +2155,16 @@ fn handle_client_command(
                         "daemon: cannot configure unknown device {}",
                         identity.serial
                     );
-                    let persisted_revision =
-                        config_revision.record_persisted_mutation(global_changed);
-                    let _ = event_tx.send(build_config_update(
-                        Some(current),
-                        registry,
-                        persisted_revision,
-                        Some(request_id),
-                    ));
+                    if global_changed {
+                        let persisted_revision = config_revision.record_persisted_mutation(true);
+                        let _ = event_tx.send(build_config_update(
+                            Some(current),
+                            registry,
+                            persisted_revision,
+                            None,
+                        ));
+                    }
+                    let _ = reply.send(command_failed(request_id, "unknown device"));
                     return false;
                 };
                 identity.serial = record.serial.clone();
@@ -2154,13 +2181,19 @@ fn handle_client_command(
                             "daemon: failed to configure device {}: {error:#}",
                             identity.serial
                         );
-                        let persisted_revision =
-                            config_revision.record_persisted_mutation(global_changed);
-                        let _ = event_tx.send(build_config_update(
-                            Some(current),
-                            registry,
-                            persisted_revision,
-                            Some(request_id),
+                        if global_changed {
+                            let persisted_revision =
+                                config_revision.record_persisted_mutation(true);
+                            let _ = event_tx.send(build_config_update(
+                                Some(current),
+                                registry,
+                                persisted_revision,
+                                None,
+                            ));
+                        }
+                        let _ = reply.send(command_failed(
+                            request_id,
+                            "could not persist the device configuration",
                         ));
                         return false;
                     }
@@ -2504,11 +2537,17 @@ fn handle_client_command(
         }
         DaemonCommand::ListPlaylists { request_id } => {
             let _ = reply.send(
-                build_playlists_update(config_path).with_acknowledged_request_id(Some(request_id)),
+                build_playlists_update(config_path, playlist_revision.current())
+                    .with_acknowledged_request_id(Some(request_id)),
             );
         }
         DaemonCommand::GetPlaylist { slug, request_id } => {
-            let _ = reply.send(build_playlist_detail(config_path, &slug, request_id));
+            let _ = reply.send(build_playlist_detail(
+                config_path,
+                &slug,
+                playlist_revision.current(),
+                request_id,
+            ));
         }
         DaemonCommand::SavePlaylist {
             playlist,
@@ -2518,6 +2557,10 @@ fn handle_client_command(
                 tracing::warn!(
                     "daemon: client {client_id} save_playlist: could not open playlist store"
                 );
+                let _ = reply.send(command_failed(
+                    request_id,
+                    "could not open the playlist store",
+                ));
                 return false;
             };
             let built = match playlist {
@@ -2530,6 +2573,10 @@ fn handle_client_command(
                                 tracing::error!(
                                     "daemon: client {client_id} save_playlist: could not allocate a slug for {name:?}: {e:#}"
                                 );
+                                let _ = reply.send(command_failed(
+                                    request_id,
+                                    "could not allocate a playlist identifier",
+                                ));
                                 return false;
                             }
                         },
@@ -2550,6 +2597,10 @@ fn handle_client_command(
                                 tracing::error!(
                                     "daemon: client {client_id} save_playlist: could not allocate a slug for {name:?}: {e:#}"
                                 );
+                                let _ = reply.send(command_failed(
+                                    request_id,
+                                    "could not allocate a playlist identifier",
+                                ));
                                 return false;
                             }
                         },
@@ -2563,10 +2614,13 @@ fn handle_client_command(
             };
             if let Err(e) = store.save(&built) {
                 tracing::error!("daemon: client {client_id} save_playlist failed: {e:#}");
+                let _ = reply.send(command_failed(request_id, "could not persist the playlist"));
                 return false;
             }
+            let persisted_revision = playlist_revision.record_persisted_mutation(true);
             let _ = event_tx.send(
-                build_playlists_update(config_path).with_acknowledged_request_id(Some(request_id)),
+                build_playlists_update(config_path, persisted_revision)
+                    .with_acknowledged_request_id(Some(request_id)),
             );
         }
         DaemonCommand::DeletePlaylist { slug, request_id } => {
@@ -2590,12 +2644,15 @@ fn handle_client_command(
                     for serial in outcome.changed_revisions.keys() {
                         let _ = event_tx.send(build_device_config_update(
                             config_path,
+                            registry,
                             serial,
                             request_id.clone(),
                         ));
                     }
+                    let persisted_revision =
+                        playlist_revision.record_persisted_mutation(outcome.deleted);
                     let _ = event_tx.send(
-                        build_playlists_update(config_path)
+                        build_playlists_update(config_path, persisted_revision)
                             .with_acknowledged_request_id(Some(request_id)),
                     );
                 }
@@ -2603,6 +2660,7 @@ fn handle_client_command(
                     tracing::error!(
                         "daemon: client {client_id} delete_playlist({slug}) failed: {error:#}"
                     );
+                    let _ = reply.send(command_failed(request_id, "could not delete the playlist"));
                 }
             }
         }
@@ -2615,6 +2673,7 @@ fn handle_client_command(
                 .expect("get_device_config is serial-targeted");
             let _ = reply.send(build_device_config_update(
                 config_path,
+                registry,
                 raw_serial,
                 request_id,
             ));
@@ -2647,15 +2706,29 @@ fn handle_client_command(
                         if changed {
                             match crate::selection::save_atomic(&path, &full) {
                                 Ok(()) => selection_changed = true,
-                                Err(e) => tracing::error!(
-                                    "daemon: failed to save device selection for {raw_serial}: {e:#}"
-                                ),
+                                Err(e) => {
+                                    tracing::error!(
+                                        "daemon: failed to save device selection for {raw_serial}: {e:#}"
+                                    );
+                                    let _ = reply.send(command_failed(
+                                        request_id,
+                                        "could not persist the device selection",
+                                    ));
+                                    return false;
+                                }
                             }
                         }
                     }
-                    Err(e) => tracing::error!(
-                        "daemon: cannot resolve device selection path for {raw_serial}: {e:#}"
-                    ),
+                    Err(e) => {
+                        tracing::error!(
+                            "daemon: cannot resolve device selection path for {raw_serial}: {e:#}"
+                        );
+                        let _ = reply.send(command_failed(
+                            request_id,
+                            "could not resolve the device selection",
+                        ));
+                        return false;
+                    }
                 }
             }
             if let Some(subs) = subscriptions {
@@ -2673,15 +2746,29 @@ fn handle_client_command(
                         if changed {
                             match crate::device_config::Subscriptions::save_atomic(&path, &full) {
                                 Ok(()) => subscriptions_changed = true,
-                                Err(e) => tracing::error!(
-                                    "daemon: failed to save subscriptions for {raw_serial}: {e:#}"
-                                ),
+                                Err(e) => {
+                                    tracing::error!(
+                                        "daemon: failed to save subscriptions for {raw_serial}: {e:#}"
+                                    );
+                                    let _ = reply.send(command_failed(
+                                        request_id,
+                                        "could not persist the device subscriptions",
+                                    ));
+                                    return false;
+                                }
                             }
                         }
                     }
-                    Err(e) => tracing::error!(
-                        "daemon: cannot resolve subscriptions path for {raw_serial}: {e:#}"
-                    ),
+                    Err(e) => {
+                        tracing::error!(
+                            "daemon: cannot resolve subscriptions path for {raw_serial}: {e:#}"
+                        );
+                        let _ = reply.send(command_failed(
+                            request_id,
+                            "could not resolve the device subscriptions",
+                        ));
+                        return false;
+                    }
                 }
             }
             if let Some(set) = settings {
@@ -2700,16 +2787,28 @@ fn handle_client_command(
                         if changed {
                             match crate::device_config::DeviceSettings::save_atomic(&path, &full) {
                                 Ok(()) => settings_changed = true,
-                                Err(e) => tracing::error!(
-                                    "daemon: failed to save settings for {raw_serial}: {e:#}"
-                                ),
+                                Err(e) => {
+                                    tracing::error!(
+                                        "daemon: failed to save settings for {raw_serial}: {e:#}"
+                                    );
+                                    let _ = reply.send(command_failed(
+                                        request_id,
+                                        "could not persist the device settings",
+                                    ));
+                                    return false;
+                                }
                             }
                         }
                     }
                     Err(e) => {
                         tracing::error!(
                             "daemon: cannot resolve settings path for {raw_serial}: {e:#}"
-                        )
+                        );
+                        let _ = reply.send(command_failed(
+                            request_id,
+                            "could not resolve the device settings",
+                        ));
+                        return false;
                     }
                 }
             }
@@ -2722,9 +2821,15 @@ fn handle_client_command(
                 tracing::error!(
                     "daemon: failed to advance config revisions for {raw_serial}: {error:#}"
                 );
+                let _ = reply.send(command_failed(
+                    request_id,
+                    "could not persist the device configuration revision",
+                ));
+                return false;
             }
             let _ = event_tx.send(build_device_config_update(
                 config_path,
+                registry,
                 raw_serial,
                 request_id,
             ));
@@ -2827,11 +2932,12 @@ fn open_playlist_store(config_path: &Path) -> Result<crate::playlist::PlaylistSt
 /// payload: every playlist in the store, summarized against the cached
 /// index. A store-open failure (e.g. an unwritable config dir) degrades to
 /// an empty list with a logged warning rather than failing the arm.
-fn build_playlists_update(config_path: &std::path::Path) -> DaemonEvent {
+fn build_playlists_update(config_path: &std::path::Path, playlist_revision: u64) -> DaemonEvent {
     let index = load_cached_index(config_path);
     match open_playlist_store(config_path) {
         Ok(store) => DaemonEvent::PlaylistsUpdate {
             playlists: crate::daemon::library::build_playlist_summaries(&store, &index),
+            playlist_revision,
             acknowledged_request_id: None,
         },
         Err(e) => {
@@ -2840,6 +2946,7 @@ fn build_playlists_update(config_path: &std::path::Path) -> DaemonEvent {
             );
             DaemonEvent::PlaylistsUpdate {
                 playlists: Vec::new(),
+                playlist_revision,
                 acknowledged_request_id: None,
             }
         }
@@ -2856,6 +2963,7 @@ fn build_playlists_update(config_path: &std::path::Path) -> DaemonEvent {
 fn build_playlist_detail(
     config_path: &Path,
     slug: &str,
+    playlist_revision: u64,
     acknowledged_request_id: String,
 ) -> DaemonEvent {
     let store = match open_playlist_store(config_path) {
@@ -2869,6 +2977,7 @@ fn build_playlist_detail(
                 tracks: None,
                 rules: None,
                 error: Some(format!("could not open playlist store: {e:#}")),
+                playlist_revision,
                 acknowledged_request_id,
             };
         }
@@ -2886,6 +2995,7 @@ fn build_playlist_detail(
             ),
             rules: None,
             error: None,
+            playlist_revision,
             acknowledged_request_id,
         },
         Ok(Some(crate::playlist::Playlist::Smart(s))) => DaemonEvent::PlaylistDetail {
@@ -2895,6 +3005,7 @@ fn build_playlist_detail(
             tracks: None,
             rules: Some(s.rules),
             error: None,
+            playlist_revision,
             acknowledged_request_id,
         },
         Ok(None) => {
@@ -2906,6 +3017,7 @@ fn build_playlist_detail(
                 tracks: None,
                 rules: None,
                 error: Some("no such playlist".to_string()),
+                playlist_revision,
                 acknowledged_request_id,
             }
         }
@@ -2918,6 +3030,7 @@ fn build_playlist_detail(
                 tracks: None,
                 rules: None,
                 error: Some(format!("{e:#}")),
+                playlist_revision,
                 acknowledged_request_id,
             }
         }
@@ -2931,6 +3044,7 @@ fn build_playlist_detail(
 /// this never fails the arm, even for a `serial` the daemon has never seen.
 fn build_device_config_update(
     config_path: &std::path::Path,
+    registry: &DeviceRegistry,
     serial: &str,
     acknowledged_request_id: String,
 ) -> DaemonEvent {
@@ -2946,6 +3060,9 @@ fn build_device_config_update(
         .flatten()
         .unwrap_or_default();
     let settings = crate::device_config::DeviceSettings::load_or_migrate_in(root, serial, &global);
+    let record = registry
+        .record(serial)
+        .expect("device config update requires a registered serial");
     DaemonEvent::DeviceConfigUpdate {
         serial: serial.to_string(),
         selection: crate::ipc_daemon::SelectionPayload {
@@ -2959,6 +3076,9 @@ fn build_device_config_update(
             auto_sync: settings.auto_sync,
             rockbox_compat: settings.rockbox_compat,
         },
+        selection_revision: record.selection_revision,
+        settings_revision: record.settings_revision,
+        subscriptions_revision: record.subscriptions_revision,
         acknowledged_request_id,
     }
 }
@@ -3701,6 +3821,153 @@ mod tests {
                 })
             })
         })
+    }
+
+    fn handle_persistence_test_command(
+        command: DaemonCommand,
+        config_path: &Path,
+        registry: &mut DeviceRegistry,
+        config_revision: &mut ConfigRevision,
+        playlist_revision: &mut PlaylistRevision,
+    ) -> (
+        broadcast::Receiver<DaemonEvent>,
+        mpsc::UnboundedReceiver<DaemonEvent>,
+    ) {
+        let (event_tx, event_rx) = broadcast::channel(16);
+        let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+        let history = HistoryService::new(config_path.with_extension("history.json"));
+        let mut state = RuntimeState::new();
+        let spawn = completed_spawn(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let (internal_tx, _internal_rx) = mpsc::unbounded_channel();
+        let mut scheduler = SyncScheduler::new(0);
+        let mut library_count = None;
+        let mut recovery = SourceRecoveryState::default();
+
+        handle_client_command(
+            ClientCommand {
+                client_id: 1,
+                command,
+                reply: reply_tx,
+            },
+            &history,
+            config_path,
+            &mut state,
+            &event_tx,
+            registry,
+            &spawn,
+            &spawn,
+            &internal_tx,
+            &mut scheduler,
+            &mut library_count,
+            config_revision,
+            playlist_revision,
+            &mut recovery,
+            &SourceAvailabilityService::platform_default(),
+        );
+
+        (event_rx, reply_rx)
+    }
+
+    #[tokio::test]
+    async fn canonical_acknowledgements_follow_persistence_and_failures_do_not_advance() {
+        let base =
+            std::env::temp_dir().join(format!("classick-canonical-ack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let source = base.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let config_path = base.join("config.toml");
+        let mut registry = registry(&["RAW-A"]);
+        let mut config_revision = ConfigRevision::default();
+        let mut playlist_revision = PlaylistRevision::default();
+
+        let (mut config_events, _) = handle_persistence_test_command(
+            DaemonCommand::SaveConfig {
+                source: Some(source.to_string_lossy().into_owned()),
+                daemon: None,
+                ipod: None,
+                request_id: "save-config".into(),
+            },
+            &config_path,
+            &mut registry,
+            &mut config_revision,
+            &mut playlist_revision,
+        );
+        let persisted_config = config_file::load(&config_path).unwrap().unwrap();
+        assert_eq!(persisted_config.source.as_deref(), Some(source.as_path()));
+        let config_event = std::iter::from_fn(|| config_events.try_recv().ok())
+            .find(|event| matches!(event, DaemonEvent::ConfigUpdate { .. }))
+            .expect("canonical config acknowledgement");
+        assert!(matches!(
+            config_event,
+            DaemonEvent::ConfigUpdate {
+                config_revision: 1,
+                acknowledged_request_id: Some(request_id),
+                ..
+            } if request_id == "save-config"
+        ));
+
+        let playlist = crate::ipc_daemon::PlaylistPayload::Manual {
+            slug: Some("gym".into()),
+            name: "Gym".into(),
+            tracks: vec!["A/01.flac".into()],
+        };
+        let (mut playlist_events, _) = handle_persistence_test_command(
+            DaemonCommand::SavePlaylist {
+                playlist,
+                request_id: "save-playlist".into(),
+            },
+            &config_path,
+            &mut registry,
+            &mut config_revision,
+            &mut playlist_revision,
+        );
+        assert!(base.join("playlists/gym.m3u8").is_file());
+        assert!(matches!(
+            playlist_events.try_recv(),
+            Ok(DaemonEvent::PlaylistsUpdate {
+                playlist_revision: 1,
+                acknowledged_request_id: Some(request_id),
+                ..
+            }) if request_id == "save-playlist"
+        ));
+
+        std::fs::create_dir_all(base.join("playlists/gym.m3u8.tmp")).unwrap();
+        let (mut failed_events, mut failed_reply) = handle_persistence_test_command(
+            DaemonCommand::SavePlaylist {
+                playlist: crate::ipc_daemon::PlaylistPayload::Manual {
+                    slug: Some("gym".into()),
+                    name: "Changed".into(),
+                    tracks: Vec::new(),
+                },
+                request_id: "failed-playlist".into(),
+            },
+            &config_path,
+            &mut registry,
+            &mut config_revision,
+            &mut playlist_revision,
+        );
+        assert!(matches!(
+            failed_reply.try_recv(),
+            Ok(DaemonEvent::CommandFailed {
+                acknowledged_request_id,
+                ..
+            }) if acknowledged_request_id == "failed-playlist"
+        ));
+        assert!(matches!(
+            failed_events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed)
+        ));
+        assert_eq!(playlist_revision.current(), 1);
+        assert_eq!(
+            crate::playlist::PlaylistStore::open(base.join("playlists"))
+                .unwrap()
+                .load("gym")
+                .unwrap()
+                .unwrap()
+                .name(),
+            "Gym"
+        );
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[tokio::test]

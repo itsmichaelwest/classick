@@ -342,6 +342,9 @@ final class AppModel {
     case .unknown:
       break
 
+    case .commandFailed:
+      break
+
     case .historyUpdate(let entries, _):
       history = entries
 
@@ -369,7 +372,7 @@ final class AppModel {
     case .selectionPreview(let info):
       selectionPreview = info
 
-    case .playlistsUpdate(let list, _):
+    case .playlistsUpdate(let list, _, _):
       playlists = list
       playlistsUpdateRevision += 1
 
@@ -377,7 +380,8 @@ final class AppModel {
       playlistDetail = detail
 
     case .deviceConfigUpdate(
-      let serial, let selection, let subscriptions, let settings, let acknowledgedRequestID):
+      let serial, let selection, let subscriptions, let settings, _, _, _,
+      let acknowledgedRequestID):
       guard shouldApplyDeviceConfigResponse(serial: serial, requestID: acknowledgedRequestID) else {
         break
       }

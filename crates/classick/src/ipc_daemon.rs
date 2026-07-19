@@ -83,6 +83,14 @@ pub enum DaemonEvent {
         serial: String,
         acknowledged_request_id: String,
     },
+    /// Correlated failure for a command that has no existing error-shaped
+    /// canonical reply. It intentionally carries no revision: clients retain
+    /// durable intents until a later canonical acknowledgement proves the
+    /// requested state was persisted.
+    CommandFailed {
+        acknowledged_request_id: String,
+        error: String,
+    },
     /// Forwarded sync-subprocess event. `line` is the raw JSON line
     /// the subprocess emitted on its stdout, unparsed. UI clients
     /// deserialize it as an M1 `IpcEvent`. Wrapping rather than
@@ -128,14 +136,13 @@ pub enum DaemonEvent {
         serial: String,
         acknowledged_request_id: String,
     },
-    /// Reply to `list_playlists`/`get_playlist`, and broadcast to all
-    /// clients after `save_playlist`/`delete_playlist`. Every playlist in
+    /// Reply to `list_playlists`, and broadcast to all clients after
+    /// `save_playlist`/`delete_playlist`. Every playlist in
     /// the store, summarized against the cached library index — sorted by
-    /// `slug` for deterministic wire ordering. `get_playlist` reuses this
-    /// same event with `playlists` filtered to 0 or 1 entries rather than
-    /// introducing a separate single-playlist event type.
+    /// `slug` for deterministic wire ordering.
     PlaylistsUpdate {
         playlists: Vec<PlaylistSummary>,
+        playlist_revision: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         acknowledged_request_id: Option<String>,
     },
@@ -164,6 +171,7 @@ pub enum DaemonEvent {
         rules: Option<crate::playlist_rules::SmartRules>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        playlist_revision: u64,
         acknowledged_request_id: String,
     },
     /// Reply to `get_device_config`, and broadcast to all clients after
@@ -174,6 +182,9 @@ pub enum DaemonEvent {
         selection: SelectionPayload,
         subscriptions: SubscriptionsPayload,
         settings: DeviceSettingsPayload,
+        selection_revision: u64,
+        settings_revision: u64,
+        subscriptions_revision: u64,
         acknowledged_request_id: String,
     },
     /// Reply to `preview_device`: a pure, index-based estimate of what this
@@ -999,12 +1010,13 @@ mod tests {
             tracks: Some(vec!["Artist/Album/01.flac".into(), "B/02.flac".into()]),
             rules: None,
             error: None,
+            playlist_revision: 7,
             acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":["Artist/Album/01.flac","B/02.flac"],"acknowledged_request_id":"request-a"}"#,
+            r#"{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":["Artist/Album/01.flac","B/02.flac"],"playlist_revision":7,"acknowledged_request_id":"request-a"}"#,
             "got: {json}"
         );
     }
@@ -1029,12 +1041,13 @@ mod tests {
                 seed: 0,
             }),
             error: None,
+            playlist_revision: 8,
             acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"playlist_detail","slug":"recent-idm","name":"Recent IDM","kind":"smart","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0},"acknowledged_request_id":"request-a"}"#,
+            r#"{"type":"playlist_detail","slug":"recent-idm","name":"Recent IDM","kind":"smart","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0},"playlist_revision":8,"acknowledged_request_id":"request-a"}"#,
             "got: {json}"
         );
     }
@@ -1048,12 +1061,13 @@ mod tests {
             tracks: None,
             rules: None,
             error: Some("no such playlist".into()),
+            playlist_revision: 8,
             acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"playlist_detail","slug":"ghost","error":"no such playlist","acknowledged_request_id":"request-a"}"#,
+            r#"{"type":"playlist_detail","slug":"ghost","error":"no such playlist","playlist_revision":8,"acknowledged_request_id":"request-a"}"#,
             "got: {json}"
         );
     }
@@ -1138,18 +1152,14 @@ mod tests {
                     error: Some("parse failed".into()),
                 },
             ],
+            playlist_revision: 9,
             acknowledged_request_id: Some("request-a".into()),
         };
         let json = serde_json::to_string(&evt).unwrap();
-        assert!(json.contains(r#""type":"playlists_update""#));
-        assert!(json.contains(r#""kind":"manual""#));
-        assert!(json.contains(r#""kind":"smart""#));
-        assert!(json.contains(r#""error":"parse failed""#));
-        assert!(
-            !json.contains(
-                r#""slug":"gym","name":"Gym","kind":"manual","tracks":12,"bytes":900,"error""#
-            ),
-            "error must be omitted (not null) when absent"
+        assert_eq!(
+            json,
+            r#"{"type":"playlists_update","playlists":[{"slug":"gym","name":"Gym","kind":"manual","tracks":12,"bytes":900},{"slug":"broken","name":"broken","kind":"smart","tracks":0,"bytes":0,"error":"parse failed"}],"playlist_revision":9,"acknowledged_request_id":"request-a"}"#,
+            "got: {json}"
         );
     }
 
@@ -1234,14 +1244,29 @@ mod tests {
                 auto_sync: true,
                 rockbox_compat: false,
             },
+            selection_revision: 3,
+            settings_revision: 4,
+            subscriptions_revision: 5,
             acknowledged_request_id: "request-a".into(),
         };
         let json = serde_json::to_string(&evt).unwrap();
-        assert!(json.contains(r#""type":"device_config_update""#));
-        assert!(json.contains(r#""serial":"0xABC""#));
-        assert!(json.contains(r#""mode":"include""#));
-        assert!(json.contains(r#""playlists":["gym"]"#));
-        assert!(json.contains(r#""auto_sync":true"#));
+        assert_eq!(
+            json,
+            r#"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"include","rules":[]},"subscriptions":{"playlists":["gym"]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"settings_revision":4,"subscriptions_revision":5,"acknowledged_request_id":"request-a"}"#
+        );
+    }
+
+    #[test]
+    fn command_failed_serializes_without_a_revision() {
+        let evt = DaemonEvent::CommandFailed {
+            acknowledged_request_id: "request-a".into(),
+            error: "persist failed".into(),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&evt).unwrap(),
+            r#"{"type":"command_failed","acknowledged_request_id":"request-a","error":"persist failed"}"#
+        );
     }
 
     // --- v1.6.0: device preview ---------------------------------------

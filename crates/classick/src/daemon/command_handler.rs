@@ -3,7 +3,15 @@
 use crate::daemon::device_registry::{canonical_serial_key, DeviceRegistry};
 use crate::daemon::runtime_state::RuntimeState;
 use crate::daemon::state::SessionKind;
+use crate::ipc_daemon::DaemonEvent;
 use crate::ipc_daemon::{DaemonCommand, SyncRejectReason};
+
+pub(crate) fn command_failed(request_id: String, error: impl Into<String>) -> DaemonEvent {
+    DaemonEvent::CommandFailed {
+        acknowledged_request_id: request_id,
+        error: error.into(),
+    }
+}
 
 pub(crate) fn same_serial(left: &str, right: &str) -> bool {
     canonical_serial_key(left) == canonical_serial_key(right)

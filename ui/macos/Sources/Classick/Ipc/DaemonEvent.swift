@@ -314,16 +314,19 @@ enum DaemonEvent: Decodable, Sendable {
     mode: SelectionMode, rules: [SelectionRule], serial: String?, acknowledgedRequestID: String?)
   case selectionPreview(SelectionPreviewInfo)
   // MARK: Protocol 2.0.0 — correlated playlists and per-device replies
-  case playlistsUpdate([PlaylistSummary], acknowledgedRequestID: String?)
+  case playlistsUpdate(
+    [PlaylistSummary], playlistRevision: UInt64, acknowledgedRequestID: String?)
   case playlistDetail(PlaylistDetail)
   case deviceConfigUpdate(
     serial: String, selection: SelectionState, subscriptions: SubscriptionsWire,
-    settings: DeviceSettingsWire, acknowledgedRequestID: String)
+    settings: DeviceSettingsWire, selectionRevision: UInt64, settingsRevision: UInt64,
+    subscriptionsRevision: UInt64, acknowledgedRequestID: String)
   case devicePreview(DevicePreview)
   case sourceAvailability(SourceAvailabilityInfo)
   /// Reply to `resolve_tracks`. An empty `tracks` array is a valid reply
   /// (no rule matched anything in the index), not an error.
   case resolvedTracks(tracks: [String], acknowledgedRequestID: String)
+  case commandFailed(acknowledgedRequestID: String, error: String)
   case unknown  // forward-compat: log + ignore
 
   private enum CodingKeys: String, CodingKey {
@@ -376,6 +379,10 @@ enum DaemonEvent: Decodable, Sendable {
     case devices
     case sessionID = "session_id"
     case configRevision = "config_revision"
+    case playlistRevision = "playlist_revision"
+    case selectionRevision = "selection_revision"
+    case settingsRevision = "settings_revision"
+    case subscriptionsRevision = "subscriptions_revision"
     case acknowledgedRequestID = "acknowledged_request_id"
   }
 
@@ -519,6 +526,7 @@ enum DaemonEvent: Decodable, Sendable {
       let playlists = try container.decode([PlaylistSummary].self, forKey: .playlists)
       self = .playlistsUpdate(
         playlists,
+        playlistRevision: try container.decode(UInt64.self, forKey: .playlistRevision),
         acknowledgedRequestID: try container.decodeIfPresent(
           String.self, forKey: .acknowledgedRequestID))
     case "playlist_detail":
@@ -536,6 +544,7 @@ enum DaemonEvent: Decodable, Sendable {
           tracks: tracks,
           rules: rules,
           error: error,
+          playlistRevision: try container.decode(UInt64.self, forKey: .playlistRevision),
           acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID)))
     case "device_config_update":
       let serial = try container.decode(String.self, forKey: .serial)
@@ -547,6 +556,9 @@ enum DaemonEvent: Decodable, Sendable {
         selection: selection,
         subscriptions: subscriptions,
         settings: settings,
+        selectionRevision: try container.decode(UInt64.self, forKey: .selectionRevision),
+        settingsRevision: try container.decode(UInt64.self, forKey: .settingsRevision),
+        subscriptionsRevision: try container.decode(UInt64.self, forKey: .subscriptionsRevision),
         acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID))
     case "device_preview":
       try requirePresence(of: .projectedFreeBytes)
@@ -567,6 +579,10 @@ enum DaemonEvent: Decodable, Sendable {
       self = .resolvedTracks(
         tracks: tracks,
         acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID))
+    case "command_failed":
+      self = .commandFailed(
+        acknowledgedRequestID: try container.decode(String.self, forKey: .acknowledgedRequestID),
+        error: try container.decode(String.self, forKey: .error))
     default:
       self = .unknown
     }
@@ -595,12 +611,21 @@ extension DaemonEvent {
           revision: revision,
           configState: ConfigCommitState(source: source, daemon: daemon, ipod: ipod))
       }
-    case .selectionUpdate(_, _, _, let requestID), .playlistsUpdate(_, let requestID):
+    case .selectionUpdate(_, _, _, let requestID):
       requestID.map {
         DurableAcknowledgement(requestID: $0, revision: nil, configState: nil)
       }
-    case .deviceConfigUpdate(_, _, _, _, let requestID):
-      DurableAcknowledgement(requestID: requestID, revision: nil, configState: nil)
+    case .playlistsUpdate(_, let revision, let requestID):
+      requestID.map {
+        DurableAcknowledgement(requestID: $0, revision: revision, configState: nil)
+      }
+    case .deviceConfigUpdate(
+      _, _, _, _, let selectionRevision, let settingsRevision, let subscriptionsRevision,
+      let requestID):
+      DurableAcknowledgement(
+        requestID: requestID,
+        revision: max(selectionRevision, max(settingsRevision, subscriptionsRevision)),
+        configState: nil)
     default:
       nil
     }

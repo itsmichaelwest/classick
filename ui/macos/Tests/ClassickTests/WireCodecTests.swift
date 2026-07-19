@@ -322,9 +322,9 @@ final class WireCodecTests: XCTestCase {
 
   func testDecodesPlaylistsUpdate() throws {
     let json =
-      #"{"type":"playlists_update","playlists":[{"slug":"gym","name":"Gym","kind":"manual","tracks":12,"bytes":900},{"slug":"broken","name":"broken","kind":"smart","tracks":0,"bytes":0,"error":"parse failed"}]}"#
+      #"{"type":"playlists_update","playlists":[{"slug":"gym","name":"Gym","kind":"manual","tracks":12,"bytes":900},{"slug":"broken","name":"broken","kind":"smart","tracks":0,"bytes":0,"error":"parse failed"}],"playlist_revision":9,"acknowledged_request_id":"request-a"}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
-    guard case .playlistsUpdate(let playlists, _) = ev else {
+    guard case .playlistsUpdate(let playlists, let revision, let requestID) = ev else {
       return XCTFail("expected playlistsUpdate")
     }
     XCTAssertEqual(playlists.count, 2)
@@ -333,12 +333,14 @@ final class WireCodecTests: XCTestCase {
       PlaylistSummary(slug: "gym", name: "Gym", kind: .manual, tracks: 12, bytes: 900, error: nil))
     XCTAssertEqual(playlists[1].kind, .smart)
     XCTAssertEqual(playlists[1].error, "parse failed")
+    XCTAssertEqual(revision, 9)
+    XCTAssertEqual(requestID, "request-a")
   }
 
   func testDecodesPlaylistDetailManual() throws {
     // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- playlist_detail example payloads"
     let json =
-      #"{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":["Artist/Album/01.flac","B/02.flac"],"acknowledged_request_id":"request-a"}"#
+      #"{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":["Artist/Album/01.flac","B/02.flac"],"playlist_revision":7,"acknowledged_request_id":"request-a"}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
     guard case .playlistDetail(let detail) = ev else { return XCTFail("expected playlistDetail") }
     XCTAssertEqual(detail.slug, "gym")
@@ -347,12 +349,13 @@ final class WireCodecTests: XCTestCase {
     XCTAssertEqual(detail.tracks, ["Artist/Album/01.flac", "B/02.flac"])
     XCTAssertNil(detail.rules)
     XCTAssertNil(detail.error)
+    XCTAssertEqual(detail.playlistRevision, 7)
   }
 
   func testDecodesPlaylistDetailSmart() throws {
     // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- playlist_detail example payloads"
     let json =
-      #"{"type":"playlist_detail","slug":"recent-idm","name":"Recent IDM","kind":"smart","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0},"acknowledged_request_id":"request-a"}"#
+      #"{"type":"playlist_detail","slug":"recent-idm","name":"Recent IDM","kind":"smart","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"IDM"}],"limit":null,"order":"alpha","seed":0},"playlist_revision":8,"acknowledged_request_id":"request-a"}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
     guard case .playlistDetail(let detail) = ev else { return XCTFail("expected playlistDetail") }
     XCTAssertEqual(detail.kind, .smart)
@@ -363,12 +366,13 @@ final class WireCodecTests: XCTestCase {
     XCTAssertNil(detail.rules?.limit)
     XCTAssertEqual(detail.rules?.order, .alpha)
     XCTAssertEqual(detail.rules?.seed, 0)
+    XCTAssertEqual(detail.playlistRevision, 8)
   }
 
   func testDecodesPlaylistDetailErrorOnlySetsSlugAndError() throws {
     // doc-literal from docs/ipc-protocol.md "Daemon v1.6.0 -- playlist_detail example payloads"
     let json =
-      #"{"type":"playlist_detail","slug":"ghost","error":"no such playlist","acknowledged_request_id":"request-a"}"#
+      #"{"type":"playlist_detail","slug":"ghost","error":"no such playlist","playlist_revision":8,"acknowledged_request_id":"request-a"}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
     guard case .playlistDetail(let detail) = ev else { return XCTFail("expected playlistDetail") }
     XCTAssertEqual(detail.slug, "ghost")
@@ -377,14 +381,17 @@ final class WireCodecTests: XCTestCase {
     XCTAssertNil(detail.kind)
     XCTAssertNil(detail.tracks)
     XCTAssertNil(detail.rules)
+    XCTAssertEqual(detail.playlistRevision, 8)
   }
 
   func testDecodesDeviceConfigUpdateFullPayload() throws {
     let json =
-      #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"include","rules":[{"kind":"artist","name":"Boards of Canada"}]},"subscriptions":{"playlists":["gym","chill"]},"settings":{"auto_sync":true,"rockbox_compat":false},"acknowledged_request_id":"request-a"}"#
+      #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"include","rules":[{"kind":"artist","name":"Boards of Canada"}]},"subscriptions":{"playlists":["gym","chill"]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"settings_revision":4,"subscriptions_revision":5,"acknowledged_request_id":"request-a"}"#
     let ev = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
     guard
-      case .deviceConfigUpdate(let serial, let selection, let subscriptions, let settings, _) = ev
+      case .deviceConfigUpdate(
+        let serial, let selection, let subscriptions, let settings,
+        let selectionRevision, let settingsRevision, let subscriptionsRevision, let requestID) = ev
     else {
       return XCTFail("expected deviceConfigUpdate")
     }
@@ -394,6 +401,39 @@ final class WireCodecTests: XCTestCase {
     XCTAssertEqual(subscriptions.playlists, ["gym", "chill"])
     XCTAssertTrue(settings.autoSync)
     XCTAssertFalse(settings.rockboxCompat)
+    XCTAssertEqual(selectionRevision, 3)
+    XCTAssertEqual(settingsRevision, 4)
+    XCTAssertEqual(subscriptionsRevision, 5)
+    XCTAssertEqual(requestID, "request-a")
+  }
+
+  func testDecodesCorrelatedCommandFailureWithoutRevision() throws {
+    let json =
+      #"{"type":"command_failed","acknowledged_request_id":"request-a","error":"persist failed"}"#
+    let event = try JSONDecoder().decode(DaemonEvent.self, from: Data(json.utf8))
+
+    guard case .commandFailed(let requestID, let error) = event else {
+      return XCTFail("expected commandFailed")
+    }
+    XCTAssertEqual(requestID, "request-a")
+    XCTAssertEqual(error, "persist failed")
+    XCTAssertNil(event.durableAcknowledgement)
+  }
+
+  func testCanonicalEditorEventsRequirePersistenceRevisions() {
+    let fixtures = [
+      #"{"type":"playlists_update","playlists":[],"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"playlist_detail","slug":"gym","name":"Gym","kind":"manual","tracks":[],"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"settings_revision":4,"subscriptions_revision":5,"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"subscriptions_revision":5,"acknowledged_request_id":"request-a"}"#,
+      #"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"settings_revision":4,"acknowledged_request_id":"request-a"}"#,
+    ]
+
+    for fixture in fixtures {
+      XCTAssertThrowsError(
+        try JSONDecoder().decode(DaemonEvent.self, from: Data(fixture.utf8)),
+        "expected revisionless canonical event to be rejected: \(fixture)")
+    }
   }
 
   func testDeviceConfigUpdateRejectsMissingRequiredPayloadFields() {

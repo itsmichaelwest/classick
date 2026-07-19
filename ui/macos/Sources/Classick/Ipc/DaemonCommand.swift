@@ -278,6 +278,7 @@ struct PlaylistDetail: Equatable, Sendable {
   var tracks: [String]?
   var rules: SmartRulesWire?
   var error: String?
+  var playlistRevision: UInt64 = 0
   var acknowledgedRequestID: String
 }
 
@@ -507,21 +508,27 @@ enum DaemonCommand: Encodable, Sendable {
   }
 
   func isCommitted(by acknowledgement: DurableAcknowledgement) -> Bool {
-    guard case .saveConfig(let source, let daemon, let ipod, _) = self else { return true }
-    guard acknowledgement.revision != nil, let state = acknowledgement.configState else {
-      return false
+    switch self {
+    case .saveConfig(let source, let daemon, let ipod, _):
+      guard acknowledgement.revision != nil, let state = acknowledgement.configState else {
+        return false
+      }
+      if let source, state.source != source { return false }
+      if let daemon, state.daemon != daemon { return false }
+      if let ipod {
+        guard let committedIpod = state.ipod,
+          committedIpod.serial == ipod.serial,
+          committedIpod.modelLabel == ipod.modelLabel,
+          committedIpod.customSelection == ipod.customSelection
+        else { return false }
+        if let name = ipod.name, committedIpod.name != name { return false }
+      }
+      return true
+    case .forgetIpod, .savePlaylist, .deletePlaylist, .saveDeviceConfig:
+      return acknowledgement.revision != nil
+    default:
+      return true
     }
-    if let source, state.source != source { return false }
-    if let daemon, state.daemon != daemon { return false }
-    if let ipod {
-      guard let committedIpod = state.ipod,
-        committedIpod.serial == ipod.serial,
-        committedIpod.modelLabel == ipod.modelLabel,
-        committedIpod.customSelection == ipod.customSelection
-      else { return false }
-      if let name = ipod.name, committedIpod.name != name { return false }
-    }
-    return true
   }
 
   func encode(to encoder: Encoder) throws {
