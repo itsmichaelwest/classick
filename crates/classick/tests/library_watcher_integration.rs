@@ -14,6 +14,7 @@ use std::time::Duration;
 use classick::config_file::{DaemonSettings, PersistedConfig, SyncMode};
 use classick::daemon::device_watcher::{DeviceEvent, DeviceWatcher};
 use classick::daemon::history::SyncSummary;
+use classick::daemon::lifecycle::ShutdownReason;
 use classick::daemon::runtime::{run_daemon_with_deps, DaemonDeps};
 use classick::daemon::sync_orchestrator::OrchestratorOutcome;
 use tokio::sync::mpsc;
@@ -65,6 +66,7 @@ struct WatcherSandbox {
     scan_spawns: Arc<AtomicUsize>,
     /// Kept alive so the device channel doesn't close (see `NoDeviceWatcher`).
     _device_tx: mpsc::Sender<DeviceEvent>,
+    _shutdown_tx: mpsc::UnboundedSender<ShutdownReason>,
     pipe_name: String,
     base: PathBuf,
     runtime_task: tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -126,6 +128,7 @@ async fn sandbox_with_source() -> WatcherSandbox {
 
     // Device channel: sender held by the sandbox so it stays open.
     let (device_tx, device_rx) = mpsc::channel::<DeviceEvent>(4);
+    let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
 
     let scan_spawns = Arc::new(AtomicUsize::new(0));
     let scan_spawns_for_closure = scan_spawns.clone();
@@ -165,6 +168,7 @@ async fn sandbox_with_source() -> WatcherSandbox {
         history_path: Some(history_path),
         pipe_name: Some(pipe_name.clone()),
         source_availability: None,
+        shutdown_rx,
     };
     let runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 
@@ -192,6 +196,7 @@ async fn sandbox_with_source() -> WatcherSandbox {
         source,
         scan_spawns,
         _device_tx: device_tx,
+        _shutdown_tx: shutdown_tx,
         pipe_name,
         base,
         runtime_task,

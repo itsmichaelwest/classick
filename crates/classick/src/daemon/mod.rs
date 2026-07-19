@@ -14,6 +14,7 @@ pub mod iokit_watcher;
 pub mod ipc_server;
 pub mod library;
 pub mod library_watcher;
+pub mod lifecycle;
 #[cfg(target_os = "macos")]
 pub mod macos_netfs;
 pub mod runtime;

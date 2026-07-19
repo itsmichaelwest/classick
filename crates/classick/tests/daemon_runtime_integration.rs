@@ -104,6 +104,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
     };
 
     let (config_path, history_path, pipe_name) = sandbox();
+    let (_shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
     let deps = DaemonDeps {
         configured_serial: Some("0xABC".to_string()),
         watcher: Box::new(watcher),
@@ -174,6 +175,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
         history_path: Some(history_path),
         pipe_name: Some(pipe_name),
         source_availability: None,
+        shutdown_rx,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 
@@ -234,6 +236,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
     };
 
     let (config_path, history_path, pipe_name) = sandbox();
+    let (_shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
     let deps = DaemonDeps {
         configured_serial: Some("0xCONFIGURED".to_string()),
         watcher: Box::new(watcher),
@@ -304,6 +307,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
         history_path: Some(history_path),
         pipe_name: Some(pipe_name),
         source_availability: None,
+        shutdown_rx,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 
@@ -374,6 +378,7 @@ async fn runtime_stays_responsive_during_long_sync() {
     };
 
     let (config_path, history_path, pipe_name) = sandbox();
+    let (_shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
     let deps = DaemonDeps {
         configured_serial: Some("0xABC".to_string()),
         watcher: Box::new(watcher),
@@ -444,6 +449,7 @@ async fn runtime_stays_responsive_during_long_sync() {
         history_path: Some(history_path),
         pipe_name: Some(pipe_name),
         source_availability: None,
+        shutdown_rx,
     };
     let _runtime_task = tokio::spawn(run_daemon_with_deps(deps));
 

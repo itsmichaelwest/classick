@@ -22,7 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ratatui = "0.29"
 crossterm = "0.29"
 dirs = "5"
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process", "signal"] }
 plist = "1"
 image = "0.25"
 # MP4 tag/cover-art writer for the artwork module (crates/classick/src/artwork.rs).

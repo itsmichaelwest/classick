@@ -3,6 +3,7 @@
 use classick::config_file::{DaemonSettings, IpodIdentity, PersistedConfig};
 use classick::daemon::device_watcher::{DeviceEvent, DeviceWatcher};
 use classick::daemon::history::{HistoryEntry, HistoryFile, SyncOutcome, SyncSummary, SyncTrigger};
+use classick::daemon::lifecycle::ShutdownReason;
 use classick::daemon::runtime::{run_daemon_with_deps, DaemonDeps, SpawnFn};
 use classick::daemon::session_admission::EventContext;
 use classick::daemon::source_availability::{
@@ -158,6 +159,7 @@ struct Sandbox {
     device_tx: mpsc::Sender<DeviceEvent>,
     spawn_rx: mpsc::UnboundedReceiver<SpawnCall>,
     scan_finish_rx: mpsc::UnboundedReceiver<oneshot::Sender<OrchestratorOutcome>>,
+    _shutdown_tx: mpsc::UnboundedSender<ShutdownReason>,
     runtime: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
@@ -218,6 +220,7 @@ impl Sandbox {
         let (device_tx, device_rx) = mpsc::channel(8);
         let (spawn_tx, spawn_rx) = mpsc::unbounded_channel();
         let (scan_finish_tx, scan_finish_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
         let spawn_sync: SpawnFn = Arc::new(move |serial, drive, cancel, _, _, context| {
             let (finish, finished) = oneshot::channel();
             spawn_tx
@@ -251,6 +254,7 @@ impl Sandbox {
             pipe_name: Some(pipe_name.clone()),
             source_availability: auth_required
                 .then(|| SourceAvailabilityService::new(Arc::new(AuthRequiredBackend))),
+            shutdown_rx,
         };
         let runtime = tokio::spawn(run_daemon_with_deps(deps));
         Self {
@@ -261,6 +265,7 @@ impl Sandbox {
             device_tx,
             spawn_rx,
             scan_finish_rx,
+            _shutdown_tx: shutdown_tx,
             runtime,
         }
     }

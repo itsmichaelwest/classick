@@ -41,7 +41,7 @@ fn main() -> Result<()> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        return runtime.block_on(classick::daemon::runtime::run_daemon());
+        return runtime.block_on(classick::daemon::runtime::run_daemon(cli.daemon_parent_pid));
     }
 
     // Pre-flight: decide if we're going TUI, plain, or IPC. IPC mode always

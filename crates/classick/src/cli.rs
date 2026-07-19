@@ -104,6 +104,11 @@ pub struct Cli {
     #[arg(long, conflicts_with_all = ["ipc_mode", "no_tui"])]
     pub daemon: bool,
 
+    /// PID of the UI process that launched this daemon. Internal ownership
+    /// lease used by GUI frontends; manual daemon launches omit it.
+    #[arg(long, hide = true, requires = "daemon")]
+    pub daemon_parent_pid: Option<u32>,
+
     /// Encoder for transcoded tracks (non-passthrough). Default: ffmpeg.
     /// Passthrough source codecs (mp3, aac, alac) are unaffected.
     #[arg(long, value_enum)]
@@ -316,6 +321,27 @@ mod tests {
     fn parses_daemon_flag() {
         let cli = Cli::try_parse_from(["classick", "--daemon"]).unwrap();
         assert!(cli.daemon);
+    }
+
+    #[test]
+    fn daemon_parent_pid_requires_daemon_mode() {
+        assert!(Cli::try_parse_from(["classick", "--daemon-parent-pid", "42"]).is_err());
+    }
+
+    #[test]
+    fn daemon_parent_pid_parses_with_daemon_mode() {
+        let cli =
+            Cli::try_parse_from(["classick", "--daemon", "--daemon-parent-pid", "42"]).unwrap();
+        assert_eq!(cli.daemon_parent_pid, Some(42));
+    }
+
+    #[test]
+    fn daemon_parent_pid_is_hidden_from_help() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        assert!(!help.contains("daemon-parent-pid"));
     }
 
     #[test]

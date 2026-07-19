@@ -17,6 +17,7 @@ use crate::daemon::device_watcher::PollingDeviceWatcher;
 use crate::daemon::device_watcher::{Debouncer, DeviceEvent, DeviceWatcher};
 use crate::daemon::history::{HistoryEntry, HistoryService, SyncOutcome, SyncSummary, SyncTrigger};
 use crate::daemon::ipc_server::{ClientCommand, InitialClientState};
+use crate::daemon::lifecycle::ShutdownReason;
 use crate::daemon::runtime_state::{RuntimeState, SessionControls};
 use crate::daemon::scheduler::SyncScheduler;
 use crate::daemon::session_admission::EventContext;
@@ -37,8 +38,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Production entry. Constructs the real device watcher + real
 /// spawn-fn and runs the daemon.
-pub async fn run_daemon() -> Result<()> {
+pub async fn run_daemon(parent_pid: Option<u32>) -> Result<()> {
     tracing::info!("daemon: starting");
+    let shutdown_rx = crate::daemon::lifecycle::spawn_shutdown_monitor(parent_pid);
     let config_path = config_file::default_path()?;
     let configured_serial = config_file::load(&config_path)
         .ok()
@@ -172,6 +174,7 @@ pub async fn run_daemon() -> Result<()> {
         history_path: None,
         pipe_name: None,
         source_availability: None,
+        shutdown_rx,
     };
     run_daemon_with_deps(deps).await
 }
@@ -254,6 +257,9 @@ pub struct DaemonDeps {
     /// uses the platform backend (NetFS on macOS, established sessions
     /// elsewhere).
     pub source_availability: Option<SourceAvailabilityService>,
+    /// Unified process-lifecycle input. Production monitors SIGINT/SIGTERM
+    /// and the optional UI-parent lease; tests inject exact shutdown reasons.
+    pub shutdown_rx: mpsc::UnboundedReceiver<ShutdownReason>,
 }
 
 /// Internal events posted from background sync tasks back to the runtime
@@ -774,6 +780,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     let source_availability = deps
         .source_availability
         .unwrap_or_else(SourceAvailabilityService::platform_default);
+    let mut shutdown_rx = deps.shutdown_rx;
     let mut source_recovery = SourceRecoveryState::default();
 
     let pipe_name = deps
@@ -847,6 +854,11 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
         tokio::select! {
             biased;
 
+            Some(reason) = shutdown_rx.recv() => {
+                tracing::info!("daemon: {reason:?} shutdown requested; exiting loop");
+                break ExitReason::Shutdown(reason);
+            }
+
             client_cmd = cmd_rx.recv() => {
                 let Some(client_cmd) = client_cmd else {
                     tracing::info!("daemon: command channel closed; exiting");
@@ -900,7 +912,7 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                         &config_path,
                     );
                 }
-                if should_exit { break ExitReason::Shutdown; }
+                if should_exit { break ExitReason::Shutdown(ShutdownReason::Client); }
             }
 
             device_event = device_rx.recv() => {
@@ -1127,9 +1139,9 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     // deliberately longer than the orchestrator's inactivity watchdog; only
     // a stalled child reaches kill_on_drop.
     match exit_reason {
-        ExitReason::Shutdown => {
+        ExitReason::Shutdown(reason) => {
             if state.active_session().is_none() {
-                tracing::info!("daemon: clean shutdown — no in-flight sync to drain");
+                tracing::info!("daemon: clean {reason:?} shutdown — no in-flight sync to drain");
             } else {
                 if drain_active_session_for_shutdown(
                     &mut state,
@@ -1151,11 +1163,10 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     Ok(())
 }
 
-/// Reason we exited the main select loop. Currently only Shutdown; the
-/// enum exists so a future channel-closed / panic-recovery branch can
-/// take a different drain path.
+/// Reason we exited the main select loop. Every shutdown source retains its
+/// origin for diagnostics while sharing the same finalization drain below.
 enum ExitReason {
-    Shutdown,
+    Shutdown(ShutdownReason),
 }
 
 fn shutdown_drain_budget() -> std::time::Duration {
