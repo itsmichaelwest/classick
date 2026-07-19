@@ -4,6 +4,75 @@ This document collects the invariants that protect user data. Changes touching
 the iTunesDB, artwork, manifests, playlists, recovery, or device discovery must
 preserve them and add a regression test where practical.
 
+## Apple initialization boundary
+
+Classick manages an Apple-initialized iPod; it does not create the initial
+Apple device structure. Ordinary mutation requires a structurally valid
+`iPod_Control/iTunes/iTunesDB`. A recognizable restored device without that
+database is reported as needing setup in Finder or the applicable Apple
+software and receives no Classick writes.
+
+An existing but invalid database is not an uninitialized device. Preserve it
+and block ordinary sync unless a Classick-owned transaction proves an exact,
+hash-validated recovery. Classick-owned initialization is deferred to a
+separate compatibility design.
+
+## Device identity
+
+The mutation authority is the canonical 16-hex USB iSerial/FireWire GUID read
+through ordinary platform USB enumeration. Mount paths, drive letters, volume
+GUIDs/UUIDs, filesystem labels, display names, model guesses, and SCSI inquiry
+are not substitutes. If that identity is unavailable or disagrees with a
+portable authority/journal, Classick does not mutate the device.
+
+Hardware facts retain their reported, decoded, or inferred provenance. Unknown
+colour, SKU, firmware, or battery data must remain unknown rather than being
+filled from a representative model.
+
+## Apple and Classick ownership
+
+Apple preferences, the user-visible iPod name, foreign playlists, and a
+foreign `SysInfoExtended` remain foreign. Classick may mutate database,
+artwork, media, and playlist records only through explicit ownership and the
+coordinated transaction below. Finder/iTunes sync preferences are not Classick
+settings.
+
+Classick-created portable state lives under `iPod_Control/classick/`. Do not
+scatter Classick metadata through Apple files or store credentials, absolute
+source paths, or host-specific mount information on the device. Rockbox files
+are created only when enabled and only where Rockbox requires them.
+
+The portable profile contains operational reconciliation and ownership data
+only. Names, model/colour/icon presentation, capacity, firmware, battery,
+telemetry, timestamps, and host/install identity are runtime or host-cache data
+and must not be serialized into it.
+
+New backup, quarantine, journal, and rollback files live below the Classick
+subtree. Legacy Classick files beside `iTunesDB` are migration inputs; preserve
+ambiguous bytes and do not create more of them.
+
+## `SysInfoExtended`
+
+A Classick-generated `iPod_Control/Device/SysInfoExtended` is a stable,
+versioned libgpod capability projection. It is not a raw SCSI response or the
+portable Classick profile.
+
+- Generate it only for a ready device with validated identity and an exact,
+  validated capability profile.
+- Preserve a foreign existing file byte-for-byte.
+- Track Classick ownership by exact hash in Classick state, never by inserting
+  custom keys into the plist.
+- Include complete artwork/image/chapter format arrays and required stable
+  libgpod capabilities. A partial present file can suppress libgpod's safer
+  fallback tables.
+- Exclude `rbsync`, `RentalClockBias`, rental/DRM data, live connection or
+  volume state, battery fields, host/updater data, and donor identity/firmware.
+- Publish or replace an owned file atomically inside the coordinated device
+  transaction.
+
+The detailed target contract is in
+[Native device protocol and identity](design/2026-07-19-native-device-protocol.md).
+
 ## Source library is read-only
 
 Classick may enumerate, stat, hash, decode, transcode from, and read tags or

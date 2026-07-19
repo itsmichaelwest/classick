@@ -28,6 +28,11 @@ The WinUI 3 tray application owns `classick.exe --daemon` and connects through
 DLL closure. Windows-only SCSI inquiry can provision exact device identity when
 the mounted filesystem lacks sufficient SysInfoExtended data.
 
+That SCSI path is current implementation detail, not the approved target. The
+[native device protocol design](design/2026-07-19-native-device-protocol.md)
+makes ordinary OS USB enumeration authoritative and retains SCSI only for
+explicit diagnostics.
+
 ### macOS application
 
 The SwiftUI application owns `classick --daemon` and connects through the Unix
@@ -52,6 +57,13 @@ socket. macOS uses the system `afconvert`; it never bundles or requires ffmpeg.
 
 `config.toml`'s legacy `ipod_identity` is migration input, not the live
 multi-device authority.
+
+The approved portable-state target adds an on-device profile under
+`iPod_Control/classick/`, with the host registry/cache and durable mutation
+outbox supporting disconnected display and edits. Pending explicit host intent
+wins until published; otherwise the connected device profile refreshes the
+host cache. This is not shipped yet; see the linked design and plan in the
+[documentation index](README.md).
 
 ## Sync flow
 

@@ -14,8 +14,9 @@ iPod Classic, transcoding to ALAC on the fly. Three parts:
    iTunesDB. Runs in three modes: `--ipc-mode` (subprocess driven by a GUI),
    `--daemon` (long-lived tray/menu-bar companion), or interactive TUI (default
    when stdout is a TTY). Device detection is implemented for Windows and macOS;
-   `#[cfg(windows)]` still gates the SCSI/SysInfoExtended-inquiry path, but the
-   rest (mount detection, libgpod identity resolution) is cross-platform.
+   `#[cfg(windows)]` still gates the optional SCSI/SysInfoExtended inquiry
+   implementation, but ordinary mount detection and USB-derived libgpod
+   identity resolution are cross-platform. SCSI is not a product requirement.
 2. **WinUI 3 tray app (`ui/windows/`)** — .NET 10 desktop app. Lives in the
    system tray, owns the daemon process, surfaces device state + sync progress
    + settings + first-run wizard.
@@ -231,11 +232,15 @@ label is the IPC contract.
 
 These hit hard in practice — see `LEARNINGS.md` for the full incident reports:
 
-- **iTunes will reject any libgpod-managed iPod** with a "cannot read,
-  please Restore" dialog. The fundamental signature mismatch can't be fixed
-  without reverse-engineering Apple's signing. We ship the
-  `preflight::verify_itunes_not_running` guard and explicit warning copy in
-  the wizard + Settings to keep users out of the Restore-loop trap.
+- **A libgpod-managed iPod is not intrinsically incompatible with Apple
+  software.** On-device verification shows correctly identified and signed
+  Classick databases remain manageable by Finder/iTunes/Music. The
+  `preflight::verify_itunes_not_running` guard is a conservative
+  concurrent-writer safety measure while Classick mutates device state.
+- **Classick does not initialize restored iPods.** A valid Apple-created
+  `iTunesDB` is the current mutation baseline. Initialization support is
+  explicitly deferred; do not manufacture the initial database or Apple
+  preferences as part of an unrelated fix.
 - **db.write() checkpointing matters.** Every Nth track
   (`SYNC_CHECKPOINT_EVERY` in `crates/classick/src/lib.rs`) the apply loop
   flushes the in-memory DB + manifest so a crash leaves at most N orphans,

@@ -7,6 +7,26 @@ incidents and completed gate reports are archived in
 
 ## Device and data safety
 
+- A factory-restored Late-2009 Classic had an empty `Device/SysInfo`, no
+  `SysInfoExtended`, and no `iTunesDB`; Finder setup created the database, name,
+  and Apple preferences while leaving both SysInfo observations unchanged.
+  Classick therefore requires an Apple-initialized, structurally valid
+  `iTunesDB`. Classick-owned initialization is explicitly deferred.
+- The USB iSerial/FireWire GUID is the portable device ID. Normalize it to 16
+  uppercase hex characters and obtain it through ordinary OS USB enumeration;
+  mount paths, volume UUIDs, labels, names, and privileged SCSI inquiry are not
+  identity authorities.
+- USB identity does not always reveal exact hardware. Classic PID `0x1261`
+  plus 160 GB is ambiguous between the 2007 thick and 2009 thin generations,
+  and USB does not report colour. Use a real device-file fact, a previously
+  reported model, or a genuine serial when available. Exact model codes map
+  reliably to colour; otherwise use generic client artwork. Do not create an
+  appearance setting or surface a default silver SKU as reported hardware.
+- Consecutive live `SysInfoExtended` inquiries changed `RentalClockBias` and
+  opaque `rbsync` bytes. Never persist a raw inquiry or a donor plist with only
+  its GUID replaced. Generate a typed stable capability projection, and include
+  complete artwork format arrays because libgpod treats a present file as
+  authoritative instead of using its fallback table.
 - On-device verification shows that a Classick-managed database is not
   intrinsically unreadable to iTunes/Music. Do not repeat the earlier
   "libgpod iPods are always rejected" claim. The running-process preflight is
@@ -65,6 +85,10 @@ incidents and completed gate reports are archived in
 
 ## Daemon and IPC
 
+- The approved target is one protocol 3.x schema across desktop-daemon and
+  daemon-worker transports; typed progress replaces the nested JSON
+  `sync_event.line`. Until implemented, the shipped protocols remain daemon
+  2.0.0 and subprocess 1.4.0.
 - There are two independently versioned newline-delimited JSON protocols:
   subprocess `1.4.0` and daemon `2.0.0`. `hello` is always first.
 - Preserve socket-line order through one actor/reader path. Per-line detached

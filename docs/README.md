@@ -20,6 +20,19 @@ implementation.
 - [Project learnings](../LEARNINGS.md) — concise operational gotchas that save
   time during implementation and debugging.
 
+## Approved designs and active plans
+
+- [Native device protocol and identity](design/2026-07-19-native-device-protocol.md)
+  — approved target for wire unification, portable device identity/state,
+  initialization boundaries, and stable `SysInfoExtended` generation.
+- [Native device protocol implementation plan](plans/2026-07-19-native-device-protocol.md)
+  — staged code, test, review, and physical-device work needed to reach that
+  target.
+
+The documents in this section describe approved future behavior. The current
+references above continue to describe shipped behavior until an implementation
+slice updates them.
+
 ## Authority
 
 The Rust wire types are the serialization authority. The protocol docs define
