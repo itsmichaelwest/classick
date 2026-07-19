@@ -826,6 +826,7 @@ async fn failed_registry_configure_acknowledges_only_actual_global_and_device_au
     );
     assert_eq!(update["source"], replacement.to_string_lossy().as_ref());
     assert_eq!(update["ipod"]["serial"], "RAW-A");
+    assert_eq!(update["config_revision"], 1);
     let snapshot = client.next_type("device_inventory_snapshot").await;
     assert!(!snapshot_device(&snapshot, "RAW-B")["configured"]
         .as_bool()
@@ -919,6 +920,10 @@ async fn save_device_config_advances_only_successfully_persisted_components() {
     assert_eq!(update["subscriptions"]["playlists"], json!([]));
     assert_eq!(update["settings"]["auto_sync"], false);
     assert_eq!(update["settings"]["rockbox_compat"], true);
+    assert_eq!(update["selection_revision"], 1);
+    assert_eq!(update["subscriptions_revision"], 0);
+    assert_eq!(update["settings_revision"], 1);
+    assert_eq!(update["acknowledged_request_id"], "mixed-config");
     let snapshot = client
         .next_snapshot_where(|snapshot| {
             snapshot_device(snapshot, "RAW-A")["selection_revision"] == 1

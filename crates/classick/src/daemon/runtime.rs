@@ -2155,15 +2155,14 @@ fn handle_client_command(
                         "daemon: cannot configure unknown device {}",
                         identity.serial
                     );
-                    if global_changed {
-                        let persisted_revision = config_revision.record_persisted_mutation(true);
-                        let _ = event_tx.send(build_config_update(
-                            Some(current),
-                            registry,
-                            persisted_revision,
-                            None,
-                        ));
-                    }
+                    let persisted_revision =
+                        config_revision.record_persisted_mutation(global_changed);
+                    let _ = event_tx.send(build_config_update(
+                        Some(current),
+                        registry,
+                        persisted_revision,
+                        Some(request_id.clone()),
+                    ));
                     let _ = reply.send(command_failed(request_id, "unknown device"));
                     return false;
                 };
@@ -2181,16 +2180,14 @@ fn handle_client_command(
                             "daemon: failed to configure device {}: {error:#}",
                             identity.serial
                         );
-                        if global_changed {
-                            let persisted_revision =
-                                config_revision.record_persisted_mutation(true);
-                            let _ = event_tx.send(build_config_update(
-                                Some(current),
-                                registry,
-                                persisted_revision,
-                                None,
-                            ));
-                        }
+                        let persisted_revision =
+                            config_revision.record_persisted_mutation(global_changed);
+                        let _ = event_tx.send(build_config_update(
+                            Some(current),
+                            registry,
+                            persisted_revision,
+                            Some(request_id.clone()),
+                        ));
                         let _ = reply.send(command_failed(
                             request_id,
                             "could not persist the device configuration",
@@ -2691,6 +2688,7 @@ fn handle_client_command(
             let mut selection_changed = false;
             let mut subscriptions_changed = false;
             let mut settings_changed = false;
+            let mut component_failure = None;
             if let Some(sel) = selection {
                 match crate::selection::effective_device_selection_path_in(
                     device_state_root(config_path),
@@ -2710,11 +2708,8 @@ fn handle_client_command(
                                     tracing::error!(
                                         "daemon: failed to save device selection for {raw_serial}: {e:#}"
                                     );
-                                    let _ = reply.send(command_failed(
-                                        request_id,
-                                        "could not persist the device selection",
-                                    ));
-                                    return false;
+                                    component_failure
+                                        .get_or_insert("could not persist the device selection");
                                 }
                             }
                         }
@@ -2723,11 +2718,7 @@ fn handle_client_command(
                         tracing::error!(
                             "daemon: cannot resolve device selection path for {raw_serial}: {e:#}"
                         );
-                        let _ = reply.send(command_failed(
-                            request_id,
-                            "could not resolve the device selection",
-                        ));
-                        return false;
+                        component_failure.get_or_insert("could not resolve the device selection");
                     }
                 }
             }
@@ -2750,11 +2741,9 @@ fn handle_client_command(
                                     tracing::error!(
                                         "daemon: failed to save subscriptions for {raw_serial}: {e:#}"
                                     );
-                                    let _ = reply.send(command_failed(
-                                        request_id,
+                                    component_failure.get_or_insert(
                                         "could not persist the device subscriptions",
-                                    ));
-                                    return false;
+                                    );
                                 }
                             }
                         }
@@ -2763,11 +2752,8 @@ fn handle_client_command(
                         tracing::error!(
                             "daemon: cannot resolve subscriptions path for {raw_serial}: {e:#}"
                         );
-                        let _ = reply.send(command_failed(
-                            request_id,
-                            "could not resolve the device subscriptions",
-                        ));
-                        return false;
+                        component_failure
+                            .get_or_insert("could not resolve the device subscriptions");
                     }
                 }
             }
@@ -2791,11 +2777,8 @@ fn handle_client_command(
                                     tracing::error!(
                                         "daemon: failed to save settings for {raw_serial}: {e:#}"
                                     );
-                                    let _ = reply.send(command_failed(
-                                        request_id,
-                                        "could not persist the device settings",
-                                    ));
-                                    return false;
+                                    component_failure
+                                        .get_or_insert("could not persist the device settings");
                                 }
                             }
                         }
@@ -2804,11 +2787,7 @@ fn handle_client_command(
                         tracing::error!(
                             "daemon: cannot resolve settings path for {raw_serial}: {e:#}"
                         );
-                        let _ = reply.send(command_failed(
-                            request_id,
-                            "could not resolve the device settings",
-                        ));
-                        return false;
+                        component_failure.get_or_insert("could not resolve the device settings");
                     }
                 }
             }
@@ -2831,8 +2810,11 @@ fn handle_client_command(
                 config_path,
                 registry,
                 raw_serial,
-                request_id,
+                request_id.clone(),
             ));
+            if let Some(error) = component_failure {
+                let _ = reply.send(command_failed(request_id, error));
+            }
             broadcast_status(
                 event_tx,
                 state,
