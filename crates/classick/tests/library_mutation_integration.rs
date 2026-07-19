@@ -1,5 +1,6 @@
 use classick::daemon::library_mutations::{LibraryMutationService, MutationFailureCode};
 use classick::library_index::{IndexedTrack, LibraryIndex};
+use classick::manifest::{Manifest, ManifestEntry};
 use classick::playlist::{ManualPlaylist, Playlist, PlaylistStore};
 use classick::selection::{SelectionMode, SelectionRule};
 use std::path::{Path, PathBuf};
@@ -57,6 +58,31 @@ fn configured(root: &Path, serial: &str) {
     let path = root.join("devices/registry.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, format!(r#"{{"version":1,"records":[{{"serial":"{serial}","model_label":"Classic","configured":true,"selection_revision":0,"settings_revision":0,"subscriptions_revision":0}}]}}"#)).unwrap();
+}
+
+fn manifest(root: &Path, serial: &str, tracks: &[&str]) -> Manifest {
+    Manifest {
+        version: 1,
+        ipod_serial: Some(serial.into()),
+        last_source_root: Some(root.join("music")),
+        tracks: tracks
+            .iter()
+            .enumerate()
+            .map(|(index, relative)| ManifestEntry {
+                source_path: root.join("music").join(relative),
+                source_mtime: 1,
+                source_size: 1,
+                source_fingerprint: format!("fp-{index}"),
+                ipod_dbid: index as u64 + 1,
+                ipod_relpath: format!("iPod_Control/Music/F00/{index}.m4a"),
+                source_known: true,
+                audio_fingerprint: String::new(),
+                encoder: "test".into(),
+                encoder_version: "1".into(),
+                source_format: "flac".into(),
+            })
+            .collect(),
+    }
 }
 
 fn artist(name: &str) -> SelectionRule {
@@ -276,4 +302,68 @@ fn no_matches_and_smart_playlist_rejection_leave_authority_unchanged() {
         MutationFailureCode::NonManualPlaylist
     );
     assert_eq!(service.playlist_revision("smart"), 0);
+}
+
+#[test]
+fn missing_counts_use_connected_manifest_then_serial_host_cache() {
+    let root = root("manifest-authority");
+    configured(&root, "A");
+    let host = classick::device_state::device_manifest_path_in(&root, "A").unwrap();
+    classick::manifest::save_atomic(&host, &manifest(&root, "A", &["Birdy/Fire Within/01.flac"]))
+        .unwrap();
+
+    let mount = root.join("mounted-ipod");
+    let live = classick::device_state::portable_manifest_path(&mount);
+    classick::manifest::save_atomic(
+        &live,
+        &manifest(
+            &root,
+            "A",
+            &["Birdy/Fire Within/01.flac", "Birdy/Fire Within/02.flac"],
+        ),
+    )
+    .unwrap();
+
+    let mut connected = LibraryMutationService::open(root.clone(), index(&root)).unwrap();
+    connected.set_connected_mount("A", Some(mount));
+    let live_outcome = connected
+        .add_selection_to_device(
+            "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8750",
+            "A",
+            &[artist("Birdy")],
+        )
+        .unwrap();
+    assert_eq!(live_outcome.missing_tracks, 0);
+
+    let mut disconnected = LibraryMutationService::open(root.clone(), index(&root)).unwrap();
+    let cached_outcome = disconnected
+        .add_selection_to_device(
+            "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8751",
+            "A",
+            &[artist("Birdy")],
+        )
+        .unwrap();
+    assert_eq!(cached_outcome.missing_tracks, 1);
+}
+
+#[test]
+fn ledger_evicts_oldest_acknowledgement_per_target() {
+    let root = root("ledger-eviction");
+    configured(&root, "A");
+    let mut service = LibraryMutationService::open(root.clone(), index(&root)).unwrap();
+    for n in 0..257 {
+        let request = format!("018f9d7e-2f2b-7b52-9f1d-{n:012x}");
+        service
+            .add_selection_to_device(&request, "A", &[artist("Birdy")])
+            .unwrap();
+    }
+    let ledger: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("devices/library-mutation-acks.json")).unwrap(),
+    )
+    .unwrap();
+    let entries = ledger["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 256);
+    assert!(entries
+        .iter()
+        .all(|entry| entry["request_id"] != "018f9d7e-2f2b-7b52-9f1d-000000000000"));
 }
