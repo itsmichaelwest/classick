@@ -40,20 +40,33 @@ pub enum PlaylistClassification {
 }
 
 pub fn firmware_profile(id: FirmwareProfileId) -> &'static FirmwarePlaylistProfile {
-    static IPOD_CLASSIC_VIDEO_KIND_V1: OnceLock<FirmwarePlaylistProfile> = OnceLock::new();
-    match id {
-        FirmwareProfileId::IpodClassicVideoKindV1 => IPOD_CLASSIC_VIDEO_KIND_V1.get_or_init(|| {
-            serde_json::from_str(include_str!(
-                "../../tests/fixtures/ipod-classic-video-kind-v1.json"
-            ))
-            .expect("bundled firmware playlist profile must be valid")
-        }),
-    }
+    &firmware_profile_encodings(id)[0]
 }
 
 pub fn match_firmware_profile(playlist: &PlaylistSnapshot) -> Option<FirmwareProfileId> {
     let id = FirmwareProfileId::IpodClassicVideoKindV1;
-    matches_profile(playlist, firmware_profile(id)).then_some(id)
+    firmware_profile_encodings(id)
+        .iter()
+        .any(|profile| matches_profile(playlist, profile))
+        .then_some(id)
+}
+
+fn firmware_profile_encodings(id: FirmwareProfileId) -> &'static [FirmwarePlaylistProfile; 2] {
+    static IPOD_CLASSIC_VIDEO_KIND_V1: OnceLock<[FirmwarePlaylistProfile; 2]> = OnceLock::new();
+    match id {
+        FirmwareProfileId::IpodClassicVideoKindV1 => IPOD_CLASSIC_VIDEO_KIND_V1.get_or_init(|| {
+            [
+                serde_json::from_str(include_str!(
+                    "../../tests/fixtures/ipod-classic-video-kind-v1.json"
+                ))
+                .expect("bundled captured firmware playlist encoding must be valid"),
+                serde_json::from_str(include_str!(
+                    "../../tests/fixtures/ipod-classic-video-kind-v1-libgpod-post-write.json"
+                ))
+                .expect("bundled libgpod post-write playlist encoding must be valid"),
+            ]
+        }),
+    }
 }
 
 pub fn classify_playlist(
@@ -124,13 +137,34 @@ mod tests {
 
     #[test]
     fn every_near_match_is_foreign() {
-        for (field, mutate) in near_match_mutations() {
-            let mut snapshot = fixture_snapshot("Videos", 7, 100);
-            mutate(&mut snapshot);
+        for profile in exact_encodings() {
+            for (field, mutate) in near_match_mutations() {
+                let mut snapshot = snapshot_from_profile(&profile, "Videos", 7, 100);
+                mutate(&mut snapshot);
+                let is_other_registered_encoding = exact_encodings()
+                    .iter()
+                    .any(|registered| matches_profile(&snapshot, registered));
+                assert_eq!(
+                    match_firmware_profile(&snapshot).is_some(),
+                    is_other_registered_encoding,
+                    "unexpected classification after mutating {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_registered_encodings_match_the_same_profile() {
+        for (index, profile) in exact_encodings().iter().enumerate() {
+            let snapshot = snapshot_from_profile(
+                profile,
+                &format!("Localized Videos {index}"),
+                70 + index as u64,
+                100 + index as i64,
+            );
             assert_eq!(
                 match_firmware_profile(&snapshot),
-                None,
-                "matched after mutating {field}"
+                Some(FirmwareProfileId::IpodClassicVideoKindV1)
             );
         }
     }
@@ -167,6 +201,15 @@ mod tests {
 
     fn fixture_snapshot(name: &str, id: u64, timestamp: i64) -> PlaylistSnapshot {
         let profile = firmware_profile(FirmwareProfileId::IpodClassicVideoKindV1);
+        snapshot_from_profile(profile, name, id, timestamp)
+    }
+
+    fn snapshot_from_profile(
+        profile: &FirmwarePlaylistProfile,
+        name: &str,
+        id: u64,
+        timestamp: i64,
+    ) -> PlaylistSnapshot {
         PlaylistSnapshot {
             id,
             name: Some(name.into()),
@@ -180,6 +223,10 @@ mod tests {
             rules_header: profile.rules_header.clone(),
             rules: profile.rules.clone(),
         }
+    }
+
+    fn exact_encodings() -> Vec<FirmwarePlaylistProfile> {
+        firmware_profile_encodings(FirmwareProfileId::IpodClassicVideoKindV1).to_vec()
     }
 
     fn normal_snapshot(name: &str, id: u64) -> PlaylistSnapshot {
@@ -302,6 +349,34 @@ mod tests {
             ("rule.reserved_int2", |s| s.rules[0].reserved_int2 += 1),
             ("rule.reserved1", |s| s.rules[0].reserved1_is_null = false),
             ("rule.reserved2", |s| s.rules[0].reserved2_is_null = false),
+            ("second_rule.field", |s| s.rules[1].field += 1),
+            ("second_rule.action", |s| s.rules[1].action += 1),
+            ("second_rule.string", |s| {
+                s.rules[1].string = Some("near".into())
+            }),
+            ("second_rule.fromvalue", |s| s.rules[1].fromvalue += 1),
+            ("second_rule.fromdate", |s| s.rules[1].fromdate += 1),
+            ("second_rule.fromunits", |s| s.rules[1].fromunits += 1),
+            ("second_rule.tovalue", |s| s.rules[1].tovalue += 1),
+            ("second_rule.todate", |s| s.rules[1].todate += 1),
+            ("second_rule.tounits", |s| s.rules[1].tounits += 1),
+            ("second_rule.unk052", |s| s.rules[1].unk052 += 1),
+            ("second_rule.unk056", |s| s.rules[1].unk056 += 1),
+            ("second_rule.unk060", |s| s.rules[1].unk060 += 1),
+            ("second_rule.unk064", |s| s.rules[1].unk064 += 1),
+            ("second_rule.unk068", |s| s.rules[1].unk068 += 1),
+            ("second_rule.reserved_int1", |s| {
+                s.rules[1].reserved_int1 += 1
+            }),
+            ("second_rule.reserved_int2", |s| {
+                s.rules[1].reserved_int2 += 1
+            }),
+            ("second_rule.reserved1", |s| {
+                s.rules[1].reserved1_is_null = false
+            }),
+            ("second_rule.reserved2", |s| {
+                s.rules[1].reserved2_is_null = false
+            }),
         ]
     }
 }

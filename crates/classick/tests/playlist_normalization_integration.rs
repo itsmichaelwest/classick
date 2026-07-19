@@ -2,7 +2,7 @@ use classick::ffi;
 use classick::ipod::playlist_audit::{snapshot_playlists, PlaylistSnapshot};
 use classick::ipod::playlist_normalize::normalize_firmware_playlists;
 use classick::ipod::playlist_profile::{
-    firmware_profile, FirmwarePlaylistProfile, FirmwareProfileId,
+    firmware_profile, match_firmware_profile, FirmwarePlaylistProfile, FirmwareProfileId,
 };
 use classick::ipod::OwnedDb;
 use std::ffi::CString;
@@ -125,6 +125,88 @@ fn normalization_persists_only_duplicate_removal() {
         .collect();
     assert!(ids.contains(&kept));
     assert!(!ids.contains(&removed));
+}
+
+#[test]
+fn libgpod_write_reparse_maps_captured_encoding_to_registered_post_write_encoding() {
+    let fixture = NormalizationFixture::new();
+    let id = fixture.add_exact("Localized Videos", 100, 10);
+    fixture.db.write().unwrap();
+    let mount = fixture.mount.clone();
+    drop(fixture);
+
+    let reopened = OwnedDb::open(&mount).unwrap();
+    let snapshot = snapshot_playlists(&reopened)
+        .into_iter()
+        .find(|playlist| playlist.id == id)
+        .unwrap();
+    assert_profile_encoding(&snapshot, &post_write_profile());
+    assert_eq!(
+        match_firmware_profile(&snapshot),
+        Some(FirmwareProfileId::IpodClassicVideoKindV1)
+    );
+}
+
+#[test]
+fn normalization_keeps_one_across_two_coordinated_writes_and_preserves_foreign_near_match() {
+    let fixture = NormalizationFixture::new();
+    let removed = fixture.add_exact("Videos", 100, 10);
+    let kept = fixture.add_exact("Vidéos", 200, 20);
+    let foreign = unsafe {
+        let playlist = add_profile(&fixture.db, "Near", 300, 30);
+        (*playlist).splrules.match_operator += 1;
+        (*playlist).id
+    };
+
+    let first = normalize_firmware_playlists(&fixture.db).unwrap();
+    assert_eq!(first.kept, vec![kept]);
+    assert_eq!(first.removed, vec![removed]);
+    fixture.db.write().unwrap();
+    let mount = fixture.mount.clone();
+    drop(fixture);
+
+    let reopened = OwnedDb::open(&mount).unwrap();
+    assert_exact_and_foreign_counts(&reopened, kept, foreign);
+    let second = normalize_firmware_playlists(&reopened).unwrap();
+    assert_eq!(second.kept, vec![kept]);
+    assert!(second.removed.is_empty());
+    reopened.write().unwrap();
+    drop(reopened);
+
+    let reopened_again = OwnedDb::open(&mount).unwrap();
+    assert_exact_and_foreign_counts(&reopened_again, kept, foreign);
+}
+
+fn post_write_profile() -> FirmwarePlaylistProfile {
+    serde_json::from_str(include_str!(
+        "fixtures/ipod-classic-video-kind-v1-libgpod-post-write.json"
+    ))
+    .unwrap()
+}
+
+fn assert_profile_encoding(snapshot: &PlaylistSnapshot, profile: &FirmwarePlaylistProfile) {
+    assert_eq!(snapshot.is_master, profile.is_master);
+    assert_eq!(snapshot.is_podcast, profile.is_podcast);
+    assert_eq!(snapshot.is_smart, profile.is_smart);
+    assert_eq!(snapshot.member_count, profile.member_count);
+    assert_eq!(snapshot.preferences, profile.preferences);
+    assert_eq!(snapshot.rules_header, profile.rules_header);
+    assert_eq!(snapshot.rules, profile.rules);
+}
+
+fn assert_exact_and_foreign_counts(db: &OwnedDb, exact_id: u64, foreign_id: u64) {
+    let snapshots = snapshot_playlists(db);
+    let exact: Vec<_> = snapshots
+        .iter()
+        .filter(|playlist| match_firmware_profile(playlist).is_some())
+        .collect();
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].id, exact_id);
+    let foreign = snapshots
+        .iter()
+        .find(|playlist| playlist.id == foreign_id)
+        .unwrap();
+    assert_eq!(match_firmware_profile(foreign), None);
 }
 
 type PlaylistMutation = unsafe fn(*mut ffi::Itdb_Playlist);

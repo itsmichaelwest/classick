@@ -1,0 +1,70 @@
+{
+  "profile_id": "ipod-classic-video-kind-v1",
+  "is_master": false,
+  "is_podcast": false,
+  "is_smart": true,
+  "member_count": 0,
+  "preferences": {
+    "liveupdate": 1,
+    "checkrules": 1,
+    "checklimits": 0,
+    "limittype": 3,
+    "limitsort": 2,
+    "limitvalue": 25,
+    "matchcheckedonly": 0,
+    "reserved_int1": 0,
+    "reserved_int2": 0,
+    "reserved1_is_null": true,
+    "reserved2_is_null": true
+  },
+  "rules_header": {
+    "unk004": 65537,
+    "match_operator": 0,
+    "reserved_int1": 0,
+    "reserved_int2": 0,
+    "reserved1_is_null": true,
+    "reserved2_is_null": true
+  },
+  "rules": [
+    {
+      "field": 60,
+      "action": 1024,
+      "string": null,
+      "fromvalue": 3138,
+      "fromdate": 0,
+      "fromunits": 1,
+      "tovalue": 3138,
+      "todate": 0,
+      "tounits": 1,
+      "unk052": 0,
+      "unk056": 0,
+      "unk060": 0,
+      "unk064": 0,
+      "unk068": 0,
+      "reserved_int1": 0,
+      "reserved_int2": 0,
+      "reserved1_is_null": true,
+      "reserved2_is_null": true
+    },
+    {
+      "field": 60,
+      "action": 33555456,
+      "string": null,
+      "fromvalue": 2138116,
+      "fromdate": 0,
+      "fromunits": 1,
+      "tovalue": 2138116,
+      "todate": 0,
+      "tounits": 1,
+      "unk052": 0,
+      "unk056": 0,
+      "unk060": 0,
+      "unk064": 0,
+      "unk068": 0,
+      "reserved_int1": 0,
+      "reserved_int2": 0,
+      "reserved1_is_null": true,
+      "reserved2_is_null": true
+    }
+  ]
+}

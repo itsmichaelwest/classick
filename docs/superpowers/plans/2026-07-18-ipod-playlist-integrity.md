@@ -12,7 +12,7 @@
 
 - This plan depends on completed Plans 1–3 and must reuse Plan 1's exact raw device serial, Plan 2's atomic-file primitive, and Plan 3's coordinated DB/artwork/manifest checkpoint; it must not add an independent DB publication path.
 - Keep `\\jupiter\data\media\music` read-only. The audit command performs no DB, manifest, ownership, or device write.
-- Classick never creates a firmware-system Videos playlist. It may remove only older exact instances of the registered `ipod-classic-video-kind-v1` semantic profile.
+- Classick never creates a firmware-system Videos playlist. It may remove only older exact instances of either registered encoding of the `ipod-classic-video-kind-v1` semantic profile.
 - Never classify, adopt, update, or remove a playlist by display name or emptiness. Unknown profiles, near matches, and unrecorded playlists are foreign and remain untouched.
 - The connected device record at `/iPod_Control/classick/managed_playlists.json` is authoritative. A host per-device record is a cache and cannot grant permission to mutate an Apple playlist.
 - A managed ID grants ownership only when it resolves to a normal, non-master, non-podcast, non-smart playlist. An invalid association is dropped from the candidate record while the suspect playlist is preserved.
@@ -22,7 +22,7 @@
 - Keep every created or materially split implementation file at or below roughly 500 lines. Split fixture builders and integration harnesses instead of growing `ipod/db.rs`, `apply_loop.rs`, or `sync_transaction.rs` further.
 - Add regression coverage first, run the focused test to observe the stated RED failure, implement the smallest passing change, and run Rust test processes sequentially when they touch libgpod or shared device-shaped paths.
 - Before every commit, stage only the exact named files with `git add <paths>`, inspect `git diff --cached`, and use the listed Conventional Commit message. Never use `git add .`, `git add -A`, `--no-verify`, or amend.
-- The physical causality gate is release-blocking. If firmware behavior disproves the registered profile or reveals a second legitimate category distinction, correct the profile and automated fixtures before release; do not broaden deletion.
+- The physical causality gate remains release-blocking. If firmware behavior disproves the two registered exact encodings or reveals another legitimate category distinction, correct the profile and automated fixtures before release; do not broaden deletion.
 
 ---
 
@@ -40,6 +40,7 @@
 | `crates/classick/src/pending_session.rs` | Carry candidate ownership and verified membership through Plan 3 recovery. |
 | `crates/classick/src/sync_transaction.rs` | Normalize before each DB write, verify candidate IDs/membership after reparse, publish device ownership, and retain the journal on failure. |
 | `crates/classick/tests/fixtures/ipod-classic-video-kind-v1.json` | Exact registered firmware-system semantic profile. |
+| `crates/classick/tests/fixtures/ipod-classic-video-kind-v1-libgpod-post-write.json` | Exact deterministic encoding produced when libgpod validates and writes the captured profile. |
 | `crates/classick/tests/playlist_audit_integration.rs` | Read-only command and audit serialization proof. |
 | `crates/classick/tests/playlist_track_unlink_integration.rs` | Normal/smart/foreign membership deletion and write/reparse proof. |
 | `crates/classick/tests/playlist_ownership_integration.rs` | Managed-target guards, authority migration, publication ordering, and recovery failure injection. |
@@ -141,7 +142,7 @@ The settled `ManagedPlaylistEntry.rockbox` remains the single desired projection
 
 - [ ] **Step 1: Write the exact versioned firmware profile fixture**
 
-Create `crates/classick/tests/fixtures/ipod-classic-video-kind-v1.json` with this complete semantic payload; `name`, `id`, and `timestamp` are deliberately absent because they are diagnostic fields, not matching fields:
+Create `crates/classick/tests/fixtures/ipod-classic-video-kind-v1.json` with the complete captured pre-write semantic payload below, plus `crates/classick/tests/fixtures/ipod-classic-video-kind-v1-libgpod-post-write.json` with the exact deterministic result of libgpod rule validation (`tovalue = fromvalue` and `tounits = fromunits` for both rules). Together these two payloads are the closed encoding set for one profile ID. `name`, `id`, and `timestamp` are deliberately absent because they are diagnostic fields, not matching fields:
 
 ```json
 {
@@ -305,7 +306,7 @@ pub struct PlaylistAudit {
 
 Run: `cargo test -p classick ipod::playlist_profile -- --test-threads=1 && cargo test -p classick ipod::playlist_audit -- --test-threads=1`
 
-Expected: PASS; the fixture matches both localized names, and every one-field mutation is foreign.
+Expected: PASS; both exact registered encodings match independent of localized name, ID, and timestamp. Every one-field mutation of either encoding is foreign unless it produces the other registered encoding exactly.
 
 - [ ] **Step 6: Commit the inventory/profile unit**
 
@@ -1011,7 +1012,7 @@ Record exact IDs/timestamps after each boot. Do not run normalization between th
 
 - [ ] **Step 6: Apply the release-blocking causality decision**
 
-Release Plan 6A only if every newly observed Videos instance exactly matches `ipod-classic-video-kind-v1` and the observations support one coherent category. If either boot produces a near match, a second legitimate semantic payload, or a category distinction that the fixture collapses, stop release, preserve all captured DB/audit evidence, add the new distinction to fixture-backed classification, and rerun Tasks 1, 6, and 8 before another device write. Never change matching to name/emptiness and never delete the unexplained record.
+Release Plan 6A only if every newly observed Videos instance exactly matches one of the two registered `ipod-classic-video-kind-v1` encodings and the observations support one coherent category. If either boot produces a near match, a third representation, a second legitimate semantic payload, or a category distinction that the fixtures collapse, stop release, preserve all captured DB/audit evidence, add the new distinction to fixture-backed classification, and rerun Tasks 1, 6, and 8 before another device write. Never change matching to name/emptiness and never delete the unexplained record. This physical gate remains release-blocking after all automated checks pass.
 
 - [ ] **Step 7: Re-run normalization and verify managed playlist playback**
 
@@ -1039,11 +1040,11 @@ git commit -m "test(ipod): gate playlist integrity on physical causality"
 ## Plan 6A Completion Criteria
 
 - `--audit-playlists` serializes every observable playlist field and classification while leaving the entire device tree unchanged.
-- The exact fixture profile is name-independent, one-field near matches are foreign, and zero/one/many normalization keeps newest timestamp then highest ID without creating a profile record.
+- The profile's two registered exact encodings are name-independent, one-field near matches of either are foreign unless they equal the other registered encoding exactly, and zero/one/many normalization keeps newest timestamp then highest ID without creating a profile record.
 - Every track-freeing path uses the safe containing-playlist snapshot helper, and real write/reparse tests prove no dangling member survives in foreign normal or smart playlists.
 - Managed ownership exists on the device with exact raw serial, schema version, expected normal kind, and Apple IDs; the host file is cache-only.
 - Reconcile never adopts/removes by name, never trusts stale IDs targeting master/podcast/smart playlists, and stages a complete candidate record before DB publication.
 - Plan 3 recovery resumes from journaled verified IDs without recreating playlists; device ownership failures retain the journal and block completed finalization.
 - Projection preparation is crash-distinguishable from projection publication: the pre-6B empty fast path requires no settled/candidate Rockbox records, while Plan 6B owns enabled and disabled planning; toggle-off produces journal-authorized delete-only operations and cannot orphan a recorded `.m3u8` file.
 - `VerifiedPlaylistMembership` supplies Plan 6B one authoritative ordered Apple membership and normalized device path list per slug.
-- The physical gate establishes when exact firmware records appear. Any contradictory or unexplained payload blocks release without broadening deletion.
+- The still-release-blocking physical gate establishes when exact firmware records appear. Any contradictory, third, or unexplained payload blocks release without broadening deletion.
