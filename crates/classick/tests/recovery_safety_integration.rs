@@ -129,6 +129,7 @@ fn device_manifest_published_future_ops_remain_byte_exact_when_recovery_rejects_
                 playlist_state_root: Some(&state_root),
                 device_identity: None,
                 playlist_failure_point: None,
+                rockbox_compat: false,
             },
         )
         .unwrap_err();
@@ -216,6 +217,7 @@ fn database_verified_mismatch_blocks_reconcile_on_every_restart() {
                 playlist_state_root: Some(&state_root),
                 device_identity: None,
                 playlist_failure_point: None,
+                rockbox_compat: false,
             },
         )
         .unwrap_err();
@@ -238,6 +240,7 @@ fn database_verified_mismatch_blocks_reconcile_on_every_restart() {
             playlist_state_root: Some(&state_root),
             device_identity: None,
             playlist_failure_point: None,
+            rockbox_compat: false,
         },
     );
     progress.finish(second.is_ok()).unwrap();
@@ -324,6 +327,7 @@ fn assert_published_mismatch_restores_manifest(label: &str, previous: Option<&[u
                 playlist_state_root: Some(&state_root),
                 device_identity: None,
                 playlist_failure_point: Some(PlaylistFailurePoint::BeforeProjectionPlanPersist),
+                rockbox_compat: false,
             },
         )
         .unwrap_err();
@@ -364,6 +368,7 @@ fn assert_published_mismatch_restores_manifest(label: &str, previous: Option<&[u
                 playlist_state_root: Some(&state_root),
                 device_identity: None,
                 playlist_failure_point: None,
+                rockbox_compat: false,
             },
         );
         progress.finish(result.is_ok()).unwrap();

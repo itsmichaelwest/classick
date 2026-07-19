@@ -119,35 +119,6 @@ pub fn ownership_store(
     ))
 }
 
-pub fn prepare_empty_projection_plan(
-    journal: &mut PendingSession,
-    store: &PendingSessionStore,
-    settled: &ManagedPlaylistOwnership,
-    failure: Option<PlaylistFailurePoint>,
-) -> Result<()> {
-    inject(failure, PlaylistFailurePoint::BeforeProjectionPlanPersist)?;
-    if !journal.pending_rockbox_ops.is_empty() {
-        bail!("Rockbox projection operations require the projection publisher");
-    }
-    let candidate = journal
-        .candidate_playlist_ownership
-        .as_ref()
-        .context("verified transaction has no candidate playlist ownership")?;
-    let has_projection = settled
-        .playlists
-        .values()
-        .chain(candidate.playlists.values())
-        .any(|entry| entry.rockbox.is_some());
-    if has_projection {
-        bail!("Rockbox projection finalization requires the projection planner");
-    }
-    journal.phase = PendingPhase::RockboxProjectionsPrepared;
-    store
-        .save(journal)
-        .context("persist empty prepared Rockbox projection plan")?;
-    inject(failure, PlaylistFailurePoint::AfterProjectionPlanPrepared)
-}
-
 pub fn publish_ownership(
     journal: &mut PendingSession,
     store: &PendingSessionStore,
@@ -167,40 +138,6 @@ pub fn publish_ownership(
     journal.phase = PendingPhase::PlaylistOwnershipPublished;
     store.save(journal)?;
     inject(failure, PlaylistFailurePoint::AfterDeviceOwnershipRename)
-}
-
-pub fn require_pre_6b_empty_plan(
-    journal: &PendingSession,
-    ownership: &DeviceOwnershipStore,
-) -> Result<()> {
-    if !journal.pending_rockbox_ops.is_empty() {
-        bail!("Rockbox projection finalization requires the projection publisher");
-    }
-    let settled = ownership.load_device_read_only()?;
-    let candidate = journal
-        .candidate_playlist_ownership
-        .as_ref()
-        .context("prepared transaction has no candidate playlist ownership")?;
-    if settled
-        .playlists
-        .values()
-        .chain(candidate.playlists.values())
-        .any(|entry| entry.rockbox.is_some())
-    {
-        bail!("Rockbox projection finalization requires the projection planner");
-    }
-    Ok(())
-}
-
-pub fn publish_empty_projections(
-    journal: &mut PendingSession,
-    store: &PendingSessionStore,
-) -> Result<()> {
-    if !journal.pending_rockbox_ops.is_empty() {
-        bail!("Rockbox projection operations require the projection publisher");
-    }
-    journal.phase = PendingPhase::RockboxProjectionsPublished;
-    store.save(journal)
 }
 
 pub fn refresh_host_cache(

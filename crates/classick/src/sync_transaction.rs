@@ -1,4 +1,5 @@
 mod playlist_publication;
+mod rockbox_publication;
 mod rollback;
 
 use anyhow::{bail, Context, Result};
@@ -15,6 +16,7 @@ pub struct PublishOptions<'a> {
     pub playlist_state_root: Option<&'a Path>,
     pub device_identity: Option<&'a crate::ipod::device::LibgpodIdentity>,
     pub playlist_failure_point: Option<PlaylistFailurePoint>,
+    pub rockbox_compat: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -193,15 +195,19 @@ impl CheckpointCoordinator<'_> {
             )?;
             if journal.phase == PendingPhase::DeviceManifestPublished {
                 let settled = ownership.load_device_read_only()?;
-                playlist_publication::prepare_empty_projection_plan(
+                rockbox_publication::prepare_playlist_projection(
                     journal,
                     &store,
                     &settled,
+                    options.rockbox_compat,
+                    options.desired_playlists,
+                    &crate::rockbox_projection_fs::DeviceProjectionFs::new(
+                        self.mount.to_path_buf(),
+                    ),
                     options.playlist_failure_point,
                 )?;
             }
             if journal.phase == PendingPhase::RockboxProjectionsPrepared {
-                playlist_publication::require_pre_6b_empty_plan(journal, &ownership)?;
                 playlist_publication::publish_ownership(
                     journal,
                     &store,
@@ -210,7 +216,21 @@ impl CheckpointCoordinator<'_> {
                 )?;
             }
             if journal.phase == PendingPhase::PlaylistOwnershipPublished {
-                playlist_publication::publish_empty_projections(journal, &store)?;
+                let verified = journal
+                    .verified_playlist_memberships
+                    .iter()
+                    .cloned()
+                    .map(|membership| (membership.slug.clone(), membership))
+                    .collect();
+                rockbox_publication::publish_playlist_finalization(
+                    &store,
+                    journal,
+                    &ownership,
+                    &crate::rockbox_projection_fs::DeviceProjectionFs::new(
+                        self.mount.to_path_buf(),
+                    ),
+                    &verified,
+                )?;
             }
             if journal.phase == PendingPhase::RockboxProjectionsPublished {
                 let warning = playlist_publication::refresh_host_cache(
@@ -651,6 +671,7 @@ fn reset_staged_publication(journal: &mut crate::pending_session::PendingSession
     journal.desired_playlist_memberships.clear();
     journal.verified_playlist_memberships.clear();
     journal.pending_rockbox_ops.clear();
+    journal.rockbox_projection_plan_version = None;
 }
 
 fn remove_stale_artwork_outputs(mount: &Path) -> Result<()> {
@@ -972,6 +993,7 @@ mod tests {
                     playlist_state_root: Some(&state_root),
                     device_identity: None,
                     playlist_failure_point: None,
+                    rockbox_compat: false,
                 },
             )
             .unwrap();
@@ -1025,6 +1047,7 @@ mod tests {
                     playlist_state_root: Some(&state_root),
                     device_identity: None,
                     playlist_failure_point: Some(PlaylistFailurePoint::BeforeDeviceOwnershipRename),
+                    rockbox_compat: false,
                 },
             )
             .unwrap_err();
@@ -1051,6 +1074,7 @@ mod tests {
                     playlist_state_root: Some(&state_root),
                     device_identity: None,
                     playlist_failure_point: None,
+                    rockbox_compat: false,
                 },
             )
             .unwrap();
@@ -1126,6 +1150,7 @@ mod tests {
                     playlist_state_root: Some(&state_root),
                     device_identity: None,
                     playlist_failure_point: Some(failure),
+                    rockbox_compat: false,
                 },
             );
 
@@ -1150,18 +1175,15 @@ mod tests {
     }
 
     #[test]
-    fn pre_6b_projection_records_cannot_take_the_empty_plan_fast_path() {
+    fn pre_6b_prepared_projection_journal_without_plan_marker_fails_closed() {
         use crate::ipod::playlist_ownership::{
             ManagedPlaylistEntry, ManagedPlaylistKind, ManagedPlaylistOwnership,
             RockboxProjectionRecord, MANAGED_PLAYLIST_OWNERSHIP_VERSION,
         };
         use std::collections::BTreeMap;
 
-        let (mount, host, _manifest_store, _cache, _manifest) =
+        let (mount, _host, _manifest_store, _cache, _manifest) =
             coordinator_fixture("pre-6b-recorded-projection");
-        let state_root = host.join("state");
-        let ownership_store =
-            playlist_publication::ownership_store(&mount, "SERIAL", Some(&state_root)).unwrap();
         let ownership = ManagedPlaylistOwnership {
             schema_version: MANAGED_PLAYLIST_OWNERSHIP_VERSION,
             device_serial: "SERIAL".into(),
@@ -1177,29 +1199,17 @@ mod tests {
                 },
             )]),
         };
-        ownership_store.publish_device(&ownership).unwrap();
         let store = PendingSessionStore::new(&mount);
         let mut journal = PendingSession::new(16, "SERIAL", Vec::new());
-        journal.phase = PendingPhase::DeviceManifestPublished;
+        journal.phase = PendingPhase::RockboxProjectionsPrepared;
         journal.candidate_playlist_ownership = Some(ownership.clone());
         journal
             .desired_playlist_memberships
             .insert("mix".into(), Vec::new());
-        store.save(&journal).unwrap();
+        let error = store.save(&journal).unwrap_err();
 
-        let error = playlist_publication::prepare_empty_projection_plan(
-            &mut journal,
-            &store,
-            &ownership,
-            None,
-        )
-        .unwrap_err();
-
-        assert!(format!("{error:#}").contains("requires the projection planner"));
-        assert_eq!(
-            store.load(16).unwrap().phase,
-            PendingPhase::DeviceManifestPublished
-        );
+        assert!(format!("{error:#}").contains("predates recorded operation planning"));
+        assert!(!store.path(16).exists());
     }
 
     #[test]
@@ -1228,6 +1238,7 @@ mod tests {
                     playlist_state_root: Some(&state_root),
                     device_identity: None,
                     playlist_failure_point: Some(PlaylistFailurePoint::AfterDatabaseVerified),
+                    rockbox_compat: false,
                 },
             )
             .unwrap_err();
@@ -1255,6 +1266,7 @@ mod tests {
                     playlist_state_root: Some(&state_root),
                     device_identity: None,
                     playlist_failure_point: None,
+                    rockbox_compat: false,
                 },
             )
             .unwrap_err();
@@ -1309,6 +1321,7 @@ mod tests {
                     playlist_state_root: Some(&state_root),
                     device_identity: None,
                     playlist_failure_point: None,
+                    rockbox_compat: false,
                 },
             )
             .is_err());

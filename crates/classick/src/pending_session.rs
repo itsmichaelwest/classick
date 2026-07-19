@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const PENDING_SESSION_VERSION: u32 = 1;
+pub const ROCKBOX_PROJECTION_PLAN_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,6 +127,8 @@ pub struct PendingSession {
     pub verified_playlist_memberships: Vec<VerifiedPlaylistMembership>,
     #[serde(default)]
     pub pending_rockbox_ops: BTreeMap<String, PendingRockboxOp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rockbox_projection_plan_version: Option<u32>,
 }
 
 impl PendingSession {
@@ -149,6 +152,7 @@ impl PendingSession {
             desired_playlist_memberships: BTreeMap::new(),
             verified_playlist_memberships: Vec::new(),
             pending_rockbox_ops: BTreeMap::new(),
+            rockbox_projection_plan_version: None,
         }
     }
 
@@ -214,6 +218,30 @@ impl PendingSession {
             || !self.verified_playlist_memberships.is_empty()
         {
             bail!("pending playlist membership exists without candidate ownership");
+        }
+        if let Some(version) = self.rockbox_projection_plan_version {
+            if version != ROCKBOX_PROJECTION_PLAN_VERSION {
+                bail!("unsupported Rockbox projection plan version {version}");
+            }
+            if self.phase < PendingPhase::RockboxProjectionsPrepared {
+                bail!("Rockbox projection plan is marked before its prepared phase");
+            }
+        } else if (self.phase >= PendingPhase::RockboxProjectionsPrepared
+            && self.phase <= PendingPhase::RockboxProjectionsPublished)
+            || (self.phase == PendingPhase::CleanupComplete
+                && self.candidate_playlist_ownership.is_some())
+        {
+            bail!("prepared Rockbox projection journal predates recorded operation planning");
+        }
+        for (slug, operation) in &self.pending_rockbox_ops {
+            for record in [&operation.previous, &operation.desired]
+                .into_iter()
+                .flatten()
+            {
+                crate::rockbox_playlist::validate_projection_record(record).with_context(|| {
+                    format!("validate pending Rockbox projection operation {slug:?}")
+                })?;
+            }
         }
         Ok(())
     }
@@ -457,71 +485,5 @@ fn is_descendant(path: &Path, root: &Path) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::{Path, PathBuf};
-
-    fn tempdir(name: &str) -> PathBuf {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-tmp")
-            .join(format!("pending-session-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root
-    }
-
-    #[test]
-    fn save_load_is_atomic_and_rejects_corruption() {
-        let mount = tempdir("atomic");
-        let store = PendingSessionStore::new(&mount);
-        let journal = PendingSession::new(41, "SERIAL", Vec::new());
-        store.save(&journal).unwrap();
-        assert_eq!(store.load(41).unwrap(), journal);
-
-        std::fs::write(store.path(41), b"{broken").unwrap();
-        assert!(store.load(41).unwrap_err().to_string().contains("decode"));
-    }
-
-    #[test]
-    fn recovery_deletes_only_unreferenced_journal_files() {
-        let mount = tempdir("foreign");
-        let pending = mount.join("pending.m4a");
-        let published = mount.join("published.m4a");
-        let foreign = mount.join("foreign.m4a");
-        for path in [&pending, &published, &foreign] {
-            std::fs::write(path, b"audio").unwrap();
-        }
-        let mut journal = PendingSession::new(42, "SERIAL", Vec::new());
-        journal.staged_files.push(StagedFile::minimal(
-            PathBuf::from("source.flac"),
-            pending.clone(),
-            Some(published.clone()),
-            7,
-        ));
-        cleanup_unreferenced_staged_files(&journal, &ReferencedPaths::from([published.clone()]))
-            .unwrap();
-        assert!(!pending.exists());
-        assert!(published.exists());
-        assert!(foreign.exists());
-    }
-
-    #[test]
-    fn albums_are_journaled_in_admission_order() {
-        let mut journal = PendingSession::new(
-            43,
-            "SERIAL",
-            vec![
-                PendingAlbum::new("second", 1),
-                PendingAlbum::new("first", 0),
-            ],
-        );
-        journal.staged_files = vec![
-            StagedFile::minimal("second.flac".into(), "second.m4a".into(), None, 0),
-            StagedFile::minimal("first.flac".into(), "first.m4a".into(), None, 0),
-        ];
-        journal.albums[0].staged_file_indices.push(0);
-        journal.albums[1].staged_file_indices.push(1);
-        assert_eq!(journal.ordered_album_keys(), vec!["first", "second"]);
-        assert_eq!(journal.publication_indices().unwrap(), vec![1, 0]);
-    }
-}
+#[path = "pending_session/tests.rs"]
+mod tests;

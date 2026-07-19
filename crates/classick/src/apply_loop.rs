@@ -394,6 +394,7 @@ pub fn run(
             playlist_state_root: None,
             device_identity: Some(&identity),
             playlist_failure_point: None,
+            rockbox_compat: config.rockbox_compat,
         },
     )?;
     if !recovery.is_empty() {
@@ -919,6 +920,7 @@ fn run_staged_sync(
                 manifest,
                 &mut journal,
                 None,
+                false,
                 progress,
             )?;
             clear_legacy_marker(legacy_dirty_marker)?;
@@ -947,6 +949,7 @@ fn run_staged_sync(
             manifest,
             &mut journal,
             desired_playlists,
+            config.rockbox_compat,
             progress,
         )?;
         clear_legacy_marker(legacy_dirty_marker)?;
@@ -1184,6 +1187,7 @@ fn publish_journal(
     manifest: &mut Manifest,
     journal: &mut crate::pending_session::PendingSession,
     desired_playlists: Option<&[(String, String, Vec<PathBuf>)]>,
+    rockbox_compat: bool,
     progress: &Progress,
 ) -> Result<()> {
     let coordinator = crate::sync_transaction::CheckpointCoordinator {
@@ -1201,6 +1205,7 @@ fn publish_journal(
             playlist_state_root: None,
             device_identity: Some(identity),
             playlist_failure_point: None,
+            rockbox_compat,
         },
     )?;
     Ok(())
