@@ -129,6 +129,20 @@ pub enum Decision {
     Pause,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    Cancelled,
+    Paused,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackResult {
+    Applied,
+    Skipped,
+}
+
 /// Events sent from the main thread to the progress thread.
 pub enum ProgressEvent {
     Header {
@@ -155,7 +169,13 @@ pub enum ProgressEvent {
         total: usize,
         label: String,
     },
-    TrackDone,
+    TrackDone(TrackResult),
+    Finalizing {
+        reason: StopReason,
+        staged_albums: usize,
+        staged_tracks: usize,
+    },
+    Cancelled,
     Log(String),
     Error(String),
     /// Terminal event. `success` reflects whether the orchestrator returned
@@ -304,7 +324,24 @@ impl Progress {
         });
     }
     pub fn track_done(&self) {
-        let _ = self.sender.send(ProgressEvent::TrackDone);
+        let _ = self
+            .sender
+            .send(ProgressEvent::TrackDone(TrackResult::Applied));
+    }
+    pub fn track_skipped(&self) {
+        let _ = self
+            .sender
+            .send(ProgressEvent::TrackDone(TrackResult::Skipped));
+    }
+    pub fn finalizing(&self, reason: StopReason, staged_albums: usize, staged_tracks: usize) {
+        let _ = self.sender.send(ProgressEvent::Finalizing {
+            reason,
+            staged_albums,
+            staged_tracks,
+        });
+    }
+    pub fn cancelled(&self) {
+        let _ = self.sender.send(ProgressEvent::Cancelled);
     }
     pub fn log(&self, msg: impl Into<String>) {
         let _ = self.sender.send(ProgressEvent::Log(msg.into()));
@@ -470,7 +507,15 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
             } => {
                 println!("[{current}/{total}] {label}");
             }
-            ProgressEvent::TrackDone => {} // already printed at start
+            ProgressEvent::TrackDone(_) => {} // already printed at start
+            ProgressEvent::Finalizing {
+                reason,
+                staged_albums,
+                staged_tracks,
+            } => println!(
+                "Finalizing {reason:?}: {staged_albums} album(s), {staged_tracks} track(s) staged"
+            ),
+            ProgressEvent::Cancelled => println!("Cancelled. Completed albums were saved."),
             ProgressEvent::Log(s) => println!("{s}"),
             ProgressEvent::Error(s) => eprintln!("ERROR: {s}"),
             // success bool is ignored in plain mode (the process exit code
@@ -484,10 +529,7 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
                 }
                 break;
             }
-            ProgressEvent::Paused => {
-                println!("Paused. Completed tracks were saved.");
-                break;
-            }
+            ProgressEvent::Paused => println!("Paused. Completed albums were saved."),
         }
     }
 }
@@ -575,8 +617,8 @@ fn run_ipc(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) -> Result
     tracing::info!("ipc: event loop entering");
     let mut eta = EtaEstimator::new();
     for event in rx {
-        let is_terminal = matches!(event, ProgressEvent::Finish { .. } | ProgressEvent::Paused);
-        if matches!(event, ProgressEvent::TrackDone) {
+        let is_terminal = matches!(event, ProgressEvent::Finish { .. });
+        if matches!(event, ProgressEvent::TrackDone(_)) {
             eta.record_track_done();
         }
         if let Some(mut ipc_event) = IpcEvent::from_progress(&event) {
@@ -933,9 +975,17 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
             state.current_total = total;
             state.current_label = label;
         }
-        ProgressEvent::TrackDone => {
+        ProgressEvent::TrackDone(_) => {
             state.done += 1;
         }
+        ProgressEvent::Finalizing {
+            reason,
+            staged_albums,
+            staged_tracks,
+        } => state.push_log(format!(
+            "Finalizing {reason:?}: {staged_albums} album(s), {staged_tracks} track(s)"
+        )),
+        ProgressEvent::Cancelled => state.push_log("Cancelled".to_string()),
         ProgressEvent::Log(s) => state.push_log(s),
         ProgressEvent::Error(s) => state.push_log(format!("ERROR: {s}")),
         // TUI doesn't surface success/failure directly here — the process
@@ -952,8 +1002,7 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
             *finished = true;
         }
         ProgressEvent::Paused => {
-            state.push_log("Paused. Completed tracks were saved.".to_string());
-            *finished = true;
+            state.push_log("Paused. Completed albums were saved.".to_string());
         }
     }
 }

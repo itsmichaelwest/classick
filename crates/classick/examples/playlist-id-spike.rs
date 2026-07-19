@@ -34,7 +34,10 @@ fn main() {
 
         let title = CString::new("Gym").unwrap();
         let pl = ffi::itdb_playlist_new(title.as_ptr(), 0);
-        println!("id immediately after itdb_playlist_new (pre-add): {}", (*pl).id);
+        println!(
+            "id immediately after itdb_playlist_new (pre-add): {}",
+            (*pl).id
+        );
         ffi::itdb_playlist_add(db, pl, -1);
         println!("id immediately after itdb_playlist_add: {}", (*pl).id);
 

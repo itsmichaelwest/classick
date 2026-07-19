@@ -68,7 +68,10 @@ fn main() -> Result<()> {
         }
     }
 
-    println!("Removing {} track(s) + their on-disk files...", tracks.len());
+    println!(
+        "Removing {} track(s) + their on-disk files...",
+        tracks.len()
+    );
     let mut files_deleted = 0usize;
     let mut files_missing = 0usize;
 
@@ -87,7 +90,10 @@ fn main() -> Result<()> {
                         files_deleted += 1;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        eprintln!("  warn: file not found (already deleted?): {}", path.display());
+                        eprintln!(
+                            "  warn: file not found (already deleted?): {}",
+                            path.display()
+                        );
                         files_missing += 1;
                     }
                     Err(e) => {
@@ -96,7 +102,9 @@ fn main() -> Result<()> {
                 }
                 ffi::g_free(fname_c as *mut std::os::raw::c_void);
             } else {
-                eprintln!("  warn: itdb_filename_on_ipod returned NULL for a track (no file to delete)");
+                eprintln!(
+                    "  warn: itdb_filename_on_ipod returned NULL for a track (no file to delete)"
+                );
             }
 
             // Remove from all playlists. Passing NULL for the playlist means

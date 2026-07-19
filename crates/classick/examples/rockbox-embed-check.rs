@@ -9,7 +9,9 @@ use classick::transcode;
 use std::path::Path;
 
 fn main() -> Result<()> {
-    let src = std::env::args().nth(1).expect("usage: rockbox-embed-check <src>");
+    let src = std::env::args()
+        .nth(1)
+        .expect("usage: rockbox-embed-check <src>");
     let src = Path::new(&src);
     let ffmpeg = Path::new("ffmpeg"); // ignored on macOS (afconvert/lofty)
 
@@ -17,7 +19,10 @@ fn main() -> Result<()> {
     let tags = tags_from_probe(&probe);
     eprintln!(
         "SOURCE tags: title={:?} artist={:?} album={:?} | has_art={}",
-        tags.title, tags.artist, tags.album, transcode::has_embedded_art(&probe)
+        tags.title,
+        tags.artist,
+        tags.album,
+        transcode::has_embedded_art(&probe)
     );
 
     let dst = transcode::temp_alac_path();
@@ -46,6 +51,10 @@ fn main() -> Result<()> {
     );
     println!("output: {}", dst.display());
     let embedded_ok = out_tags.title.is_some() || out_tags.artist.is_some();
-    eprintln!("EMBED {} — output .m4a {} tags", if embedded_ok { "WORKS" } else { "FAILED" }, if embedded_ok { "HAS" } else { "has NO" });
+    eprintln!(
+        "EMBED {} — output .m4a {} tags",
+        if embedded_ok { "WORKS" } else { "FAILED" },
+        if embedded_ok { "HAS" } else { "has NO" }
+    );
     Ok(())
 }

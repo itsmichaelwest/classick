@@ -22,8 +22,8 @@ struct Permits {
 pub struct OrderedTranscoder<T: Send + 'static> {
     results: Arc<Results<T>>,
     permits: Arc<Permits>,
-    _feeder: JoinHandle<()>,
-    _workers: Vec<JoinHandle<()>>,
+    feeder: JoinHandle<()>,
+    workers: Vec<JoinHandle<()>>,
 }
 
 impl<T: Send + 'static> OrderedTranscoder<T> {
@@ -101,8 +101,8 @@ impl<T: Send + 'static> OrderedTranscoder<T> {
         Self {
             results,
             permits,
-            _feeder: feeder,
-            _workers: worker_handles,
+            feeder,
+            workers: worker_handles,
         }
     }
 
@@ -139,6 +139,21 @@ impl<T: Send + 'static> OrderedTranscoder<T> {
     pub fn stop(&self) {
         self.permits.cv.notify_all();
         self.results.cv.notify_all();
+    }
+
+    /// Join the feeder and every worker after callers have consumed every
+    /// admitted result. A finalized album must not leave background work or
+    /// temporary files behind when the next album is deliberately not admitted.
+    pub fn finish(self) -> anyhow::Result<()> {
+        self.feeder
+            .join()
+            .map_err(|_| anyhow::anyhow!("transcode feeder panicked"))?;
+        for worker in self.workers {
+            worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("transcode worker panicked"))?;
+        }
+        Ok(())
     }
 }
 
@@ -184,6 +199,23 @@ mod tests {
             max_seen.load(Ordering::SeqCst) <= 8,
             "in-flight exceeded window"
         );
+    }
+
+    #[test]
+    fn finish_joins_every_admitted_worker() {
+        let completed = Arc::new(AtomicUsize::new(0));
+        let completed_in_worker = completed.clone();
+        let jobs: Vec<(usize, usize)> = (0..8).map(|i| (i, i)).collect();
+        let ot = OrderedTranscoder::start(jobs, 3, 8, move |&i: &usize| {
+            completed_in_worker.fetch_add(1, Ordering::SeqCst);
+            Ok::<usize, anyhow::Error>(i)
+        });
+        for seq in 0..8 {
+            assert_eq!(ot.take(seq).unwrap(), seq);
+        }
+
+        ot.finish().unwrap();
+        assert_eq!(completed.load(Ordering::SeqCst), 8);
     }
 
     #[test]

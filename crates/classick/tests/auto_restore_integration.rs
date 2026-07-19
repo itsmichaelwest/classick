@@ -93,7 +93,10 @@ fn open_with_auto_restore_restores_from_backup_on_corrupt_live_db() {
     .expect("open_with_auto_restore should recover via the backup");
     drop(db);
 
-    assert!(restored.load(Ordering::SeqCst), "on_restore callback should fire");
+    assert!(
+        restored.load(Ordering::SeqCst),
+        "on_restore callback should fire"
+    );
 
     // Corrupt live DB was set aside, not deleted.
     let aside = corrupt_aside_path(&mount);
@@ -136,14 +139,20 @@ fn open_with_auto_restore_fails_when_backup_also_corrupt() {
         msg.contains("--rebuild-manifest") && msg.contains("--restore-db-backup"),
         "error should name both recovery remedies, got: {msg}"
     );
-    assert!(!restored.load(Ordering::SeqCst), "on_restore must not fire on failure");
+    assert!(
+        !restored.load(Ordering::SeqCst),
+        "on_restore must not fire on failure"
+    );
 
     // Live DB (still corrupt) untouched, and no .corrupt aside was created —
     // we must not clobber the only copy of the corrupt DB with a failed
     // restore attempt, and must not destructively rename it before we know
     // the backup is usable.
     assert_eq!(std::fs::read(&live).unwrap(), CORRUPT_BYTES);
-    assert!(!corrupt_aside_path(&mount).exists(), "no .corrupt aside on failed restore");
+    assert!(
+        !corrupt_aside_path(&mount).exists(),
+        "no .corrupt aside on failed restore"
+    );
 }
 
 #[test]
@@ -153,6 +162,9 @@ fn restore_itunesdb_from_backup_errors_when_backup_missing() {
     // No backup file at all.
 
     let result = restore_itunesdb_from_backup(&mount);
-    assert!(result.is_err(), "should error when there is no backup to restore from");
+    assert!(
+        result.is_err(),
+        "should error when there is no backup to restore from"
+    );
     assert!(!corrupt_aside_path(&mount).exists());
 }

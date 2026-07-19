@@ -8,11 +8,17 @@ use std::os::raw::c_char;
 use std::path::PathBuf;
 
 fn s(p: *const c_char) -> String {
-    if p.is_null() { String::new() } else { unsafe { CStr::from_ptr(p).to_string_lossy().into_owned() } }
+    if p.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(p).to_string_lossy().into_owned() }
+    }
 }
 
 fn main() -> Result<()> {
-    let mount = std::env::args().nth(1).context("usage: art-audit <mount>")?;
+    let mount = std::env::args()
+        .nth(1)
+        .context("usage: art-audit <mount>")?;
     let db = OwnedDb::open(&PathBuf::from(&mount))?;
     let (mut with, mut without) = (0u32, 0u32);
     unsafe {
@@ -21,7 +27,11 @@ fn main() -> Result<()> {
             let t = (*node).data as *mut ffi::Itdb_Track;
             let has = (*t).has_artwork; // 1 = yes, 2 = no (libgpod tri-state)
             let art = has == 1;
-            if art { with += 1 } else { without += 1 }
+            if art {
+                with += 1
+            } else {
+                without += 1
+            }
             println!(
                 "art={} has_artwork={} size={} | {} - {} - {}",
                 if art { "YES" } else { "no " },

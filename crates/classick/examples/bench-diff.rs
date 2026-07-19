@@ -20,7 +20,11 @@ fn main() -> Result<()> {
     let source_root = std::env::var("CLASSICK_SOURCE")
         .map_err(|_| anyhow!("set CLASSICK_SOURCE to the music root"))?;
     let manifest_path: PathBuf = std::env::var_os("APPDATA")
-        .map(|a| PathBuf::from(a).join(classick::PROJECT_DIR).join("manifest.json"))
+        .map(|a| {
+            PathBuf::from(a)
+                .join(classick::PROJECT_DIR)
+                .join("manifest.json")
+        })
         .ok_or_else(|| anyhow!("APPDATA not set"))?;
 
     println!("source    = {source_root}");
@@ -29,12 +33,20 @@ fn main() -> Result<()> {
     let t0 = Instant::now();
     let manifest = manifest::load_or_default(&manifest_path)?;
     let t_load = t0.elapsed();
-    println!("load manifest: {:.3}s ({} tracks)", t_load.as_secs_f64(), manifest.tracks.len());
+    println!(
+        "load manifest: {:.3}s ({} tracks)",
+        t_load.as_secs_f64(),
+        manifest.tracks.len()
+    );
 
     let t1 = Instant::now();
     let sources = source::walk(std::path::Path::new(&source_root))?;
     let t_walk = t1.elapsed();
-    println!("walk source:   {:.3}s ({} files)", t_walk.as_secs_f64(), sources.len());
+    println!(
+        "walk source:   {:.3}s ({} files)",
+        t_walk.as_secs_f64(),
+        sources.len()
+    );
 
     let mut fp_calls = 0usize;
     let mut audio_fp_calls = 0usize;

@@ -78,6 +78,12 @@ pub struct ObsoleteFile {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ManagedPlaylistRecordSnapshot {
+    pub contents: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PendingSession {
     pub version: u32,
     pub session_id: SessionId,
@@ -87,6 +93,8 @@ pub struct PendingSession {
     pub staged_files: Vec<StagedFile>,
     pub obsolete_files: Vec<ObsoleteFile>,
     pub candidate_manifest: Option<Manifest>,
+    #[serde(default)]
+    pub managed_playlist_record_snapshot: Option<ManagedPlaylistRecordSnapshot>,
 }
 
 impl PendingSession {
@@ -104,6 +112,7 @@ impl PendingSession {
             staged_files: Vec::new(),
             obsolete_files: Vec::new(),
             candidate_manifest: None,
+            managed_playlist_record_snapshot: None,
         }
     }
 

@@ -6,6 +6,20 @@ use classick::orchestrator;
 use classick::progress::Progress;
 use std::io::IsTerminal;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalSignal {
+    Cancelled,
+    Paused,
+}
+
+fn terminal_signal(result: &Result<RunOutcome>) -> Option<TerminalSignal> {
+    match result {
+        Ok(RunOutcome::Cancelled) => Some(TerminalSignal::Cancelled),
+        Ok(RunOutcome::Paused) => Some(TerminalSignal::Paused),
+        Ok(RunOutcome::Completed) | Err(_) => None,
+    }
+}
+
 fn main() -> Result<()> {
     // Windows-only: point gdk-pixbuf at the loaders.cache build.rs staged
     // next to the binary. On Linux/macOS, gdk-pixbuf is system-installed and
@@ -69,8 +83,10 @@ fn main() -> Result<()> {
     // §4.11-adjacent; `finish` alone can't distinguish Paused from a normal
     // Completed run). `finish(true)` still runs on the Paused path: pausing
     // is a clean stop, not an error, so the exit code stays 0.
-    if matches!(result, Ok(RunOutcome::Paused)) {
-        progress.paused();
+    match terminal_signal(&result) {
+        Some(TerminalSignal::Paused) => progress.paused(),
+        Some(TerminalSignal::Cancelled) => progress.cancelled(),
+        None => {}
     }
 
     // Tear down the backend. `finish` consumes `progress` and now carries
@@ -86,4 +102,21 @@ fn main() -> Result<()> {
     let finish_result = progress.finish(result.is_ok());
 
     result.map(|_| ()).and(finish_result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_finalization_has_no_cancelled_terminal_signal() {
+        let result = Err(anyhow::anyhow!("publication failed"));
+        assert_eq!(terminal_signal(&result), None);
+    }
+
+    #[test]
+    fn clean_cancel_has_a_distinct_terminal_signal() {
+        let result = Ok(RunOutcome::Cancelled);
+        assert_eq!(terminal_signal(&result), Some(TerminalSignal::Cancelled));
+    }
 }

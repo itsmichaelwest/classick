@@ -1,6 +1,6 @@
-# ipod-sync IPC protocol v1.3.0
+# Classick subprocess IPC protocol v1.4.0
 
-> This title's version (`1.3.0`) is the **subprocess** protocol (stdin/stdout,
+> This title's version (`1.4.0`) is the **subprocess** protocol (stdin/stdout,
 > `--ipc-mode`) described below. The separate **daemon** protocol (named-pipe/
 > Unix-socket, UI ↔ daemon) is currently at **`2.0.0`** — see "Daemon v2.0.0"
 > further down this document for its commands/events.
@@ -23,7 +23,7 @@ custom-envelope instead of JSON-RPC 2.0, why WinUI 3 — see
 
 ## 1. Versioning
 
-Protocol version follows **semver**. The current version is **`1.3.0`**.
+Protocol version follows **semver**. The current version is **`1.4.0`**.
 
 The core **MUST** emit a `hello` event (see §4.1) as its first line of
 stdout, carrying the protocol version it speaks. The UI **MUST** read
@@ -124,11 +124,13 @@ Rules:
 | `prompt`      | `id`, `message`, `options`                                                                   | Modal multi-choice prompt                 |
 | `form`        | `id`, `label`, `initial`, `hint`                                                             | Modal text-input prompt                   |
 | `track_start` | `current`, `total`, `label`, `eta_secs?`                                                     | Begin a per-track operation               |
-| `track_done`  | (none)                                                                                       | Increment completed count                 |
+| `track_done`  | `result`                                                                                     | Applied/skipped track outcome              |
+| `finalizing`  | `reason`, `staged_albums`, `staged_tracks`                                                   | Coordinated stop publication began        |
+| `cancelled`   | (none)                                                                                       | Cancellation publication verified         |
 | `log`         | `message`                                                                                    | Informational log line                    |
 | `error`       | `message`, `recovery_hints?`                                                                 | Non-fatal or fatal error                  |
 | `finish`      | `success`, `skipped_for_space?`, `artwork?`, `db_restored?`                                  | Run complete; core will close stdout      |
-| `paused`      | (none)                                                                                       | Run gracefully paused; core will close stdout (new in **1.1.0**) |
+| `paused`      | (none)                                                                                       | Pause publication verified (new in **1.1.0**) |
 
 The Rust-side enum the events derive from is `ProgressEvent` in
 `src/progress.rs`. `hello` is new in IPC mode (not part of
@@ -142,7 +144,7 @@ then proceeds with the rest of the protocol.
 
 | Field              | Type     | Notes                                                       |
 |--------------------|----------|-------------------------------------------------------------|
-| `protocol_version` | `string` | Semver of the wire protocol the core speaks. Currently `1.3.0`. |
+| `protocol_version` | `string` | Semver of the wire protocol the core speaks. Currently `1.4.0`. |
 | `core_version`     | `string` | `CARGO_PKG_VERSION` of the core binary. Informational.       |
 
 ```json
@@ -268,12 +270,33 @@ Emitted once per track at the start of its apply step. Mirrors
 
 ### 4.8 `track_done`
 
-Emitted once per track at the end of its apply step. Carries no fields.
-The UI increments its "completed" counter on receipt. Mirrors
-`ProgressEvent::TrackDone`.
+Emitted once per admitted track at the end of its apply step. Since 1.4.0,
+`result` is `applied` or `skipped`; older UIs may ignore the additive field.
+The UI increments its completed counter on receipt and may distinguish skips.
 
 ```json
-{"type":"track_done"}
+{"type":"track_done","result":"applied"}
+```
+
+### 4.8.1 `finalizing` and `cancelled`
+
+Since subprocess protocol 1.4.0, cancel and pause stop admission at an album
+boundary, drain every worker already admitted for the current album, and emit
+`finalizing` before coordinated DB/artwork/manifest publication. `reason` is
+`cancelled` or `paused`; the counts describe the journal being published.
+
+```json
+{"type":"finalizing","reason":"cancelled","staged_albums":2,"staged_tracks":17}
+```
+
+After publication and verification succeed, cancellation emits `cancelled`.
+A failure emits `error` and `finish{success:false}` instead and MUST NOT emit
+`cancelled`. The exact successful order is `finalizing`, `cancelled`, then
+`finish{success:true}`. The distinct `cancelled` event is the semantic outcome;
+the trailing successful finish reports that finalization completed cleanly.
+
+```json
+{"type":"cancelled"}
 ```
 
 ### 4.9 `log`
@@ -509,19 +532,17 @@ Request a graceful shutdown. No fields.
 {"type":"cancel"}
 ```
 
-**M1 behavior:**
+**v1.4 behavior:**
 
 - If the core is currently awaiting a `review_decision`, `cancel` is
   internally mapped to `review_decision { decision: { type: "quit" } }`
   — the orchestrator unwinds cleanly without writing the manifest.
-- If the core is mid-sync (between `track_start` events), `cancel` is
-  **best-effort**: the orchestrator does not yet support cooperative
-  cancellation, so the core finishes the current track and only then
-  observes the request. The UI MUST therefore back its `cancel` with a
-  bounded-wait force-kill (see §7).
-
-Future milestones will plumb `cancel` deeper into the orchestrator so
-it can interrupt mid-track work.
+- If the core is mid-album, it drains the bounded work already admitted for
+  that album and admits no following album.
+- The core then emits `finalizing`; the UI keeps the iPod-connected warning
+  visible and continues draining stdout.
+- Verified publication emits `cancelled`, then `finish{success:true}`. Failed
+  publication emits no `cancelled` and finishes unsuccessfully.
 
 ### 5.6 `pause`
 
@@ -744,7 +765,8 @@ Deliberately **not** in v1 — listed so they don't accidentally creep in:
 | 1.0.0    | 0.1.x        | 0.1.x      | Initial M1 | Windows-only UI; cross-platform TUI fallback remains. |
 | 1.1.0    | 0.1.x        | 0.1.x      | Superseded | Additive: `pause` command (§5.6) + terminal `paused` event (§4.12). Handshake still requires major version `1` on both sides. |
 | 1.2.0    | 0.1.x        | 0.1.x      | Superseded | Additive: optional `eta_secs` field on `track_start` (§4.7), daemon-computed whole-run-average sync ETA. |
-| 1.3.0    | 0.1.x        | 0.1.x      | Current    | Additive: fit engine wired into the apply loop — `finish` gains optional `skipped_for_space`, `artwork` (previously reserved and always absent; populated as of this bump), and `db_restored` fields (§4.11). |
+| 1.3.0    | 0.1.x        | 0.1.x      | Superseded | Additive: fit engine wired into the apply loop — `finish` gains optional `skipped_for_space`, `artwork` (previously reserved and always absent; populated as of this bump), and `db_restored` fields (§4.11). |
+| 1.4.0    | 0.1.x        | 0.1.x      | Current    | Additive: `finalizing` and `cancelled`; cancel/pause drain one admitted album and publish through the coordinated checkpoint. |
 
 Bumps will append rows here. Don't edit historical rows.
 

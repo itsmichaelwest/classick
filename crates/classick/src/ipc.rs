@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Current wire-protocol semver. Bumped per the rules in
 /// `docs/ipc-protocol.md` §1.
-pub const PROTOCOL_VERSION: &str = "1.3.0";
+pub const PROTOCOL_VERSION: &str = "1.4.0";
 
 /// Events emitted from the core to the UI on stdout.
 ///
@@ -68,9 +68,19 @@ pub enum IpcEvent {
         eta_secs: Option<u64>,
     },
     /// Per-track done. No fields. See §4.8.
-    TrackDone,
+    TrackDone {
+        result: crate::progress::TrackResult,
+    },
+    Finalizing {
+        reason: crate::progress::StopReason,
+        staged_albums: usize,
+        staged_tracks: usize,
+    },
+    Cancelled,
     /// Informational log line. See §4.9.
-    Log { message: String },
+    Log {
+        message: String,
+    },
     /// Non-fatal or fatal error. `recovery_hints` is currently always empty
     /// in M1; it's reserved for future use and omitted on the wire when
     /// empty. See §4.10.
@@ -268,7 +278,17 @@ impl IpcEvent {
                 label: label.clone(),
                 eta_secs: None,
             },
-            PE::TrackDone => IpcEvent::TrackDone,
+            PE::TrackDone(result) => IpcEvent::TrackDone { result: *result },
+            PE::Finalizing {
+                reason,
+                staged_albums,
+                staged_tracks,
+            } => IpcEvent::Finalizing {
+                reason: *reason,
+                staged_albums: *staged_albums,
+                staged_tracks: *staged_tracks,
+            },
+            PE::Cancelled => IpcEvent::Cancelled,
             PE::Log(m) => IpcEvent::Log { message: m.clone() },
             PE::Error(m) => IpcEvent::Error {
                 message: m.clone(),
@@ -410,11 +430,14 @@ mod tests {
     }
 
     #[test]
-    fn track_done_event_serializes_with_no_fields() {
-        let event = IpcEvent::TrackDone;
+    fn track_done_event_serializes_with_result() {
+        let event = IpcEvent::TrackDone {
+            result: crate::progress::TrackResult::Applied,
+        };
         let json = serde_json::to_string(&event).unwrap();
         // Internally tagged enum with no fields serializes as just {"type": "..."}.
         assert!(json.contains(r#""type":"track_done""#), "got: {json}");
+        assert!(json.contains(r#""result":"applied""#), "got: {json}");
     }
 
     #[test]
@@ -452,8 +475,41 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_1_3_0() {
-        assert_eq!(PROTOCOL_VERSION, "1.3.0");
+    fn protocol_version_is_1_4_0() {
+        assert_eq!(PROTOCOL_VERSION, "1.4.0");
+    }
+
+    #[test]
+    fn finalizing_cancelled_and_finish_serialize_in_order() {
+        use crate::progress::{ProgressEvent, StopReason};
+
+        let events = [
+            ProgressEvent::Finalizing {
+                reason: StopReason::Cancelled,
+                staged_albums: 2,
+                staged_tracks: 17,
+            },
+            ProgressEvent::Cancelled,
+            ProgressEvent::Finish {
+                success: true,
+                skipped_for_space: None,
+                artwork: None,
+                db_restored: false,
+            },
+        ];
+        let lines = events
+            .iter()
+            .map(|event| serde_json::to_string(&IpcEvent::from_progress(event).unwrap()).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            vec![
+                r#"{"type":"finalizing","reason":"cancelled","staged_albums":2,"staged_tracks":17}"#,
+                r#"{"type":"cancelled"}"#,
+                r#"{"type":"finish","success":true}"#,
+            ]
+        );
     }
 
     // -- Task 8: Finish gains skipped_for_space / artwork / db_restored ----

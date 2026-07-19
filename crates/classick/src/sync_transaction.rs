@@ -3,7 +3,16 @@ mod rollback;
 use anyhow::{bail, Context, Result};
 use rollback::is_managed_artwork_output;
 pub use rollback::{FailurePoint, RollbackSnapshot};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub type DesiredPlaylist = (String, String, Vec<PathBuf>);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PublishOptions<'a> {
+    pub desired_playlists: Option<&'a [DesiredPlaylist]>,
+    pub playlist_state_root: Option<&'a Path>,
+    pub device_identity: Option<&'a crate::ipod::device::LibgpodIdentity>,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CheckpointResult {
@@ -26,6 +35,16 @@ impl CheckpointCoordinator<'_> {
         manifest: &mut crate::manifest::Manifest,
         progress: &crate::progress::Progress,
     ) -> Result<CheckpointResult> {
+        self.publish_with_options(journal, manifest, progress, PublishOptions::default())
+    }
+
+    pub fn publish_with_options(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        manifest: &mut crate::manifest::Manifest,
+        progress: &crate::progress::Progress,
+        options: PublishOptions<'_>,
+    ) -> Result<CheckpointResult> {
         use crate::pending_session::PendingPhase;
 
         self.validate_journal(journal)?;
@@ -40,7 +59,9 @@ impl CheckpointCoordinator<'_> {
 
         let snapshot = self.ensure_snapshot(&store, journal)?;
         if journal.phase == PendingPhase::ReadyToPublish {
-            self.resume_or_publish_database(journal, manifest, &store, &snapshot, progress)?;
+            self.resume_or_publish_database(
+                journal, manifest, &store, &snapshot, progress, options,
+            )?;
         }
 
         let candidate = journal
@@ -52,8 +73,8 @@ impl CheckpointCoordinator<'_> {
                 crate::ipod::db::OwnedDb::open(self.mount).context("reopen verified iTunesDB")?;
             if let Err(error) = self.verify_candidate(&reopened, &candidate) {
                 drop(reopened);
-                self.rollback_to_ready(journal, &store, &snapshot, error)?;
-                return self.publish(journal, manifest, progress);
+                self.rollback_to_ready(journal, &store, &snapshot, options, error)?;
+                return self.publish_with_options(journal, manifest, progress, options);
             }
             drop(reopened);
 
@@ -61,7 +82,7 @@ impl CheckpointCoordinator<'_> {
             let outcome = match self.manifest_store.publish_runtime(&candidate) {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    self.rollback_to_ready(journal, &store, &snapshot, error)?;
+                    self.rollback_to_ready(journal, &store, &snapshot, options, error)?;
                     bail!("device manifest publication failed; database and artwork restored");
                 }
             };
@@ -143,6 +164,7 @@ impl CheckpointCoordinator<'_> {
         store: &crate::pending_session::PendingSessionStore,
         snapshot: &RollbackSnapshot,
         progress: &crate::progress::Progress,
+        options: PublishOptions<'_>,
     ) -> Result<()> {
         use crate::pending_session::PendingPhase;
 
@@ -156,6 +178,7 @@ impl CheckpointCoordinator<'_> {
             }
             drop(live);
             snapshot.restore(self.mount)?;
+            self.restore_managed_playlist_record(journal, options)?;
             self.cleanup_after_rollback(journal)?;
             reset_staged_publication(journal);
             store.save(journal)?;
@@ -164,6 +187,7 @@ impl CheckpointCoordinator<'_> {
         progress.log("Publishing staged albums and artwork".to_string());
         let db = crate::ipod::db::OwnedDb::open(self.mount)
             .context("open fresh publication database")?;
+        apply_device_identity(&db, options.device_identity)?;
         let mut candidate = manifest.clone();
         for obsolete in &journal.obsolete_files {
             db.unlink_track_keep_file(obsolete.prior_dbid)?;
@@ -208,19 +232,50 @@ impl CheckpointCoordinator<'_> {
                 .context("journal copied iPod path before DB write")?;
         }
 
-        for entry in candidate.tracks.iter().filter(|entry| entry.source_known) {
-            let art = self.artwork_cache.load_for_source(&entry.source_path)?;
-            db.set_track_artwork(entry.ipod_dbid, art.as_deref())?;
+        if options.desired_playlists.is_some() {
+            self.ensure_managed_playlist_record_snapshot(journal, store, options)?;
         }
-        journal.candidate_manifest = Some(candidate.clone());
-        store
-            .save(journal)
-            .context("journal candidate before DB write")?;
-        remove_stale_artwork_outputs(self.mount)?;
+        let preparation = (|| -> Result<()> {
+            if let Some(desired) = options.desired_playlists {
+                match options.playlist_state_root {
+                    Some(root) => crate::apply_loop::reconcile_playlists_step_in(
+                        &db,
+                        desired,
+                        &candidate,
+                        root,
+                        self.serial,
+                        progress,
+                    )?,
+                    None => crate::apply_loop::reconcile_playlists_step(
+                        &db,
+                        desired,
+                        &candidate,
+                        self.serial,
+                        progress,
+                    )?,
+                }
+            }
+
+            for entry in candidate.tracks.iter().filter(|entry| entry.source_known) {
+                let art = self.artwork_cache.load_for_source(&entry.source_path)?;
+                db.set_track_artwork(entry.ipod_dbid, art.as_deref())?;
+            }
+            journal.candidate_manifest = Some(candidate.clone());
+            store
+                .save(journal)
+                .context("journal candidate before DB write")?;
+            remove_stale_artwork_outputs(self.mount)
+        })();
+        if let Err(error) = preparation {
+            let message = format!("{error:#}");
+            drop(db);
+            self.rollback_to_ready(journal, store, snapshot, options, error)?;
+            bail!("candidate database preparation failed and was restored: {message}");
+        }
 
         if let Err(error) = db.write().context("write candidate iTunesDB and artwork") {
             drop(db);
-            self.rollback_to_ready(journal, store, snapshot, error)?;
+            self.rollback_to_ready(journal, store, snapshot, options, error)?;
             bail!("database publication failed; database and artwork restored");
         }
         drop(db);
@@ -228,13 +283,13 @@ impl CheckpointCoordinator<'_> {
             match crate::ipod::db::OwnedDb::open(self.mount).context("reopen candidate iTunesDB") {
                 Ok(db) => db,
                 Err(error) => {
-                    self.rollback_to_ready(journal, store, snapshot, error)?;
+                    self.rollback_to_ready(journal, store, snapshot, options, error)?;
                     bail!("database verification failed; database and artwork restored");
                 }
             };
         if let Err(error) = self.verify_candidate(&reopened, &candidate) {
             drop(reopened);
-            self.rollback_to_ready(journal, store, snapshot, error)?;
+            self.rollback_to_ready(journal, store, snapshot, options, error)?;
             bail!("database verification failed; database and artwork restored");
         }
         journal.phase = PendingPhase::DatabaseVerified;
@@ -263,15 +318,67 @@ impl CheckpointCoordinator<'_> {
         journal: &mut crate::pending_session::PendingSession,
         store: &crate::pending_session::PendingSessionStore,
         snapshot: &RollbackSnapshot,
+        options: PublishOptions<'_>,
         cause: anyhow::Error,
     ) -> Result<()> {
         snapshot
             .restore(self.mount)
             .with_context(|| format!("restore rollback after {cause:#}"))?;
+        self.restore_managed_playlist_record(journal, options)?;
         self.cleanup_after_rollback(journal)?;
         reset_staged_publication(journal);
         journal.phase = crate::pending_session::PendingPhase::ReadyToPublish;
         store.save(journal)
+    }
+
+    fn ensure_managed_playlist_record_snapshot(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+        options: PublishOptions<'_>,
+    ) -> Result<()> {
+        if journal.managed_playlist_record_snapshot.is_some() {
+            return Ok(());
+        }
+        let path = self.managed_playlist_record_path(options)?;
+        let contents = match std::fs::read(&path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("snapshot playlist record {}", path.display()));
+            }
+        };
+        journal.managed_playlist_record_snapshot =
+            Some(crate::pending_session::ManagedPlaylistRecordSnapshot { contents });
+        store
+            .save(journal)
+            .context("journal managed-playlist record before reconciliation")
+    }
+
+    fn restore_managed_playlist_record(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        options: PublishOptions<'_>,
+    ) -> Result<()> {
+        if journal.managed_playlist_record_snapshot.is_none() {
+            return Ok(());
+        }
+        let path = self.managed_playlist_record_path(options)?;
+        let snapshot = journal.managed_playlist_record_snapshot.take().unwrap();
+        match snapshot.contents {
+            Some(contents) => crate::atomic_file::AtomicFileWriter::new()
+                .write(&path, &contents)
+                .with_context(|| format!("restore playlist record {}", path.display())),
+            None => remove_file_if_present(&path),
+        }
+    }
+
+    fn managed_playlist_record_path(&self, options: PublishOptions<'_>) -> Result<PathBuf> {
+        match options.playlist_state_root {
+            Some(root) => crate::device_state::managed_playlists_path_in(root, self.serial),
+            None => crate::device_state::managed_playlists_path(self.serial),
+        }
     }
 
     fn cleanup_after_rollback(
@@ -328,6 +435,20 @@ impl CheckpointCoordinator<'_> {
     }
 }
 
+fn apply_device_identity(
+    db: &crate::ipod::db::OwnedDb,
+    identity: Option<&crate::ipod::device::LibgpodIdentity>,
+) -> Result<()> {
+    let Some(identity) = identity else {
+        return Ok(());
+    };
+    unsafe {
+        let device = (*db.as_ptr()).device;
+        crate::ipod::device::set_firewire_guid(device, &identity.firewire_guid)?;
+        crate::ipod::device::set_model_num(device, &identity.model_num_str)
+    }
+}
+
 fn reset_staged_publication(journal: &mut crate::pending_session::PendingSession) {
     for staged in &mut journal.staged_files {
         staged.dbid = 0;
@@ -370,10 +491,10 @@ fn remove_dir_if_present(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::atomic_file::AtomicFileWriter;
-    use crate::manifest::Manifest;
+    use crate::manifest::{Manifest, ManifestEntry};
     use crate::manifest_store::ManifestStore;
     use crate::pending_session::PendingPhase;
-    use crate::pending_session::{PendingSession, PendingSessionStore};
+    use crate::pending_session::{PendingAlbum, PendingSession, PendingSessionStore, StagedFile};
     use std::ffi::CString;
     use std::path::PathBuf;
     use std::ptr;
@@ -393,6 +514,35 @@ mod tests {
         assert!(FailurePoint::DatabaseVerification.requires_rollback());
         assert!(FailurePoint::DeviceManifest.requires_rollback());
         assert!(!FailurePoint::HostCache.requires_rollback());
+    }
+
+    #[test]
+    fn candidate_database_receives_complete_device_identity() {
+        let mount =
+            temp_mount().with_file_name(format!("transaction-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mount);
+        std::fs::create_dir_all(mount.join("iPod_Control/iTunes")).unwrap();
+        write_valid_itunesdb(&mount);
+        let db = crate::ipod::db::OwnedDb::open(&mount).unwrap();
+        let identity = crate::ipod::device::LibgpodIdentity {
+            firewire_guid: "000A27002138B0A8".into(),
+            model_num_str: "MC293".into(),
+        };
+
+        apply_device_identity(&db, Some(&identity)).unwrap();
+
+        unsafe {
+            let device = (*db.as_ptr()).device;
+            for (key, expected) in [
+                (c"FirewireGuid", identity.firewire_guid.as_str()),
+                (c"ModelNumStr", identity.model_num_str.as_str()),
+            ] {
+                let value = crate::ffi::itdb_device_get_sysinfo(device, key.as_ptr());
+                assert!(!value.is_null());
+                assert_eq!(std::ffi::CStr::from_ptr(value).to_str().unwrap(), expected);
+                crate::ffi::g_free(value.cast());
+            }
+        }
     }
 
     fn temp_mount() -> std::path::PathBuf {
@@ -538,5 +688,135 @@ mod tests {
             original_db
         );
         snapshot.validate().unwrap();
+    }
+
+    #[test]
+    fn coordinator_reconciles_playlists_against_post_staging_dbids() {
+        let (mount, host, store, cache, mut manifest) = coordinator_fixture("playlists");
+        let source = manifest
+            .last_source_root
+            .as_ref()
+            .unwrap()
+            .join("album/track.flac");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac"),
+            &source,
+        )
+        .unwrap();
+        let pending = host.join("track.m4a");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bare.m4a"),
+            &pending,
+        )
+        .unwrap();
+        cache.record_no_art(&source).unwrap();
+
+        let mut album = PendingAlbum::new("album", 0);
+        album.staged_file_indices.push(0);
+        let mut journal = PendingSession::new(13, "SERIAL", vec![album]);
+        let mut staged = StagedFile::minimal(source.clone(), pending, None, 0);
+        staged.candidate_entry = Some(ManifestEntry {
+            source_path: source.clone(),
+            source_mtime: 1,
+            source_size: 2,
+            source_fingerprint: "fingerprint".into(),
+            ipod_dbid: 0,
+            ipod_relpath: String::new(),
+            source_known: true,
+            audio_fingerprint: String::new(),
+            encoder: "afconvert".into(),
+            encoder_version: String::new(),
+            source_format: "flac".into(),
+        });
+        journal.staged_files.push(staged);
+
+        let desired = vec![("mix".to_string(), "Mix".to_string(), vec![source.clone()])];
+        let state_root = host.join("state");
+        let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: "SERIAL",
+            manifest_store: &store,
+            artwork_cache: cache,
+        };
+
+        coordinator
+            .publish_with_options(
+                &mut journal,
+                &mut manifest,
+                &progress,
+                PublishOptions {
+                    desired_playlists: Some(&desired),
+                    playlist_state_root: Some(&state_root),
+                    device_identity: None,
+                },
+            )
+            .unwrap();
+        progress.finish(true).unwrap();
+
+        let dbid = manifest
+            .tracks
+            .iter()
+            .find(|entry| entry.source_path == source)
+            .unwrap()
+            .ipod_dbid;
+        let reopened = crate::ipod::db::OwnedDb::open(&mount).unwrap();
+        unsafe {
+            let name = CString::new("Mix").unwrap();
+            let playlist =
+                crate::ffi::itdb_playlist_by_name(reopened.as_ptr(), name.as_ptr() as *mut _);
+            assert!(!playlist.is_null());
+            let member = (*playlist).members;
+            assert!(!member.is_null());
+            assert_eq!(
+                (*((*member).data as *mut crate::ffi::Itdb_Track)).dbid,
+                dbid
+            );
+            assert!((*member).next.is_null());
+        }
+    }
+
+    #[test]
+    fn playlist_record_is_restored_when_checkpoint_rolls_back() {
+        let (mount, host, store, cache, mut manifest) = coordinator_fixture("playlist-rollback");
+        let state_root = host.join("state");
+        let record = crate::device_state::managed_playlists_path_in(&state_root, "SERIAL").unwrap();
+        let original = br#"{
+  "names": [
+    { "slug": "old", "name": "Old", "id": 123 }
+  ]
+}"#;
+        std::fs::write(&record, original).unwrap();
+        let manifest_path = crate::device_state::portable_manifest_path(&mount);
+        std::fs::create_dir_all(&manifest_path).unwrap();
+
+        let mut journal = PendingSession::new(14, "SERIAL", Vec::new());
+        let desired = Vec::<DesiredPlaylist>::new();
+        let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: "SERIAL",
+            manifest_store: &store,
+            artwork_cache: cache,
+        };
+
+        assert!(coordinator
+            .publish_with_options(
+                &mut journal,
+                &mut manifest,
+                &progress,
+                PublishOptions {
+                    desired_playlists: Some(&desired),
+                    playlist_state_root: Some(&state_root),
+                    device_identity: None,
+                },
+            )
+            .is_err());
+        progress.finish(false).unwrap();
+
+        assert_eq!(std::fs::read(record).unwrap(), original);
+        assert_eq!(journal.phase, PendingPhase::ReadyToPublish);
+        assert!(journal.managed_playlist_record_snapshot.is_none());
     }
 }

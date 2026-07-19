@@ -20,7 +20,9 @@ fn s(p: *const c_char) -> String {
 }
 
 fn main() -> Result<()> {
-    let mount = std::env::args().nth(1).context("usage: ipod-albums <mount>")?;
+    let mount = std::env::args()
+        .nth(1)
+        .context("usage: ipod-albums <mount>")?;
     let db = OwnedDb::open(&PathBuf::from(&mount))?;
     let mut set = BTreeSet::new();
     unsafe {

@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 fn main() -> Result<()> {
-    let mount = std::env::args().nth(1).context("usage: remove-synced <mount>")?;
+    let mount = std::env::args()
+        .nth(1)
+        .context("usage: remove-synced <mount>")?;
     let mount_path = PathBuf::from(&mount);
 
     let manifest_path = dirs::config_dir()
@@ -29,7 +31,10 @@ fn main() -> Result<()> {
         .as_array()
         .map(|a| a.iter().filter_map(|t| t["ipod_dbid"].as_u64()).collect())
         .unwrap_or_default();
-    println!("manifest records {} track(s) to remove by DBID", targets.len());
+    println!(
+        "manifest records {} track(s) to remove by DBID",
+        targets.len()
+    );
     if targets.is_empty() {
         return Ok(());
     }
@@ -70,7 +75,11 @@ fn main() -> Result<()> {
             ffi::itdb_track_remove(t);
         }
     }
-    println!("removed {} DB entries, deleted {} files", hits.len(), deleted);
+    println!(
+        "removed {} DB entries, deleted {} files",
+        hits.len(),
+        deleted
+    );
 
     db.write()?;
     println!("new track count: {}", db.track_count());

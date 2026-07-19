@@ -18,7 +18,9 @@ fn s(p: *const c_char) -> String {
 }
 
 fn main() -> Result<()> {
-    let mount = std::env::args().nth(1).context("usage: ipod-durations <mount>")?;
+    let mount = std::env::args()
+        .nth(1)
+        .context("usage: ipod-durations <mount>")?;
     let db = OwnedDb::open(&PathBuf::from(&mount))?;
     let mut zero = 0usize;
     unsafe {

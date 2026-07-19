@@ -3,6 +3,7 @@
 Per global AGENTS.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
 - **Artwork-safe checkpoints need a complete rollback set:** snapshot and hash-validate `iTunesDB`, `ArtworkDB`, and every `.ithmb` before deleting stale artwork output; retain old audio until DB/art verification and device-manifest publication, and remove only paths explicitly owned by the pending-session journal.
+- **Fresh publication DBs need the full transaction context:** a checkpoint that reopens `OwnedDb` must reapply FirewireGuid/ModelNumStr, resolve playlists against post-staging DBIDs, and snapshot playlist ownership before reconciliation so rollback restores both device and host authority.
 
 ## iTunes will always reject a libgpod-managed iPod (2026-05-24)
 
