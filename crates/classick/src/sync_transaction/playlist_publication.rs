@@ -126,6 +126,9 @@ pub fn prepare_empty_projection_plan(
     failure: Option<PlaylistFailurePoint>,
 ) -> Result<()> {
     inject(failure, PlaylistFailurePoint::BeforeProjectionPlanPersist)?;
+    if !journal.pending_rockbox_ops.is_empty() {
+        bail!("Rockbox projection operations require the projection publisher");
+    }
     let candidate = journal
         .candidate_playlist_ownership
         .as_ref()
@@ -138,7 +141,6 @@ pub fn prepare_empty_projection_plan(
     if has_projection {
         bail!("Rockbox projection finalization requires the projection planner");
     }
-    journal.pending_rockbox_ops.clear();
     journal.phase = PendingPhase::RockboxProjectionsPrepared;
     store
         .save(journal)

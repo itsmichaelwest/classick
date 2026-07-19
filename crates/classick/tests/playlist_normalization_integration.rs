@@ -177,6 +177,45 @@ fn normalization_keeps_one_across_two_coordinated_writes_and_preserves_foreign_n
     assert_exact_and_foreign_counts(&reopened_again, kept, foreign);
 }
 
+#[test]
+fn replace_library_database_write_normalizes_exact_firmware_duplicates() {
+    let fixture = NormalizationFixture::new();
+    let removed = fixture.add_exact("Videos", 100, 10);
+    let kept = fixture.add_exact("Vidéos", 200, 20);
+
+    classick::apply_loop::write_replace_library_database(&fixture.db).unwrap();
+    let mount = fixture.mount.clone();
+    drop(fixture);
+
+    let reopened = OwnedDb::open(&mount).unwrap();
+    assert!(reopened.track_count() == 0);
+    let ids = snapshot_playlists(&reopened)
+        .into_iter()
+        .map(|playlist| playlist.id)
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&removed));
+    assert!(ids.contains(&kept));
+}
+
+#[test]
+fn rebuilt_artwork_database_write_normalizes_exact_firmware_duplicates() {
+    let fixture = NormalizationFixture::new();
+    let removed = fixture.add_exact("Videos", 100, 10);
+    let kept = fixture.add_exact("Vidéos", 200, 20);
+
+    classick::apply_loop::write_rebuilt_artwork_database(&fixture.db).unwrap();
+    let mount = fixture.mount.clone();
+    drop(fixture);
+
+    let reopened = OwnedDb::open(&mount).unwrap();
+    let ids = snapshot_playlists(&reopened)
+        .into_iter()
+        .map(|playlist| playlist.id)
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&removed));
+    assert!(ids.contains(&kept));
+}
+
 fn post_write_profile() -> FirmwarePlaylistProfile {
     serde_json::from_str(include_str!(
         "fixtures/ipod-classic-video-kind-v1-libgpod-post-write.json"

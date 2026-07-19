@@ -1322,7 +1322,7 @@ pub fn replace_library(
     progress.log(format!("Erasing {track_count} track(s) from the iPod…"));
     let wiped = crate::ipod::db::wipe_all_tracks(&db)?;
     progress.log(format!("Erased {wiped} track(s)."));
-    db.write().context("write iPod DB after wipe")?;
+    write_replace_library_database(&db)?;
     drop(db);
 
     let mut manifest = Manifest::empty();
@@ -1340,6 +1340,10 @@ pub fn replace_library(
 /// Progress/decision-channel harness.
 pub(crate) fn should_skip_replace_confirmation(apply: bool) -> bool {
     apply
+}
+
+pub fn write_replace_library_database(db: &OwnedDb) -> Result<()> {
+    crate::sync_transaction::write_coordinated_database(db).context("write iPod DB after wipe")
 }
 
 /// Message shown by `replace_library`'s confirmation prompt. Pure so its
@@ -2068,8 +2072,13 @@ fn rebuild_apple_artwork(
             }
         }
     }
-    db.write()?;
+    write_rebuilt_artwork_database(&db)?;
     Ok(())
+}
+
+pub fn write_rebuilt_artwork_database(db: &OwnedDb) -> Result<()> {
+    crate::sync_transaction::write_coordinated_database(db)
+        .context("write rebuilt Apple artwork database")
 }
 
 pub(crate) fn build_rebuild_manifest(db: &OwnedDb, serial: &str) -> Manifest {

@@ -108,9 +108,12 @@ impl CheckpointCoordinator<'_> {
             .context("verified transaction has no candidate manifest")?;
         let mut manifest_cache_warning = None;
         if journal.phase > PendingPhase::DatabaseVerified {
-            if let Some(ownership) = journal.candidate_playlist_ownership.as_ref() {
-                let reopened = crate::ipod::db::OwnedDb::open(self.mount)
-                    .context("reopen finalized iTunesDB for playlist verification")?;
+            let reopened = crate::ipod::db::OwnedDb::open(self.mount)
+                .context("reopen finalized iTunesDB for recovery verification")?;
+            let verification = self.verify_candidate(&reopened, &candidate).and_then(|()| {
+                let Some(ownership) = journal.candidate_playlist_ownership.as_ref() else {
+                    return Ok(());
+                };
                 let verified = playlist_publication::verify_managed_playlists(
                     &reopened,
                     ownership,
@@ -119,15 +122,23 @@ impl CheckpointCoordinator<'_> {
                 if verified != journal.verified_playlist_memberships {
                     bail!("reopened managed playlist verification differs from pending journal");
                 }
+                Ok(())
+            });
+            if let Err(error) = verification {
+                let message = format!("{error:#}");
+                drop(reopened);
+                self.rollback_to_ready(journal, &store, &snapshot, error)?;
+                bail!("database verification failed; database and artwork restored: {message}");
             }
         }
         if journal.phase == PendingPhase::DatabaseVerified {
             let reopened =
                 crate::ipod::db::OwnedDb::open(self.mount).context("reopen verified iTunesDB")?;
             if let Err(error) = self.verify_candidate(&reopened, &candidate) {
+                let message = format!("{error:#}");
                 drop(reopened);
-                self.rollback_to_ready(journal, &store, &snapshot, options, error)?;
-                return self.publish_with_options(journal, manifest, progress, options);
+                self.rollback_to_ready(journal, &store, &snapshot, error)?;
+                bail!("database verification failed; database and artwork restored: {message}");
             }
             if let Some(ownership) = journal.candidate_playlist_ownership.as_ref() {
                 match playlist_publication::verify_managed_playlists(
@@ -138,7 +149,7 @@ impl CheckpointCoordinator<'_> {
                     Ok(verified) => journal.verified_playlist_memberships = verified,
                     Err(error) => {
                         drop(reopened);
-                        self.rollback_to_ready(journal, &store, &snapshot, options, error)?;
+                        self.rollback_to_ready(journal, &store, &snapshot, error)?;
                         bail!("playlist verification failed; database and artwork restored");
                     }
                 }
@@ -150,7 +161,7 @@ impl CheckpointCoordinator<'_> {
             let outcome = match self.manifest_store.publish_runtime(&candidate) {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    self.rollback_to_ready(journal, &store, &snapshot, options, error)?;
+                    self.rollback_to_ready(journal, &store, &snapshot, error)?;
                     bail!("device manifest publication failed; database and artwork restored");
                 }
             };
@@ -404,13 +415,13 @@ impl CheckpointCoordinator<'_> {
         if let Err(error) = preparation {
             let message = format!("{error:#}");
             drop(db);
-            self.rollback_to_ready(journal, store, snapshot, options, error)?;
+            self.rollback_to_ready(journal, store, snapshot, error)?;
             bail!("candidate database preparation failed and was restored: {message}");
         }
 
         if let Err(error) = write_coordinated_database(&db) {
             drop(db);
-            self.rollback_to_ready(journal, store, snapshot, options, error)?;
+            self.rollback_to_ready(journal, store, snapshot, error)?;
             bail!("database publication failed; database and artwork restored");
         }
         drop(db);
@@ -418,13 +429,13 @@ impl CheckpointCoordinator<'_> {
             match crate::ipod::db::OwnedDb::open(self.mount).context("reopen candidate iTunesDB") {
                 Ok(db) => db,
                 Err(error) => {
-                    self.rollback_to_ready(journal, store, snapshot, options, error)?;
+                    self.rollback_to_ready(journal, store, snapshot, error)?;
                     bail!("database verification failed; database and artwork restored");
                 }
             };
         if let Err(error) = self.verify_candidate(&reopened, &candidate) {
             drop(reopened);
-            self.rollback_to_ready(journal, store, snapshot, options, error)?;
+            self.rollback_to_ready(journal, store, snapshot, error)?;
             bail!("database verification failed; database and artwork restored");
         }
         if let Some(ownership) = journal.candidate_playlist_ownership.as_ref() {
@@ -436,7 +447,7 @@ impl CheckpointCoordinator<'_> {
                 Ok(verified) => journal.verified_playlist_memberships = verified,
                 Err(error) => {
                     drop(reopened);
-                    self.rollback_to_ready(journal, store, snapshot, options, error)?;
+                    self.rollback_to_ready(journal, store, snapshot, error)?;
                     bail!("playlist verification failed; database and artwork restored");
                 }
             }
@@ -471,7 +482,6 @@ impl CheckpointCoordinator<'_> {
         journal: &mut crate::pending_session::PendingSession,
         store: &crate::pending_session::PendingSessionStore,
         snapshot: &RollbackSnapshot,
-        options: PublishOptions<'_>,
         cause: anyhow::Error,
     ) -> Result<()> {
         snapshot
@@ -537,7 +547,7 @@ impl CheckpointCoordinator<'_> {
     }
 }
 
-fn write_coordinated_database(db: &crate::ipod::db::OwnedDb) -> Result<()> {
+pub fn write_coordinated_database(db: &crate::ipod::db::OwnedDb) -> Result<()> {
     crate::ipod::playlist_normalize::normalize_firmware_playlists(db)
         .context("normalize exact firmware playlist duplicates")?;
     db.write().context("write candidate iTunesDB and artwork")
