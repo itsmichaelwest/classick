@@ -148,9 +148,7 @@ pub fn refresh_host_cache(
     if let Err(error) = inject(failure, PlaylistFailurePoint::BeforeHostCacheRefresh) {
         return Some(format!("{error:#}"));
     }
-    let Some(candidate) = journal.candidate_playlist_ownership.as_ref() else {
-        return None;
-    };
+    let candidate = journal.candidate_playlist_ownership.as_ref()?;
     match ownership.refresh_host_cache(candidate) {
         Ok(warning) => warning,
         Err(error) => Some(format!("{error:#}")),

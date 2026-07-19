@@ -10,6 +10,8 @@ use crate::rockbox_projection_fs::{ProjectionIo, TargetState};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+type ProjectionAuthority = (HashSet<String>, BTreeMap<String, BTreeSet<String>>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesiredVerifiedPlaylist {
     pub display_name: String,
@@ -162,7 +164,7 @@ fn validate_and_render_desired(
 fn validated_authority(
     settled: &ManagedPlaylistOwnership,
     candidate: &ManagedPlaylistOwnership,
-) -> Result<(HashSet<String>, BTreeMap<String, BTreeSet<String>>)> {
+) -> Result<ProjectionAuthority> {
     let mut authorized = HashSet::new();
     let mut owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for ownership in [settled, candidate] {

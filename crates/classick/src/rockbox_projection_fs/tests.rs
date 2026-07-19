@@ -36,14 +36,14 @@ fn durable_write_has_exact_bytes_and_leaves_no_temp() {
     assert!(fs
         .content_matches(
             "Gym--0123456789.m3u8",
-            &blake3::hash(b"/a\n").to_hex().to_string(),
+            blake3::hash(b"/a\n").to_hex().as_ref(),
             &authorized,
         )
         .unwrap());
     assert!(!fs
         .content_matches(
             "Gym--0123456789.m3u8",
-            &blake3::hash(b"different").to_hex().to_string(),
+            blake3::hash(b"different").to_hex().as_ref(),
             &authorized,
         )
         .unwrap());
