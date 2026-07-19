@@ -12,6 +12,9 @@ implementation.
   protocols.
 - [Device safety](device-safety.md) — invariants for iTunesDB, artwork,
   manifests, playlists, recovery, and source-library access.
+- [Device coordination architecture](device-coordination.md) — proposed
+  standard-user locking, external-writer fencing, recovery, and per-family
+  synchronization profiles for future implementation.
 - [Code-size audit](code-size-audit.md) — current large-file hotspots and
   recommended refactor order.
 - [Project learnings](../LEARNINGS.md) — concise operational gotchas that save

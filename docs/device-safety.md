@@ -11,12 +11,18 @@ artwork from the configured source. It must never rename, delete, rewrite, or
 create files in that source tree. Temporary and derived output belongs in
 Classick state/staging directories or on the target device.
 
-## iTunes compatibility warning
+## Apple software and concurrent mutation
 
-Apple iTunes rejects libgpod-managed databases because their signature does not
-match Apple's stricter check, even though iPod firmware accepts them. Users must
-close iTunes and must not follow its Restore prompt. The Windows preflight guard
-and UI warning copy are safety controls, not optional messaging.
+On-device verification shows that a Classick-managed database is not
+intrinsically unreadable to iTunes or Music. The current running-process
+preflight is a conservative attempt to avoid concurrent mutation, not a
+workaround for permanent format incompatibility.
+
+Classick and Apple software must not write the same device state concurrently.
+Until the proposed [device coordination architecture](device-coordination.md)
+is implemented, users should close active Apple device-sync interfaces and
+disable automatic syncing before Classick mutates an iPod. Apple Mobile Device
+Service merely running is not proof that a write is in progress.
 
 ## Publication is coordinated
 
@@ -44,6 +50,10 @@ and block mutation; they are never guessed away.
 A verified mismatch rollback is terminal. It restores the exact database,
 artwork, manifest bytes-or-absence, and other recorded authorities, then records
 `RollbackComplete`. It must not demote the transaction into a replayable phase.
+Rollback is permitted only when the live bytes match a generation the journal
+proves Classick owns. An unknown external generation must be preserved and
+block destructive recovery, as specified by the proposed
+[device coordination architecture](device-coordination.md).
 
 ## Cancellation drains finalization
 

@@ -12,6 +12,11 @@ incidents and completed gate reports are archived in
   "libgpod iPods are always rejected" claim. The running-process preflight is
   only a conservative concurrent-access guard while Classick mutates device
   state, not a workaround for a permanent format incompatibility.
+- libgpod's `itdb_start_sync` is a no-op on regular mounted iPods; only its
+  iPhone-family backend performs the Apple `lockdownd`/AFC sync handshake and
+  locks `/com.apple.itunes.lock_sync`. Mounted devices therefore need a
+  Classick lease plus external-generation fencing, while future iPod touch
+  support needs a distinct mobile-device backend.
 - Treat database, artwork, playlists, ownership, and manifests as one
   coordinated publication. Rollback must restore the exact recorded
   bytes-or-absence for every authority before becoming terminal.
