@@ -202,6 +202,7 @@ pub(crate) fn recover_pending(registry: &DeviceRegistry, state_root: &Path) -> R
             && current.settings == journal.original_revisions.settings
             && current.subscriptions == journal.original_revisions.subscriptions
         {
+            require_original_or_target(state_root, &journal)?;
             restore_originals(&AtomicFileWriter::new(), state_root, &journal)?;
         } else if current.selection == target.selection
             && current.settings == target.settings
@@ -299,6 +300,28 @@ fn restore_originals(
                         .with_context(|| format!("remove device config {}", live.display()))
                 }
             },
+        }
+    }
+    Ok(())
+}
+
+fn require_original_or_target(state_root: &Path, journal: &MutationJournal) -> Result<()> {
+    for component in &journal.components {
+        let live = state_root.join(&component.live_path);
+        let actual = match std::fs::read(&live) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("read device config {}", live.display()))
+            }
+        };
+        let matches_original = actual.as_deref() == component.original_contents.as_deref();
+        let matches_target = actual.as_deref() == Some(component.target_contents.as_slice());
+        if !matches_original && !matches_target {
+            bail!(
+                "device config {} differs from journal original and target",
+                live.display()
+            );
         }
     }
     Ok(())

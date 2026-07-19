@@ -86,6 +86,40 @@ fn original_revisions_restore_exact_original_bytes() {
 }
 
 #[test]
+fn original_revisions_reject_unexpected_bytes_or_absence() {
+    for (label, actual) in [
+        (
+            "unexpected-bytes",
+            Some(selection_bytes(SelectionMode::Exclude)),
+        ),
+        ("unexpected-absence", None),
+    ] {
+        let (root, registry) = fixture(label);
+        let live = crate::device_state::device_selection_path_in(&root, "RAW-A").unwrap();
+        let original = selection_bytes(SelectionMode::All);
+        let target = selection_bytes(SelectionMode::Include);
+        if let Some(actual) = actual {
+            AtomicFileWriter::new().write(&live, &actual).unwrap();
+        }
+        let journal = journal_with_components(
+            &root,
+            label,
+            vec![JournalComponent {
+                kind: ConfigComponentKind::Selection,
+                live_path: relative_to(&root, &live).unwrap(),
+                original_contents: Some(original),
+                target_contents: target,
+            }],
+        );
+
+        let error = recover_pending(&registry, &root).unwrap_err();
+
+        assert!(error.to_string().contains("differs from journal"));
+        assert!(journal.exists());
+    }
+}
+
+#[test]
 fn target_revisions_accept_only_exact_published_target() {
     let (root, mut registry) = fixture("accept-target");
     let live = crate::device_state::device_selection_path_in(&root, "RAW-A").unwrap();

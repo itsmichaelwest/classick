@@ -1606,6 +1606,21 @@ fn start_sync_session(
     config_path: &Path,
     library_count_cache: Option<usize>,
 ) {
+    match pending_host_mutation(device_state_root(config_path)) {
+        Ok(Some(pending)) => {
+            tracing::warn!(
+                "daemon: blocked {trigger:?} device session for {serial:?} while {pending:?} recovery is pending"
+            );
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(
+                "daemon: blocked {trigger:?} device session for {serial:?}; cannot inspect pending host mutations: {error:#}"
+            );
+            return;
+        }
+    }
     let Ok(session) = state.try_admit_device(trigger, &serial, std::path::Path::new(&drive)) else {
         return;
     };
@@ -2054,6 +2069,9 @@ fn command_requires_settled_host_state(command: &DaemonCommand) -> bool {
             | DaemonCommand::SaveDeviceConfig { .. }
             | DaemonCommand::ForgetIpod { .. }
             | DaemonCommand::SaveConfig { ipod: Some(_), .. }
+            | DaemonCommand::TriggerSync { .. }
+            | DaemonCommand::BackfillRockbox { .. }
+            | DaemonCommand::ReplaceLibrary { .. }
     )
 }
 
@@ -3922,6 +3940,52 @@ mod tests {
                 })
             })
         })
+    }
+
+    #[tokio::test]
+    async fn pending_host_journals_block_every_device_session_trigger() {
+        for mutation_dir in ["playlist-mutations", "config-mutations"] {
+            for trigger in [
+                SyncTrigger::Manual,
+                SyncTrigger::Scheduled,
+                SyncTrigger::PlugIn,
+            ] {
+                let base = std::env::temp_dir().join(format!(
+                    "classick-session-block-{mutation_dir}-{trigger:?}-{}",
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_dir_all(&base);
+                let config_path = base.join("config.toml");
+                let mutation_root = base.join("devices").join(mutation_dir);
+                std::fs::create_dir_all(&mutation_root).unwrap();
+                std::fs::write(mutation_root.join("pending.json"), b"{}").unwrap();
+                let mut state = RuntimeState::new();
+                let (event_tx, _) = broadcast::channel(8);
+                let (internal_tx, _internal_rx) = mpsc::unbounded_channel();
+                let spawn_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+                start_sync_session(
+                    trigger.clone(),
+                    "RAW-A".into(),
+                    "/Volumes/IPOD".into(),
+                    &mut state,
+                    &event_tx,
+                    &completed_spawn(spawn_count.clone()),
+                    &internal_tx,
+                    &config_path,
+                    None,
+                );
+                tokio::task::yield_now().await;
+
+                assert!(state.is_idle(), "{mutation_dir} must block {trigger:?}");
+                assert_eq!(
+                    spawn_count.load(std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "{mutation_dir} must not spawn {trigger:?}"
+                );
+                let _ = std::fs::remove_dir_all(base);
+            }
+        }
     }
 
     fn handle_persistence_test_command(
