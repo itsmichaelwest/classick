@@ -39,6 +39,8 @@ use classick::selection::{Selection, SelectionMode, SelectionRule};
 use classick::source::SourceEntry;
 use classick::source_location::{SourceIdentity, SourceLocation};
 use classick::sync_set;
+use classick::sync_transaction::verify_managed_playlists;
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -394,6 +396,45 @@ fn setup() -> Fixture {
         state_root,
         serial,
     }
+}
+
+#[test]
+fn reopened_managed_playlist_verification_preserves_exact_order_and_device_paths() {
+    let f = setup();
+    let keep_dbid = dbid_for(&f.manifest, &f.keep.path);
+    let skip_dbid = dbid_for(&f.manifest, &f.skip.path);
+    let desired = vec![DesiredPlaylist {
+        slug: "mix".into(),
+        display_name: "Mix".into(),
+        ordered_dbids: vec![skip_dbid, keep_dbid],
+    }];
+    let outcome = reconcile_candidate(
+        &f.db,
+        &desired,
+        &ManagedPlaylistOwnership::empty_for_serial(&f.serial),
+    )
+    .unwrap();
+    f.db.write().unwrap();
+    drop(f.db);
+
+    let reopened = OwnedDb::open(&f.mount).unwrap();
+    let verified = verify_managed_playlists(
+        &reopened,
+        &outcome.candidate_ownership,
+        &outcome.desired_memberships,
+    )
+    .unwrap();
+
+    assert_eq!(verified.len(), 1);
+    assert_eq!(verified[0].ordered_dbids, vec![skip_dbid, keep_dbid]);
+    assert!(verified[0]
+        .ordered_ipod_paths
+        .iter()
+        .all(|path| path.starts_with("/iPod_Control/Music/")));
+    let wrong_order = BTreeMap::from([("mix".to_string(), vec![keep_dbid, skip_dbid])]);
+    assert!(
+        verify_managed_playlists(&reopened, &outcome.candidate_ownership, &wrong_order).is_err()
+    );
 }
 
 /// Scenario 1: a manual playlist referencing a track OUTSIDE the Include

@@ -1,6 +1,8 @@
+mod playlist_publication;
 mod rollback;
 
 use anyhow::{bail, Context, Result};
+pub use playlist_publication::{verify_managed_playlists, PlaylistFailurePoint};
 use rollback::is_managed_artwork_output;
 pub use rollback::{FailurePoint, RollbackSnapshot};
 use std::path::{Path, PathBuf};
@@ -12,6 +14,7 @@ pub struct PublishOptions<'a> {
     pub desired_playlists: Option<&'a [DesiredPlaylist]>,
     pub playlist_state_root: Option<&'a Path>,
     pub device_identity: Option<&'a crate::ipod::device::LibgpodIdentity>,
+    pub playlist_failure_point: Option<PlaylistFailurePoint>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -103,6 +106,21 @@ impl CheckpointCoordinator<'_> {
             .candidate_manifest
             .clone()
             .context("verified transaction has no candidate manifest")?;
+        let mut manifest_cache_warning = None;
+        if journal.phase > PendingPhase::DatabaseVerified {
+            if let Some(ownership) = journal.candidate_playlist_ownership.as_ref() {
+                let reopened = crate::ipod::db::OwnedDb::open(self.mount)
+                    .context("reopen finalized iTunesDB for playlist verification")?;
+                let verified = playlist_publication::verify_managed_playlists(
+                    &reopened,
+                    ownership,
+                    &journal.desired_playlist_memberships,
+                )?;
+                if verified != journal.verified_playlist_memberships {
+                    bail!("reopened managed playlist verification differs from pending journal");
+                }
+            }
+        }
         if journal.phase == PendingPhase::DatabaseVerified {
             let reopened =
                 crate::ipod::db::OwnedDb::open(self.mount).context("reopen verified iTunesDB")?;
@@ -110,6 +128,21 @@ impl CheckpointCoordinator<'_> {
                 drop(reopened);
                 self.rollback_to_ready(journal, &store, &snapshot, options, error)?;
                 return self.publish_with_options(journal, manifest, progress, options);
+            }
+            if let Some(ownership) = journal.candidate_playlist_ownership.as_ref() {
+                match playlist_publication::verify_managed_playlists(
+                    &reopened,
+                    ownership,
+                    &journal.desired_playlist_memberships,
+                ) {
+                    Ok(verified) => journal.verified_playlist_memberships = verified,
+                    Err(error) => {
+                        drop(reopened);
+                        self.rollback_to_ready(journal, &store, &snapshot, options, error)?;
+                        bail!("playlist verification failed; database and artwork restored");
+                    }
+                }
+                store.save(journal)?;
             }
             drop(reopened);
 
@@ -121,14 +154,60 @@ impl CheckpointCoordinator<'_> {
                     bail!("device manifest publication failed; database and artwork restored");
                 }
             };
-            *manifest = candidate;
+            *manifest = candidate.clone();
+            manifest_cache_warning = outcome.host_cache_warning;
             journal.phase = PendingPhase::DeviceManifestPublished;
             store.save(journal)?;
-            return self.finish_cleanup(journal, &store, outcome.host_cache_warning, progress);
+            if journal.candidate_playlist_ownership.is_none() {
+                return self.finish_cleanup(journal, &store, manifest_cache_warning, progress);
+            }
         }
 
-        if journal.phase == PendingPhase::DeviceManifestPublished {
+        if journal.phase >= PendingPhase::DeviceManifestPublished {
             *manifest = candidate;
+        }
+
+        if journal.candidate_playlist_ownership.is_some() {
+            let ownership = playlist_publication::ownership_store(
+                self.mount,
+                self.serial,
+                options.playlist_state_root,
+            )?;
+            if journal.phase == PendingPhase::DeviceManifestPublished {
+                let settled = ownership.load_device_read_only()?;
+                playlist_publication::prepare_empty_projection_plan(
+                    journal,
+                    &store,
+                    &settled,
+                    options.playlist_failure_point,
+                )?;
+            }
+            if journal.phase == PendingPhase::RockboxProjectionsPrepared {
+                playlist_publication::require_pre_6b_empty_plan(journal, &ownership)?;
+                playlist_publication::publish_ownership(
+                    journal,
+                    &store,
+                    &ownership,
+                    options.playlist_failure_point,
+                )?;
+            }
+            if journal.phase == PendingPhase::PlaylistOwnershipPublished {
+                playlist_publication::publish_empty_projections(journal, &store)?;
+            }
+            if journal.phase == PendingPhase::RockboxProjectionsPublished {
+                let warning = playlist_publication::refresh_host_cache(
+                    journal,
+                    &ownership,
+                    options.playlist_failure_point,
+                );
+                return self.finish_cleanup(
+                    journal,
+                    &store,
+                    merge_warnings(manifest_cache_warning, warning),
+                    progress,
+                );
+            }
+        } else if journal.phase == PendingPhase::DeviceManifestPublished {
             return self.finish_cleanup(journal, &store, None, progress);
         }
 
@@ -232,7 +311,6 @@ impl CheckpointCoordinator<'_> {
             }
             drop(live);
             snapshot.restore(self.mount)?;
-            self.restore_managed_playlist_record(journal, options)?;
             self.cleanup_after_rollback(journal)?;
             reset_staged_publication(journal);
             store.save(journal)?;
@@ -286,13 +364,10 @@ impl CheckpointCoordinator<'_> {
                 .context("journal copied iPod path before DB write")?;
         }
 
-        if options.desired_playlists.is_some() {
-            self.ensure_managed_playlist_record_snapshot(journal, store, options)?;
-        }
         let preparation = (|| -> Result<()> {
             if let Some(desired) = options.desired_playlists {
-                match options.playlist_state_root {
-                    Some(root) => crate::apply_loop::reconcile_playlists_step_in(
+                let outcome = match options.playlist_state_root {
+                    Some(root) => crate::apply_loop::reconcile_playlists_candidate_step_in(
                         &db,
                         desired,
                         &candidate,
@@ -300,14 +375,16 @@ impl CheckpointCoordinator<'_> {
                         self.serial,
                         progress,
                     )?,
-                    None => crate::apply_loop::reconcile_playlists_step(
+                    None => crate::apply_loop::reconcile_playlists_candidate_step(
                         &db,
                         desired,
                         &candidate,
                         self.serial,
                         progress,
                     )?,
-                }
+                };
+                journal.candidate_playlist_ownership = Some(outcome.candidate_ownership);
+                journal.desired_playlist_memberships = outcome.desired_memberships;
             }
 
             for entry in candidate.tracks.iter().filter(|entry| entry.source_known) {
@@ -318,6 +395,10 @@ impl CheckpointCoordinator<'_> {
             store
                 .save(journal)
                 .context("journal candidate before DB write")?;
+            playlist_publication::inject(
+                options.playlist_failure_point,
+                PlaylistFailurePoint::BeforeDatabaseWrite,
+            )?;
             remove_stale_artwork_outputs(self.mount)
         })();
         if let Err(error) = preparation {
@@ -346,8 +427,26 @@ impl CheckpointCoordinator<'_> {
             self.rollback_to_ready(journal, store, snapshot, options, error)?;
             bail!("database verification failed; database and artwork restored");
         }
+        if let Some(ownership) = journal.candidate_playlist_ownership.as_ref() {
+            match playlist_publication::verify_managed_playlists(
+                &reopened,
+                ownership,
+                &journal.desired_playlist_memberships,
+            ) {
+                Ok(verified) => journal.verified_playlist_memberships = verified,
+                Err(error) => {
+                    drop(reopened);
+                    self.rollback_to_ready(journal, store, snapshot, options, error)?;
+                    bail!("playlist verification failed; database and artwork restored");
+                }
+            }
+        }
         journal.phase = PendingPhase::DatabaseVerified;
         store.save(journal)?;
+        playlist_publication::inject(
+            options.playlist_failure_point,
+            PlaylistFailurePoint::AfterDatabaseVerified,
+        )?;
         Ok(())
     }
 
@@ -378,61 +477,10 @@ impl CheckpointCoordinator<'_> {
         snapshot
             .restore(self.mount)
             .with_context(|| format!("restore rollback after {cause:#}"))?;
-        self.restore_managed_playlist_record(journal, options)?;
         self.cleanup_after_rollback(journal)?;
         reset_staged_publication(journal);
         journal.phase = crate::pending_session::PendingPhase::ReadyToPublish;
         store.save(journal)
-    }
-
-    fn ensure_managed_playlist_record_snapshot(
-        &self,
-        journal: &mut crate::pending_session::PendingSession,
-        store: &crate::pending_session::PendingSessionStore,
-        options: PublishOptions<'_>,
-    ) -> Result<()> {
-        if journal.managed_playlist_record_snapshot.is_some() {
-            return Ok(());
-        }
-        let path = self.managed_playlist_record_path(options)?;
-        let contents = match std::fs::read(&path) {
-            Ok(contents) => Some(contents),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("snapshot playlist record {}", path.display()));
-            }
-        };
-        journal.managed_playlist_record_snapshot =
-            Some(crate::pending_session::ManagedPlaylistRecordSnapshot { contents });
-        store
-            .save(journal)
-            .context("journal managed-playlist record before reconciliation")
-    }
-
-    fn restore_managed_playlist_record(
-        &self,
-        journal: &mut crate::pending_session::PendingSession,
-        options: PublishOptions<'_>,
-    ) -> Result<()> {
-        if journal.managed_playlist_record_snapshot.is_none() {
-            return Ok(());
-        }
-        let path = self.managed_playlist_record_path(options)?;
-        let snapshot = journal.managed_playlist_record_snapshot.take().unwrap();
-        match snapshot.contents {
-            Some(contents) => crate::atomic_file::AtomicFileWriter::new()
-                .write(&path, &contents)
-                .with_context(|| format!("restore playlist record {}", path.display())),
-            None => remove_file_if_present(&path),
-        }
-    }
-
-    fn managed_playlist_record_path(&self, options: PublishOptions<'_>) -> Result<PathBuf> {
-        match options.playlist_state_root {
-            Some(root) => crate::device_state::managed_playlists_path_in(root, self.serial),
-            None => crate::device_state::managed_playlists_path(self.serial),
-        }
     }
 
     fn cleanup_after_rollback(
@@ -515,6 +563,10 @@ fn reset_staged_publication(journal: &mut crate::pending_session::PendingSession
         staged.final_ipod_path = None;
     }
     journal.candidate_manifest = None;
+    journal.candidate_playlist_ownership = None;
+    journal.desired_playlist_memberships.clear();
+    journal.verified_playlist_memberships.clear();
+    journal.pending_rockbox_ops.clear();
 }
 
 fn remove_stale_artwork_outputs(mount: &Path) -> Result<()> {
@@ -547,6 +599,14 @@ fn remove_dir_if_present(path: &Path) -> Result<()> {
     }
 }
 
+fn merge_warnings(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first}; {second}")),
+        (Some(warning), None) | (None, Some(warning)) => Some(warning),
+        (None, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +624,14 @@ mod tests {
         assert!(PendingPhase::Staging < PendingPhase::ReadyToPublish);
         assert!(PendingPhase::ReadyToPublish < PendingPhase::DatabaseVerified);
         assert!(PendingPhase::DatabaseVerified < PendingPhase::DeviceManifestPublished);
+        assert!(PendingPhase::DeviceManifestPublished < PendingPhase::RockboxProjectionsPrepared);
+        assert!(
+            PendingPhase::RockboxProjectionsPrepared < PendingPhase::PlaylistOwnershipPublished
+        );
+        assert!(
+            PendingPhase::PlaylistOwnershipPublished < PendingPhase::RockboxProjectionsPublished
+        );
+        assert!(PendingPhase::RockboxProjectionsPublished < PendingPhase::CleanupComplete);
         assert!(PendingPhase::DeviceManifestPublished < PendingPhase::CleanupComplete);
     }
 
@@ -810,6 +878,7 @@ mod tests {
                     desired_playlists: Some(&desired),
                     playlist_state_root: Some(&state_root),
                     device_identity: None,
+                    playlist_failure_point: None,
                 },
             )
             .unwrap();
@@ -835,6 +904,279 @@ mod tests {
             );
             assert!((*member).next.is_null());
         }
+    }
+
+    #[test]
+    fn ownership_failure_keeps_journal_and_recovery_reuses_verified_ids() {
+        let (mount, host, manifest_store, cache, mut manifest) =
+            coordinator_fixture("playlist-ownership-recovery");
+        let state_root = host.join("state");
+        let desired = vec![("mix".to_string(), "Mix".to_string(), Vec::new())];
+        let store = PendingSessionStore::new(&mount);
+        let mut journal = PendingSession::new(15, "SERIAL", Vec::new());
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: "SERIAL",
+            manifest_store: &manifest_store,
+            artwork_cache: cache,
+        };
+        let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+
+        let error = coordinator
+            .publish_with_options(
+                &mut journal,
+                &mut manifest,
+                &progress,
+                PublishOptions {
+                    desired_playlists: Some(&desired),
+                    playlist_state_root: Some(&state_root),
+                    device_identity: None,
+                    playlist_failure_point: Some(PlaylistFailurePoint::BeforeDeviceOwnershipRename),
+                },
+            )
+            .unwrap_err();
+        progress.finish(false).unwrap();
+
+        assert!(format!("{error:#}").contains("publish device playlist ownership"));
+        let pending = store.load(15).unwrap();
+        assert_eq!(pending.phase, PendingPhase::RockboxProjectionsPrepared);
+        let candidate_id = pending
+            .candidate_playlist_ownership
+            .as_ref()
+            .unwrap()
+            .playlists["mix"]
+            .apple_playlist_id;
+        assert!(!crate::ipod::layout::managed_playlists_path(&mount).exists());
+
+        let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+        let recovered = coordinator
+            .recover_pending_with_options(
+                &mut manifest,
+                &progress,
+                PublishOptions {
+                    desired_playlists: Some(&desired),
+                    playlist_state_root: Some(&state_root),
+                    device_identity: None,
+                    playlist_failure_point: None,
+                },
+            )
+            .unwrap();
+        progress.finish(true).unwrap();
+
+        assert_eq!(recovered.len(), 1);
+        let ownership = playlist_publication::ownership_store(&mount, "SERIAL", Some(&state_root))
+            .unwrap()
+            .load_device()
+            .unwrap();
+        assert_eq!(ownership.playlists["mix"].apple_playlist_id, candidate_id);
+        assert_eq!(
+            crate::ipod::db::list_playlists(&crate::ipod::db::OwnedDb::open(&mount).unwrap())
+                .iter()
+                .filter(|(name, is_master)| name == "Mix" && !is_master)
+                .count(),
+            1
+        );
+        assert!(!store.path(15).exists());
+    }
+
+    #[test]
+    fn playlist_failure_boundaries_retain_the_exact_recovery_phase() {
+        let cases = [
+            (
+                PlaylistFailurePoint::BeforeDatabaseWrite,
+                Some(PendingPhase::ReadyToPublish),
+            ),
+            (
+                PlaylistFailurePoint::AfterDatabaseVerified,
+                Some(PendingPhase::DatabaseVerified),
+            ),
+            (
+                PlaylistFailurePoint::BeforeProjectionPlanPersist,
+                Some(PendingPhase::DeviceManifestPublished),
+            ),
+            (
+                PlaylistFailurePoint::AfterProjectionPlanPrepared,
+                Some(PendingPhase::RockboxProjectionsPrepared),
+            ),
+            (
+                PlaylistFailurePoint::BeforeDeviceOwnershipRename,
+                Some(PendingPhase::RockboxProjectionsPrepared),
+            ),
+            (
+                PlaylistFailurePoint::AfterDeviceOwnershipRename,
+                Some(PendingPhase::PlaylistOwnershipPublished),
+            ),
+            (PlaylistFailurePoint::BeforeHostCacheRefresh, None),
+        ];
+
+        for (index, (failure, expected_phase)) in cases.into_iter().enumerate() {
+            let (mount, host, manifest_store, cache, mut manifest) =
+                coordinator_fixture(&format!("playlist-boundary-{index}"));
+            let state_root = host.join("state");
+            let desired = vec![("mix".to_string(), "Mix".to_string(), Vec::new())];
+            let store = PendingSessionStore::new(&mount);
+            let session_id = 100 + index as u64;
+            let mut journal = PendingSession::new(session_id, "SERIAL", Vec::new());
+            let coordinator = CheckpointCoordinator {
+                mount: &mount,
+                serial: "SERIAL",
+                manifest_store: &manifest_store,
+                artwork_cache: cache,
+            };
+            let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+            let result = coordinator.publish_with_options(
+                &mut journal,
+                &mut manifest,
+                &progress,
+                PublishOptions {
+                    desired_playlists: Some(&desired),
+                    playlist_state_root: Some(&state_root),
+                    device_identity: None,
+                    playlist_failure_point: Some(failure),
+                },
+            );
+
+            match expected_phase {
+                Some(expected) => {
+                    assert!(result.is_err(), "{failure:?} unexpectedly succeeded");
+                    assert_eq!(
+                        store.load(session_id).unwrap().phase,
+                        expected,
+                        "{failure:?}"
+                    );
+                    progress.finish(false).unwrap();
+                }
+                None => {
+                    let result = result.expect("host-cache failure must be warning-only");
+                    assert!(result.host_cache_warning.is_some());
+                    assert!(!store.path(session_id).exists());
+                    progress.finish(true).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pre_6b_projection_records_cannot_take_the_empty_plan_fast_path() {
+        use crate::ipod::playlist_ownership::{
+            ManagedPlaylistEntry, ManagedPlaylistKind, ManagedPlaylistOwnership,
+            RockboxProjectionRecord, MANAGED_PLAYLIST_OWNERSHIP_VERSION,
+        };
+        use std::collections::BTreeMap;
+
+        let (mount, host, _manifest_store, _cache, _manifest) =
+            coordinator_fixture("pre-6b-recorded-projection");
+        let state_root = host.join("state");
+        let ownership_store =
+            playlist_publication::ownership_store(&mount, "SERIAL", Some(&state_root)).unwrap();
+        let ownership = ManagedPlaylistOwnership {
+            schema_version: MANAGED_PLAYLIST_OWNERSHIP_VERSION,
+            device_serial: "SERIAL".into(),
+            playlists: BTreeMap::from([(
+                "mix".into(),
+                ManagedPlaylistEntry {
+                    apple_playlist_id: 41,
+                    expected_kind: ManagedPlaylistKind::Normal,
+                    rockbox: Some(RockboxProjectionRecord {
+                        relative_filename: "Mix--0123456789.m3u8".into(),
+                        content_hash: "a".repeat(64),
+                    }),
+                },
+            )]),
+        };
+        ownership_store.publish_device(&ownership).unwrap();
+        let store = PendingSessionStore::new(&mount);
+        let mut journal = PendingSession::new(16, "SERIAL", Vec::new());
+        journal.phase = PendingPhase::DeviceManifestPublished;
+        journal.candidate_playlist_ownership = Some(ownership.clone());
+        journal
+            .desired_playlist_memberships
+            .insert("mix".into(), Vec::new());
+        store.save(&journal).unwrap();
+
+        let error = playlist_publication::prepare_empty_projection_plan(
+            &mut journal,
+            &store,
+            &ownership,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("requires the projection planner"));
+        assert_eq!(
+            store.load(16).unwrap().phase,
+            PendingPhase::DeviceManifestPublished
+        );
+    }
+
+    #[test]
+    fn recovery_playlist_mismatch_restores_the_full_snapshot() {
+        let (mount, host, manifest_store, cache, mut manifest) =
+            coordinator_fixture("playlist-verify-rollback");
+        let original_db = std::fs::read(crate::ipod::layout::itunes_db_path(&mount)).unwrap();
+        let state_root = host.join("state");
+        let desired = vec![("mix".to_string(), "Mix".to_string(), Vec::new())];
+        let store = PendingSessionStore::new(&mount);
+        let mut journal = PendingSession::new(17, "SERIAL", Vec::new());
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: "SERIAL",
+            manifest_store: &manifest_store,
+            artwork_cache: cache,
+        };
+        let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+        coordinator
+            .publish_with_options(
+                &mut journal,
+                &mut manifest,
+                &progress,
+                PublishOptions {
+                    desired_playlists: Some(&desired),
+                    playlist_state_root: Some(&state_root),
+                    device_identity: None,
+                    playlist_failure_point: Some(PlaylistFailurePoint::AfterDatabaseVerified),
+                },
+            )
+            .unwrap_err();
+        progress.finish(false).unwrap();
+        let playlist_id = store
+            .load(17)
+            .unwrap()
+            .candidate_playlist_ownership
+            .as_ref()
+            .unwrap()
+            .playlists["mix"]
+            .apple_playlist_id;
+        let db = crate::ipod::db::OwnedDb::open(&mount).unwrap();
+        crate::ipod::db::remove_playlist_by_id(&db, playlist_id).unwrap();
+        db.write().unwrap();
+        drop(db);
+
+        let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+        let error = coordinator
+            .recover_pending_with_options(
+                &mut manifest,
+                &progress,
+                PublishOptions {
+                    desired_playlists: Some(&desired),
+                    playlist_state_root: Some(&state_root),
+                    device_identity: None,
+                    playlist_failure_point: None,
+                },
+            )
+            .unwrap_err();
+        progress.finish(false).unwrap();
+
+        assert!(format!("{error:#}").contains("playlist verification failed"));
+        assert_eq!(store.load(17).unwrap().phase, PendingPhase::ReadyToPublish);
+        assert_eq!(
+            std::fs::read(crate::ipod::layout::itunes_db_path(&mount)).unwrap(),
+            original_db
+        );
+        RollbackSnapshot::open(&store.snapshot_dir(17))
+            .unwrap()
+            .validate()
+            .unwrap();
     }
 
     #[test]
@@ -870,6 +1212,7 @@ mod tests {
                     desired_playlists: Some(&desired),
                     playlist_state_root: Some(&state_root),
                     device_identity: None,
+                    playlist_failure_point: None,
                 },
             )
             .is_err());

@@ -393,6 +393,7 @@ pub fn run(
             desired_playlists: desired_playlists.as_deref(),
             playlist_state_root: None,
             device_identity: Some(&identity),
+            playlist_failure_point: None,
         },
     )?;
     if !recovery.is_empty() {
@@ -1199,6 +1200,7 @@ fn publish_journal(
             desired_playlists,
             playlist_state_root: None,
             device_identity: Some(identity),
+            playlist_failure_point: None,
         },
     )?;
     Ok(())

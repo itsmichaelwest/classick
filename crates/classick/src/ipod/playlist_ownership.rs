@@ -22,6 +22,15 @@ pub struct RockboxProjectionRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct VerifiedPlaylistMembership {
+    pub slug: String,
+    pub apple_playlist_id: u64,
+    pub ordered_dbids: Vec<u64>,
+    pub ordered_ipod_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ManagedPlaylistEntry {
     pub apple_playlist_id: u64,
     pub expected_kind: ManagedPlaylistKind,

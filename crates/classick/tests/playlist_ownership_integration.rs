@@ -6,6 +6,31 @@ use classick::ipod::playlist_ownership::{
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn publication_journal_round_trips_future_rockbox_operations() {
+    use classick::ipod::playlist_ownership::RockboxProjectionRecord;
+    use classick::pending_session::{PendingPhase, PendingRockboxOp, PendingSession};
+
+    let mut journal = PendingSession::new(91, "RAW-Serial", Vec::new());
+    journal.phase = PendingPhase::RockboxProjectionsPrepared;
+    journal.pending_rockbox_ops.insert(
+        "mix".into(),
+        PendingRockboxOp {
+            previous: Some(RockboxProjectionRecord {
+                relative_filename: "Old--0123456789.m3u8".into(),
+                content_hash: "a".repeat(64),
+            }),
+            desired: None,
+        },
+    );
+
+    let bytes = serde_json::to_vec(&journal).unwrap();
+    let decoded: PendingSession = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(decoded.pending_rockbox_ops, journal.pending_rockbox_ops);
+    assert_eq!(decoded.phase, PendingPhase::RockboxProjectionsPrepared);
+}
+
 struct OwnershipFixture {
     root: PathBuf,
     device_path: PathBuf,

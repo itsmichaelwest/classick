@@ -9,6 +9,8 @@ pub use reconcile::{
     ReconcileStats,
 };
 
+pub use crate::ipod::playlist_ownership::VerifiedPlaylistMembership;
+
 use std::path::{Path, PathBuf};
 
 /// Best-effort backup of playlist definitions and subscriptions onto the iPod.

@@ -750,6 +750,26 @@ impl OwnedDb {
             })
         }
     }
+
+    pub fn normal_playlist_members_by_id(&self, id: u64) -> Result<Vec<(u64, String)>> {
+        if self.playlist_kind_by_id(id) != Some(PlaylistStructuralKind::Normal) {
+            return Err(anyhow!("playlist id {id} is not a normal playlist"));
+        }
+        unsafe {
+            let playlist = ffi::itdb_playlist_by_id(self.0, id);
+            let mut members = Vec::new();
+            let mut node = (*playlist).members;
+            while !node.is_null() {
+                let track = (*node).data as *mut ffi::Itdb_Track;
+                if track.is_null() {
+                    return Err(anyhow!("playlist id {id} contains a null member"));
+                }
+                members.push(((*track).dbid as u64, read_ipod_relpath(track)));
+                node = (*node).next;
+            }
+            Ok(members)
+        }
+    }
 }
 
 /// Find-or-create a Classick-managed playlist by **recorded itdb id**,

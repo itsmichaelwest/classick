@@ -1,10 +1,12 @@
 use crate::atomic_file::AtomicFileWriter;
 use crate::ipc_device::SessionId;
 use crate::ipod::db::Tags;
+use crate::ipod::device_playlists::VerifiedPlaylistMembership;
+use crate::ipod::playlist_ownership::{ManagedPlaylistOwnership, RockboxProjectionRecord};
 use crate::manifest::{Manifest, ManifestEntry};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const PENDING_SESSION_VERSION: u32 = 1;
@@ -16,7 +18,19 @@ pub enum PendingPhase {
     ReadyToPublish,
     DatabaseVerified,
     DeviceManifestPublished,
+    RockboxProjectionsPrepared,
+    PlaylistOwnershipPublished,
+    RockboxProjectionsPublished,
     CleanupComplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRockboxOp {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<RockboxProjectionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired: Option<RockboxProjectionRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +109,14 @@ pub struct PendingSession {
     pub candidate_manifest: Option<Manifest>,
     #[serde(default)]
     pub managed_playlist_record_snapshot: Option<ManagedPlaylistRecordSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_playlist_ownership: Option<ManagedPlaylistOwnership>,
+    #[serde(default)]
+    pub desired_playlist_memberships: BTreeMap<String, Vec<u64>>,
+    #[serde(default)]
+    pub verified_playlist_memberships: Vec<VerifiedPlaylistMembership>,
+    #[serde(default)]
+    pub pending_rockbox_ops: BTreeMap<String, PendingRockboxOp>,
 }
 
 impl PendingSession {
@@ -113,6 +135,10 @@ impl PendingSession {
             obsolete_files: Vec::new(),
             candidate_manifest: None,
             managed_playlist_record_snapshot: None,
+            candidate_playlist_ownership: None,
+            desired_playlist_memberships: BTreeMap::new(),
+            verified_playlist_memberships: Vec::new(),
+            pending_rockbox_ops: BTreeMap::new(),
         }
     }
 
@@ -162,6 +188,23 @@ impl PendingSession {
             }
         }
         self.publication_indices()?;
+        if let Some(candidate) = &self.candidate_playlist_ownership {
+            candidate
+                .validate_for_serial(&self.serial)
+                .context("validate pending candidate playlist ownership")?;
+            if candidate.playlists.len() != self.desired_playlist_memberships.len()
+                || candidate
+                    .playlists
+                    .keys()
+                    .any(|slug| !self.desired_playlist_memberships.contains_key(slug))
+            {
+                bail!("pending candidate ownership and desired memberships differ");
+            }
+        } else if !self.desired_playlist_memberships.is_empty()
+            || !self.verified_playlist_memberships.is_empty()
+        {
+            bail!("pending playlist membership exists without candidate ownership");
+        }
         Ok(())
     }
 }
