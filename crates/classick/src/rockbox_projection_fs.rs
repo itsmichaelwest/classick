@@ -1,10 +1,11 @@
 use crate::rockbox_playlist::validate_recorded_filename;
 use anyhow::{bail, Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(target_os = "macos")]
 #[path = "rockbox_projection_fs/macos.rs"]
@@ -21,6 +22,19 @@ pub enum TargetState {
     Missing,
     RecordedFile,
     ForeignFile,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionFailurePoint {
+    Write,
+    Rename,
+    Delete,
+}
+
+fn injected_failures() -> &'static Mutex<HashMap<PathBuf, ProjectionFailurePoint>> {
+    static FAILURES: OnceLock<Mutex<HashMap<PathBuf, ProjectionFailurePoint>>> = OnceLock::new();
+    FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub trait ProjectionIo {
@@ -67,6 +81,11 @@ impl DeviceProjectionFs {
         }
     }
 
+    #[doc(hidden)]
+    pub fn fail_once_for_mount(mount: PathBuf, point: ProjectionFailurePoint) {
+        injected_failures().lock().unwrap().insert(mount, point);
+    }
+
     pub fn root(&self) -> PathBuf {
         self.mount.join("Playlists").join("Classick")
     }
@@ -110,6 +129,19 @@ impl DeviceProjectionFs {
         }
         Ok(name)
     }
+
+    fn inject(&self, point: ProjectionFailurePoint) -> Result<()> {
+        let mut failures = injected_failures().lock().unwrap();
+        if failures.get(&self.mount) != Some(&point) {
+            return Ok(());
+        }
+        failures.remove(&self.mount);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            format!("injected Rockbox projection failure at {point:?}"),
+        )
+        .into())
+    }
 }
 
 impl ProjectionIo for DeviceProjectionFs {
@@ -144,6 +176,7 @@ impl ProjectionIo for DeviceProjectionFs {
         validate_write_target(&target, replace_recorded)?;
         let (temporary, mut file) = create_unique_temporary(&root, name)?;
         let result = (|| {
+            self.inject(ProjectionFailurePoint::Write)?;
             file.write_all(bytes)
                 .with_context(|| format!("write projection temp {}", temporary.display()))?;
             file.sync_all()
@@ -152,6 +185,7 @@ impl ProjectionIo for DeviceProjectionFs {
 
             self.validate_managed_root()?;
             validate_write_target(&target, replace_recorded)?;
+            self.inject(ProjectionFailurePoint::Rename)?;
             if self.fail_before_rename.as_deref() == Some(name) {
                 bail!("injected failure before projection rename for {name:?}");
             }
@@ -187,6 +221,7 @@ impl ProjectionIo for DeviceProjectionFs {
                 target.display()
             ),
         }
+        self.inject(ProjectionFailurePoint::Delete)?;
         fs::remove_file(&target)
             .with_context(|| format!("remove recorded projection {}", target.display()))?;
         sync_directory(&root)?;
