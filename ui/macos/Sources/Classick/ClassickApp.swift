@@ -58,19 +58,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let updater = Updater()
   #endif
   private var eventTask: Task<Void, Never>?
-
-  // Set by the most recent inner `summary` line of the sync in progress, so
-  // that when the matching `finish` line arrives we know how many tracks
-  // were added. Decoded straight from `sync_event.line` here (rather than
-  // exposing it on AppModel) since notifications are a side effect of the
-  // event stream, not UI state the reducer needs to track.
-  private var pendingSyncAddCount = 0
-  /// Whether the subprocess stream currently in flight is a library scan
-  /// (latched at `header` — see `observeForNotification`).
-  private var currentStreamIsScan = false
+  private var syncNotificationCoordinator = SyncNotificationCoordinator()
   private var sourceConnectIntent = SourceConnectIntent()
-
-  private let syncEventDecoder = JSONDecoder()
 
   /// Mirrors `daemonClient.lastFatalError` on the main actor. The actor's
   /// own property can't be read synchronously from a SwiftUI `body`, so
@@ -107,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         if case .hello = event {
           self.requestLibraryAndSelection()
         }
-        self.observeForNotification(event)
+        self.postNotifications(for: event)
         self.presentPromptIfNeeded()
         self.autoPresentSetupIfNeeded()
       }
@@ -341,14 +330,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     syncNow(serial: serial)
   }
 
-  /// "Retry" from the error phase. There's no dedicated retry command on
-  /// the wire — a fresh `get_status` forces the daemon to push a current
-  /// `status_update`, which recomputes phase out of `.error` if whatever
-  /// caused it has cleared.
+  /// "Retry" starts a new sync attempt. Clear only the presented terminal
+  /// error first; the daemon's next serial/session snapshot remains the
+  /// authority for the new run.
   func retry(serial: DeviceSerial) {
-    sendDeviceCommands(
-      serial: serial,
-      commands: [.getStatus(requestID: DaemonCommand.newRequestID())])
+    model.dismissTerminalError(for: serial)
+    syncNow(serial: serial)
   }
 
   /// Sidebar's "+ New Playlist" flow (Task 3). The daemon replies with an
@@ -508,44 +495,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     #endif
   }
 
-  /// Peeks at `sync_event` lines for the `summary`/`finish` pair so a
-  /// completion notification can report how many tracks were added.
-  /// AppModel's reducer already handles these lines for UI state; this is
-  /// a side channel over the same wire data, not a change to the reducer.
-  private func observeForNotification(_ event: DaemonEvent) {
-    guard case .syncEvent(let line, _, _) = event,
-      let data = line.data(using: .utf8),
-      let inner = try? syncEventDecoder.decode(SyncEvent.self, from: data)
-    else { return }
-    switch inner {
-    case .header:
-      // A new sync just started streaming — clear out whatever count
-      // is left over from the previous run so a `finish` that (for
-      // whatever reason) arrives without an intervening `summary`
-      // can't report a stale, previous-run count.
-      pendingSyncAddCount = 0
-      // Latch "this stream is a scan" at stream START, when the
-      // daemon's scanning status_update has definitively preceded
-      // the subprocess's first line — reading `isScanning` at
-      // `finish` time instead raced the trailing idle status_update
-      // (sweep finding #7: if idle landed first, a scan fired a
-      // bogus "Sync complete" banner).
-      currentStreamIsScan = model.isScanning
-    case .summary(let add, _, _, _, _, _):
-      pendingSyncAddCount = add
-    case .finish(let success, _, _, _):
-      // Honor the user's notification-level preference (notify_on):
-      // "all" fires always, "errors_only" only on failure, "none" never.
-      if Notifier.shouldPostSyncFinished(
-        notifyOn: model.config?.daemon?.notifyOn, success: success,
-        isScanning: currentStreamIsScan)
-      {
-        Notifier.syncFinished(success: success, added: pendingSyncAddCount)
-      }
-      pendingSyncAddCount = 0
-      currentStreamIsScan = false
-    default:
-      break
+  private func postNotifications(for event: DaemonEvent) {
+    for notification in syncNotificationCoordinator.consume(event, devices: model.devices) {
+      guard
+        Notifier.shouldPostSyncFinished(
+          notifyOn: model.config?.daemon?.notifyOn,
+          success: notification.success)
+      else { continue }
+      Notifier.syncFinished(notification)
     }
   }
 

@@ -122,7 +122,6 @@ struct SourceConnectIntent {
 final class AppModel {
   private(set) var device: DeviceState?
   private(set) var phase: Phase = .noDevice
-  private(set) var lastSync: HistoryEntry?
   private(set) var pendingPrompt: PendingPrompt?
   private(set) var storageText: String?
   private(set) var config: AppConfig?
@@ -132,7 +131,7 @@ final class AppModel {
 
   // Protocol 1.5.0: the most recently completed run's `finish` rollups,
   // for immediate post-sync display (Task 17). These are separate from
-  // `lastSync`/`history`'s own `summary`/`dbRestored` (which the daemon
+  // `history`'s own `summary`/`dbRestored` (which the daemon
   // persists and rebroadcasts) because a live `finish` line arrives over
   // the forwarded sync_event stream before the daemon's own
   // history_update/status_update catches up.
@@ -178,6 +177,7 @@ final class AppModel {
   private var lastInventoryRevision: UInt64?
   private var hasAuthoritativeInventory = false
   private var globalScanSessionID: UInt64?
+  private var terminalStateConsumer = TerminalStateConsumer()
 
   /// Device commands are unsafe until the current daemon connection has
   /// supplied its first authoritative inventory snapshot.
@@ -318,10 +318,10 @@ final class AppModel {
       hasAuthoritativeInventory = false
       globalScanSessionID = nil
       isScanning = false
+      terminalStateConsumer.reset()
       devices.removeAll()
       device = nil
       phase = .noDevice
-      lastSync = nil
       pendingPrompt = nil
       storageText = nil
       config = nil
@@ -438,7 +438,6 @@ final class AppModel {
     case .statusUpdate(let info):
       statusConfigured = info.configured
       isIpodConnected = info.ipodConnected
-      lastSync = info.lastSync
       syncedCount = info.syncedCount
       libraryCount = info.libraryCount
       let wasScanning = isScanning
@@ -476,7 +475,9 @@ final class AppModel {
       guard lastInventoryRevision.map({ snapshot.revision > $0 }) ?? true else { break }
       lastInventoryRevision = snapshot.revision
       hasAuthoritativeInventory = true
-      devices = DeviceReducer.reduce(snapshot: snapshot, previous: devices)
+      let previous = devices
+      devices = DeviceReducer.reduce(snapshot: snapshot, previous: previous)
+      terminalStateConsumer.reconcile(devices: &devices, previous: previous)
       refreshFocusedDeviceProjection()
     }
   }
@@ -485,6 +486,14 @@ final class AppModel {
   /// `decide_prompt` sent) so the same prompt isn't re-presented.
   func clearPendingPrompt() {
     pendingPrompt = nil
+  }
+
+  /// Clears the currently presented failure after the user dismisses Details.
+  /// The attempt identity remains suppressed so an unchanged daemon snapshot
+  /// cannot immediately resurrect the same error.
+  func dismissTerminalError(for serial: DeviceSerial) {
+    terminalStateConsumer.dismiss(serial: serial, devices: &devices)
+    refreshFocusedDeviceProjection()
   }
 
   func willRequestDeviceConfig(
@@ -685,7 +694,6 @@ final class AppModel {
       drive: state.mountPath ?? "")
     syncedCount = state.syncedCount
     libraryCount = state.libraryCount
-    lastSync = state.latestSuccessfulSync
     if let storage = state.storage {
       deviceStorage = (
         free: Int64(clamping: storage.free),

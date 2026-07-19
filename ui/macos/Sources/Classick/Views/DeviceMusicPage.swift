@@ -166,7 +166,7 @@ struct DeviceMusicPage: View {
     // Shown for the KNOWN (paired) device even while disconnected —
     // the last sync is a fact on disk, not a live connection property.
     // Only a page for some OTHER device gets the placeholder.
-    guard let last = deviceState?.latestSuccessfulSync else { return "Never synced" }
+    guard let last = model.latestSuccessfulSync(for: serial) else { return "Never synced" }
     return "Last synced \(shortDate(last.timestamp))"
   }
 

@@ -42,6 +42,7 @@
 		8C007C9F5695000CBA16E4F7 /* SetupWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82BC8C8CBF9B3ECE8C2C11DC /* SetupWindow.swift */; };
 		8E754E9CDBBCE92EAAB8FFAC /* DeviceViewState.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAFC22FBF6AE96AE44011EC1 /* DeviceViewState.swift */; };
 		8F39F1B258597665AC6A4DE5 /* DeviceMusicPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 026585EAEA306343196D6CC1 /* DeviceMusicPage.swift */; };
+		915A95C05CC4D6EFAA867656 /* SyncNotificationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3029F7DAACFF04C9AE8CFB25 /* SyncNotificationCoordinator.swift */; };
 		946F25B53E859840D136A76B /* DeviceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA35506FB0FA89D1354E4C9B /* DeviceRow.swift */; };
 		9B4E3549C2DCE960F8A6402C /* DaemonEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AE77C26530FE55F27CA0B60 /* DaemonEvent.swift */; };
 		9F69DE55F112B10BBAE446BB /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1788052EC7FE9655A0767A10 /* HistoryView.swift */; };
@@ -86,6 +87,7 @@
 		202553602D0B6CF9B75237B8 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		2C1244EE2C4156A9617AD090 /* AppLogic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogic.swift; sourceTree = "<group>"; };
 		2FDB10A10012288F988FE32C /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
+		3029F7DAACFF04C9AE8CFB25 /* SyncNotificationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncNotificationCoordinator.swift; sourceTree = "<group>"; };
 		3331333DE93E329157E37562 /* SidebarDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarDestination.swift; sourceTree = "<group>"; };
 		39CCC1F780C5FA6F22AD6FA7 /* DaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClient.swift; sourceTree = "<group>"; };
 		3F08940741D874678EDEC6A1 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
@@ -199,6 +201,7 @@
 				5EF66143092AD180B04081EF /* SelectionDraft.swift */,
 				3331333DE93E329157E37562 /* SidebarDestination.swift */,
 				61DE80657A5644ED21E4873A /* Storage.swift */,
+				3029F7DAACFF04C9AE8CFB25 /* SyncNotificationCoordinator.swift */,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -492,6 +495,7 @@
 				2C3FE03490909F6CB32075D0 /* SmartRulesEditor.swift in Sources */,
 				34B045E46CB1FFA37A665FA4 /* Storage.swift in Sources */,
 				EB742693791D9B54172F9ADE /* SyncEvent.swift in Sources */,
+				915A95C05CC4D6EFAA867656 /* SyncNotificationCoordinator.swift in Sources */,
 				ADA05051A9898D63AB07DD45 /* Updater.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

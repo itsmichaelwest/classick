@@ -102,6 +102,147 @@ final class AppModelReducerTests: XCTestCase {
     guard case .syncing = m.phase else { return XCTFail("finish must await the terminal snapshot") }
   }
 
+  func testNullAttemptSnapshotPreservesLatestSuccessfulSync() {
+    let model = AppModel()
+    let success = terminalHistory(sessionID: 40, outcome: "ok")
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 1,
+          devices: [
+            deviceSnapshot(
+              "0xA", latestSuccessfulSync: success, latestAttempt: success)
+          ])))
+
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 2,
+          devices: [
+            deviceSnapshot(
+              "0xA", phase: .syncing, sessionID: 41,
+              latestSuccessfulSync: nil, latestAttempt: nil)
+          ])))
+
+    XCTAssertEqual(model.latestSuccessfulSync(for: "0xA"), success)
+  }
+
+  func testTerminalErrorSurvivesNonClearingSnapshot() {
+    let model = AppModel()
+    let failure = terminalHistory(sessionID: 41, outcome: "error")
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 1,
+          devices: [
+            deviceSnapshot(
+              "0xA", phase: .error, latestAttempt: failure,
+              lastTerminalError: "Artwork publication failed")
+          ])))
+
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 2,
+          devices: [
+            deviceSnapshot("0xA", phase: .idle, latestAttempt: failure)
+          ])))
+
+    XCTAssertEqual(model.devices["0xA"]?.phase, .error("Artwork publication failed"))
+  }
+
+  func testLaterSuccessfulSessionClearsRetainedTerminalError() {
+    let model = AppModel()
+    let failure = terminalHistory(sessionID: 41, outcome: "error")
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 1,
+          devices: [
+            deviceSnapshot(
+              "0xA", phase: .error, latestAttempt: failure,
+              lastTerminalError: "Artwork publication failed")
+          ])))
+    let success = terminalHistory(sessionID: 42, outcome: "ok")
+
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 2,
+          devices: [
+            deviceSnapshot(
+              "0xA", phase: .idle, latestSuccessfulSync: success,
+              latestAttempt: success)
+          ])))
+
+    XCTAssertEqual(model.devices["0xA"]?.phase, .idle)
+    XCTAssertEqual(model.latestSuccessfulSync(for: "0xA"), success)
+    XCTAssertNil(model.devices["0xA"]?.lastTerminalError)
+  }
+
+  func testHistoryUsesTheAuthoritativeLatestSuccessfulEntry() {
+    let model = AppModel()
+    let stale = HistoryEntry(
+      serial: "0xA", sessionID: 42, timestamp: "2026-07-19T12:00:00Z",
+      durationSecs: 1, trigger: "manual", outcome: "ok")
+    model.apply(.historyUpdate(entries: [stale], acknowledgedRequestID: "history"))
+    let authoritative = HistoryEntry(
+      serial: "0xA", sessionID: 42, timestamp: "2026-07-19T12:00:00Z",
+      durationSecs: 10, trigger: "manual", outcome: "ok", dbRestored: true)
+
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 1,
+          devices: [
+            deviceSnapshot(
+              "0xA", latestSuccessfulSync: authoritative,
+              latestAttempt: authoritative)
+          ])))
+
+    XCTAssertEqual(model.authoritativeHistory, [authoritative])
+  }
+
+  func testDismissingTerminalErrorClearsOnlyThatAttempt() {
+    let model = AppModel()
+    let failure = terminalHistory(sessionID: 41, outcome: "error")
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 1,
+          devices: [
+            deviceSnapshot(
+              "0xA", phase: .error, latestAttempt: failure,
+              lastTerminalError: "Artwork publication failed")
+          ])))
+
+    model.dismissTerminalError(for: "0xA")
+    XCTAssertEqual(model.devices["0xA"]?.phase, .idle)
+
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 2,
+          devices: [
+            deviceSnapshot(
+              "0xA", phase: .error, latestAttempt: failure,
+              lastTerminalError: "Artwork publication failed")
+          ])))
+    XCTAssertEqual(model.devices["0xA"]?.phase, .idle, "dismissed attempt must stay dismissed")
+
+    let laterFailure = terminalHistory(sessionID: 42, outcome: "error")
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 3,
+          devices: [
+            deviceSnapshot(
+              "0xA", phase: .error, latestAttempt: laterFailure,
+              lastTerminalError: "Database write failed")
+          ])))
+    XCTAssertEqual(model.devices["0xA"]?.phase, .error("Database write failed"))
+  }
+
   func testPromptSurfaced() {
     let m = AppModel()
     seedDevice("0xA", phase: .syncing, sessionID: 1, in: m)
@@ -1140,7 +1281,10 @@ final class AppModelReducerTests: XCTestCase {
     phase: DevicePhaseLabel = .idle,
     sessionID: UInt64? = nil,
     syncedCount: Int = 0,
-    libraryCount: Int? = nil
+    libraryCount: Int? = nil,
+    latestSuccessfulSync: HistoryEntry? = nil,
+    latestAttempt: HistoryEntry? = nil,
+    lastTerminalError: String? = nil
   ) -> DeviceSnapshotWire {
     DeviceSnapshotWire(
       identity: DeviceIdentityWire(serial: serial, modelLabel: "iPod Classic", name: nil),
@@ -1152,11 +1296,18 @@ final class AppModelReducerTests: XCTestCase {
       storage: nil,
       syncedCount: syncedCount,
       libraryCount: libraryCount,
-      latestSuccessfulSync: nil,
-      latestAttempt: nil,
-      lastTerminalError: nil,
+      latestSuccessfulSync: latestSuccessfulSync,
+      latestAttempt: latestAttempt,
+      lastTerminalError: lastTerminalError,
       selectionRevision: 0,
       settingsRevision: 0,
       subscriptionsRevision: 0)
+  }
+
+  private func terminalHistory(sessionID: UInt64, outcome: String) -> HistoryEntry {
+    HistoryEntry(
+      serial: "0xA", sessionID: sessionID,
+      timestamp: "2026-07-19T12:00:00Z", durationSecs: 10,
+      trigger: "manual", outcome: outcome)
   }
 }

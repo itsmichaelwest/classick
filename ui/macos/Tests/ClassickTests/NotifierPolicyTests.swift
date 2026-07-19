@@ -1,38 +1,145 @@
 import XCTest
+
 @testable import Classick
 
 /// The `notify_on` preference used to be ignored on macOS — a banner fired on
 /// every sync regardless. These pin the policy that now gates `syncFinished`.
+@MainActor
 final class NotifierPolicyTests: XCTestCase {
-    func testAllNotifiesForSuccessAndFailure() {
-        XCTAssertTrue(Notifier.shouldPostSyncFinished(notifyOn: "all", success: true, isScanning: false))
-        XCTAssertTrue(Notifier.shouldPostSyncFinished(notifyOn: "all", success: false, isScanning: false))
-    }
+  func testAllNotifiesForSuccessAndFailure() {
+    XCTAssertTrue(
+      Notifier.shouldPostSyncFinished(notifyOn: "all", success: true))
+    XCTAssertTrue(
+      Notifier.shouldPostSyncFinished(notifyOn: "all", success: false))
+  }
 
-    func testErrorsOnlyNotifiesOnlyOnFailure() {
-        XCTAssertFalse(Notifier.shouldPostSyncFinished(notifyOn: "errors_only", success: true, isScanning: false))
-        XCTAssertTrue(Notifier.shouldPostSyncFinished(notifyOn: "errors_only", success: false, isScanning: false))
-    }
+  func testErrorsOnlyNotifiesOnlyOnFailure() {
+    XCTAssertFalse(
+      Notifier.shouldPostSyncFinished(notifyOn: "errors_only", success: true))
+    XCTAssertTrue(
+      Notifier.shouldPostSyncFinished(notifyOn: "errors_only", success: false))
+  }
 
-    func testNoneNeverNotifies() {
-        XCTAssertFalse(Notifier.shouldPostSyncFinished(notifyOn: "none", success: true, isScanning: false))
-        XCTAssertFalse(Notifier.shouldPostSyncFinished(notifyOn: "none", success: false, isScanning: false))
-    }
+  func testNoneNeverNotifies() {
+    XCTAssertFalse(
+      Notifier.shouldPostSyncFinished(notifyOn: "none", success: true))
+    XCTAssertFalse(
+      Notifier.shouldPostSyncFinished(notifyOn: "none", success: false))
+  }
 
-    func testNilOrUnknownDefaultsToAll() {
-        XCTAssertTrue(Notifier.shouldPostSyncFinished(notifyOn: nil, success: true, isScanning: false))
-        XCTAssertTrue(Notifier.shouldPostSyncFinished(notifyOn: "bogus", success: false, isScanning: false))
-    }
+  func testNilOrUnknownDefaultsToAll() {
+    XCTAssertTrue(Notifier.shouldPostSyncFinished(notifyOn: nil, success: true))
+    XCTAssertTrue(
+      Notifier.shouldPostSyncFinished(notifyOn: "bogus", success: false))
+  }
 
-    /// A `--scan-library` subprocess streams the same header/summary/finish
-    /// wire as a real sync — its `finish` used to fire a bogus
-    /// "Sync complete / N added" banner for tracks added to the INDEX, not
-    /// the iPod. Scanning suppresses the banner regardless of `notify_on`
-    /// or outcome.
-    func testScanningSuppressesBannerRegardlessOfPolicy() {
-        XCTAssertFalse(Notifier.shouldPostSyncFinished(notifyOn: "all", success: true, isScanning: true))
-        XCTAssertFalse(Notifier.shouldPostSyncFinished(notifyOn: "all", success: false, isScanning: true))
-        XCTAssertFalse(Notifier.shouldPostSyncFinished(notifyOn: "errors_only", success: false, isScanning: true))
-        XCTAssertFalse(Notifier.shouldPostSyncFinished(notifyOn: nil, success: true, isScanning: true))
-    }
+  func testEarlyFinishWaitsForAuthoritativeTerminalSnapshot() {
+    var coordinator = SyncNotificationCoordinator()
+    let model = AppModel()
+    let active = snapshot(revision: 1, phase: .syncing, sessionID: 42)
+    model.apply(.deviceInventorySnapshot(active))
+    XCTAssertEqual(
+      coordinator.consume(.deviceInventorySnapshot(active), devices: model.devices), [])
+
+    let summary = DaemonEvent.syncEvent(
+      line:
+        #"{"type":"summary","add":3,"modify":0,"metadata_only":0,"remove":0,"unchanged":7,"total_planned":3}"#,
+      serial: "A", sessionID: 42)
+    model.apply(summary)
+    XCTAssertEqual(coordinator.consume(summary, devices: model.devices), [])
+
+    let finish = DaemonEvent.syncEvent(
+      line: #"{"type":"finish","success":true}"#, serial: "A", sessionID: 42)
+    model.apply(finish)
+    XCTAssertEqual(coordinator.consume(finish, devices: model.devices), [])
+  }
+
+  func testAuthoritativeTerminalSnapshotProducesOneCompletion() {
+    var coordinator = SyncNotificationCoordinator()
+    let model = AppModel()
+    let active = snapshot(revision: 1, phase: .syncing, sessionID: 42)
+    model.apply(.deviceInventorySnapshot(active))
+    _ = coordinator.consume(.deviceInventorySnapshot(active), devices: model.devices)
+    let summary = DaemonEvent.syncEvent(
+      line:
+        #"{"type":"summary","add":3,"modify":0,"metadata_only":0,"remove":0,"unchanged":7,"total_planned":3}"#,
+      serial: "A", sessionID: 42)
+    model.apply(summary)
+    _ = coordinator.consume(summary, devices: model.devices)
+
+    let success = history(sessionID: 42, outcome: "ok")
+    let terminal = snapshot(
+      revision: 2, phase: .idle, sessionID: nil,
+      latestSuccessfulSync: success, latestAttempt: success)
+    model.apply(.deviceInventorySnapshot(terminal))
+
+    XCTAssertEqual(
+      coordinator.consume(.deviceInventorySnapshot(terminal), devices: model.devices),
+      [SyncFinishedNotification(serial: "A", sessionID: 42, success: true, added: 3)])
+    XCTAssertEqual(
+      coordinator.consume(.deviceInventorySnapshot(terminal), devices: model.devices), [],
+      "duplicate terminal snapshots must not post twice")
+  }
+
+  func testCancellationNeverProducesCompletionNotification() {
+    var coordinator = SyncNotificationCoordinator()
+    let model = AppModel()
+    let active = snapshot(revision: 1, phase: .syncing, sessionID: 42)
+    model.apply(.deviceInventorySnapshot(active))
+    _ = coordinator.consume(.deviceInventorySnapshot(active), devices: model.devices)
+
+    let cancelledEvent = DaemonEvent.syncEvent(
+      line: #"{"type":"cancelled"}"#, serial: "A", sessionID: 42)
+    model.apply(cancelledEvent)
+    _ = coordinator.consume(cancelledEvent, devices: model.devices)
+    let cancelled = history(sessionID: 42, outcome: "cancelled")
+    let terminal = snapshot(
+      revision: 2, phase: .idle, sessionID: nil,
+      latestSuccessfulSync: nil, latestAttempt: cancelled)
+    model.apply(.deviceInventorySnapshot(terminal))
+
+    XCTAssertEqual(
+      coordinator.consume(.deviceInventorySnapshot(terminal), devices: model.devices), [])
+  }
+
+  func testSeriallessScanStreamNeverProducesSyncNotification() {
+    var coordinator = SyncNotificationCoordinator()
+    let model = AppModel()
+    model.apply(
+      .statusUpdate(
+        .init(
+          state: .scanning, configured: true, ipodConnected: false,
+          lastSync: nil, storage: nil)))
+    let finish = DaemonEvent.syncEvent(
+      line: #"{"type":"finish","success":true}"#, serial: nil, sessionID: 99)
+    model.apply(finish)
+
+    XCTAssertEqual(coordinator.consume(finish, devices: model.devices), [])
+  }
+
+  private func snapshot(
+    revision: UInt64,
+    phase: DevicePhaseLabel,
+    sessionID: UInt64?,
+    latestSuccessfulSync: HistoryEntry? = nil,
+    latestAttempt: HistoryEntry? = nil
+  ) -> DeviceInventorySnapshot {
+    DeviceInventorySnapshot(
+      revision: revision,
+      devices: [
+        DeviceSnapshotWire(
+          identity: .init(serial: "A", modelLabel: "iPod Classic", name: "A's iPod"),
+          configured: true, connected: true, mount: "/Volumes/A", phase: phase,
+          sessionID: sessionID, storage: nil, syncedCount: 10, libraryCount: 10,
+          latestSuccessfulSync: latestSuccessfulSync, latestAttempt: latestAttempt,
+          lastTerminalError: nil, selectionRevision: 1, settingsRevision: 1,
+          subscriptionsRevision: 1)
+      ])
+  }
+
+  private func history(sessionID: UInt64, outcome: String) -> HistoryEntry {
+    HistoryEntry(
+      serial: "A", sessionID: sessionID, timestamp: "2026-07-19T12:00:00Z",
+      durationSecs: 10, trigger: "manual", outcome: outcome)
+  }
 }

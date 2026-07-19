@@ -64,7 +64,7 @@ struct DeviceSettingsPage: View {
           LabeledContent("Capacity", value: capacity)
         }
         LabeledContent("Synced", value: syncedSummary)
-        if let last = deviceState?.latestSuccessfulSync {
+        if let last = model.latestSuccessfulSync(for: serial) {
           LabeledContent("Last synced", value: shortDate(last.timestamp))
         } else {
           LabeledContent("Last synced", value: "Never synced")

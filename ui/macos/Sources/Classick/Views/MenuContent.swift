@@ -77,7 +77,7 @@ struct MenuContent: View {
       if let storageText = DeviceSurfaceLogic.storageText(state) {
         Text(storageText)
       }
-      if let lastSync = state.latestSuccessfulSync {
+      if let lastSync = model.latestSuccessfulSync(for: serial) {
         Text("Last sync: \(formatLastSync(lastSync.timestamp))")
       }
       Divider()

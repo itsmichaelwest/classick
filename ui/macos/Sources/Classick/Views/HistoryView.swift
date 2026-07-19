@@ -5,7 +5,7 @@ struct HistoryView: View {
   var model: AppModel
 
   private var rows: [Row] {
-    model.history.reversed().enumerated().map { Row(id: $0.offset, entry: $0.element) }
+    model.authoritativeHistory.reversed().enumerated().map { Row(id: $0.offset, entry: $0.element) }
   }
   private struct Row: Identifiable {
     let id: Int
