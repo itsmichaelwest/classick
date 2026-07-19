@@ -167,8 +167,19 @@ final class DaemonClientTests: XCTestCase {
     outbox.markWritten(requestID: first.requestID, connectionGeneration: 1)
     try outbox.upsert(.deletePlaylist(slug: "mix", requestID: "successor"))
     XCTAssertNil(outbox.nextIntent(for: 1), "same-key successor must wait for acknowledgement")
-    let acknowledgement = DurableAcknowledgement(
+    let revisionlessAcknowledgement = DurableAcknowledgement(
       requestID: "first", revision: nil, configState: nil)
+    XCTAssertFalse(outbox.acknowledge(revisionlessAcknowledgement))
+    XCTAssertNil(
+      outbox.nextIntent(for: 1),
+      "correlation without persistence evidence must keep the predecessor in flight")
+
+    let event = try JSONDecoder().decode(
+      DaemonEvent.self,
+      from: Data(
+        #"{"type":"playlists_update","playlists":[],"playlist_revision":1,"acknowledged_request_id":"first"}"#
+          .utf8))
+    let acknowledgement = try XCTUnwrap(event.durableAcknowledgement)
     XCTAssertTrue(outbox.acknowledge(acknowledgement))
     XCTAssertFalse(outbox.acknowledge(acknowledgement))
     XCTAssertEqual(outbox.nextIntent(for: 1)?.requestID, "successor")
