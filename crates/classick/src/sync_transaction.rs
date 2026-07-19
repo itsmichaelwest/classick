@@ -725,6 +725,9 @@ mod tests {
     use std::ffi::CString;
     use std::path::PathBuf;
     use std::ptr;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_MOUNT: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn publication_phase_order_is_total() {
@@ -783,11 +786,20 @@ mod tests {
     fn temp_mount() -> std::path::PathBuf {
         let mount = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target/test-tmp")
-            .join(format!("transaction-snapshot-{}", std::process::id()));
+            .join(format!(
+                "transaction-snapshot-{}-{}",
+                std::process::id(),
+                NEXT_TEMP_MOUNT.fetch_add(1, Ordering::Relaxed)
+            ));
         let _ = std::fs::remove_dir_all(&mount);
         std::fs::create_dir_all(mount.join("iPod_Control/iTunes")).unwrap();
         std::fs::create_dir_all(mount.join("iPod_Control/Artwork")).unwrap();
         mount
+    }
+
+    #[test]
+    fn temp_mount_is_unique_within_the_test_process() {
+        assert_ne!(temp_mount(), temp_mount());
     }
 
     fn write_valid_itunesdb(mount: &Path) {
