@@ -71,6 +71,11 @@ pub fn portable_manifest_path(mount: &Path) -> PathBuf {
         .join("manifest.json")
 }
 
+/// Durable per-session journals and rollback snapshots on the connected iPod.
+pub fn pending_sessions_dir(mount: &Path) -> PathBuf {
+    mount.join("iPod_Control").join("classick").join("pending")
+}
+
 /// Retained copy of a per-device v1 host manifest after its cache path is
 /// upgraded to v2.
 pub fn retained_v1_manifest_path(host_cache: &Path) -> PathBuf {

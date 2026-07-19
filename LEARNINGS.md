@@ -2,6 +2,8 @@
 
 Per global AGENTS.md: record discovered conventions, gotchas, debugging insights, and useful commands here as work proceeds. One bullet per learning.
 
+- **Artwork-safe checkpoints need a complete rollback set:** snapshot and hash-validate `iTunesDB`, `ArtworkDB`, and every `.ithmb` before deleting stale artwork output; retain old audio until DB/art verification and device-manifest publication, and remove only paths explicitly owned by the pending-session journal.
+
 ## iTunes will always reject a libgpod-managed iPod (2026-05-24)
 
 - **Fundamental:** libgpod's iTunesDB writes are byte-compatible with what the iPod firmware accepts (Phase 1 gate proved this) but the signature does NOT match Apple's stricter check. iTunes 12.x on Windows will pop a "cannot read contents of the iPod, please Restore" dialog whenever it sees a libgpod-managed device. **This is not a bug we can fix without reverse-engineering Apple's signing algorithm exactly.**

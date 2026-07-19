@@ -147,6 +147,15 @@ impl ManifestStore {
         })
     }
 
+    pub fn publish_runtime(&self, manifest: &Manifest) -> Result<ManifestPublishOutcome> {
+        let root = manifest
+            .last_source_root
+            .clone()
+            .context("candidate manifest has no resolved source root")?;
+        let source = SourceLocation::discover(root).context("resolve candidate source identity")?;
+        self.publish(manifest, &source)
+    }
+
     pub fn reconcile_from_live_db(
         &self,
         source: &SourceLocation,

@@ -2,8 +2,9 @@
 
 use crate::ffi;
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, CString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 /// Owns an `Itdb_iTunesDB *` and frees it on Drop. Holds the database in memory
@@ -20,7 +21,7 @@ pub struct TrackHandle {
 }
 
 /// The metadata fields we copy into `Itdb_Track`. Parsed from ffprobe by main.rs.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Tags {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -211,6 +212,37 @@ impl OwnedDb {
         }
     }
 
+    /// Artwork-safe add variant. Unlike the historical add path, supplied
+    /// artwork is required to attach successfully; a thumbnail failure rolls
+    /// back the in-memory track and copied file instead of publishing artless.
+    pub fn add_track_with_file_strict(
+        &self,
+        source_alac: &Path,
+        tags: &Tags,
+        art: Option<&[u8]>,
+    ) -> Result<TrackHandle> {
+        let handle = self.add_track_with_file(source_alac, tags, art)?;
+        if art.is_some() && !self.track_has_artwork(handle.dbid) {
+            let removed = self.unlink_track_keep_file(handle.dbid)?;
+            if let Some(removed) = removed {
+                if let Some(mount) = self.mount_path() {
+                    let _ = std::fs::remove_file(
+                        mount.join(
+                            removed
+                                .ipod_relpath
+                                .replace('\\', std::path::MAIN_SEPARATOR_STR),
+                        ),
+                    );
+                }
+            }
+            return Err(anyhow!(
+                "artwork thumbnail preparation failed for dbid {}",
+                handle.dbid
+            ));
+        }
+        Ok(handle)
+    }
+
     /// Remove a track from the iPod by dbid. Idempotent (returns Ok if not present).
     /// Does NOT call `itdb_write`; the caller batches multiple removes + adds
     /// then calls `write` once.
@@ -235,6 +267,24 @@ impl OwnedDb {
             ffi::itdb_track_remove(found);
         }
         Ok(())
+    }
+
+    /// Remove a track record and playlist membership while retaining its
+    /// audio file until the coordinated publication has been verified.
+    pub fn unlink_track_keep_file(&self, dbid: u64) -> Result<Option<TrackHandle>> {
+        unsafe {
+            let found = self.find_track_by_dbid(dbid);
+            if found.is_null() {
+                return Ok(None);
+            }
+            let handle = TrackHandle {
+                dbid,
+                ipod_relpath: read_ipod_relpath(found),
+            };
+            ffi::itdb_playlist_remove_track(std::ptr::null_mut(), found);
+            ffi::itdb_track_remove(found);
+            Ok(Some(handle))
+        }
     }
 
     /// Update an existing iPod track's tags + thumbnails without touching the
@@ -268,6 +318,98 @@ impl OwnedDb {
             }
         }
         Ok(())
+    }
+
+    pub fn set_track_metadata_and_art(
+        &self,
+        dbid: u64,
+        tags: &Tags,
+        art: Option<&[u8]>,
+    ) -> Result<()> {
+        self.update_track_metadata(dbid, tags, art)
+    }
+
+    /// Replace only the thumbnail input, preserving every metadata field.
+    pub fn set_track_artwork(&self, dbid: u64, art: Option<&[u8]>) -> Result<()> {
+        unsafe {
+            let found = self.find_track_by_dbid(dbid);
+            if found.is_null() {
+                return Err(anyhow!("track dbid {dbid} is missing"));
+            }
+            match art {
+                Some(bytes) => {
+                    if ffi::itdb_track_set_thumbnails_from_data(
+                        found,
+                        bytes.as_ptr(),
+                        bytes.len() as _,
+                    ) == 0
+                    {
+                        return Err(anyhow!(
+                            "itdb_track_set_thumbnails_from_data failed for dbid {dbid}"
+                        ));
+                    }
+                }
+                None => ffi::itdb_track_remove_thumbnails(found),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn track_has_artwork(&self, dbid: u64) -> bool {
+        unsafe {
+            let found = self.find_track_by_dbid(dbid);
+            !found.is_null()
+                && (*found).has_artwork == 1
+                && ffi::itdb_track_has_thumbnails(found) != 0
+        }
+    }
+
+    pub fn verify_track(
+        &self,
+        dbid: u64,
+        expected_relpath: &str,
+        expects_artwork: bool,
+    ) -> Result<()> {
+        unsafe {
+            let found = self.find_track_by_dbid(dbid);
+            if found.is_null() {
+                return Err(anyhow!("track dbid {dbid} is missing after publication"));
+            }
+            let actual = read_ipod_relpath(found);
+            if normalize_relpath(&actual) != normalize_relpath(expected_relpath) {
+                return Err(anyhow!(
+                    "track dbid {dbid} path mismatch: expected {expected_relpath:?}, got {actual:?}"
+                ));
+            }
+            if expects_artwork && !self.track_has_artwork(dbid) {
+                return Err(anyhow!(
+                    "track dbid {dbid} has no thumbnail after publication"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn referenced_paths(&self, mount: &Path) -> std::collections::HashSet<PathBuf> {
+        self.list_tracks_for_rebuild()
+            .into_iter()
+            .filter(|track| !track.ipod_relpath.is_empty())
+            .map(|track| {
+                mount.join(
+                    track
+                        .ipod_relpath
+                        .replace('\\', std::path::MAIN_SEPARATOR_STR),
+                )
+            })
+            .collect()
+    }
+
+    fn mount_path(&self) -> Option<PathBuf> {
+        unsafe {
+            let mount = ffi::itdb_get_mountpoint(self.0);
+            (!mount.is_null())
+                .then(|| PathBuf::from(CStr::from_ptr(mount).to_string_lossy().as_ref()))
+        }
     }
 
     /// Walk the DB's track GList and return the first track whose dbid
@@ -404,6 +546,12 @@ impl OwnedDb {
             dangling_removed,
         }
     }
+}
+
+fn normalize_relpath(path: &str) -> String {
+    path.trim_start_matches(['/', '\\'])
+        .replace(['/', ':'], "\\")
+        .to_ascii_lowercase()
 }
 
 /// Result of `OwnedDb::reconcile_with_disk`. All counts are zero on a

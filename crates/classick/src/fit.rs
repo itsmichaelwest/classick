@@ -148,6 +148,20 @@ pub fn reserve_bytes(total_bytes: u64) -> u64 {
     crate::FIT_RESERVE_MIN_BYTES.max(fraction)
 }
 
+/// Maximum additional audio bytes required before deferred cleanup. Removes
+/// contribute no credit because the old files stay live until publication is
+/// verified; replacements therefore count their complete staged size too.
+pub fn peak_space_required(actions: &[Action], rollback_snapshot_bytes: u64) -> u64 {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Add(source) | Action::Modify(source, _) => Some(source.size),
+            _ => None,
+        })
+        .sum::<u64>()
+        .saturating_add(rollback_snapshot_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +389,18 @@ mod tests {
         assert!(outcome.deferred.is_empty());
         let kept_paths: Vec<_> = outcome.kept.iter().map(action_path).collect();
         assert_eq!(kept_paths, expected);
+    }
+
+    #[test]
+    fn peak_space_never_credits_deferred_removes() {
+        let actions = vec![
+            Action::Remove(entry("/m/Old/01.flac", 900)),
+            Action::Add(src("/m/New/01.flac", 100)),
+            Action::Modify(
+                src("/m/Changed/01.flac", 200),
+                entry("/m/Changed/01.flac", 800),
+            ),
+        ];
+        assert_eq!(peak_space_required(&actions, 50), 350);
     }
 }
