@@ -16,6 +16,9 @@ struct Sidebar: View {
   /// clicking it unpaired the device and never touched the volume.
   var onEjectIpod: (DeviceSerial) -> Void
   var onSavePlaylist: (PlaylistPayload) -> Void
+  var onSubmitLibraryDrop: @MainActor @Sendable (LibraryDropTarget, [SelectionRule], UUID) -> Void = {
+    _, _, _ in
+  }
 
   /// Snapshot of playlist slugs taken the moment "+" is tapped, so the
   /// `onChange` below can recognize the newly assigned slug once the
@@ -140,6 +143,11 @@ struct Sidebar: View {
     DisclosureGroup(isExpanded: expandedBinding) {
       Label("Music", systemImage: "music.note")
         .tag(SidebarDestination.device(serial: device.serial, page: .music))
+        .libraryDropDestination(
+          target: libraryDropTarget(for: device.serial),
+          launchNonce: model.libraryDragLaunchNonce,
+          feedback: libraryDropFeedback(for: libraryDropTarget(for: device.serial)),
+          submit: onSubmitLibraryDrop)
       Label("Settings", systemImage: "gear")
         .tag(SidebarDestination.device(serial: device.serial, page: .settings))
     } label: {
@@ -175,6 +183,11 @@ struct Sidebar: View {
       .onTapGesture {
         selection = SidebarDestination.destinationForDeviceRowClick(serial: device.serial)
       }
+      .libraryDropDestination(
+        target: libraryDropTarget(for: device.serial),
+        launchNonce: model.libraryDragLaunchNonce,
+        feedback: libraryDropFeedback(for: libraryDropTarget(for: device.serial)),
+        submit: onSubmitLibraryDrop)
     }
     .foregroundStyle(device.connected ? .primary : .secondary)
   }
@@ -189,6 +202,20 @@ struct Sidebar: View {
       }
     }
     .tag(SidebarDestination.playlist(slug: summary.slug))
+    .libraryDropDestination(
+      target: LibraryDropEligibility.targetForPlaylist(summary),
+      launchNonce: model.libraryDragLaunchNonce,
+      feedback: libraryDropFeedback(for: LibraryDropEligibility.targetForPlaylist(summary)),
+      submit: onSubmitLibraryDrop)
+  }
+
+  private func libraryDropTarget(for serial: DeviceSerial) -> LibraryDropTarget? {
+    model.devices[serial].flatMap(LibraryDropEligibility.targetForDevice)
+  }
+
+  private func libraryDropFeedback(for target: LibraryDropTarget?) -> String? {
+    guard let target, LibraryDropFeedback.belongs(model.dropOutcome, to: target) else { return nil }
+    return model.dropOutcome?.accessibleMessage
   }
 }
 
@@ -233,7 +260,8 @@ enum SidebarInventory {
     var body: some View {
       NavigationSplitView {
         Sidebar(
-          model: model, selection: $selection, onEjectIpod: { _ in }, onSavePlaylist: { _ in })
+          model: model, selection: $selection, onEjectIpod: { _ in }, onSavePlaylist: { _ in },
+          onSubmitLibraryDrop: { _, _, _ in })
       } detail: {
         Text("Detail").foregroundStyle(.secondary)
       }

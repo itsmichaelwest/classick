@@ -9,6 +9,9 @@ struct DeviceRow: View {
   var onResume: (DeviceSerial) -> Void
   var onRetry: (DeviceSerial) -> Void
   var onSetUp: (DeviceSerial?) -> Void
+  var onSubmitLibraryDrop: @MainActor @Sendable (LibraryDropTarget, [SelectionRule], UUID) -> Void = {
+    _, _, _ in
+  }
 
   private var presentation: DeviceRowPresentation {
     DeviceRowPresentation.make(
@@ -33,6 +36,26 @@ struct DeviceRow: View {
     .floatingBarBackground()
     .padding(.horizontal, DeviceRowLayout.outerInset)
     .padding(.bottom, DeviceRowLayout.outerInset)
+    .libraryDropDestination(
+      target: libraryDropTarget,
+      launchNonce: model.libraryDragLaunchNonce,
+      feedback: libraryDropFeedback,
+      submit: onSubmitLibraryDrop)
+  }
+
+  private var libraryDropTarget: LibraryDropTarget? {
+    guard let serial = presentation.serial,
+      let device = model.devices[serial],
+      LibraryDropEligibility.targetForDevice(device) != nil
+    else { return nil }
+    return LibraryDropEligibility.targetForCard(presentation)
+  }
+
+  private var libraryDropFeedback: String? {
+    guard let target = libraryDropTarget,
+      LibraryDropFeedback.belongs(model.dropOutcome, to: target)
+    else { return nil }
+    return model.dropOutcome?.accessibleMessage
   }
 
   private var header: some View {

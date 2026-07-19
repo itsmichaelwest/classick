@@ -1,5 +1,76 @@
 import Foundation
 
+struct LibraryDropEligibility: Equatable {
+  static func targetForDevice(_ device: DeviceViewState) -> LibraryDropTarget? {
+    let serial = device.identity.serial.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard device.configured, !serial.isEmpty else { return nil }
+    return .device(
+      serial: serial,
+      displayName: device.identity.name ?? device.identity.modelLabel)
+  }
+
+  static func targetForCard(_ presentation: DeviceRowPresentation) -> LibraryDropTarget? {
+    guard let serial = presentation.serial, !serial.isEmpty else { return nil }
+    return .device(serial: serial, displayName: presentation.title)
+  }
+
+  static func targetForPlaylist(_ summary: PlaylistSummary) -> LibraryDropTarget? {
+    guard summary.kind == .manual, summary.error == nil, !summary.slug.isEmpty else { return nil }
+    return .manualPlaylist(slug: summary.slug, displayName: summary.name)
+  }
+}
+
+enum LibraryDropAcceptanceError: Error, Equatable {
+  case empty
+  case tooManyRules
+}
+
+enum LibraryDropAcceptance {
+  static func rules(
+    from items: [LibraryDragPayload], expectedNonce: UUID
+  ) throws -> [SelectionRule] {
+    guard !items.isEmpty else { throw LibraryDropAcceptanceError.empty }
+    var combined: [SelectionRule] = []
+    for item in items {
+      let rules = try item.validated(expectedNonce: expectedNonce)
+      guard combined.count + rules.count <= LibraryDragPayload.maximumRules else {
+        throw LibraryDropAcceptanceError.tooManyRules
+      }
+      combined.append(contentsOf: rules)
+    }
+    return DaemonCommand.canonicalAdditiveRules(combined)
+  }
+}
+
+func acceptLibraryDrop(
+  _ items: [LibraryDragPayload], on target: LibraryDropTarget, expectedNonce: UUID
+) -> Bool {
+  _ = target
+  return (try? LibraryDropAcceptance.rules(from: items, expectedNonce: expectedNonce)) != nil
+}
+
+enum LibraryDropFeedback {
+  static func accessibilityLabel(summary: String, target: LibraryDropTarget) -> String {
+    "Add \(summary) to \(target.displayName)"
+  }
+
+  static func belongs(_ outcome: DropOutcome?, to target: LibraryDropTarget) -> Bool {
+    guard let outcome else { return false }
+    switch (outcome, target) {
+    case (.adding(let outcomeTarget), _), (.rejected(let outcomeTarget, _), _):
+      return outcomeTarget == target
+    case (.addedAndSyncing(let serial), .device(let targetSerial, _)),
+      (.addedForNextSync(let serial), .device(let targetSerial, _)),
+      (.alreadyPresent(let serial), .device(let targetSerial, _)):
+      return serial == targetSerial
+    case (.appended(let slug, _), .manualPlaylist(let targetSlug, _)):
+      return slug == targetSlug
+    default:
+      return false
+    }
+  }
+}
+
 enum LibraryDropTarget: Hashable, Sendable {
   case device(serial: String, displayName: String)
   case manualPlaylist(slug: String, displayName: String)
@@ -59,6 +130,11 @@ struct LibraryDropState: Sendable {
 
   func isAdding(target: LibraryDropTarget) -> Bool {
     pending[target.identity] != nil
+  }
+
+  func isAdding(requestID: UUID) -> Bool {
+    let requestID = requestID.uuidString.lowercased()
+    return pending.values.contains { $0.requestID == requestID }
   }
 
   mutating func completeDevice(

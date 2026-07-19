@@ -585,6 +585,10 @@ final class AppModel {
     libraryDropState.isAdding(target: target)
   }
 
+  func isLibraryDropAdding(requestID: UUID) -> Bool {
+    libraryDropState.isAdding(requestID: requestID)
+  }
+
   func rejectLibraryDropLocally(
     requestID: UUID, target: LibraryDropTarget, message: String
   ) {

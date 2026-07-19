@@ -46,6 +46,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
   let model = AppModel()
   let daemonClient = DaemonClient()
+  private var libraryDropSubmissionCoordinator: LibraryDropSubmissionCoordinator!
+  private let libraryDropAnnouncementCoordinator = LibraryDropAnnouncementCoordinator()
   private let daemonProcess = DaemonProcess()
   private let daemonShutdownCoordinator = DaemonShutdownCoordinator()
   private let setupWindowController = SetupWindowController()
@@ -67,6 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// exactly when a fatal handshake error, if any, was set).
   @Published private(set) var daemonFatalError: String?
 
+  override init() {
+    super.init()
+    libraryDropSubmissionCoordinator = LibraryDropSubmissionCoordinator(
+      send: { [daemonClient] command in await daemonClient.send(command) },
+      rejectLocally: { [model] requestID, target, message in
+        model.rejectLibraryDropLocally(requestID: requestID, target: target, message: message)
+      })
+  }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     // Xcode renders an app target's previews by launching the app as the
     // preview host. Fixtures need none of the launch side effects.
@@ -82,6 +93,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
       await self.daemonClient.start()
       for await event in stream {
         self.model.apply(event)
+        if let requestID = self.model.persistedDropAcknowledgements.last,
+          let outcome = self.model.dropOutcome
+        {
+          self.libraryDropAnnouncementCoordinator.announce(
+            requestID: requestID, outcome: outcome)
+        }
         // `hello` marks a completed (re)handshake. The initial
         // window-appear request batch races the first connect —
         // `DaemonClient.send` DROPS commands while disconnected —
@@ -107,6 +124,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   func applicationDidBecomeActive(_ notification: Notification) {
     guard sourceConnectIntent.applicationDidBecomeActive() else { return }
     sendSourceMountRetry()
+  }
+
+  func submitLibraryDrop(
+    target: LibraryDropTarget, rules: [SelectionRule], requestID: UUID
+  ) {
+    model.markLibraryDropAdding(requestID: requestID, target: target)
+    libraryDropSubmissionCoordinator.submit(
+      target: target, rules: rules, requestID: requestID)
   }
 
   /// Shows first-run setup. Wired to the "Set Up Classick…" menu row and
@@ -581,6 +606,7 @@ struct ClassickApp: App {
         onReplaceLibrary: appDelegate.replaceLibrary,
         onAppearRequests: appDelegate.requestLibraryAndSelection,
         onSavePlaylist: { payload in _ = appDelegate.savePlaylist(payload) },
+        onSubmitLibraryDrop: appDelegate.submitLibraryDrop,
         onSavePlaylistDraft: appDelegate.savePlaylist,
         onGetPlaylist: { slug in appDelegate.getPlaylist(slug: slug) },
         onDeletePlaylist: { slug in appDelegate.deletePlaylist(slug: slug) },

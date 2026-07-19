@@ -13,6 +13,9 @@ struct PlaylistPage: View {
     var onGetPlaylist: (String) -> Void = { _ in }
     var onDeletePlaylist: (String) -> Void = { _ in }
     var onResolveTracks: (_ slug: String, _ rules: [SelectionRule]) -> Void = { _, _ in }
+    var onSubmitLibraryDrop: @MainActor @Sendable (LibraryDropTarget, [SelectionRule], UUID) -> Void = {
+        _, _, _ in
+    }
 
     /// `model.playlistDetail` is a single slot (not scoped by slug) — only
     /// meaningful once its own `slug` matches the page currently showing;
@@ -35,6 +38,23 @@ struct PlaylistPage: View {
                 guard model.playlists.contains(where: { $0.slug == slug }) else { return }
                 onGetPlaylist(slug)
             }
+            .libraryDropDestination(
+                target: libraryDropTarget,
+                launchNonce: model.libraryDragLaunchNonce,
+                feedback: libraryDropFeedback,
+                submit: onSubmitLibraryDrop)
+    }
+
+    private var libraryDropTarget: LibraryDropTarget? {
+        model.playlists.first(where: { $0.slug == slug })
+            .flatMap(LibraryDropEligibility.targetForPlaylist)
+    }
+
+    private var libraryDropFeedback: String? {
+        guard let target = libraryDropTarget,
+              LibraryDropFeedback.belongs(model.dropOutcome, to: target)
+        else { return nil }
+        return model.dropOutcome?.accessibleMessage
     }
 
     /// The sidebar summary usually has the display name before the

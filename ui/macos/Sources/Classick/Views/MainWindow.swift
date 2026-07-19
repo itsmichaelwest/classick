@@ -28,6 +28,7 @@ struct MainWindow: View {
   // — the call site can compile clean while never actually wiring the
   // daemon send path. See `ClassickApp`'s `MainWindow(...)` call site.
   var onSavePlaylist: (PlaylistPayload) -> Void
+  var onSubmitLibraryDrop: @MainActor @Sendable (LibraryDropTarget, [SelectionRule], UUID) -> Void
   var onSavePlaylistDraft: (PlaylistPayload) -> String = { _ in "" }
   // Playlist editor pages (Task 7).
   var onGetPlaylist: (String) -> Void = { _ in }
@@ -62,7 +63,8 @@ struct MainWindow: View {
     NavigationSplitView(columnVisibility: $columnVisibility) {
       Sidebar(
         model: model, selection: selection,
-        onEjectIpod: onEjectIpod, onSavePlaylist: onSavePlaylist)
+        onEjectIpod: onEjectIpod, onSavePlaylist: onSavePlaylist,
+        onSubmitLibraryDrop: onSubmitLibraryDrop)
     } detail: {
       detail
         // Fill the pane BEFORE attaching the bottom inset: pages
@@ -77,7 +79,8 @@ struct MainWindow: View {
             selectedSerial: selectedDeviceSerial,
             onSyncNow: onSyncNow, onPause: onPause,
             onCancelSync: onCancelSync, onResume: onResume,
-            onRetry: onRetry, onSetUp: onSetUp)
+            onRetry: onRetry, onSetUp: onSetUp,
+            onSubmitLibraryDrop: onSubmitLibraryDrop)
         }
     }
     .navigationTitle("Classick")
@@ -106,7 +109,8 @@ struct MainWindow: View {
         DeviceMusicPage(
           model: model, serial: serial, onSyncNow: onSyncNow,
           onLoadDeviceConfig: onLoadDeviceConfig,
-          onSaveAndPreviewDeviceConfig: onSaveAndPreviewDeviceConfig, onScan: onScan
+          onSaveAndPreviewDeviceConfig: onSaveAndPreviewDeviceConfig, onScan: onScan,
+          onSubmitLibraryDrop: onSubmitLibraryDrop
         )
         .id(serial)
       case .device(let serial, .settings):
@@ -120,7 +124,8 @@ struct MainWindow: View {
         PlaylistPage(
           model: model, slug: slug, onSavePlaylist: onSavePlaylistDraft,
           onGetPlaylist: onGetPlaylist, onDeletePlaylist: onDeletePlaylist,
-          onResolveTracks: onResolveTracks
+          onResolveTracks: onResolveTracks,
+          onSubmitLibraryDrop: onSubmitLibraryDrop
         )
         .id(slug)
       case .history:
@@ -164,7 +169,8 @@ struct SetupCallToActionView: View {
         onConnectSource: {},
         onForgetIpod: { _ in }, onEjectIpod: { _ in },
         onBackfill: { _ in }, onSetUp: { _ in }, onReplaceLibrary: { _ in },
-        onAppearRequests: {}, onSavePlaylist: { _ in }, onSavePlaylistDraft: { _ in "preview" },
+        onAppearRequests: {}, onSavePlaylist: { _ in },
+        onSubmitLibraryDrop: { _, _, _ in }, onSavePlaylistDraft: { _ in "preview" },
         // Answer get_playlist from fixture data — a no-op here left
         // every playlist page in the canvas on "Loading…" forever,
         // since the reply the page waits for can never arrive.

@@ -29,6 +29,9 @@ struct DeviceMusicPage: View {
   // `onSavePlaylist` for why a defaulted closure here would be exactly
   // how this action could ship silently dead.
   var onScan: () -> Void
+  var onSubmitLibraryDrop: @MainActor @Sendable (LibraryDropTarget, [SelectionRule], UUID) -> Void = {
+    _, _, _ in
+  }
 
   private struct MusicDraft: Equatable {
     var mode: SelectionMode = .all
@@ -137,6 +140,22 @@ struct DeviceMusicPage: View {
       // navigated away from. Reconnects use the same cancellation path
       // through `handleDeviceAvailabilityChange`.
       .onDisappear { saveTask?.cancel() }
+      .libraryDropDestination(
+        target: libraryDropTarget,
+        launchNonce: model.libraryDragLaunchNonce,
+        feedback: libraryDropFeedback,
+        submit: onSubmitLibraryDrop)
+  }
+
+  private var libraryDropTarget: LibraryDropTarget? {
+    deviceState.flatMap(LibraryDropEligibility.targetForDevice)
+  }
+
+  private var libraryDropFeedback: String? {
+    guard let target = libraryDropTarget,
+      LibraryDropFeedback.belongs(model.dropOutcome, to: target)
+    else { return nil }
+    return model.dropOutcome?.accessibleMessage
   }
 
   // MARK: - Facet bar (below the toolbar, scroll-edge-aware)
