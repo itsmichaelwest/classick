@@ -2,19 +2,76 @@ import Darwin
 import Foundation
 import os
 
+enum SendDisposition: Equatable, Sendable {
+  case sent
+  case queued
+  case dropped
+}
+
+struct DurableIntent: Sendable {
+  let key: DurableIntentKey
+  let requestID: String
+  let bytes: Data
+  fileprivate var lastWrittenConnection: Int?
+}
+
+struct DurableIntentOutbox: Sendable {
+  private var intents: [DurableIntent] = []
+
+  var requestIDs: [String] { intents.map(\.requestID) }
+
+  mutating func upsert(_ command: DaemonCommand) throws {
+    guard let key = command.durableIntentKey, let requestID = command.requestID else { return }
+    guard !intents.contains(where: { $0.requestID == requestID }) else { return }
+
+    intents.removeAll { $0.key == key && $0.lastWrittenConnection == nil }
+    var bytes = try JSONEncoder().encode(command)
+    bytes.append(0x0A)
+    intents.append(
+      DurableIntent(
+        key: key, requestID: requestID, bytes: bytes, lastWrittenConnection: nil))
+  }
+
+  func nextIntent(for connectionGeneration: Int) -> DurableIntent? {
+    for (index, intent) in intents.enumerated() {
+      if intent.lastWrittenConnection == connectionGeneration { continue }
+      let hasInFlightPredecessor = intents[..<index].contains {
+        $0.key == intent.key && $0.lastWrittenConnection != nil
+      }
+      guard !hasInFlightPredecessor else { return nil }
+      return intent
+    }
+    return nil
+  }
+
+  mutating func markWritten(requestID: String, connectionGeneration: Int) {
+    guard let index = intents.firstIndex(where: { $0.requestID == requestID }) else { return }
+    intents[index].lastWrittenConnection = connectionGeneration
+  }
+
+  func wasWritten(requestID: String, connectionGeneration: Int) -> Bool {
+    intents.first(where: { $0.requestID == requestID })?.lastWrittenConnection
+      == connectionGeneration
+  }
+
+  @discardableResult
+  mutating func acknowledge(requestID: String) -> Bool {
+    guard
+      let index = intents.firstIndex(where: {
+        $0.requestID == requestID && $0.lastWrittenConnection != nil
+      })
+    else { return false }
+    intents.remove(at: index)
+    return true
+  }
+}
+
 /// Owns the Unix-domain-socket connection to the classick daemon.
 ///
 /// Blocking `read()` must never run inside actor-isolated code — it would
 /// stall every other call on this actor (including `send`) for as long as
-/// the daemon stays silent. So the read loop runs on a dedicated background
-/// `Thread`, which only ever touches its own local copy of the fd and
-/// reports decoded lines back onto the actor via `Task { await ... }`, waiting
-/// for each line to finish before enqueueing the next so the hello gate cannot
-/// be overtaken by later events. The
-/// only state shared across the isolation boundary is the fd itself (a
-/// plain, Sendable `Int32`); the kernel already serializes concurrent
-/// read/write on it from different threads, so no additional Swift-side
-/// synchronization is needed.
+/// the daemon stays silent. One dedicated background `Thread` therefore
+/// produces raw lines, and one actor-isolated loop decodes and yields them.
 actor DaemonClient {
   private let logger = Logger(subsystem: "com.classick.app", category: "DaemonClient")
   private let socketPath: String
@@ -24,6 +81,8 @@ actor DaemonClient {
   private var isRunning = false
   private var generation = 0
   private var connectionGeneration = 0
+  private var handshakeComplete = false
+  private var durableOutbox = DurableIntentOutbox()
 
   /// Set once if the daemon's handshake fails the protocol-version check.
   /// Non-nil means the client has permanently stopped (no more reconnects).
@@ -60,22 +119,54 @@ actor DaemonClient {
     continuation?.finish()
   }
 
-  func send(_ cmd: DaemonCommand) async {
-    sendCommands([cmd])
+  @discardableResult
+  func send(_ command: DaemonCommand) async -> SendDisposition {
+    sendCommand(command)
   }
 
-  func send(_ commands: [DaemonCommand]) async {
-    sendCommands(commands)
-  }
-
-  private func sendCommands(_ commands: [DaemonCommand]) {
-    guard fd >= 0 else {
-      logger.warning(
-        "send(\(String(describing: commands), privacy: .public)) dropped — not connected")
-      return
+  private func sendCommand(_ command: DaemonCommand) -> SendDisposition {
+    if command.durableIntentKey != nil {
+      guard command.requestID != nil else { return .dropped }
+      do {
+        try durableOutbox.upsert(command)
+      } catch {
+        logger.error(
+          "failed to encode durable command: \(error.localizedDescription, privacy: .public)")
+        return .dropped
+      }
+      flushDurableIntents()
+      guard let requestID = command.requestID else { return .dropped }
+      return durableOutbox.wasWritten(
+        requestID: requestID, connectionGeneration: connectionGeneration)
+        ? .sent : .queued
     }
-    for command in commands {
-      writeCommand(command, to: fd)
+
+    guard fd >= 0, handshakeComplete else {
+      logger.warning(
+        "send(\(String(describing: command), privacy: .public)) dropped — not connected")
+      return .dropped
+    }
+    guard let bytes = encodedLine(for: command), writeAll(bytes, to: fd) else {
+      closeSocket()
+      return .dropped
+    }
+    return .sent
+  }
+
+  @discardableResult
+  func send(_ commands: [DaemonCommand]) async -> [SendDisposition] {
+    commands.map(sendCommand)
+  }
+
+  private func flushDurableIntents() {
+    guard fd >= 0, handshakeComplete else { return }
+    while let intent = durableOutbox.nextIntent(for: connectionGeneration) {
+      guard writeAll(intent.bytes, to: fd) else {
+        closeSocket()
+        return
+      }
+      durableOutbox.markWritten(
+        requestID: intent.requestID, connectionGeneration: connectionGeneration)
     }
   }
 
@@ -89,6 +180,7 @@ actor DaemonClient {
       if let connectedFd = connectSocket(path: socketPath) {
         fd = connectedFd
         connectionGeneration += 1
+        handshakeComplete = false
         let currentConnectionGeneration = connectionGeneration
         backoff = .milliseconds(250)
         await readUntilDisconnected(
@@ -107,59 +199,61 @@ actor DaemonClient {
   }
 
   private func closeSocket() {
+    handshakeComplete = false
     if fd >= 0 {
       // `shutdown(SHUT_RDWR)` first: the background reader thread is
       // blocked in a plain `read()` on this fd, and on Darwin a bare
       // `close()` doesn't reliably unblock a concurrent read on the
       // same descriptor from another thread. `shutdown` forces that
       // read to return (EOF/error) so the reader thread's loop exits
-      // and its `resume.resume()` fires instead of hanging forever.
+      // and finishes the raw-line stream instead of hanging forever.
       Darwin.shutdown(fd, SHUT_RDWR)
       close(fd)
       fd = -1
     }
   }
 
-  /// Spawns a background thread that blocks on `read()`, splits the
-  /// stream into newline-delimited lines, decodes each into a
-  /// `DaemonEvent`, and reports it back onto the actor. Suspends until
-  /// the thread observes EOF or a read error.
+  /// Consumes the one raw-line stream sequentially on this actor. No line gets
+  /// its own task, so decoding, acknowledgement, and yielding cannot overtake.
   private func readUntilDisconnected(
     connectionFd: Int32,
     runGeneration: Int,
     connectionGeneration: Int
   ) async {
-    await withCheckedContinuation { (resume: CheckedContinuation<Void, Never>) in
-      let thread = Thread { [weak self] in
+    var isFirstLine = true
+    for await line in Self.lineStream(from: connectionFd) {
+      await handleLine(
+        line, isFirstLine: isFirstLine,
+        runGeneration: runGeneration,
+        connectionGeneration: connectionGeneration)
+      isFirstLine = false
+    }
+  }
+
+  nonisolated private static func lineStream(from connectionFd: Int32) -> AsyncStream<Data> {
+    AsyncStream { continuation in
+      let thread = Thread {
         var buffer = Data()
-        var isFirstLine = true
         var readBuffer = [UInt8](repeating: 0, count: 4096)
 
         readLoop: while true {
-          let n = readBuffer.withUnsafeMutableBytes { ptr -> Int in
-            Darwin.read(connectionFd, ptr.baseAddress, ptr.count)
+          let count: Int = readBuffer.withUnsafeMutableBytes { pointer in
+            while true {
+              let result = Darwin.read(connectionFd, pointer.baseAddress, pointer.count)
+              if result < 0, errno == EINTR { continue }
+              return result
+            }
           }
-          if n <= 0 { break readLoop }
-          buffer.append(contentsOf: readBuffer[0..<n])
+          guard count > 0 else { break readLoop }
+          buffer.append(contentsOf: readBuffer[0..<count])
 
           while let newlineIndex = buffer.firstIndex(of: 0x0A) {
-            let lineData = buffer.subdata(in: buffer.startIndex..<newlineIndex)
+            let line = buffer.subdata(in: buffer.startIndex..<newlineIndex)
             buffer.removeSubrange(buffer.startIndex...newlineIndex)
-            guard !lineData.isEmpty, let self else { continue }
-            let wasFirst = isFirstLine
-            isFirstLine = false
-            let handled = DispatchSemaphore(value: 0)
-            Task {
-              await self.handleLine(
-                lineData, isFirstLine: wasFirst,
-                runGeneration: runGeneration,
-                connectionGeneration: connectionGeneration)
-              handled.signal()
-            }
-            handled.wait()
+            if !line.isEmpty { continuation.yield(line) }
           }
         }
-        resume.resume()
+        continuation.finish()
       }
       thread.name = "classick.DaemonClient.reader"
       thread.start()
@@ -211,6 +305,7 @@ actor DaemonClient {
         continuation?.finish()
         return
       }
+      handshakeComplete = true
       continuation?.yield(event)
       await send(.subscribeDeviceEvents)
       await send(.getStatus(requestID: DaemonCommand.newRequestID()))
@@ -220,9 +315,15 @@ actor DaemonClient {
       // a cached-name plug-in — leaving `configuredSerial` nil, the menu
       // stuck on "Set Up", and Settings showing defaults.
       await send(.getConfig(requestID: DaemonCommand.newRequestID()))
+      flushDurableIntents()
       return
     }
 
+    if let acknowledgement = event.durableAcknowledgement,
+      durableOutbox.acknowledge(requestID: acknowledgement.requestID)
+    {
+      flushDurableIntents()
+    }
     continuation?.yield(event)
   }
 
@@ -275,20 +376,29 @@ actor DaemonClient {
     return newFd
   }
 
-  private func writeCommand(_ command: DaemonCommand, to fd: Int32) {
+  private func encodedLine(for command: DaemonCommand) -> Data? {
     do {
       var data = try JSONEncoder().encode(command)
       data.append(0x0A)
-      data.withUnsafeBytes { ptr in
-        var offset = 0
-        while offset < ptr.count {
-          let n = Darwin.write(fd, ptr.baseAddress!.advanced(by: offset), ptr.count - offset)
-          if n <= 0 { break }
-          offset += n
-        }
-      }
+      return data
     } catch {
       logger.error("failed to encode command: \(error.localizedDescription, privacy: .public)")
+      return nil
+    }
+  }
+
+  private func writeAll(_ data: Data, to fd: Int32) -> Bool {
+    data.withUnsafeBytes { pointer in
+      guard let baseAddress = pointer.baseAddress else { return true }
+      var offset = 0
+      while offset < pointer.count {
+        let count = Darwin.write(
+          fd, baseAddress.advanced(by: offset), pointer.count - offset)
+        if count < 0, errno == EINTR { continue }
+        guard count > 0 else { return false }
+        offset += count
+      }
+      return true
     }
   }
 }

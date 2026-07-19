@@ -66,6 +66,98 @@ private final class CommandSink: @unchecked Sendable {
 }
 
 final class DaemonClientTests: XCTestCase {
+  func testHundredEventBurstPreservesExactWireOrder() async throws {
+    let path = NSTemporaryDirectory() + "cdor_\(UUID().uuidString.prefix(8)).sock"
+    defer { unlink(path) }
+    let listenFd = makeUnixListener(path: path)
+    defer { close(listenFd) }
+
+    Thread {
+      let clientFd = accept(listenFd, nil, nil)
+      guard clientFd >= 0 else { return }
+      defer { close(clientFd) }
+      writeLine(
+        #"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n",
+        to: clientFd)
+      for index in 0..<100 {
+        writeLine(
+          #"{"type":"device_connected","serial":"S\#(index)","model_label":"iPod","drive":"/Volumes/IPOD"}"#
+            + "\n", to: clientFd)
+      }
+      Thread.sleep(forTimeInterval: 0.2)
+    }.start()
+
+    let client = DaemonClient(socketPath: path)
+    let collector = EventCollector()
+    let stream = await client.events()
+    let consumer = Task { for await event in stream { await collector.append(event) } }
+    await client.start()
+    await waitForEvents(collector, minCount: 101)
+    await client.stop()
+    consumer.cancel()
+
+    let serials = await collector.events.compactMap { event -> String? in
+      guard case .deviceConnected(let serial, _, _, _) = event else { return nil }
+      return serial
+    }
+    XCTAssertEqual(serials, (0..<100).map { "S\($0)" })
+  }
+
+  func testSameKeyQueuedIntentsCoalesceToNewest() throws {
+    var outbox = DurableIntentOutbox()
+    try outbox.upsert(.saveConfig(source: "/old", daemon: nil, ipod: nil, requestID: "old"))
+    try outbox.upsert(.saveConfig(source: "/new", daemon: nil, ipod: nil, requestID: "new"))
+    XCTAssertEqual(outbox.requestIDs, ["new"])
+  }
+
+  func testCoalescingMovesNewestIntentBehindOtherKeys() throws {
+    var outbox = DurableIntentOutbox()
+    try outbox.upsert(.saveConfig(source: "/old", daemon: nil, ipod: nil, requestID: "old"))
+    try outbox.upsert(.deletePlaylist(slug: "mix", requestID: "playlist"))
+    try outbox.upsert(.saveConfig(source: "/new", daemon: nil, ipod: nil, requestID: "new"))
+    XCTAssertEqual(outbox.requestIDs, ["playlist", "new"])
+  }
+
+  func testFailedFlushLeavesIntentAtFront() throws {
+    var outbox = DurableIntentOutbox()
+    try outbox.upsert(.deletePlaylist(slug: "mix", requestID: "save"))
+    let attempted = try XCTUnwrap(outbox.nextIntent(for: 1))
+    XCTAssertEqual(outbox.nextIntent(for: 1)?.requestID, attempted.requestID)
+    XCTAssertEqual(outbox.nextIntent(for: 1)?.bytes, attempted.bytes)
+  }
+
+  func testWrittenIntentIsResentVerbatimAfterReconnect() throws {
+    var outbox = DurableIntentOutbox()
+    try outbox.upsert(.deletePlaylist(slug: "mix", requestID: "save"))
+    let firstWrite = try XCTUnwrap(outbox.nextIntent(for: 1))
+    outbox.markWritten(requestID: firstWrite.requestID, connectionGeneration: 1)
+    XCTAssertNil(outbox.nextIntent(for: 1))
+    XCTAssertEqual(outbox.nextIntent(for: 2)?.bytes, firstWrite.bytes)
+  }
+
+  func testAcknowledgementRemovesOnlyWrittenIntentExactlyOnce() throws {
+    var outbox = DurableIntentOutbox()
+    try outbox.upsert(.deletePlaylist(slug: "mix", requestID: "first"))
+    let first = try XCTUnwrap(outbox.nextIntent(for: 1))
+    outbox.markWritten(requestID: first.requestID, connectionGeneration: 1)
+    try outbox.upsert(.deletePlaylist(slug: "mix", requestID: "successor"))
+    XCTAssertNil(outbox.nextIntent(for: 1), "same-key successor must wait for acknowledgement")
+    XCTAssertTrue(outbox.acknowledge(requestID: "first"))
+    XCTAssertFalse(outbox.acknowledge(requestID: "first"))
+    XCTAssertEqual(outbox.nextIntent(for: 1)?.requestID, "successor")
+  }
+
+  func testDisconnectedSendQueuesOnlyDurableMutations() async {
+    let client = DaemonClient(socketPath: "/tmp/classick-missing-\(UUID().uuidString).sock")
+    let durable = await client.send(
+      .saveDeviceConfig(
+        serial: "A", selection: .init(mode: .all, rules: []), subscriptions: nil,
+        settings: nil, requestID: "save"))
+    let read = await client.send(.getStatus(requestID: "read"))
+    XCTAssertEqual(durable, .queued)
+    XCTAssertEqual(read, .dropped)
+  }
+
   func testDaemonProtocolCompatibilityAcceptsOnlyMajorTwo() {
     XCTAssertTrue(DaemonClient.supportsDaemonProtocol("2.0.0"))
     XCTAssertTrue(DaemonClient.supportsDaemonProtocol("2.9.7"))

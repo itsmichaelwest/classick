@@ -572,3 +572,23 @@ enum DaemonEvent: Decodable, Sendable {
     }
   }
 }
+
+struct DurableAcknowledgement: Equatable, Sendable {
+  var requestID: String
+  var revision: UInt64?
+}
+
+extension DaemonEvent {
+  var durableAcknowledgement: DurableAcknowledgement? {
+    switch self {
+    case .configUpdate(_, _, _, let revision, let requestID):
+      requestID.map { DurableAcknowledgement(requestID: $0, revision: revision) }
+    case .selectionUpdate(_, _, _, let requestID), .playlistsUpdate(_, let requestID):
+      requestID.map { DurableAcknowledgement(requestID: $0, revision: nil) }
+    case .deviceConfigUpdate(_, _, _, _, let requestID):
+      DurableAcknowledgement(requestID: requestID, revision: nil)
+    default:
+      nil
+    }
+  }
+}

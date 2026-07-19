@@ -345,6 +345,14 @@ struct DevicePreview: Equatable, Sendable {
 
 // MARK: - DaemonCommand (sent)
 
+enum DurableIntentKey: Hashable, Sendable {
+  case config
+  case selection
+  case deviceConfig(serial: String)
+  case playlist(String)
+  case deviceRemoval(serial: String)
+}
+
 enum DaemonCommand: Encodable, Sendable {
   case subscribeDeviceEvents
   case getStatus(requestID: String)
@@ -417,6 +425,44 @@ enum DaemonCommand: Encodable, Sendable {
 
   static func newRequestID() -> String {
     UUID().uuidString.lowercased()
+  }
+
+  var requestID: String? {
+    switch self {
+    case .subscribeDeviceEvents:
+      nil
+    case .getStatus(let requestID), .getConfig(let requestID),
+      .forgetIpod(_, let requestID), .triggerSync(_, _, let requestID),
+      .cancelSync(_, let requestID), .pause(_, let requestID),
+      .decidePrompt(_, _, _, let requestID), .backfillRockbox(_, let requestID),
+      .getLibrary(let requestID), .scanLibrary(let requestID),
+      .retrySourceMount(_, let requestID), .previewSelection(_, _, _, let requestID),
+      .getHistory(_, let requestID), .replaceLibrary(_, let requestID),
+      .listPlaylists(let requestID), .getPlaylist(_, let requestID),
+      .savePlaylist(_, let requestID), .deletePlaylist(_, let requestID),
+      .getDeviceConfig(_, let requestID), .saveDeviceConfig(_, _, _, _, let requestID),
+      .previewDevice(_, let requestID), .resolveTracks(_, let requestID):
+      requestID
+    case .saveConfig(_, _, _, let requestID):
+      requestID
+    }
+  }
+
+  var durableIntentKey: DurableIntentKey? {
+    switch self {
+    case .saveConfig:
+      .config
+    case .forgetIpod(let serial, _):
+      .deviceRemoval(serial: serial)
+    case .savePlaylist(let playlist, let requestID):
+      .playlist(playlist.slug ?? "new:\(requestID)")
+    case .deletePlaylist(let slug, _):
+      .playlist(slug)
+    case .saveDeviceConfig(let serial, _, _, _, _):
+      .deviceConfig(serial: serial)
+    default:
+      nil
+    }
   }
 
   func encode(to encoder: Encoder) throws {
@@ -522,6 +568,14 @@ enum DaemonCommand: Encodable, Sendable {
       try container.encode("resolve_tracks", forKey: .type)
       try container.encode(rules, forKey: .rules)
       try container.encode(requestID, forKey: .requestID)
+    }
+  }
+}
+
+extension PlaylistPayload {
+  fileprivate var slug: String? {
+    switch self {
+    case .manual(let slug, _, _), .smart(let slug, _, _): slug
     }
   }
 }
