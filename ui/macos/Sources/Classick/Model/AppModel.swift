@@ -210,6 +210,10 @@ final class AppModel {
       devices: devices)
   }
 
+  func canControlSync(to serial: DeviceSerial) -> Bool {
+    canSendDeviceCommand(to: serial) && devices[serial]?.finalization == nil
+  }
+
   // MARK: - Protocol 1.7.0: Add Songs picker track resolution
 
   /// Most recent `resolved_tracks` reply, tagged with the slug of the
@@ -660,7 +664,7 @@ final class AppModel {
       phase = .error(message)
     case .paused:
       phase = .paused(synced: syncedCount, total: libraryCount)
-    case .hello, .header, .summary, .trackDone, .log, .other:
+    case .hello, .header, .summary, .trackDone, .finalizing, .cancelled, .log, .other:
       break
     }
   }

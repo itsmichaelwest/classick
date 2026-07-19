@@ -311,7 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// closures, so each hop through here spawns a detached-from-the-caller
   /// `Task` to bridge to the actor.
   func syncNow(serial: DeviceSerial) {
-    sendDeviceCommands(
+    sendSyncControlCommands(
       serial: serial,
       commands: [
         DeviceActionCommand.sync(serial: serial, requestID: DaemonCommand.newRequestID())
@@ -319,7 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   }
 
   func cancelSync(serial: DeviceSerial) {
-    sendDeviceCommands(
+    sendSyncControlCommands(
       serial: serial,
       commands: [
         DeviceActionCommand.cancel(serial: serial, requestID: DaemonCommand.newRequestID())
@@ -330,7 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// checkpoint on the daemon side; resume is just a normal sync trigger —
   /// the sync is diff-based, so it continues where it left off.
   func pause(serial: DeviceSerial) {
-    sendDeviceCommands(
+    sendSyncControlCommands(
       serial: serial,
       commands: [
         DeviceActionCommand.pause(serial: serial, requestID: DaemonCommand.newRequestID())
@@ -488,6 +488,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     guard model.canSendDeviceCommand(to: serial) else { return }
     Task { [weak self] in
       guard let self, self.model.canSendDeviceCommand(to: serial) else { return }
+      await self.daemonClient.send(commands)
+    }
+  }
+
+  private func sendSyncControlCommands(serial: DeviceSerial, commands: [DaemonCommand]) {
+    guard model.canControlSync(to: serial) else { return }
+    Task { [weak self] in
+      guard let self, self.model.canControlSync(to: serial) else { return }
       await self.daemonClient.send(commands)
     }
   }

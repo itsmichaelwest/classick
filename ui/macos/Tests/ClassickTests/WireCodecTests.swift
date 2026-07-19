@@ -80,6 +80,29 @@ final class WireCodecTests: XCTestCase {
     }
   }
 
+  func testDecodesFinalizingAndCancelledSyncEvents() throws {
+    let decoder = JSONDecoder()
+    let finalizing = try decoder.decode(
+      SyncEvent.self,
+      from: Data(
+        #"{"type":"finalizing","reason":"cancelled","staged_albums":2,"staged_tracks":17}"#.utf8))
+    guard
+      case .finalizing(
+        reason: .cancelled, stagedAlbums: let stagedAlbums, stagedTracks: let stagedTracks) =
+        finalizing
+    else {
+      return XCTFail("expected finalizing")
+    }
+    XCTAssertEqual(stagedAlbums, 2)
+    XCTAssertEqual(stagedTracks, 17)
+
+    let cancelled = try decoder.decode(
+      SyncEvent.self, from: Data(#"{"type":"cancelled"}"#.utf8))
+    guard case .cancelled = cancelled else {
+      return XCTFail("expected cancelled")
+    }
+  }
+
   func testEncodesSaveConfig() throws {
     let cmd = DaemonCommand.saveConfig(
       source: "/music", daemon: nil,

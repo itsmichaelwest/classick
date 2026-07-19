@@ -25,6 +25,11 @@ struct ArtworkSummary: Codable, Equatable, Sendable {
   }
 }
 
+enum SyncStopReason: String, Decodable, Equatable, Sendable {
+  case cancelled
+  case paused
+}
+
 enum SyncEvent: Decodable, Sendable {
   case hello(protocolVersion: String, coreVersion: String)
   case header(source: String, ipod: String, manifest: String)
@@ -32,6 +37,8 @@ enum SyncEvent: Decodable, Sendable {
     add: Int, modify: Int, metadataOnly: Int, remove: Int, unchanged: Int, totalPlanned: Int)
   case trackStart(current: Int, total: Int, label: String, etaSecs: UInt64?)
   case trackDone
+  case finalizing(reason: SyncStopReason, stagedAlbums: Int, stagedTracks: Int)
+  case cancelled
   case log(message: String)
   case prompt(id: UInt64, message: String, options: [String])
   case form(id: UInt64, label: String, initial: String?, hint: String?)
@@ -69,6 +76,9 @@ enum SyncEvent: Decodable, Sendable {
     case recoveryHints = "recovery_hints"
     case success
     case etaSecs = "eta_secs"
+    case reason
+    case stagedAlbums = "staged_albums"
+    case stagedTracks = "staged_tracks"
     case skippedForSpace = "skipped_for_space"
     case artwork
     case dbRestored = "db_restored"
@@ -105,6 +115,13 @@ enum SyncEvent: Decodable, Sendable {
       self = .trackStart(current: current, total: total, label: label, etaSecs: etaSecs)
     case "track_done":
       self = .trackDone
+    case "finalizing":
+      self = .finalizing(
+        reason: try container.decode(SyncStopReason.self, forKey: .reason),
+        stagedAlbums: try container.decode(Int.self, forKey: .stagedAlbums),
+        stagedTracks: try container.decode(Int.self, forKey: .stagedTracks))
+    case "cancelled":
+      self = .cancelled
     case "log":
       let message = try container.decode(String.self, forKey: .message)
       self = .log(message: message)

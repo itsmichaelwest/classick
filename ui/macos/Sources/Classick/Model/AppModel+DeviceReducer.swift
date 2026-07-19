@@ -33,6 +33,7 @@ enum DeviceReducer {
             settingsRevision: wire.settingsRevision,
             subscriptionsRevision: wire.subscriptionsRevision,
             syncProgress: sameSession && wire.phase == .syncing ? prior?.syncProgress : nil,
+            finalization: sameSession ? prior?.finalization : nil,
             lastRun: sameSession || preserveFinishedRun ? prior?.lastRun : nil)
         )
       })
@@ -44,13 +45,17 @@ enum DeviceReducer {
     case .trackStart(let current, let total, let label, let etaSecs):
       state.syncProgress = DeviceSyncProgress(
         current: current, total: total, label: label, etaSecs: etaSecs)
+    case .finalizing(let reason, let stagedAlbums, let stagedTracks):
+      state.finalization = DeviceFinalization(
+        reason: reason, stagedAlbums: stagedAlbums, stagedTracks: stagedTracks)
     case .finish(let success, let skippedForSpace, let artwork, let dbRestored):
       state.lastRun = DeviceRunRollup(
         success: success,
         skippedForSpace: skippedForSpace,
         artwork: artwork,
         dbRestored: dbRestored)
-    case .hello, .header, .summary, .trackDone, .log, .prompt, .form, .error, .paused, .other:
+    case .hello, .header, .summary, .trackDone, .cancelled, .log, .prompt, .form, .error, .paused,
+      .other:
       break
     }
     return state
@@ -70,7 +75,7 @@ enum DeviceReducer {
 
 extension AppModel {
   var focusedDeviceSerial: DeviceSerial? {
-    let active = devices.values.filter { $0.connected && $0.sessionID != nil }
+    let active = devices.values.filter { $0.sessionID != nil }
     if active.count == 1 {
       return active[0].identity.serial
     }

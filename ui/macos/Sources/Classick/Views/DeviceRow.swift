@@ -38,6 +38,24 @@ struct DeviceRow: View {
 
   @ViewBuilder
   private var content: some View {
+    if deviceState?.finalization != nil {
+      twoRowCard(subtitle: "Finishing sync…") {
+        EmptyView()
+      } bar: {
+        VStack(alignment: .leading, spacing: 6) {
+          ProgressView("Saving completed albums")
+          Text("Keep the iPod connected")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+    } else {
+      phaseContent
+    }
+  }
+
+  @ViewBuilder
+  private var phaseContent: some View {
     switch phase {
     case .idle:
       // Idle card, two rows (user's mock): identity header — device

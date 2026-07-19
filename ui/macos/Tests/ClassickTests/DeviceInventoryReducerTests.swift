@@ -105,6 +105,173 @@ final class DeviceInventoryReducerTests: XCTestCase {
     XCTAssertEqual(model.devices["A"]?.lastRun?.dbRestored, true)
   }
 
+  func testFinalizingEventImmediatelyMarksTheMatchingDevice() {
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(revision: 1, devices: [device("A", phase: .syncing, sessionID: 42)])))
+
+    model.apply(
+      .syncEvent(
+        line:
+          #"{"type":"finalizing","reason":"cancelled","staged_albums":2,"staged_tracks":17}"#,
+        serial: "A", sessionID: 42))
+
+    XCTAssertEqual(
+      model.devices["A"]?.finalization,
+      DeviceFinalization(
+        reason: .cancelled, stagedAlbums: 2, stagedTracks: 17))
+    XCTAssertFalse(model.canControlSync(to: "A"))
+  }
+
+  func testRawFinishAndCancelledDoNotOwnTheTerminalTransition() {
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(revision: 1, devices: [device("A", phase: .syncing, sessionID: 42)])))
+    model.apply(
+      .syncEvent(
+        line:
+          #"{"type":"finalizing","reason":"cancelled","staged_albums":2,"staged_tracks":17}"#,
+        serial: "A", sessionID: 42))
+
+    model.apply(
+      .syncEvent(
+        line: #"{"type":"cancelled"}"#, serial: "A", sessionID: 42))
+    model.apply(
+      .syncEvent(
+        line: #"{"type":"finish","success":true}"#, serial: "A", sessionID: 42))
+
+    XCTAssertEqual(model.devices["A"]?.phase, .syncing)
+    XCTAssertEqual(model.devices["A"]?.sessionID, 42)
+    XCTAssertEqual(model.devices["A"]?.finalization?.reason, .cancelled)
+  }
+
+  func testCancelledTerminalSnapshotPreservesLatestSuccessfulTimestamp() {
+    let model = AppModel()
+    let successful = history(
+      serial: "A", sessionID: 40, outcome: "ok", timestamp: "2026-07-18T10:00:00Z")
+    let cancelled = history(
+      serial: "A", sessionID: 42, outcome: "cancelled", timestamp: "2026-07-19T10:00:00Z")
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(
+          revision: 1,
+          devices: [
+            device(
+              "A", phase: .syncing, sessionID: 42, latestSuccessfulSync: successful,
+              latestAttempt: successful)
+          ])))
+    model.apply(
+      .syncEvent(
+        line:
+          #"{"type":"finalizing","reason":"cancelled","staged_albums":1,"staged_tracks":3}"#,
+        serial: "A", sessionID: 42))
+
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(
+          revision: 2,
+          devices: [
+            device(
+              "A", phase: .idle, sessionID: nil, latestSuccessfulSync: successful,
+              latestAttempt: cancelled)
+          ])))
+
+    XCTAssertEqual(model.devices["A"]?.latestSuccessfulSync?.timestamp, successful.timestamp)
+    XCTAssertEqual(model.devices["A"]?.latestAttempt, cancelled)
+    XCTAssertNil(model.devices["A"]?.finalization)
+  }
+
+  func testInterruptedFinalizationTransitionsOnlyWithAuthoritativeErrorSnapshot() {
+    let model = AppModel()
+    let successful = history(
+      serial: "A", sessionID: 40, outcome: "ok", timestamp: "2026-07-18T10:00:00Z")
+    let interrupted = history(
+      serial: "A", sessionID: 42, outcome: "aborted", timestamp: "2026-07-19T10:00:00Z")
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(
+          revision: 1,
+          devices: [
+            device(
+              "A", phase: .syncing, sessionID: 42, latestSuccessfulSync: successful,
+              latestAttempt: successful)
+          ])))
+    model.apply(
+      .syncEvent(
+        line:
+          #"{"type":"finalizing","reason":"cancelled","staged_albums":1,"staged_tracks":3}"#,
+        serial: "A", sessionID: 42))
+
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(
+          revision: 2,
+          devices: [
+            device(
+              "A", phase: .error, sessionID: nil, latestSuccessfulSync: successful,
+              latestAttempt: interrupted, lastTerminalError: "finalization_stalled")
+          ])))
+
+    XCTAssertEqual(model.devices["A"]?.phase, .error("finalization_stalled"))
+    XCTAssertEqual(model.devices["A"]?.latestSuccessfulSync, successful)
+    XCTAssertEqual(model.devices["A"]?.latestAttempt, interrupted)
+    XCTAssertNil(model.devices["A"]?.finalization)
+  }
+
+  func testFinalizingEventIsIsolatedBySerialAndSession() {
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(
+          revision: 1,
+          devices: [
+            device("A", phase: .syncing, sessionID: 42),
+            device("B", phase: .syncing, sessionID: 84),
+          ])))
+
+    model.apply(
+      .syncEvent(
+        line:
+          #"{"type":"finalizing","reason":"cancelled","staged_albums":2,"staged_tracks":17}"#,
+        serial: "A", sessionID: 42))
+    model.apply(
+      .syncEvent(
+        line:
+          #"{"type":"finalizing","reason":"cancelled","staged_albums":9,"staged_tracks":99}"#,
+        serial: "B", sessionID: 83))
+
+    XCTAssertEqual(model.devices["A"]?.finalization?.stagedTracks, 17)
+    XCTAssertNil(model.devices["B"]?.finalization)
+    XCTAssertTrue(model.canControlSync(to: "B"))
+  }
+
+  func testDisconnectedFinalizingSessionRemainsFocusedAndNonInteractive() {
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(revision: 1, devices: [device("A", phase: .syncing, sessionID: 42)])))
+    model.apply(
+      .syncEvent(
+        line:
+          #"{"type":"finalizing","reason":"cancelled","staged_albums":2,"staged_tracks":17}"#,
+        serial: "A", sessionID: 42))
+
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(
+          revision: 2,
+          devices: [
+            device(
+              "A", connected: false, mount: nil, phase: .disconnected, sessionID: 42)
+          ])))
+
+    XCTAssertEqual(model.focusedDeviceSerial, "A")
+    XCTAssertEqual(model.devices["A"]?.finalization?.stagedTracks, 17)
+    XCTAssertFalse(model.canControlSync(to: "A"))
+  }
+
   func testLaterSnapshotAppliesTerminalStateAtomically() {
     let model = AppModel()
     model.apply(
@@ -233,7 +400,8 @@ final class DeviceInventoryReducerTests: XCTestCase {
     syncedCount: Int = 0,
     libraryCount: Int? = 20,
     latestSuccessfulSync: HistoryEntry? = nil,
-    latestAttempt: HistoryEntry? = nil
+    latestAttempt: HistoryEntry? = nil,
+    lastTerminalError: String? = nil
   ) -> DeviceSnapshotWire {
     DeviceSnapshotWire(
       identity: DeviceIdentityWire(
@@ -248,17 +416,20 @@ final class DeviceInventoryReducerTests: XCTestCase {
       libraryCount: libraryCount,
       latestSuccessfulSync: latestSuccessfulSync,
       latestAttempt: latestAttempt,
-      lastTerminalError: nil,
+      lastTerminalError: lastTerminalError,
       selectionRevision: 1,
       settingsRevision: 2,
       subscriptionsRevision: 3)
   }
 
-  private func history(serial: String, sessionID: UInt64, outcome: String) -> HistoryEntry {
+  private func history(
+    serial: String, sessionID: UInt64, outcome: String,
+    timestamp: String = "2026-07-18T12:00:00Z"
+  ) -> HistoryEntry {
     HistoryEntry(
       serial: serial,
       sessionID: sessionID,
-      timestamp: "2026-07-18T12:00:00Z",
+      timestamp: timestamp,
       durationSecs: 10,
       trigger: "manual",
       outcome: outcome)

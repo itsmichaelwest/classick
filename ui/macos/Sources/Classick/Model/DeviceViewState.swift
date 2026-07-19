@@ -27,6 +27,12 @@ struct DeviceRunRollup: Equatable, Sendable {
   var dbRestored: Bool
 }
 
+struct DeviceFinalization: Equatable, Sendable {
+  var reason: SyncStopReason
+  var stagedAlbums: Int
+  var stagedTracks: Int
+}
+
 struct DeviceViewState: Equatable, Sendable {
   var identity: DeviceIdentityWire
   var configured: Bool
@@ -46,5 +52,6 @@ struct DeviceViewState: Equatable, Sendable {
   var settingsRevision: UInt64
   var subscriptionsRevision: UInt64
   var syncProgress: DeviceSyncProgress?
+  var finalization: DeviceFinalization?
   var lastRun: DeviceRunRollup?
 }
