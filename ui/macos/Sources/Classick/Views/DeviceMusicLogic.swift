@@ -98,4 +98,47 @@ enum DeviceMusicLogic {
         guard let unresolved, !unresolved.isEmpty else { return nil }
         return "\(unresolved.count) subscribed playlist\(unresolved.count == 1 ? "" : "s") couldn't be resolved"
     }
+
+    static func scrubbedSubscriptions(
+        _ subscriptions: Set<String>, validSlugs: Set<String>
+    ) -> Set<String> {
+        subscriptions.intersection(validSlugs)
+    }
+}
+
+enum DeviceSurfaceLogic {
+    static func state(
+        serial: DeviceSerial, in devices: [DeviceSerial: DeviceViewState]
+    ) -> DeviceViewState? {
+        devices[serial]
+    }
+
+    static func phase(for state: DeviceViewState?, globalPhase: Phase) -> Phase {
+        if case .scanning = globalPhase { return globalPhase }
+        guard let state else { return .noDevice }
+        switch state.phase {
+        case .disconnected: return .noDevice
+        case .unconfigured: return .notConfigured
+        case .idle: return .idle
+        case .syncing:
+            let progress = state.syncProgress
+            return .syncing(
+                current: progress?.current ?? 0,
+                total: progress?.total ?? 0,
+                label: progress?.label ?? "",
+                etaSecs: progress?.etaSecs)
+        case .paused: return .paused(synced: state.syncedCount, total: state.libraryCount)
+        case .error(let message): return .error(message)
+        }
+    }
+
+    static func storage(_ state: DeviceViewState?) -> (free: Int64, total: Int64)? {
+        guard let storage = state?.storage else { return nil }
+        return (Int64(clamping: storage.free), Int64(clamping: storage.total))
+    }
+
+    static func storageText(_ state: DeviceViewState?) -> String? {
+        guard let storage = state?.storage else { return nil }
+        return "\(storage.free / 1_000_000_000) / \(storage.total / 1_000_000_000) GB"
+    }
 }

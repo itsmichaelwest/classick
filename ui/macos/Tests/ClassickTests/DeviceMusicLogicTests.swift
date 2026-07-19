@@ -450,4 +450,11 @@ extension DeviceMusicLogicTests {
         fromDeviceContents: [], previousMode: .include, newMode: .exclude,
         current: [.artist(name: "Beck")], remembered: excludeMemory), excludeMemory)
   }
+
+  func testDeletionScrubCannotResurrectRemovedSubscriptionSlug() {
+    XCTAssertEqual(
+      DeviceMusicLogic.scrubbedSubscriptions(
+        ["gym", "deleted"], validSlugs: ["gym", "focus"]),
+      ["gym"])
+  }
 }

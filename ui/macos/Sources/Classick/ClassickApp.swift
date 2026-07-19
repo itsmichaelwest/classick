@@ -231,15 +231,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// Settings window's debounced edits. `ipod` is omitted (nil) so an
   /// existing iPod pairing isn't disturbed by unrelated setting changes —
   /// only "Remove this iPod" (`forgetIpod()`) touches that.
-  func saveSettings(source: String?, daemon: DaemonSettings) {
+  func saveSettings(source: String?, daemon: DaemonSettings) -> String {
+    let requestID = DaemonCommand.newRequestID()
     Task {
       await daemonClient.send(
         .saveConfig(
           source: source,
           daemon: daemon,
           ipod: nil,
-          requestID: DaemonCommand.newRequestID()))
+          requestID: requestID))
     }
+    return requestID
   }
 
   func forgetIpod(serial: DeviceSerial) {
@@ -342,13 +344,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// unsolicited `playlists_update` (not a direct reply to this command),
   /// which is what `Sidebar`'s `destinationForNewlyCreatedPlaylist` flow
   /// watches for to pick up the newly assigned slug.
-  func savePlaylist(_ payload: PlaylistPayload) {
+  func savePlaylist(_ payload: PlaylistPayload) -> String {
+    let requestID = DaemonCommand.newRequestID()
     Task {
       await daemonClient.send(
         .savePlaylist(
           payload,
-          requestID: DaemonCommand.newRequestID()))
+          requestID: requestID))
     }
+    return requestID
   }
 
   /// Playlist editor pages (Task 7): fetches one playlist's full content
@@ -433,8 +437,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// the save before it evaluates the following preview.
   func saveAndPreviewDeviceConfig(
     serial: String, selection: SelectionState?, subscriptions: SubscriptionsWire?
-  ) {
-    guard model.canSendDeviceCommand(to: serial) else { return }
+  ) -> String? {
+    guard model.canSendDeviceCommand(to: serial) else { return nil }
     let saveRequestID = DaemonCommand.newRequestID()
     let previewRequestID = DaemonCommand.newRequestID()
     model.willRequestDeviceConfig(
@@ -451,14 +455,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
           requestID: saveRequestID),
         .previewDevice(serial: serial, requestID: previewRequestID),
       ])
+    return saveRequestID
   }
 
   /// Device Settings page's debounced auto-save (Task 6): the mirror image
   /// of `saveDeviceConfig` above — `selection`/`subscriptions` are always
   /// omitted (nil = "don't change") via `DeviceSettingsLogic.saveSettingsCommand`,
   /// so a toggle edit here can never disturb the Music page's sync intent.
-  func saveDeviceSettings(serial: String, settings: DeviceSettingsWire) {
-    guard model.canSendDeviceCommand(to: serial) else { return }
+  func saveDeviceSettings(serial: String, settings: DeviceSettingsWire) -> String? {
+    guard model.canSendDeviceCommand(to: serial) else { return nil }
     let requestID = DaemonCommand.newRequestID()
     model.willRequestDeviceConfig(serial: serial, requestID: requestID, intent: .write)
     sendDeviceCommands(
@@ -469,6 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
           settings: settings,
           requestID: requestID)
       ])
+    return requestID
   }
 
   private func sendDeviceCommands(serial: DeviceSerial, commands: [DaemonCommand]) {
@@ -574,7 +580,8 @@ struct ClassickApp: App {
         onSetUp: { serial in appDelegate.presentSetup(serial: serial) },
         onReplaceLibrary: appDelegate.replaceLibrary,
         onAppearRequests: appDelegate.requestLibraryAndSelection,
-        onSavePlaylist: { payload in appDelegate.savePlaylist(payload) },
+        onSavePlaylist: { payload in _ = appDelegate.savePlaylist(payload) },
+        onSavePlaylistDraft: appDelegate.savePlaylist,
         onGetPlaylist: { slug in appDelegate.getPlaylist(slug: slug) },
         onDeletePlaylist: { slug in appDelegate.deletePlaylist(slug: slug) },
         onResolveTracks: { slug, rules in appDelegate.resolveTracks(slug: slug, rules: rules) },

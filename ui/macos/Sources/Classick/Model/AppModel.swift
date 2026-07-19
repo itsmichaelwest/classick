@@ -148,6 +148,8 @@ final class AppModel {
   // MARK: - Protocol 1.6.0: playlists, per-device config, device preview
 
   private(set) var playlists: [PlaylistSummary] = []
+  private(set) var playlistRevision: UInt64 = 0
+  private(set) var playlistAcknowledgedRequestID: String?
   /// Bumped on every `playlists_update` event, regardless of whether
   /// `playlists`'s content actually changed. The sidebar's "+" in-flight
   /// guard (review finding #2) needs to observe EVERY reply — including
@@ -161,6 +163,9 @@ final class AppModel {
   /// (Task 7). Not scoped by slug: like `selectionPreview`, there's only
   /// ever one in-flight editor request at a time.
   private(set) var playlistDetail: PlaylistDetail?
+  private(set) var configRevision: UInt64 = 0
+  private(set) var configAcknowledgedRequestID: String?
+  private(set) var deviceConfigAcknowledgedRequestIDs: [DeviceSerial: String] = [:]
   private(set) var devices: [DeviceSerial: DeviceViewState] = [:]
   var deviceConfigs: [String: DeviceConfigState] {
     devices.compactMapValues(\.config)
@@ -338,6 +343,11 @@ final class AppModel {
       statusConfigured = false
       sourceAvailability = nil
       pendingSourceRetryRequestID = nil
+      playlistRevision = 0
+      playlistAcknowledgedRequestID = nil
+      configRevision = 0
+      configAcknowledgedRequestID = nil
+      deviceConfigAcknowledgedRequestIDs.removeAll()
 
     case .unknown:
       break
@@ -372,26 +382,43 @@ final class AppModel {
     case .selectionPreview(let info):
       selectionPreview = info
 
-    case .playlistsUpdate(let list, _, _):
+    case .playlistsUpdate(let list, let revision, let acknowledgedRequestID):
+      guard revision >= playlistRevision else { break }
       playlists = list
+      playlistRevision = revision
+      playlistAcknowledgedRequestID = acknowledgedRequestID
       playlistsUpdateRevision += 1
+      if let slug = playlistDetail?.slug, !list.contains(where: { $0.slug == slug }) {
+        playlistDetail = nil
+      }
 
     case .playlistDetail(let detail):
+      guard detail.playlistRevision >= playlistRevision else { break }
       playlistDetail = detail
 
     case .deviceConfigUpdate(
-      let serial, let selection, let subscriptions, let settings, _, _, _,
+      let serial, let selection, let subscriptions, let settings, let selectionRevision,
+      let settingsRevision, let subscriptionsRevision,
       let acknowledgedRequestID):
       guard shouldApplyDeviceConfigResponse(serial: serial, requestID: acknowledgedRequestID) else {
         break
       }
       guard var deviceState = devices[serial] else { break }
+      guard selectionRevision >= deviceState.selectionRevision,
+        settingsRevision >= deviceState.settingsRevision,
+        subscriptionsRevision >= deviceState.subscriptionsRevision
+      else { break }
       var config = deviceState.config ?? .defaultState
       config.selection = selection
       config.subscriptions = subscriptions
       config.settings = settings
       deviceState.config = config
+      deviceState.selectionRevision = max(deviceState.selectionRevision, selectionRevision)
+      deviceState.settingsRevision = max(deviceState.settingsRevision, settingsRevision)
+      deviceState.subscriptionsRevision = max(
+        deviceState.subscriptionsRevision, subscriptionsRevision)
       devices[serial] = deviceState
+      deviceConfigAcknowledgedRequestIDs[serial] = acknowledgedRequestID
 
     case .devicePreview(let preview):
       let serial = preview.serial
@@ -411,8 +438,11 @@ final class AppModel {
       deviceState.config?.preview = preview
       devices[serial] = deviceState
 
-    case .configUpdate(let source, let daemon, let ipod, _, _):
+    case .configUpdate(let source, let daemon, let ipod, let revision, let acknowledgedRequestID):
+      guard revision >= configRevision else { break }
       config = AppConfig(source: source, daemon: daemon, ipod: ipod)
+      configRevision = revision
+      configAcknowledgedRequestID = acknowledgedRequestID
       // The daemon considers itself configured once it has a persisted
       // iPod identity (daemon: `configured = configured_serial.is_some()`).
       // It emits `config_update` (not a pushed `status_update`) after a

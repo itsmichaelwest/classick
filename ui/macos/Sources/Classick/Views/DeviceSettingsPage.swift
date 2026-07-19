@@ -17,7 +17,7 @@ struct DeviceSettingsPage: View {
   var model: AppModel
   var serial: String
   var onLoadDeviceConfig: (String) -> Void
-  var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> Void
+  var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> String?
   var onForgetIpod: (DeviceSerial) -> Void
   var onBackfill: (DeviceSerial) -> Void
   var onReplaceLibrary: (DeviceSerial) -> Void
@@ -28,12 +28,9 @@ struct DeviceSettingsPage: View {
   }
 
   @State private var draft = SettingsDraft()
-  @State private var seededFromModel = false
-  @State private var userEdited = false
-  /// True only for the seed's own draft assignment, so `.onChange(of:
-  /// draft)` can tell "the seed just landed" apart from a real user edit
-  /// — without this, merely opening the page fired a save.
-  @State private var isSeeding = false
+  @State private var acknowledgedDraft = AcknowledgedDraft(
+    canonical: SettingsDraft(), revision: 0)
+  @State private var hasCanonicalDraft = false
   @State private var saveTask: Task<Void, Never>?
   @State private var showReplaceConfirm = false
 
@@ -80,11 +77,11 @@ struct DeviceSettingsPage: View {
         // snapped to the persisted values a beat later — reported
         // as "the toggle turns itself off when I open the page."
         // A short placeholder is honest; a wrong toggle isn't.
-        if seededFromModel {
+        if hasCanonicalDraft {
           Toggle(
             "Sync automatically when connected",
             isOn: Binding(
-              get: { draft.autoSync }, set: { draft.autoSync = $0 })
+              get: { draft.autoSync }, set: { value in edit { $0.autoSync = value } })
           )
           .disabled(!canEditDevice)
           // Disabled while disconnected (user decision, overriding
@@ -95,7 +92,7 @@ struct DeviceSettingsPage: View {
           Toggle(
             "Rockbox compatibility mode",
             isOn: Binding(
-              get: { draft.rockboxCompat }, set: { draft.rockboxCompat = $0 })
+              get: { draft.rockboxCompat }, set: { value in edit { $0.rockboxCompat = value } })
           )
           .disabled(!isConnected || !canEditDevice)
         } else {
@@ -151,18 +148,7 @@ struct DeviceSettingsPage: View {
       handleDeviceAvailabilityChange(isAvailable)
     }
     .onChange(of: config?.settings) { _, _ in seedIfNeeded() }
-    .onChange(of: draft) { _, newDraft in
-      // The seed's own assignment lands here too — it must NOT count
-      // as a user edit or trigger a save (opening the page used to
-      // write device config for no reason).
-      if isSeeding {
-        isSeeding = false
-        return
-      }
-      guard canEditDevice else { return }
-      userEdited = true
-      scheduleSave(newDraft)
-    }
+    .onChange(of: deviceState?.settingsRevision) { _, _ in seedIfNeeded() }
     // See `DeviceMusicPage`'s identical `.onDisappear` for the
     // rationale — cancels an in-flight debounced save the instant this
     // page is navigated away from.
@@ -185,14 +171,16 @@ struct DeviceSettingsPage: View {
     return d.formatted(date: .abbreviated, time: .shortened)
   }
 
-  /// Seeds the local draft from the persisted per-device settings exactly
-  /// once, and never after the user has started editing.
+  /// Reconciles persisted settings while preserving newer local edits.
   private func seedIfNeeded() {
-    guard !seededFromModel, !userEdited, let config else { return }
-    isSeeding = true
-    draft = SettingsDraft(
+    guard let config, let deviceState else { return }
+    let canonical = SettingsDraft(
       autoSync: config.settings.autoSync, rockboxCompat: config.settings.rockboxCompat)
-    seededFromModel = true
+    acknowledgedDraft.reconcile(
+      canonical: canonical, revision: deviceState.settingsRevision,
+      acknowledgedRequestID: model.deviceConfigAcknowledgedRequestIDs[serial])
+    draft = acknowledgedDraft.value
+    hasCanonicalDraft = true
   }
 
   /// Debounced auto-save: every toggle edit sends `save_device_config`
@@ -206,18 +194,28 @@ struct DeviceSettingsPage: View {
         await DeviceDraftSaveGate.waitUntilReady(
           serial: serial, model: model)
       else { return }
-      onSaveDeviceSettings(
+      guard let requestID = onSaveDeviceSettings(
         serial, DeviceSettingsWire(autoSync: d.autoSync, rockboxCompat: d.rockboxCompat))
+      else { return }
+      acknowledgedDraft.markSubmitted(requestID: requestID)
     }
+  }
+
+  private func edit(_ mutation: (inout SettingsDraft) -> Void) {
+    guard hasCanonicalDraft, canEditDevice else { return }
+    var edited = draft
+    mutation(&edited)
+    guard edited != draft else { return }
+    acknowledgedDraft.edit(edited)
+    draft = acknowledgedDraft.value
+    scheduleSave(draft)
   }
 
   private func handleDeviceAvailabilityChange(_ isAvailable: Bool) {
     guard isAvailable else {
       saveTask?.cancel()
       showReplaceConfirm = false
-      seededFromModel = false
-      userEdited = false
-      isSeeding = false
+      hasCanonicalDraft = false
       return
     }
     seedIfNeeded()
@@ -361,7 +359,7 @@ private struct ReplaceLibraryConfirmationSheet: View {
   #Preview("Connected") {
     DeviceSettingsPage(
       model: PreviewFixtures.connectedSyncedModel(), serial: PreviewFixtures.pairedIpod.serial,
-      onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in },
+      onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in "preview" },
       onForgetIpod: { _ in }, onBackfill: { _ in }, onReplaceLibrary: { _ in }
     )
     .frame(width: 520, height: 520)
@@ -370,7 +368,7 @@ private struct ReplaceLibraryConfirmationSheet: View {
   #Preview("Disconnected") {
     DeviceSettingsPage(
       model: PreviewFixtures.disconnectedModel(), serial: PreviewFixtures.pairedIpod.serial,
-      onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in },
+      onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in "preview" },
       onForgetIpod: { _ in }, onBackfill: { _ in }, onReplaceLibrary: { _ in }
     )
     .frame(width: 520, height: 520)

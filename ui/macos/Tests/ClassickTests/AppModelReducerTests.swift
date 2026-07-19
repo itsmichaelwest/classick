@@ -606,6 +606,46 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertEqual(m.playlistDetail?.tracks, ["a.flac"])
   }
 
+  func testPlaylistDeletionScrubRejectsLateDetailThatWouldResurrectSlug() {
+    let m = AppModel()
+    m.apply(
+      .playlistDetail(
+        PlaylistDetail(
+          slug: "gym", name: "Gym", kind: .manual, tracks: ["a.flac"], rules: nil,
+          error: nil, playlistRevision: 4, acknowledgedRequestID: "get")))
+    m.apply(.playlistsUpdate([], playlistRevision: 5, acknowledgedRequestID: "delete"))
+    XCTAssertNil(m.playlistDetail)
+
+    m.apply(
+      .playlistDetail(
+        PlaylistDetail(
+          slug: "gym", name: "Gym", kind: .manual, tracks: ["a.flac"], rules: nil,
+          error: nil, playlistRevision: 4, acknowledgedRequestID: "late-get")))
+
+    XCTAssertNil(m.playlistDetail)
+    XCTAssertEqual(m.playlistRevision, 5)
+    XCTAssertEqual(m.playlistAcknowledgedRequestID, "delete")
+  }
+
+  func testGlobalConfigRejectsStaleRevisionAndExposesAcknowledgement() {
+    let m = AppModel()
+    let current = DaemonSettings(
+      enabled: true, autostartWithWindows: false, firstSyncMode: "auto_apply",
+      subsequentSyncMode: "auto_apply", scheduleMinutes: 60, notifyOn: "all")
+    m.apply(
+      .configUpdate(
+        source: "/new", daemon: current, ipod: nil, configRevision: 2,
+        acknowledgedRequestID: "save-new"))
+    m.apply(
+      .configUpdate(
+        source: "/old", daemon: current, ipod: nil, configRevision: 1,
+        acknowledgedRequestID: "save-old"))
+
+    XCTAssertEqual(m.config?.source, "/new")
+    XCTAssertEqual(m.configRevision, 2)
+    XCTAssertEqual(m.configAcknowledgedRequestID, "save-new")
+  }
+
   func testDeviceConfigUpdateUpsertsBySerial() {
     let m = AppModel()
     seedDevices(["0xA", "0xB"], in: m)

@@ -17,7 +17,7 @@ struct SmartRulesEditor: View {
   var model: AppModel
   var slug: String
   var detail: PlaylistDetail
-  var onSavePlaylist: (PlaylistPayload) -> Void
+  var onSavePlaylist: (PlaylistPayload) -> String
   var onDeletePlaylist: (String) -> Void
 
   struct SmartDraft: Equatable {
@@ -35,8 +35,8 @@ struct SmartRulesEditor: View {
   }
 
   @State private var draft = SmartDraft()
-  @State private var seededFromModel = false
-  @State private var userEdited = false
+  @State private var acknowledgedDraft = AcknowledgedDraft(canonical: SmartDraft(), revision: 0)
+  @State private var hasCanonicalDraft = false
   @State private var saveTask: Task<Void, Never>?
   @State private var showDeleteConfirm = false
 
@@ -46,7 +46,7 @@ struct SmartRulesEditor: View {
     VStack(spacing: 0) {
       Form {
         Section("Match") {
-          Picker("", selection: Binding(get: { draft.matching }, set: { draft.matching = $0 })) {
+          Picker("", selection: Binding(get: { draft.matching }, set: { value in edit { $0.matching = value } })) {
             Text("All of the following").tag(SmartMatching.all)
             Text("Any of the following").tag(SmartMatching.any)
           }
@@ -56,12 +56,12 @@ struct SmartRulesEditor: View {
             ruleRow(index)
           }
           Button("Add Rule") {
-            draft.rules.append(SmartRuleWire(field: .artist, op: .is, value: ""))
+            edit { $0.rules.append(SmartRuleWire(field: .artist, op: .is, value: "")) }
           }
         }
         Section("Limit") {
           Picker(
-            "Limit", selection: Binding(get: { draft.limitKind }, set: { draft.limitKind = $0 })
+            "Limit", selection: Binding(get: { draft.limitKind }, set: { value in edit { $0.limitKind = value } })
           ) {
             Text("No limit").tag(LimitKind.none)
             Text("File size").tag(LimitKind.bytes)
@@ -70,9 +70,9 @@ struct SmartRulesEditor: View {
           if draft.limitKind != .none {
             TextField(
               draft.limitKind == .bytes ? "Bytes" : "Tracks",
-              text: Binding(get: { draft.limitValueText }, set: { draft.limitValueText = $0 }))
+              text: Binding(get: { draft.limitValueText }, set: { value in edit { $0.limitValueText = value } }))
           }
-          Picker("Order", selection: Binding(get: { draft.order }, set: { draft.order = $0 })) {
+          Picker("Order", selection: Binding(get: { draft.order }, set: { value in edit { $0.order = value } })) {
             Text("Alphabetical").tag(SmartOrder.alpha)
             Text("Recently Modified").tag(SmartOrder.recentlyModified)
             Text("Random (Stable)").tag(SmartOrder.randomStable)
@@ -87,7 +87,7 @@ struct SmartRulesEditor: View {
     }
     // Same editable-titlebar treatment as `ManualPlaylistEditor` — see
     // its doc comment; the old in-page header duplicated the titlebar.
-    .navigationTitle(Binding(get: { draft.name }, set: { draft.name = $0 }))
+    .navigationTitle(Binding(get: { draft.name }, set: { value in edit { $0.name = value } }))
     // See ManualPlaylistEditor: toolbarTitleMenu supplies the chevron,
     // RenameButton triggers inline titlebar editing.
     .toolbarTitleMenu {
@@ -105,9 +105,8 @@ struct SmartRulesEditor: View {
     }
     .task { seedIfNeeded() }
     .onChange(of: detail) { _, _ in seedIfNeeded() }
-    .onChange(of: draft) { _, newDraft in
-      userEdited = true
-      scheduleSave(newDraft)
+    .onChange(of: model.playlistRevision) { _, _ in
+      reconcileSaveAcknowledgement()
     }
     .onDisappear { saveTask?.cancel() }
     .confirmationDialog(
@@ -132,7 +131,7 @@ struct SmartRulesEditor: View {
       Picker(
         "",
         selection: Binding(
-          get: { draft.rules[index].field }, set: { draft.rules[index].field = $0 })
+          get: { draft.rules[index].field }, set: { value in edit { $0.rules[index].field = value } })
       ) {
         ForEach(SmartField.allCases, id: \.self) { field in
           Text(field.rawValue.capitalized).tag(field)
@@ -141,7 +140,7 @@ struct SmartRulesEditor: View {
       .labelsHidden()
       .frame(width: 90)
       Picker(
-        "", selection: Binding(get: { draft.rules[index].op }, set: { draft.rules[index].op = $0 })
+        "", selection: Binding(get: { draft.rules[index].op }, set: { value in edit { $0.rules[index].op = value } })
       ) {
         ForEach(SmartOp.allCases, id: \.self) { op in
           Text(SmartRulesLogic.opLabel(op)).tag(op)
@@ -151,9 +150,9 @@ struct SmartRulesEditor: View {
       .frame(width: 110)
       TextField(
         "Value",
-        text: Binding(get: { draft.rules[index].value }, set: { draft.rules[index].value = $0 }))
+        text: Binding(get: { draft.rules[index].value }, set: { value in edit { $0.rules[index].value = value } }))
       Button {
-        draft.rules.remove(at: index)
+        edit { $0.rules.remove(at: index) }
       } label: {
         Image(systemName: "minus.circle")
       }
@@ -161,18 +160,21 @@ struct SmartRulesEditor: View {
     }
   }
 
-  /// Seeds the draft from `get_playlist`'s `rules` exactly once, and
-  /// never after the user has started editing.
+  /// Reconciles canonical rules without replacing a newer local generation.
   private func seedIfNeeded() {
-    guard !seededFromModel, !userEdited, let rules = detail.rules else { return }
-    draft = SmartDraft(
+    guard let rules = detail.rules else { return }
+    let canonical = SmartDraft(
       name: detail.name ?? "",
       matching: rules.matching,
       rules: rules.rules,
       limitKind: SmartRulesLogic.limitKind(for: rules.limit),
       limitValueText: SmartRulesLogic.limitValueText(for: rules.limit),
       order: rules.order)
-    seededFromModel = true
+    acknowledgedDraft.reconcile(
+      canonical: canonical, revision: detail.playlistRevision,
+      acknowledgedRequestID: detail.acknowledgedRequestID)
+    draft = acknowledgedDraft.value
+    hasCanonicalDraft = true
   }
 
   /// Debounced auto-save, gated on validity so an incomplete mid-edit rule
@@ -191,8 +193,29 @@ struct SmartRulesEditor: View {
         matching: d.matching, rules: d.rules,
         limit: SmartRulesLogic.limit(kind: d.limitKind, valueText: d.limitValueText),
         order: d.order)
-      onSavePlaylist(.smart(slug: slug, name: d.name, rules: rules))
+      let requestID = onSavePlaylist(.smart(slug: slug, name: d.name, rules: rules))
+      acknowledgedDraft.markSubmitted(requestID: requestID)
     }
+  }
+
+  private func edit(_ mutation: (inout SmartDraft) -> Void) {
+    guard hasCanonicalDraft else { return }
+    var edited = draft
+    mutation(&edited)
+    guard edited != draft else { return }
+    acknowledgedDraft.edit(edited)
+    draft = acknowledgedDraft.value
+    scheduleSave(draft)
+  }
+
+  private func reconcileSaveAcknowledgement() {
+    guard let requestID = model.playlistAcknowledgedRequestID,
+      let submitted = acknowledgedDraft.submitted[requestID]
+    else { return }
+    acknowledgedDraft.reconcile(
+      canonical: submitted.value, revision: model.playlistRevision,
+      acknowledgedRequestID: requestID)
+    draft = acknowledgedDraft.value
   }
 }
 
@@ -272,7 +295,7 @@ enum SmartRulesLogic {
       model: PreviewFixtures.playlistDetailModel(PreviewFixtures.smartPlaylistDetail),
       slug: PreviewFixtures.smartPlaylistDetail.slug,
       detail: PreviewFixtures.smartPlaylistDetail,
-      onSavePlaylist: { _ in }, onDeletePlaylist: { _ in }
+      onSavePlaylist: { _ in "preview" }, onDeletePlaylist: { _ in }
     )
     .frame(width: 640, height: 560)
   }
@@ -286,7 +309,7 @@ enum SmartRulesLogic {
       acknowledgedRequestID: "preview-request")
     SmartRulesEditor(
       model: PreviewFixtures.playlistDetailModel(detail), slug: detail.slug, detail: detail,
-      onSavePlaylist: { _ in }, onDeletePlaylist: { _ in }
+      onSavePlaylist: { _ in "preview" }, onDeletePlaylist: { _ in }
     )
     .frame(width: 640, height: 560)
   }

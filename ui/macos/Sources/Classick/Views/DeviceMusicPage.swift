@@ -24,7 +24,7 @@ struct DeviceMusicPage: View {
   var onSyncNow: (DeviceSerial) -> Void
   var onLoadDeviceConfig: (String) -> Void
   var onSaveAndPreviewDeviceConfig:
-    (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> Void
+    (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> String?
   // Required (no no-op default) — see `MainWindow`'s doc comment on
   // `onSavePlaylist` for why a defaulted closure here would be exactly
   // how this action could ship silently dead.
@@ -36,18 +36,23 @@ struct DeviceMusicPage: View {
     var subscriptions: Set<String> = []
   }
 
+  private struct SelectionDraft: Equatable {
+    var mode: SelectionMode = .all
+    var checked: Set<SelectionKey> = []
+  }
+
   @State private var draft = MusicDraft()
+  @State private var acknowledgedSelection = AcknowledgedDraft(
+    canonical: SelectionDraft(), revision: 0)
+  @State private var acknowledgedSubscriptions = AcknowledgedDraft(
+    canonical: Set<String>(), revision: 0)
   /// Per-mode memory of checked sets, page-lifetime only: flipping modes
   /// stashes the departing mode's checks and restores the target's, so
   /// Selected → Entire → Selected round-trips the user's original picks
   /// instead of re-seeding everything. First-ever entry to a mode (no
   /// memory) keeps the zero-diff seeding behavior.
   @State private var rememberedRules: [SelectionMode: Set<SelectionKey>] = [:]
-  @State private var seededFromModel = false
-  @State private var userEdited = false
-  /// True only for the seed's own draft assignment — see `.onChange(of:
-  /// draft)` and DeviceSettingsPage's identical guard.
-  @State private var isSeeding = false
+  @State private var hasCanonicalDraft = false
   @State private var facet: LibraryBrowser.Facet = .artists
   @State private var saveTask: Task<Void, Never>?
 
@@ -95,7 +100,7 @@ struct DeviceMusicPage: View {
           // latched `userEdited`, blocked the real config from ever
           // seeding, and debounced-saved the wrong selection over
           // the persisted one.
-          .disabled(!seededFromModel || !canEditDevice)
+          .disabled(!hasCanonicalDraft || !canEditDevice)
           // HIDDEN (not disabled) while disconnected: a permanently
           // washed-out prominent capsule reads as broken chrome, and
           // the bottom device bar already explains "<name> not
@@ -124,21 +129,9 @@ struct DeviceMusicPage: View {
       }
       .onChange(of: config?.selection) { _, _ in seedIfNeeded() }
       .onChange(of: config?.subscriptions) { _, _ in seedIfNeeded() }
-      .onChange(of: draft) { _, newDraft in
-        // The seed's own assignment lands here too — it must NOT count
-        // as a user edit or fire a save/preview round-trip (same
-        // `isSeeding` guard as DeviceSettingsPage; the old "harmless
-        // cosmetic round-trip" rationale also latched `userEdited`,
-        // which made the page ignore every later device_config_update
-        // for its lifetime).
-        if isSeeding {
-          isSeeding = false
-          return
-        }
-        guard canEditDevice else { return }
-        userEdited = true
-        scheduleSave(newDraft)
-      }
+      .onChange(of: deviceState?.selectionRevision) { _, _ in seedIfNeeded() }
+      .onChange(of: deviceState?.subscriptionsRevision) { _, _ in seedIfNeeded() }
+      .onChange(of: model.playlistRevision) { _, _ in scrubDeletedSubscriptions() }
       // Belt-and-suspenders alongside request-generation correlation:
       // cancels an in-flight debounce the instant this page is
       // navigated away from. Reconnects use the same cancellation path
@@ -183,7 +176,7 @@ struct DeviceMusicPage: View {
   /// read-only browse list that snapped into checkbox mode a beat later.
   @ViewBuilder
   private var seededContent: some View {
-    if seededFromModel {
+    if hasCanonicalDraft {
       content
     } else {
       VStack(spacing: 8) {
@@ -227,7 +220,8 @@ struct DeviceMusicPage: View {
   private var browserMode: LibraryBrowser.Mode {
     guard canEditDevice, draft.mode != .all else { return .browse }
     return .select(
-      checked: Binding(get: { draft.checked }, set: { draft.checked = $0 }), style: .cascading)
+      checked: Binding(get: { draft.checked }, set: { value in editSelection { $0.checked = value } }),
+      style: .cascading)
   }
 
   private var needsScanState: some View {
@@ -298,10 +292,8 @@ struct DeviceMusicPage: View {
             isOn: Binding(
               get: { draft.subscriptions.contains(playlist.slug) },
               set: { on in
-                if on {
-                  draft.subscriptions.insert(playlist.slug)
-                } else {
-                  draft.subscriptions.remove(playlist.slug)
+                editSubscriptions {
+                  if on { $0.insert(playlist.slug) } else { $0.remove(playlist.slug) }
                 }
               }
             )
@@ -338,21 +330,20 @@ struct DeviceMusicPage: View {
 
   // MARK: - Draft seeding + mode switch + debounced save
 
-  /// Seeds the draft from the persisted config — EDIT-gated, not
-  /// once-only: while the user hasn't touched anything, later
-  /// `device_config_update`s refresh the open page instead of
-  /// being ignored. The moment the user edits, their draft wins.
+  /// Reconciles persisted selection and subscriptions independently because
+  /// their daemon revisions advance separately.
   private func seedIfNeeded() {
-    guard !userEdited, let config else { return }
-    let seeded = MusicDraft(
-      mode: config.selection.mode,
-      checked: Set(config.selection.rules),
-      subscriptions: Set(config.subscriptions.playlists))
-    if seeded != draft {
-      isSeeding = true
-      draft = seeded
-    }
-    seededFromModel = true
+    guard let config, let deviceState else { return }
+    let acknowledgement = model.deviceConfigAcknowledgedRequestIDs[serial]
+    acknowledgedSelection.reconcile(
+      canonical: SelectionDraft(
+        mode: config.selection.mode, checked: Set(config.selection.rules)),
+      revision: deviceState.selectionRevision, acknowledgedRequestID: acknowledgement)
+    acknowledgedSubscriptions.reconcile(
+      canonical: Set(config.subscriptions.playlists),
+      revision: deviceState.subscriptionsRevision, acknowledgedRequestID: acknowledgement)
+    copyAcknowledgedValuesToDraft()
+    hasCanonicalDraft = true
   }
 
   /// The mode `Picker`'s edit path: stash the departing mode's checks in
@@ -360,14 +351,17 @@ struct DeviceMusicPage: View {
   /// function — which restores the target mode's remembered checks when
   /// it has any, and only zero-diff-seeds on first entry.
   private func setMode(_ newMode: SelectionMode) {
-    rememberedRules[draft.mode] = draft.checked
+    let previousMode = draft.mode
+    rememberedRules[previousMode] = draft.checked
     let seeded = DeviceMusicLogic.seededSelection(
       fromDeviceContents: model.library?.artists ?? [],
-      previousMode: draft.mode, newMode: newMode,
+      previousMode: previousMode, newMode: newMode,
       current: Array(draft.checked),
       remembered: rememberedRules[newMode].map(Array.init))
-    draft.mode = newMode
-    draft.checked = Set(seeded)
+    editSelection {
+      $0.mode = newMode
+      $0.checked = Set(seeded)
+    }
   }
 
   /// Debounced auto-save: every selection/subscription/mode edit sends
@@ -382,19 +376,56 @@ struct DeviceMusicPage: View {
         await DeviceDraftSaveGate.waitUntilReady(
           serial: serial, model: model)
       else { return }
-      onSaveAndPreviewDeviceConfig(
+      guard let requestID = onSaveAndPreviewDeviceConfig(
         serial,
         SelectionState(mode: d.mode, rules: Array(d.checked)),
         SubscriptionsWire(playlists: Array(d.subscriptions).sorted()))
+      else { return }
+      acknowledgedSelection.markSubmitted(requestID: requestID)
+      acknowledgedSubscriptions.markSubmitted(requestID: requestID)
     }
+  }
+
+  private func editSelection(_ mutation: (inout SelectionDraft) -> Void) {
+    guard hasCanonicalDraft, canEditDevice else { return }
+    var edited = acknowledgedSelection.value
+    mutation(&edited)
+    guard edited != acknowledgedSelection.value else { return }
+    acknowledgedSelection.edit(edited)
+    copyAcknowledgedValuesToDraft()
+    scheduleSave(draft)
+  }
+
+  private func editSubscriptions(_ mutation: (inout Set<String>) -> Void) {
+    guard hasCanonicalDraft, canEditDevice else { return }
+    var edited = acknowledgedSubscriptions.value
+    mutation(&edited)
+    guard edited != acknowledgedSubscriptions.value else { return }
+    acknowledgedSubscriptions.edit(edited)
+    copyAcknowledgedValuesToDraft()
+    scheduleSave(draft)
+  }
+
+  private func copyAcknowledgedValuesToDraft() {
+    draft = MusicDraft(
+      mode: acknowledgedSelection.value.mode,
+      checked: acknowledgedSelection.value.checked,
+      subscriptions: acknowledgedSubscriptions.value)
+  }
+
+  private func scrubDeletedSubscriptions() {
+    guard hasCanonicalDraft else { return }
+    let validSlugs = Set(model.playlists.map(\.slug))
+    let scrubbed = DeviceMusicLogic.scrubbedSubscriptions(
+      acknowledgedSubscriptions.value, validSlugs: validSlugs)
+    guard scrubbed != acknowledgedSubscriptions.value else { return }
+    editSubscriptions { $0 = scrubbed }
   }
 
   private func handleDeviceAvailabilityChange(_ isAvailable: Bool) {
     guard isAvailable else {
       saveTask?.cancel()
-      seededFromModel = false
-      userEdited = false
-      isSeeding = false
+      hasCanonicalDraft = false
       rememberedRules.removeAll()
       return
     }
@@ -415,48 +446,6 @@ enum DeviceDraftSaveGate {
   }
 }
 
-enum DeviceSurfaceLogic {
-  static func state(
-    serial: DeviceSerial, in devices: [DeviceSerial: DeviceViewState]
-  ) -> DeviceViewState? {
-    devices[serial]
-  }
-
-  static func phase(for state: DeviceViewState?, globalPhase: Phase) -> Phase {
-    if case .scanning = globalPhase { return globalPhase }
-    guard let state else { return .noDevice }
-    switch state.phase {
-    case .disconnected:
-      return .noDevice
-    case .unconfigured:
-      return .notConfigured
-    case .idle:
-      return .idle
-    case .syncing:
-      let progress = state.syncProgress
-      return .syncing(
-        current: progress?.current ?? 0,
-        total: progress?.total ?? 0,
-        label: progress?.label ?? "",
-        etaSecs: progress?.etaSecs)
-    case .paused:
-      return .paused(synced: state.syncedCount, total: state.libraryCount)
-    case .error(let message):
-      return .error(message)
-    }
-  }
-
-  static func storage(_ state: DeviceViewState?) -> (free: Int64, total: Int64)? {
-    guard let storage = state?.storage else { return nil }
-    return (Int64(clamping: storage.free), Int64(clamping: storage.total))
-  }
-
-  static func storageText(_ state: DeviceViewState?) -> String? {
-    guard let storage = state?.storage else { return nil }
-    return "\(storage.free / 1_000_000_000) / \(storage.total / 1_000_000_000) GB"
-  }
-}
-
 #if DEBUG
   /// Wrapped in a `NavigationStack` so the titlebar chrome this page declares
   /// (`navigationTitle`/`navigationSubtitle`/`.toolbar`) actually renders in
@@ -468,7 +457,7 @@ enum DeviceSurfaceLogic {
       DeviceMusicPage(
         model: model, serial: PreviewFixtures.pairedIpod.serial,
         onSyncNow: { _ in }, onLoadDeviceConfig: { _ in },
-        onSaveAndPreviewDeviceConfig: { _, _, _ in }, onScan: {})
+        onSaveAndPreviewDeviceConfig: { _, _, _ in "preview" }, onScan: {})
     }
     .frame(width: 760, height: 560)
   }

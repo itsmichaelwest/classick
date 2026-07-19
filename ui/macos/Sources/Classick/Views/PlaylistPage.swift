@@ -9,7 +9,7 @@ import SwiftUI
 struct PlaylistPage: View {
     var model: AppModel
     var slug: String
-    var onSavePlaylist: (PlaylistPayload) -> Void
+    var onSavePlaylist: (PlaylistPayload) -> String
     var onGetPlaylist: (String) -> Void = { _ in }
     var onDeletePlaylist: (String) -> Void = { _ in }
     var onResolveTracks: (_ slug: String, _ rules: [SelectionRule]) -> Void = { _, _ in }
@@ -31,6 +31,10 @@ struct PlaylistPage: View {
     var body: some View {
         content
             .task(id: slug) { onGetPlaylist(slug) }
+            .onChange(of: model.playlistRevision) { _, _ in
+                guard model.playlists.contains(where: { $0.slug == slug }) else { return }
+                onGetPlaylist(slug)
+            }
     }
 
     /// The sidebar summary usually has the display name before the
@@ -85,7 +89,7 @@ private struct ManualPlaylistEditor: View {
     var model: AppModel
     var slug: String
     var detail: PlaylistDetail
-    var onSavePlaylist: (PlaylistPayload) -> Void
+    var onSavePlaylist: (PlaylistPayload) -> String
     var onDeletePlaylist: (String) -> Void
     var onResolveTracks: (_ slug: String, _ rules: [SelectionRule]) -> Void
 
@@ -95,10 +99,9 @@ private struct ManualPlaylistEditor: View {
     }
 
     @State private var draft = ManualDraft()
-    @State private var seededFromModel = false
-    @State private var userEdited = false
-    /// Seed-assignment marker — see `.onChange(of: draft)`.
-    @State private var isSeeding = false
+    @State private var acknowledgedDraft = AcknowledgedDraft(
+        canonical: ManualDraft(), revision: 0)
+    @State private var hasCanonicalDraft = false
     @State private var saveTask: Task<Void, Never>?
     @State private var showAddSongs = false
     @State private var isResolvingAdd = false
@@ -113,7 +116,7 @@ private struct ManualPlaylistEditor: View {
         // edit), bound straight into the draft so renames flow through the
         // same debounced save as every other edit. Replaces the old
         // in-page header row, which duplicated the titlebar's title.
-        .navigationTitle(Binding(get: { draft.name }, set: { draft.name = $0 }))
+        .navigationTitle(Binding(get: { draft.name }, set: { newName in edit { $0.name = newName } }))
         // The binding-title alone only ENABLES renaming — the visible
         // affordances are these: `toolbarTitleMenu` gives the title its
         // chevron menu, and `RenameButton()` is the system control that
@@ -144,12 +147,8 @@ private struct ManualPlaylistEditor: View {
         }
         .task { seedIfNeeded() }
         .onChange(of: detail) { _, _ in seedIfNeeded() }
-        .onChange(of: draft) { _, newDraft in
-            // Seed assignments must not count as edits or fire saves —
-            // same isSeeding guard as the device pages.
-            if isSeeding { isSeeding = false; return }
-            userEdited = true
-            scheduleSave(newDraft)
+        .onChange(of: model.playlistRevision) { _, _ in
+            reconcileSaveAcknowledgement()
         }
         .onDisappear { saveTask?.cancel() }
         // `resolved_tracks` carries no correlation id of its own on the wire
@@ -165,7 +164,7 @@ private struct ManualPlaylistEditor: View {
                   ManualPlaylistLogic.shouldConsumeResolvedTracks(reply: reply, forSlug: slug)
             else { return }
             isResolvingAdd = false
-            draft.tracks = ManualPlaylistLogic.appendingTracks(draft.tracks, adding: reply.tracks)
+            edit { $0.tracks = ManualPlaylistLogic.appendingTracks($0.tracks, adding: reply.tracks) }
             showAddSongs = false
         }
         .sheet(isPresented: $showAddSongs) {
@@ -187,7 +186,7 @@ private struct ManualPlaylistEditor: View {
             TextField("Name", text: $renameText)
             Button("Rename") {
                 if PlaylistEditorLogic.isNameValid(renameText) {
-                    draft.name = renameText
+                    edit { $0.name = renameText }
                 }
             }
             Button("Cancel", role: .cancel) {}
@@ -222,8 +221,8 @@ private struct ManualPlaylistEditor: View {
                 ForEach(draft.tracks.indices, id: \.self) { index in
                     trackRow(draft.tracks[index])
                 }
-                .onMove { from, to in draft.tracks = ManualPlaylistLogic.moved(draft.tracks, from: from, to: to) }
-                .onDelete { offsets in draft.tracks = ManualPlaylistLogic.removed(draft.tracks, at: offsets) }
+                .onMove { from, to in edit { $0.tracks = ManualPlaylistLogic.moved($0.tracks, from: from, to: to) } }
+                .onDelete { offsets in edit { $0.tracks = ManualPlaylistLogic.removed($0.tracks, at: offsets) } }
             }
             .listStyle(.inset)
             .environment(\.defaultMinListRowHeight, LibraryBrowser.rowHeight)
@@ -263,18 +262,15 @@ private struct ManualPlaylistEditor: View {
         }
     }
 
-    /// Seeds the draft from `get_playlist`'s reply — EDIT-gated, not
-    /// once-only (same rationale as `DeviceMusicPage.seedIfNeeded`): while
-    /// unedited, a refreshed `playlist_detail` (e.g. after a sidebar
-    /// drag-drop appends tracks to THIS playlist) updates the open editor.
+    /// Reconciles every canonical `get_playlist` reply while preserving any
+    /// newer local generation that has not been acknowledged yet.
     private func seedIfNeeded() {
-        guard !userEdited else { return }
         let seeded = ManualDraft(name: detail.name ?? "", tracks: detail.tracks ?? [])
-        if seeded != draft {
-            isSeeding = true
-            draft = seeded
-        }
-        seededFromModel = true
+        acknowledgedDraft.reconcile(
+            canonical: seeded, revision: detail.playlistRevision,
+            acknowledgedRequestID: detail.acknowledgedRequestID)
+        draft = acknowledgedDraft.value
+        hasCanonicalDraft = true
     }
 
     private func scheduleSave(_ d: ManualDraft) {
@@ -283,8 +279,29 @@ private struct ManualPlaylistEditor: View {
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled else { return }
             guard PlaylistEditorLogic.isNameValid(d.name) else { return }
-            onSavePlaylist(.manual(slug: slug, name: d.name, tracks: d.tracks))
+            let requestID = onSavePlaylist(.manual(slug: slug, name: d.name, tracks: d.tracks))
+            acknowledgedDraft.markSubmitted(requestID: requestID)
         }
+    }
+
+    private func edit(_ mutation: (inout ManualDraft) -> Void) {
+        guard hasCanonicalDraft else { return }
+        var edited = draft
+        mutation(&edited)
+        guard edited != draft else { return }
+        acknowledgedDraft.edit(edited)
+        draft = acknowledgedDraft.value
+        scheduleSave(draft)
+    }
+
+    private func reconcileSaveAcknowledgement() {
+        guard let requestID = model.playlistAcknowledgedRequestID,
+              let submitted = acknowledgedDraft.submitted[requestID]
+        else { return }
+        acknowledgedDraft.reconcile(
+            canonical: submitted.value, revision: model.playlistRevision,
+            acknowledgedRequestID: requestID)
+        draft = acknowledgedDraft.value
     }
 }
 
@@ -417,7 +434,7 @@ enum PlaylistEditorLogic {
 @MainActor
 private func playlistPreview(_ model: AppModel, slug: String, height: CGFloat) -> some View {
     NavigationStack {
-        PlaylistPage(model: model, slug: slug, onSavePlaylist: { _ in })
+        PlaylistPage(model: model, slug: slug, onSavePlaylist: { _ in "preview" })
     }
     .frame(width: 640, height: height)
 }

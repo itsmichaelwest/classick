@@ -28,6 +28,7 @@ struct MainWindow: View {
   // — the call site can compile clean while never actually wiring the
   // daemon send path. See `ClassickApp`'s `MainWindow(...)` call site.
   var onSavePlaylist: (PlaylistPayload) -> Void
+  var onSavePlaylistDraft: (PlaylistPayload) -> String = { _ in "" }
   // Playlist editor pages (Task 7).
   var onGetPlaylist: (String) -> Void = { _ in }
   var onDeletePlaylist: (String) -> Void = { _ in }
@@ -35,10 +36,12 @@ struct MainWindow: View {
   // Device Music page (Task 5).
   var onLoadDeviceConfig: (String) -> Void = { _ in }
   var onSaveAndPreviewDeviceConfig:
-    (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> Void =
-      { _, _, _ in }
+    (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> String? =
+      { _, _, _ in nil }
   // Device Settings page (Task 6).
-  var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> Void = { _, _ in }
+  var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> String? = {
+    _, _ in nil
+  }
 
   private var selection: Binding<SidebarDestination?> {
     Binding(get: { model.selectedDestination }, set: { model.selectedDestination = $0 })
@@ -115,7 +118,7 @@ struct MainWindow: View {
         .id(serial)
       case .playlist(let slug):
         PlaylistPage(
-          model: model, slug: slug, onSavePlaylist: onSavePlaylist,
+          model: model, slug: slug, onSavePlaylist: onSavePlaylistDraft,
           onGetPlaylist: onGetPlaylist, onDeletePlaylist: onDeletePlaylist,
           onResolveTracks: onResolveTracks
         )
@@ -161,7 +164,7 @@ struct SetupCallToActionView: View {
         onConnectSource: {},
         onForgetIpod: { _ in }, onEjectIpod: { _ in },
         onBackfill: { _ in }, onSetUp: { _ in }, onReplaceLibrary: { _ in },
-        onAppearRequests: {}, onSavePlaylist: { _ in },
+        onAppearRequests: {}, onSavePlaylist: { _ in }, onSavePlaylistDraft: { _ in "preview" },
         // Answer get_playlist from fixture data — a no-op here left
         // every playlist page in the canvas on "Loading…" forever,
         // since the reply the page waits for can never arrive.

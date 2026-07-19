@@ -13,7 +13,7 @@ import SwiftUI
 /// of record; this view only mirrors it and writes back via `save_config`.
 struct SettingsView: View {
     var model: AppModel
-    var onSave: (_ source: String?, _ daemon: DaemonSettings) -> Void
+    var onSave: (_ source: String?, _ daemon: DaemonSettings) -> String
 
     var body: some View {
         TabView {
@@ -28,11 +28,21 @@ struct SettingsView: View {
 
 private struct GeneralTab: View {
     var model: AppModel
-    var onSave: (_ source: String?, _ daemon: DaemonSettings) -> Void
+    var onSave: (_ source: String?, _ daemon: DaemonSettings) -> String
+
+    private struct GlobalSettingsDraft: Equatable {
+        var sourcePath: String?
+        var scheduleMinutes: UInt32
+        var launchAtLogin: Bool
+    }
 
     @State private var sourcePath: String?
     @State private var scheduleMinutes: UInt32 = 0
     @State private var launchAtLogin = false
+    @State private var acknowledgedDraft = AcknowledgedDraft(
+        canonical: GlobalSettingsDraft(sourcePath: nil, scheduleMinutes: 0, launchAtLogin: false),
+        revision: 0)
+    @State private var hasCanonicalDraft = false
     @State private var isPickingFolder = false
     @State private var saveTask: Task<Void, Never>?
 
@@ -65,7 +75,7 @@ private struct GeneralTab: View {
                 "Scheduled sync",
                 selection: Binding(
                     get: { scheduleMinutes },
-                    set: { scheduleMinutes = $0; scheduleSave() }
+                    set: { value in edit { $0.scheduleMinutes = value } }
                 )
             ) {
                 ForEach(Self.scheduleOptions, id: \.minutes) { option in
@@ -78,9 +88,8 @@ private struct GeneralTab: View {
                 isOn: Binding(
                     get: { launchAtLogin },
                     set: { newValue in
-                        launchAtLogin = newValue
+                        edit { $0.launchAtLogin = newValue }
                         applyLaunchAtLogin(newValue)
-                        scheduleSave()
                     }
                 ))
 
@@ -89,21 +98,27 @@ private struct GeneralTab: View {
         .padding(20)
         .onAppear(perform: syncFromConfig)
         .onChange(of: model.config) { _, _ in syncFromConfig() }
+        .onChange(of: model.configRevision) { _, _ in syncFromConfig() }
         .fileImporter(isPresented: $isPickingFolder, allowedContentTypes: [.folder]) { result in
             if case let .success(url) = result {
-                sourcePath = url.path
-                scheduleSave()
+                edit { $0.sourcePath = url.path }
             }
         }
     }
 
     private func syncFromConfig() {
         guard let config = model.config else { return }
-        sourcePath = config.source
-        if let daemon = config.daemon {
-            scheduleMinutes = daemon.scheduleMinutes
-            launchAtLogin = daemon.autostartWithWindows
-        }
+        let canonical = GlobalSettingsDraft(
+            sourcePath: config.source,
+            scheduleMinutes: config.daemon?.scheduleMinutes ?? 0,
+            launchAtLogin: config.daemon?.autostartWithWindows ?? false)
+        acknowledgedDraft.reconcile(
+            canonical: canonical, revision: model.configRevision,
+            acknowledgedRequestID: model.configAcknowledgedRequestID)
+        sourcePath = acknowledgedDraft.value.sourcePath
+        scheduleMinutes = acknowledgedDraft.value.scheduleMinutes
+        launchAtLogin = acknowledgedDraft.value.launchAtLogin
+        hasCanonicalDraft = true
     }
 
     /// Debounces edits (picker/re-pick/toggle) into a single `save_config`
@@ -127,8 +142,21 @@ private struct GeneralTab: View {
                 scheduleMinutes: scheduleMinutes,
                 notifyOn: model.config?.daemon?.notifyOn ?? "all",
                 rockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
-            onSave(sourcePath, daemon)
+            let requestID = onSave(sourcePath, daemon)
+            acknowledgedDraft.markSubmitted(requestID: requestID)
         }
+    }
+
+    private func edit(_ mutation: (inout GlobalSettingsDraft) -> Void) {
+        guard hasCanonicalDraft else { return }
+        var edited = acknowledgedDraft.value
+        mutation(&edited)
+        guard edited != acknowledgedDraft.value else { return }
+        acknowledgedDraft.edit(edited)
+        sourcePath = acknowledgedDraft.value.sourcePath
+        scheduleMinutes = acknowledgedDraft.value.scheduleMinutes
+        launchAtLogin = acknowledgedDraft.value.launchAtLogin
+        scheduleSave()
     }
 
     /// `SMAppService` failures (e.g. running via `swift run` outside a
@@ -182,14 +210,14 @@ private struct AboutTab: View {
 #Preview("Configured") {
     SettingsView(
         model: PreviewFixtures.connectedSyncedModel(),
-        onSave: { _, _ in })
+        onSave: { _, _ in "preview" })
         .frame(width: 440, height: 380)
 }
 
 #Preview("First run") {
     SettingsView(
         model: PreviewFixtures.firstRunModel(),
-        onSave: { _, _ in })
+        onSave: { _, _ in "preview" })
         .frame(width: 440, height: 380)
 }
 #endif
