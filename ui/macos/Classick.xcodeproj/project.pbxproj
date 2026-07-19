@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0A3FEB815A326868D819E58B /* SmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FDB10A10012288F988FE32C /* SmokeTests.swift */; };
+		0BB4A3E1BFCC66F5E2A7B952 /* MenuBarLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2118EFC38385B03A4D6EF6EC /* MenuBarLabel.swift */; };
 		1048844EE6A3198321594B2A /* MainWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495FAA88EEF9E0F49604E450 /* MainWindow.swift */; };
 		167F85B9A5398B8C1CB6296D /* DeviceSettingsPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = AED4F3217C2E370FC65BE756 /* DeviceSettingsPage.swift */; };
 		1CA50F7FD8706F2DE3CB38F8 /* DeviceSettingsLogicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA965549DF09BB79C8583291 /* DeviceSettingsLogicTests.swift */; };
@@ -50,6 +51,7 @@
 		9B4E3549C2DCE960F8A6402C /* DaemonEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AE77C26530FE55F27CA0B60 /* DaemonEvent.swift */; };
 		9F69DE55F112B10BBAE446BB /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1788052EC7FE9655A0767A10 /* HistoryView.swift */; };
 		A6E2CFE58A8D14C39D2AFBB8 /* MenuContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04854C70583BD2B3841B7139 /* MenuContent.swift */; };
+		AADF94134EED81964962C558 /* MenuBarLabelLogicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5061C4BFCFF766BF7F60820 /* MenuBarLabelLogicTests.swift */; };
 		ABF42C45D618EEF21FB7EC8B /* FacetBarBelowToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2F476AC0491A3C31818E27B /* FacetBarBelowToolbar.swift */; };
 		AC48A04CBF94280A05103549 /* AcknowledgedDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A16C43DE7D0AE54DBCE519 /* AcknowledgedDraftTests.swift */; };
 		ACB102D41EA59D9FCB5F58FE /* DaemonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39CCC1F780C5FA6F22AD6FA7 /* DaemonClient.swift */; };
@@ -90,6 +92,7 @@
 		1D2A6B821B672C47C5AFD5EE /* AppModel+DeviceReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+DeviceReducer.swift"; sourceTree = "<group>"; };
 		1F6E6E19F0CC4A565F756B34 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		202553602D0B6CF9B75237B8 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		2118EFC38385B03A4D6EF6EC /* MenuBarLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarLabel.swift; sourceTree = "<group>"; };
 		2C1244EE2C4156A9617AD090 /* AppLogic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogic.swift; sourceTree = "<group>"; };
 		2FDB10A10012288F988FE32C /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
 		3029F7DAACFF04C9AE8CFB25 /* SyncNotificationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncNotificationCoordinator.swift; sourceTree = "<group>"; };
@@ -128,6 +131,7 @@
 		AB7728BC7FA457FF41968C65 /* SmartRulesEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartRulesEditor.swift; sourceTree = "<group>"; };
 		AED4F3217C2E370FC65BE756 /* DeviceSettingsPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceSettingsPage.swift; sourceTree = "<group>"; };
 		B2F476AC0491A3C31818E27B /* FacetBarBelowToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FacetBarBelowToolbar.swift; sourceTree = "<group>"; };
+		B5061C4BFCFF766BF7F60820 /* MenuBarLabelLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarLabelLogicTests.swift; sourceTree = "<group>"; };
 		BA965549DF09BB79C8583291 /* DeviceSettingsLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceSettingsLogicTests.swift; sourceTree = "<group>"; };
 		C0C70C5977ABC785EA99BB4F /* DeviceIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIcon.swift; sourceTree = "<group>"; };
 		C7A16C43DE7D0AE54DBCE519 /* AcknowledgedDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcknowledgedDraftTests.swift; sourceTree = "<group>"; };
@@ -240,6 +244,7 @@
 				5EBCC5FA0BAE57BC86471748 /* LibrarySelectionLogic.swift */,
 				68140E99FECE65763E7B7F7F /* LibraryView.swift */,
 				495FAA88EEF9E0F49604E450 /* MainWindow.swift */,
+				2118EFC38385B03A4D6EF6EC /* MenuBarLabel.swift */,
 				04854C70583BD2B3841B7139 /* MenuContent.swift */,
 				DE25169AF5227F47112B49D2 /* PlaylistPage.swift */,
 				DAB3C64FBA7F0070A69F92BD /* PromptAlert.swift */,
@@ -266,6 +271,7 @@
 				0ECE629212707A1810016520 /* DeviceRowPresentationTests.swift */,
 				BA965549DF09BB79C8583291 /* DeviceSettingsLogicTests.swift */,
 				0C05804D1D10803966E55427 /* LibraryBrowserLogicTests.swift */,
+				B5061C4BFCFF766BF7F60820 /* MenuBarLabelLogicTests.swift */,
 				9752BD44A7E2AEA57406B9EA /* NotifierPolicyTests.swift */,
 				9D40072357DDBD617F93FF0B /* PlaylistEditorLogicTests.swift */,
 				AA0AEA0F898A570ADA7D30EB /* SelectionDraftTests.swift */,
@@ -460,6 +466,7 @@
 				514D0D9344CE9C40A9E0C81F /* DeviceRowPresentationTests.swift in Sources */,
 				1CA50F7FD8706F2DE3CB38F8 /* DeviceSettingsLogicTests.swift in Sources */,
 				3EB8079679ACFE2DEF3894F7 /* LibraryBrowserLogicTests.swift in Sources */,
+				AADF94134EED81964962C558 /* MenuBarLabelLogicTests.swift in Sources */,
 				F7AD8BE48FF289EEE5944BC0 /* NotifierPolicyTests.swift in Sources */,
 				B30D9D2716DB879527A1CFEF /* PlaylistEditorLogicTests.swift in Sources */,
 				2BD4832EC2BB0BEC5A2FFA9F /* SelectionDraftTests.swift in Sources */,
@@ -497,6 +504,7 @@
 				25BDC1D480EE6CAADE80D177 /* LibrarySelectionLogic.swift in Sources */,
 				BBF23B87AD78F97A074AA537 /* LibraryView.swift in Sources */,
 				1048844EE6A3198321594B2A /* MainWindow.swift in Sources */,
+				0BB4A3E1BFCC66F5E2A7B952 /* MenuBarLabel.swift in Sources */,
 				A6E2CFE58A8D14C39D2AFBB8 /* MenuContent.swift in Sources */,
 				4FB908A351CF502DE07174A1 /* Notifier.swift in Sources */,
 				C1D2B216C33F513ACF890A24 /* PlaylistPage.swift in Sources */,

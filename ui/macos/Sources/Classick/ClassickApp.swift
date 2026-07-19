@@ -601,7 +601,6 @@ struct ClassickApp: App {
     // body for real, and without the gate every canvas refresh planted
     // a Classick item in the developer's actual menu bar.
     MenuBarExtra(
-      "Classick", systemImage: menuBarSystemImage(for: appDelegate.model.phase),
       isInserted: .constant(!ProcessInfo.isRunningInXcodePreviews)
     ) {
       MenuContent(
@@ -619,6 +618,13 @@ struct ClassickApp: App {
         onRetry: appDelegate.retry,
         onCheckForUpdates: appDelegate.checkForUpdates
       )
+    } label: {
+      MenuBarLabel(
+        presentation: MenuBarLabelPresentation.make(
+          globalPhase: appDelegate.model.phase,
+          device: appDelegate.model.focusedDeviceSerial.flatMap {
+            appDelegate.model.devices[$0]
+          }))
     }
     .menuBarExtraStyle(.menu)
 
