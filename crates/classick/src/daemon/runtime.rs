@@ -4326,13 +4326,20 @@ mod tests {
             }) if request_id == "save-playlist"
         ));
 
-        std::fs::create_dir_all(base.join("playlists/gym.m3u8.tmp")).unwrap();
+        std::fs::create_dir_all(base.join("playlists/gym.rules.json")).unwrap();
         let (mut failed_events, mut failed_reply) = handle_persistence_test_command(
             DaemonCommand::SavePlaylist {
-                playlist: crate::ipc_daemon::PlaylistPayload::Manual {
+                playlist: crate::ipc_daemon::PlaylistPayload::Smart {
                     slug: Some("gym".into()),
                     name: "Changed".into(),
-                    tracks: Vec::new(),
+                    rules: crate::playlist_rules::SmartRules {
+                        version: crate::playlist_rules::RULES_VERSION,
+                        matching: crate::playlist_rules::Match::All,
+                        rules: Vec::new(),
+                        limit: None,
+                        order: crate::playlist_rules::Order::default(),
+                        seed: 0,
+                    },
                 },
                 request_id: "failed-playlist".into(),
             },
