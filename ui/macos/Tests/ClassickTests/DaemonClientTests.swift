@@ -135,6 +135,31 @@ final class DaemonClientTests: XCTestCase {
     XCTAssertEqual(outbox.nextIntent(for: 2)?.bytes, firstWrite.bytes)
   }
 
+  func testNilSlugPlaylistLostAcknowledgementReplaysOneStableOrderedCreate() throws {
+    var outbox = DurableIntentOutbox()
+    try outbox.upsert(
+      .savePlaylist(
+        .manual(
+          slug: nil, name: "Gym Mix",
+          tracks: ["B/02.flac", "A/01.flac", "B/03.flac"]),
+        requestID: "request-a"))
+    let firstWrite = try XCTUnwrap(outbox.nextIntent(for: 1))
+    outbox.markWritten(requestID: firstWrite.requestID, connectionGeneration: 1)
+    let replay = try XCTUnwrap(outbox.nextIntent(for: 2))
+
+    XCTAssertEqual(replay.bytes, firstWrite.bytes, "reconnect must replay byte-identical intent")
+    let firstObject = try playlistObject(from: firstWrite.bytes)
+    let replayObject = try playlistObject(from: replay.bytes)
+    let firstSlug = try XCTUnwrap(firstObject["slug"] as? String)
+    let replaySlug = try XCTUnwrap(replayObject["slug"] as? String)
+    XCTAssertEqual(Set([firstSlug, replaySlug]).count, 1, "both writes must target one playlist")
+    XCTAssertEqual(firstSlug, "gym-mix-request-a")
+    XCTAssertEqual(
+      replayObject["tracks"] as? [String],
+      ["B/02.flac", "A/01.flac", "B/03.flac"],
+      "manual playlist order must remain stable")
+  }
+
   func testAcknowledgementRemovesOnlyWrittenIntentExactlyOnce() throws {
     var outbox = DurableIntentOutbox()
     try outbox.upsert(.deletePlaylist(slug: "mix", requestID: "first"))
@@ -142,9 +167,45 @@ final class DaemonClientTests: XCTestCase {
     outbox.markWritten(requestID: first.requestID, connectionGeneration: 1)
     try outbox.upsert(.deletePlaylist(slug: "mix", requestID: "successor"))
     XCTAssertNil(outbox.nextIntent(for: 1), "same-key successor must wait for acknowledgement")
-    XCTAssertTrue(outbox.acknowledge(requestID: "first"))
-    XCTAssertFalse(outbox.acknowledge(requestID: "first"))
+    let acknowledgement = DurableAcknowledgement(
+      requestID: "first", revision: nil, configState: nil)
+    XCTAssertTrue(outbox.acknowledge(acknowledgement))
+    XCTAssertFalse(outbox.acknowledge(acknowledgement))
     XCTAssertEqual(outbox.nextIntent(for: 1)?.requestID, "successor")
+  }
+
+  func testRejectedConfigSaveAcknowledgementRetainsIntentForReconnect() throws {
+    var outbox = DurableIntentOutbox()
+    try outbox.upsert(
+      .saveConfig(source: "/wanted", daemon: nil, ipod: nil, requestID: "save"))
+    let written = try XCTUnwrap(outbox.nextIntent(for: 1))
+    outbox.markWritten(requestID: written.requestID, connectionGeneration: 1)
+    let failedReply = try JSONDecoder().decode(
+      DaemonEvent.self,
+      from: Data(
+        #"{"type":"config_update","source":"/original","daemon":null,"ipod":null,"config_revision":7,"acknowledged_request_id":"save"}"#
+          .utf8))
+    let acknowledgement = try XCTUnwrap(failedReply.durableAcknowledgement)
+
+    XCTAssertFalse(outbox.acknowledge(acknowledgement))
+    XCTAssertEqual(outbox.nextIntent(for: 2)?.bytes, written.bytes)
+  }
+
+  func testCommittedConfigSaveAcknowledgementRemovesIntent() throws {
+    var outbox = DurableIntentOutbox()
+    try outbox.upsert(
+      .saveConfig(source: "/wanted", daemon: nil, ipod: nil, requestID: "save"))
+    let written = try XCTUnwrap(outbox.nextIntent(for: 1))
+    outbox.markWritten(requestID: written.requestID, connectionGeneration: 1)
+    let committedReply = try JSONDecoder().decode(
+      DaemonEvent.self,
+      from: Data(
+        #"{"type":"config_update","source":"/wanted","daemon":null,"ipod":null,"config_revision":8,"acknowledged_request_id":"save"}"#
+          .utf8))
+    let acknowledgement = try XCTUnwrap(committedReply.durableAcknowledgement)
+
+    XCTAssertTrue(outbox.acknowledge(acknowledgement))
+    XCTAssertNil(outbox.nextIntent(for: 2))
   }
 
   func testDisconnectedSendQueuesOnlyDurableMutations() async {
@@ -233,6 +294,11 @@ final class DaemonClientTests: XCTestCase {
     while await collector.count < minCount && Date() < deadline {
       try? await Task.sleep(for: .milliseconds(20))
     }
+  }
+
+  private func playlistObject(from line: Data) throws -> [String: Any] {
+    let object = try JSONSerialization.jsonObject(with: line) as! [String: Any]
+    return object["playlist"] as! [String: Any]
   }
 
   func testHandshakeThenDeviceConnectedEvent() async throws {

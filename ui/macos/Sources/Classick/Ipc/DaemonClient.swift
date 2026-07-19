@@ -11,6 +11,7 @@ enum SendDisposition: Equatable, Sendable {
 struct DurableIntent: Sendable {
   let key: DurableIntentKey
   let requestID: String
+  let command: DaemonCommand
   let bytes: Data
   fileprivate var lastWrittenConnection: Int?
 }
@@ -21,6 +22,7 @@ struct DurableIntentOutbox: Sendable {
   var requestIDs: [String] { intents.map(\.requestID) }
 
   mutating func upsert(_ command: DaemonCommand) throws {
+    let command = command.normalizedForDurableEncoding()
     guard let key = command.durableIntentKey, let requestID = command.requestID else { return }
     guard !intents.contains(where: { $0.requestID == requestID }) else { return }
 
@@ -29,7 +31,8 @@ struct DurableIntentOutbox: Sendable {
     bytes.append(0x0A)
     intents.append(
       DurableIntent(
-        key: key, requestID: requestID, bytes: bytes, lastWrittenConnection: nil))
+        key: key, requestID: requestID, command: command, bytes: bytes,
+        lastWrittenConnection: nil))
   }
 
   func nextIntent(for connectionGeneration: Int) -> DurableIntent? {
@@ -55,12 +58,13 @@ struct DurableIntentOutbox: Sendable {
   }
 
   @discardableResult
-  mutating func acknowledge(requestID: String) -> Bool {
+  mutating func acknowledge(_ acknowledgement: DurableAcknowledgement) -> Bool {
     guard
       let index = intents.firstIndex(where: {
-        $0.requestID == requestID && $0.lastWrittenConnection != nil
+        $0.requestID == acknowledgement.requestID && $0.lastWrittenConnection != nil
       })
     else { return false }
+    guard intents[index].command.isCommitted(by: acknowledgement) else { return false }
     intents.remove(at: index)
     return true
   }
@@ -142,8 +146,7 @@ actor DaemonClient {
       shutdownConnectionGeneration = connectionGeneration
       shutdownInactivityTimeout = timeout
       scheduleShutdownTimeout()
-      guard fd >= 0, handshakeComplete else { return }
-      shutdownCommandSent = sendCommand(.shutdown) == .sent
+      sendPendingShutdownIfReady()
     }
   }
 
@@ -341,6 +344,10 @@ actor DaemonClient {
         return
       }
       handshakeComplete = true
+      if sendPendingShutdownIfReady() {
+        continuation?.yield(event)
+        return
+      }
       continuation?.yield(event)
       await send(.subscribeDeviceEvents)
       await send(.getStatus(requestID: DaemonCommand.newRequestID()))
@@ -355,7 +362,7 @@ actor DaemonClient {
     }
 
     if let acknowledgement = event.durableAcknowledgement,
-      durableOutbox.acknowledge(requestID: acknowledgement.requestID)
+      durableOutbox.acknowledge(acknowledgement)
     {
       flushDurableIntents()
     }
@@ -374,6 +381,21 @@ actor DaemonClient {
 
   nonisolated static func supportsDaemonProtocol(_ version: String) -> Bool {
     version.split(separator: ".").first == "2"
+  }
+
+  @discardableResult
+  private func sendPendingShutdownIfReady() -> Bool {
+    guard !shutdownCommandSent,
+      shutdownConnectionGeneration == connectionGeneration,
+      fd >= 0,
+      handshakeComplete
+    else { return false }
+
+    shutdownCommandSent = sendCommand(.shutdown) == .sent
+    if shutdownCommandSent {
+      scheduleShutdownTimeout()
+    }
+    return shutdownCommandSent
   }
 
   private func scheduleShutdownTimeout() {

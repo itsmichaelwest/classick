@@ -1135,26 +1135,19 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
     };
 
     // Graceful shutdown: if a sync is in flight, keep the runtime alive while
-    // the orchestrator drains cancellation finalization. The outer budget is
-    // deliberately longer than the orchestrator's inactivity watchdog; only
-    // a stalled child reaches kill_on_drop.
+    // the orchestrator drains cancellation finalization. The orchestrator's
+    // progress-reset watchdog owns stall detection; a second total-duration
+    // deadline here would kill healthy publication that continues to advance.
     match exit_reason {
         ExitReason::Shutdown(reason) => {
             if state.active_session().is_none() {
                 tracing::info!("daemon: clean {reason:?} shutdown — no in-flight sync to drain");
             } else {
-                if drain_active_session_for_shutdown(
-                    &mut state,
-                    &mut internal_rx,
-                    shutdown_drain_budget(),
-                )
-                .await
-                {
+                if drain_active_session_for_shutdown(&mut state, &mut internal_rx).await {
                     tracing::info!("daemon: in-flight sync drained cleanly");
                 } else {
                     tracing::warn!(
-                        "daemon: shutdown drain timed out after {:?}; subprocess will be killed by kill_on_drop",
-                        shutdown_drain_budget(),
+                        "daemon: shutdown drain ended before the active session completed"
                     );
                 }
             }
@@ -1169,14 +1162,9 @@ enum ExitReason {
     Shutdown(ShutdownReason),
 }
 
-fn shutdown_drain_budget() -> std::time::Duration {
-    sync_orchestrator::FINALIZATION_STALL_GRACE + std::time::Duration::from_secs(5)
-}
-
 async fn drain_active_session_for_shutdown(
     state: &mut RuntimeState,
     internal_rx: &mut mpsc::UnboundedReceiver<InternalEvent>,
-    budget: std::time::Duration,
 ) -> bool {
     let Some(active_session_id) = state.active_session().map(|session| session.id) else {
         return true;
@@ -1186,22 +1174,18 @@ async fn drain_active_session_for_shutdown(
         tracing::info!("daemon: signalled in-flight sync to cancel before exit");
     }
 
-    tokio::time::timeout(budget, async {
-        while let Some(internal) = internal_rx.recv().await {
-            match internal {
-                InternalEvent::SyncCompleted { session_id, .. }
-                | InternalEvent::ScanCompleted { session_id, .. }
-                    if session_id == active_session_id =>
-                {
-                    return true;
-                }
-                _ => {}
+    while let Some(internal) = internal_rx.recv().await {
+        match internal {
+            InternalEvent::SyncCompleted { session_id, .. }
+            | InternalEvent::ScanCompleted { session_id, .. }
+                if session_id == active_session_id =>
+            {
+                return true;
             }
+            _ => {}
         }
-        false
-    })
-    .await
-    .unwrap_or(false)
+    }
+    false
 }
 
 /// Apply a sync's outcome to state + history, then broadcast a fresh
@@ -3335,13 +3319,8 @@ mod tests {
         assert_eq!(entry.session_id, Some(42));
     }
 
-    #[test]
-    fn shutdown_budget_covers_a_full_finalization_stall_grace() {
-        assert!(shutdown_drain_budget() > sync_orchestrator::FINALIZATION_STALL_GRACE);
-    }
-
     #[tokio::test(start_paused = true)]
-    async fn shutdown_drain_waits_for_completion_beyond_the_old_eight_second_budget() {
+    async fn shutdown_drain_has_no_total_duration_cap_while_orchestrator_is_progressing() {
         let mut state = RuntimeState::new();
         let session = state
             .try_admit_device(
@@ -3360,7 +3339,9 @@ mod tests {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             cancel_rx.await.expect("shutdown sends cancel");
-            tokio::time::sleep(std::time::Duration::from_secs(9)).await;
+            let old_outer_budget =
+                sync_orchestrator::FINALIZATION_STALL_GRACE + std::time::Duration::from_secs(5);
+            tokio::time::sleep(old_outer_budget + std::time::Duration::from_secs(1)).await;
             internal_tx
                 .send(InternalEvent::SyncCompleted {
                     session_id: session.id,
@@ -3369,14 +3350,7 @@ mod tests {
                 .unwrap();
         });
 
-        assert!(
-            drain_active_session_for_shutdown(
-                &mut state,
-                &mut internal_rx,
-                shutdown_drain_budget(),
-            )
-            .await
-        );
+        assert!(drain_active_session_for_shutdown(&mut state, &mut internal_rx).await);
     }
 
     #[test]

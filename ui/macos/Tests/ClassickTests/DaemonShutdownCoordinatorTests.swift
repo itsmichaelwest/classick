@@ -83,6 +83,46 @@ private func readCommandsUntilShutdown(from fd: Int32, into sink: ShutdownComman
 }
 
 final class DaemonClientShutdownTests: XCTestCase {
+  func testAttachedShutdownRequestedBeforeHelloSendsOnceAndWaitsForEOF() async {
+    let path = NSTemporaryDirectory() + "cdsh_\(UUID().uuidString.prefix(8)).sock"
+    defer { unlink(path) }
+    let listenFd = makeShutdownListener(path: path)
+    defer { close(listenFd) }
+    let sink = ShutdownCommandSink()
+    let accepted = expectation(description: "socket accepted before hello")
+    let releaseHello = DispatchSemaphore(value: 0)
+
+    Thread {
+      let clientFd = accept(listenFd, nil, nil)
+      guard clientFd >= 0 else { return }
+      accepted.fulfill()
+      releaseHello.wait()
+      writeShutdownLine(
+        #"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n",
+        to: clientFd)
+      readCommandsUntilShutdown(from: clientFd, into: sink)
+      close(clientFd)
+    }.start()
+
+    let client = DaemonClient(socketPath: path)
+    let stream = await client.events()
+    let consumer = Task { for await _ in stream {} }
+    await client.start()
+    await fulfillment(of: [accepted], timeout: 1)
+    try? await Task.sleep(for: .milliseconds(20))
+
+    let shutdown = Task { await client.shutdownAndWait(timeout: .seconds(1)) }
+    try? await Task.sleep(for: .milliseconds(20))
+    releaseHello.signal()
+    let cleanExit = await shutdown.value
+    consumer.cancel()
+
+    XCTAssertTrue(cleanExit)
+    XCTAssertEqual(
+      sink.text.split(separator: "\n").filter { $0 == #"{"type":"shutdown"}"# }.count,
+      1)
+  }
+
   func testShutdownAndWaitSendsShutdownToAttachedDaemonAndSucceedsAtEOF() async {
     let path = NSTemporaryDirectory() + "cdsd_\(UUID().uuidString.prefix(8)).sock"
     defer { unlink(path) }
@@ -213,6 +253,55 @@ final class DaemonClientShutdownTests: XCTestCase {
 }
 
 final class DaemonShutdownCoordinatorTests: XCTestCase {
+  @MainActor
+  func testOwnedShutdownRequestedBeforeHelloAvoidsFallbackAfterEOF() async {
+    let path = NSTemporaryDirectory() + "cdso_\(UUID().uuidString.prefix(8)).sock"
+    defer { unlink(path) }
+    let listenFd = makeShutdownListener(path: path)
+    defer { close(listenFd) }
+    let sink = ShutdownCommandSink()
+    let accepted = expectation(description: "socket accepted before hello")
+    let releaseHello = DispatchSemaphore(value: 0)
+
+    Thread {
+      let clientFd = accept(listenFd, nil, nil)
+      guard clientFd >= 0 else { return }
+      accepted.fulfill()
+      releaseHello.wait()
+      writeShutdownLine(
+        #"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n",
+        to: clientFd)
+      readCommandsUntilShutdown(from: clientFd, into: sink)
+      close(clientFd)
+    }.start()
+
+    let client = DaemonClient(socketPath: path)
+    let stream = await client.events()
+    let consumer = Task { for await _ in stream {} }
+    await client.start()
+    await fulfillment(of: [accepted], timeout: 1)
+    try? await Task.sleep(for: .milliseconds(20))
+
+    let coordinator = DaemonShutdownCoordinator()
+    let fallbacks = LockedCounter()
+    let replied = expectation(description: "termination reply")
+    XCTAssertEqual(
+      coordinator.begin(
+        shutdown: { await client.shutdownAndWait(timeout: .seconds(1)) },
+        forceTerminateOwnedDaemon: { fallbacks.increment() },
+        reply: { _ in replied.fulfill() }),
+      .terminateLater)
+    try? await Task.sleep(for: .milliseconds(20))
+    releaseHello.signal()
+
+    await fulfillment(of: [replied], timeout: 1)
+    consumer.cancel()
+    XCTAssertEqual(fallbacks.count, 0)
+    XCTAssertEqual(
+      sink.text.split(separator: "\n").filter { $0 == #"{"type":"shutdown"}"# }.count,
+      1)
+  }
+
   @MainActor
   func testSuccessfulShutdownRepliesOnceWithoutFallback() async {
     let coordinator = DaemonShutdownCoordinator()

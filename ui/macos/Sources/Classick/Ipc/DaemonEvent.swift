@@ -576,17 +576,31 @@ enum DaemonEvent: Decodable, Sendable {
 struct DurableAcknowledgement: Equatable, Sendable {
   var requestID: String
   var revision: UInt64?
+  var configState: ConfigCommitState?
+}
+
+struct ConfigCommitState: Equatable, Sendable {
+  var source: String?
+  var daemon: DaemonSettings?
+  var ipod: IpodIdentity?
 }
 
 extension DaemonEvent {
   var durableAcknowledgement: DurableAcknowledgement? {
     switch self {
-    case .configUpdate(_, _, _, let revision, let requestID):
-      requestID.map { DurableAcknowledgement(requestID: $0, revision: revision) }
+    case .configUpdate(let source, let daemon, let ipod, let revision, let requestID):
+      requestID.map {
+        DurableAcknowledgement(
+          requestID: $0,
+          revision: revision,
+          configState: ConfigCommitState(source: source, daemon: daemon, ipod: ipod))
+      }
     case .selectionUpdate(_, _, _, let requestID), .playlistsUpdate(_, let requestID):
-      requestID.map { DurableAcknowledgement(requestID: $0, revision: nil) }
+      requestID.map {
+        DurableAcknowledgement(requestID: $0, revision: nil, configState: nil)
+      }
     case .deviceConfigUpdate(_, _, _, _, let requestID):
-      DurableAcknowledgement(requestID: requestID, revision: nil)
+      DurableAcknowledgement(requestID: requestID, revision: nil, configState: nil)
     default:
       nil
     }

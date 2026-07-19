@@ -63,7 +63,8 @@ Per global AGENTS.md: record discovered conventions, gotchas, debugging insights
 - **Fix:** Two layers in `runtime.rs` + `sync_orchestrator.rs`:
   1. `build_command()` now sets `.kill_on_drop(true)` so any unexpected drop of the `Child` (panic, runtime teardown) kills the subprocess.
   2. `handle_client_command` returns `bool` ("should exit"); `Shutdown` returns true instead of `std::process::exit`. The main `select!` loop breaks with `ExitReason::Shutdown`, signals cancel once, then keeps receiving the matching terminal internal event for longer than the orchestrator's 120-second inactivity grace.
-- **Important: do NOT remove or fork the drain.** Client shutdown, SIGINT/SIGTERM, and `--daemon-parent-pid` mismatch all enter the same runtime exit and bounded finalization path. Hard-killing the subprocess mid-publication could corrupt the iPod's DB/artwork state. The outer shutdown budget must remain longer than the progress-reset finalization watchdog so only a genuinely stalled child reaches `kill_on_drop`; a manually launched `--daemon` intentionally has no parent lease.
+- **Important: do NOT remove or fork the drain.** Client shutdown, SIGINT/SIGTERM, and `--daemon-parent-pid` mismatch all enter the same runtime exit and finalization path. Hard-killing the subprocess mid-publication could corrupt the iPod's DB/artwork state. The child orchestrator's progress-reset watchdog must be the only stall deadline; a second fixed runtime budget can kill healthy publication that continues beyond it. A manually launched `--daemon` intentionally has no parent lease.
+- **Durable IPC needs committed-state evidence and stable create identity:** an echoed request ID is not an acknowledgement when the canonical config still differs, and replayable creates must receive a deterministic client identity before outbox encoding so a lost reply cannot allocate a second resource.
 
 ## Daemon's configured_serial was captured-once at startup (2026-05-24)
 

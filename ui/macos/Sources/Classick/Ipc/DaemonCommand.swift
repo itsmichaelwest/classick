@@ -466,6 +466,64 @@ enum DaemonCommand: Encodable, Sendable {
     }
   }
 
+  func normalizedForDurableEncoding() -> DaemonCommand {
+    guard case .savePlaylist(let playlist, let requestID) = self else { return self }
+    switch playlist {
+    case .manual(nil, let name, let tracks):
+      return .savePlaylist(
+        .manual(
+          slug: Self.stableCreateSlug(name: name, requestID: requestID), name: name, tracks: tracks),
+        requestID: requestID)
+    case .smart(nil, let name, let rules):
+      return .savePlaylist(
+        .smart(
+          slug: Self.stableCreateSlug(name: name, requestID: requestID), name: name, rules: rules),
+        requestID: requestID)
+    case .manual, .smart:
+      return self
+    }
+  }
+
+  private static func stableCreateSlug(name: String, requestID: String) -> String {
+    "\(slugify(name))-\(slugify(requestID))"
+  }
+
+  private static func slugify(_ value: String) -> String {
+    var result = ""
+    var lastWasSeparator = true
+    for character in value {
+      if character.isASCII, character.isLetter || character.isNumber {
+        result += character.lowercased()
+        lastWasSeparator = false
+      } else if !lastWasSeparator {
+        result.append("-")
+        lastWasSeparator = true
+      }
+    }
+    while result.hasSuffix("-") {
+      result.removeLast()
+    }
+    return result.isEmpty ? "playlist" : result
+  }
+
+  func isCommitted(by acknowledgement: DurableAcknowledgement) -> Bool {
+    guard case .saveConfig(let source, let daemon, let ipod, _) = self else { return true }
+    guard acknowledgement.revision != nil, let state = acknowledgement.configState else {
+      return false
+    }
+    if let source, state.source != source { return false }
+    if let daemon, state.daemon != daemon { return false }
+    if let ipod {
+      guard let committedIpod = state.ipod,
+        committedIpod.serial == ipod.serial,
+        committedIpod.modelLabel == ipod.modelLabel,
+        committedIpod.customSelection == ipod.customSelection
+      else { return false }
+      if let name = ipod.name, committedIpod.name != name { return false }
+    }
+    return true
+  }
+
   func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     switch self {
