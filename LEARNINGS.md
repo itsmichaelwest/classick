@@ -7,9 +7,11 @@ incidents and completed gate reports are archived in
 
 ## Device and data safety
 
-- iTunes rejects libgpod-managed databases and may offer Restore even when the
-  iPod firmware accepts them. Keep the iTunes-running preflight and warning
-  copy; users must close iTunes and not restore.
+- On-device verification shows that a Classick-managed database is not
+  intrinsically unreadable to iTunes/Music. Do not repeat the earlier
+  "libgpod iPods are always rejected" claim. The running-process preflight is
+  only a conservative concurrent-access guard while Classick mutates device
+  state, not a workaround for a permanent format incompatibility.
 - Treat database, artwork, playlists, ownership, and manifests as one
   coordinated publication. Rollback must restore the exact recorded
   bytes-or-absence for every authority before becoming terminal.
