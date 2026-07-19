@@ -22,9 +22,10 @@ pub enum SyncOutcome {
     Ok,
     Error,
     Aborted,
+    Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncSummary {
     pub add: usize,
     pub modify: usize,
@@ -443,7 +444,7 @@ mod tests {
         for (timestamp, outcome) in [
             ("2026-07-18T10:00:00Z", SyncOutcome::Ok),
             ("2026-07-18T10:01:00Z", SyncOutcome::Error),
-            ("2026-07-18T10:02:00Z", SyncOutcome::Aborted),
+            ("2026-07-18T10:02:00Z", SyncOutcome::Cancelled),
         ] {
             let mut entry = make_entry(timestamp, outcome);
             entry.serial = "A".to_string();
@@ -458,6 +459,23 @@ mod tests {
             svc.latest_success("A").unwrap().timestamp,
             "2026-07-18T10:00:00Z"
         );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn cancelled_outcome_round_trips_without_replacing_latest_success() {
+        let p = tmp_path("cancelled");
+        let _ = std::fs::remove_file(&p);
+        let svc = HistoryService::new(p.clone());
+        let mut successful = make_entry("2026-07-19T10:00:00Z", SyncOutcome::Ok);
+        successful.serial = "RAW-A".to_string();
+        svc.append(successful.clone()).unwrap();
+        let mut cancelled = make_entry("2026-07-19T10:01:00Z", SyncOutcome::Cancelled);
+        cancelled.serial = "RAW-A".to_string();
+        svc.append(cancelled.clone()).unwrap();
+
+        assert_eq!(svc.latest_attempt("RAW-A"), Some(cancelled));
+        assert_eq!(svc.latest_success("RAW-A"), Some(successful));
         let _ = std::fs::remove_file(&p);
     }
 

@@ -1122,44 +1122,28 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
         }
     };
 
-    // Graceful shutdown: if a sync is in flight, give the orchestrator a
-    // bounded window to drain (it writes Cancel to subprocess stdin and
-    // force-kills after SYNC_KILL_GRACE). The kill_on_drop flag on the
-    // child Command is the backstop — when this function returns and the
-    // tokio runtime tears down, the orchestrator task is dropped and any
-    // still-living subprocess gets TerminateProcess'd. Without this drain,
-    // the OS would yank the subprocess mid-itdb_write and risk corrupting
-    // the iPod's iTunesDB.
+    // Graceful shutdown: if a sync is in flight, keep the runtime alive while
+    // the orchestrator drains cancellation finalization. The outer budget is
+    // deliberately longer than the orchestrator's inactivity watchdog; only
+    // a stalled child reaches kill_on_drop.
     match exit_reason {
         ExitReason::Shutdown => {
-            let active_session_id = state.active_session().map(|session| session.id);
-            if active_session_id.is_none() {
+            if state.active_session().is_none() {
                 tracing::info!("daemon: clean shutdown — no in-flight sync to drain");
             } else {
-                if let Some(tx) = active_session_id.and_then(|id| state.take_cancel(id)) {
-                    let _ = tx.send(());
-                    tracing::info!("daemon: signalled in-flight sync to cancel before exit");
-                }
-                let drain = tokio::time::timeout(crate::daemon::SHUTDOWN_DRAIN_BUDGET, async {
-                    while let Some(internal) = internal_rx.recv().await {
-                        match internal {
-                            InternalEvent::SyncCompleted { session_id, .. }
-                            | InternalEvent::ScanCompleted { session_id, .. }
-                                if Some(session_id) == active_session_id =>
-                            {
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                })
-                .await;
-                match drain {
-                    Ok(()) => tracing::info!("daemon: in-flight sync drained cleanly"),
-                    Err(_) => tracing::warn!(
+                if drain_active_session_for_shutdown(
+                    &mut state,
+                    &mut internal_rx,
+                    shutdown_drain_budget(),
+                )
+                .await
+                {
+                    tracing::info!("daemon: in-flight sync drained cleanly");
+                } else {
+                    tracing::warn!(
                         "daemon: shutdown drain timed out after {:?}; subprocess will be killed by kill_on_drop",
-                        crate::daemon::SHUTDOWN_DRAIN_BUDGET,
-                    ),
+                        shutdown_drain_budget(),
+                    );
                 }
             }
         }
@@ -1172,6 +1156,41 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
 /// take a different drain path.
 enum ExitReason {
     Shutdown,
+}
+
+fn shutdown_drain_budget() -> std::time::Duration {
+    sync_orchestrator::FINALIZATION_STALL_GRACE + std::time::Duration::from_secs(5)
+}
+
+async fn drain_active_session_for_shutdown(
+    state: &mut RuntimeState,
+    internal_rx: &mut mpsc::UnboundedReceiver<InternalEvent>,
+    budget: std::time::Duration,
+) -> bool {
+    let Some(active_session_id) = state.active_session().map(|session| session.id) else {
+        return true;
+    };
+    if let Some(tx) = state.take_cancel(active_session_id) {
+        let _ = tx.send(());
+        tracing::info!("daemon: signalled in-flight sync to cancel before exit");
+    }
+
+    tokio::time::timeout(budget, async {
+        while let Some(internal) = internal_rx.recv().await {
+            match internal {
+                InternalEvent::SyncCompleted { session_id, .. }
+                | InternalEvent::ScanCompleted { session_id, .. }
+                    if session_id == active_session_id =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Apply a sync's outcome to state + history, then broadcast a fresh
@@ -1285,20 +1304,12 @@ fn handle_internal_event(
 
             let (history_outcome, error_message, summary, db_restored) = match outcome {
                 Ok(OrchestratorOutcome::Completed {
-                    outcome: SyncOutcome::Ok,
                     summary,
                     db_restored,
-                }) => (SyncOutcome::Ok, None, summary, db_restored),
-                Ok(OrchestratorOutcome::Completed {
-                    outcome,
-                    summary,
-                    db_restored,
-                }) => (
-                    outcome,
-                    Some("sync subprocess reported failure".to_string()),
-                    summary,
-                    db_restored,
-                ),
+                }) => (SyncOutcome::Ok, None, Some(summary), db_restored),
+                Ok(OrchestratorOutcome::Cancelled { summary }) => {
+                    (SyncOutcome::Cancelled, None, summary, false)
+                }
                 Ok(OrchestratorOutcome::Aborted { reason, summary }) => {
                     (SyncOutcome::Aborted, Some(reason), summary, false)
                 }
@@ -2341,9 +2352,8 @@ fn handle_client_command(
         }
         DaemonCommand::CancelSync { .. } => {
             // Wake the orchestrator's cancel arm. The orchestrator
-            // writes a Cancel command to subprocess stdin and force-kills
-            // after 5s; the SyncCompleted internal event arrives shortly
-            // with outcome = Aborted{reason="user_cancelled"}.
+            // writes one Cancel command, keeps both pipes open, and drains
+            // through the subprocess's finalization terminal event + EOF.
             let active_session_id = state.active_session().map(|session| session.id);
             if let Some(tx) = active_session_id.and_then(|id| state.take_cancel(id)) {
                 let _ = tx.send(());
@@ -3315,6 +3325,93 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_budget_covers_a_full_finalization_stall_grace() {
+        assert!(shutdown_drain_budget() > sync_orchestrator::FINALIZATION_STALL_GRACE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_drain_waits_for_completion_beyond_the_old_eight_second_budget() {
+        let mut state = RuntimeState::new();
+        let session = state
+            .try_admit_device(
+                SyncTrigger::Manual,
+                "RAW-A",
+                std::path::Path::new("/Volumes/IPOD"),
+            )
+            .unwrap();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (pause_tx, _pause_rx) = oneshot::channel();
+        let (prompt_tx, _prompt_rx) = mpsc::unbounded_channel();
+        state.install_controls(
+            session.id,
+            SessionControls::new(cancel_tx, pause_tx, prompt_tx),
+        );
+        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            cancel_rx.await.expect("shutdown sends cancel");
+            tokio::time::sleep(std::time::Duration::from_secs(9)).await;
+            internal_tx
+                .send(InternalEvent::SyncCompleted {
+                    session_id: session.id,
+                    outcome: Ok(OrchestratorOutcome::Cancelled { summary: None }),
+                })
+                .unwrap();
+        });
+
+        assert!(
+            drain_active_session_for_shutdown(
+                &mut state,
+                &mut internal_rx,
+                shutdown_drain_budget(),
+            )
+            .await
+        );
+    }
+
+    #[test]
+    fn cancelled_completion_is_persisted_as_cancelled() {
+        let base =
+            std::env::temp_dir().join(format!("classick-cancelled-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let history = HistoryService::new(base.join("history.json"));
+        let config_path = base.join("config.toml");
+        let mut state = RuntimeState::new();
+        let session = state
+            .try_admit_device(
+                SyncTrigger::Manual,
+                "RAW-A",
+                std::path::Path::new("/Volumes/IPOD"),
+            )
+            .unwrap();
+        let mut registry = registry(&["RAW-A"]);
+        let (event_tx, _) = broadcast::channel(8);
+        let mut library_count = None;
+        let mut revision = ConfigRevision::default();
+
+        handle_internal_event(
+            InternalEvent::SyncCompleted {
+                session_id: session.id,
+                outcome: Ok(OrchestratorOutcome::Cancelled { summary: None }),
+            },
+            &mut state,
+            &event_tx,
+            &history,
+            &mut registry,
+            &config_path,
+            &mut library_count,
+            &mut revision,
+        );
+
+        assert_eq!(
+            history.latest_attempt("RAW-A").unwrap().outcome,
+            SyncOutcome::Cancelled
+        );
+        assert!(state.is_idle());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn legacy_history_has_an_authority_only_with_one_configured_device() {
         assert_eq!(
             unique_configured_serial(&registry(&["RAW-A"])),
@@ -3585,8 +3682,7 @@ mod tests {
             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async {
                 Ok(OrchestratorOutcome::Completed {
-                    outcome: SyncOutcome::Ok,
-                    summary: None,
+                    summary: SyncSummary::default(),
                     db_restored: false,
                 })
             })

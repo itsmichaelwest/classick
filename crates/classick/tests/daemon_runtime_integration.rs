@@ -96,8 +96,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
         Box::pin(async move {
             Ok(
                 classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                    outcome: classick::daemon::history::SyncOutcome::Ok,
-                    summary: None,
+                    summary: classick::daemon::history::SyncSummary::default(),
                     db_restored: false,
                 },
             )
@@ -119,8 +118,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
                 Box::pin(async move {
                     Ok(
                         classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                            outcome: classick::daemon::history::SyncOutcome::Ok,
-                            summary: None,
+                            summary: classick::daemon::history::SyncSummary::default(),
                             db_restored: false,
                         },
                     )
@@ -140,8 +138,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
                 Box::pin(async move {
                     Ok(
                         classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                            outcome: classick::daemon::history::SyncOutcome::Ok,
-                            summary: None,
+                            summary: classick::daemon::history::SyncSummary::default(),
                             db_restored: false,
                         },
                     )
@@ -161,8 +158,7 @@ async fn auto_sync_fires_when_configured_device_connects() {
                 Box::pin(async move {
                     Ok(
                         classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                            outcome: classick::daemon::history::SyncOutcome::Ok,
-                            summary: None,
+                            summary: classick::daemon::history::SyncSummary::default(),
                             db_restored: false,
                         },
                     )
@@ -230,8 +226,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
         Box::pin(async move {
             Ok(
                 classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                    outcome: classick::daemon::history::SyncOutcome::Ok,
-                    summary: None,
+                    summary: classick::daemon::history::SyncSummary::default(),
                     db_restored: false,
                 },
             )
@@ -253,8 +248,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
                 Box::pin(async move {
                     Ok(
                         classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                            outcome: classick::daemon::history::SyncOutcome::Ok,
-                            summary: None,
+                            summary: classick::daemon::history::SyncSummary::default(),
                             db_restored: false,
                         },
                     )
@@ -274,8 +268,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
                 Box::pin(async move {
                     Ok(
                         classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                            outcome: classick::daemon::history::SyncOutcome::Ok,
-                            summary: None,
+                            summary: classick::daemon::history::SyncSummary::default(),
                             db_restored: false,
                         },
                     )
@@ -295,8 +288,7 @@ async fn unknown_device_does_not_trigger_auto_sync() {
                 Box::pin(async move {
                     Ok(
                         classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                            outcome: classick::daemon::history::SyncOutcome::Ok,
-                            summary: None,
+                            summary: classick::daemon::history::SyncSummary::default(),
                             db_restored: false,
                         },
                     )
@@ -374,8 +366,7 @@ async fn runtime_stays_responsive_during_long_sync() {
             #[allow(unreachable_code)]
             Ok(
                 classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                    outcome: classick::daemon::history::SyncOutcome::Ok,
-                    summary: None,
+                    summary: classick::daemon::history::SyncSummary::default(),
                     db_restored: false,
                 },
             )
@@ -397,8 +388,7 @@ async fn runtime_stays_responsive_during_long_sync() {
                 Box::pin(async move {
                     Ok(
                         classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                            outcome: classick::daemon::history::SyncOutcome::Ok,
-                            summary: None,
+                            summary: classick::daemon::history::SyncSummary::default(),
                             db_restored: false,
                         },
                     )
@@ -418,8 +408,7 @@ async fn runtime_stays_responsive_during_long_sync() {
                 Box::pin(async move {
                     Ok(
                         classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                            outcome: classick::daemon::history::SyncOutcome::Ok,
-                            summary: None,
+                            summary: classick::daemon::history::SyncSummary::default(),
                             db_restored: false,
                         },
                     )
@@ -439,8 +428,7 @@ async fn runtime_stays_responsive_during_long_sync() {
                 Box::pin(async move {
                     Ok(
                         classick::daemon::sync_orchestrator::OrchestratorOutcome::Completed {
-                            outcome: classick::daemon::history::SyncOutcome::Ok,
-                            summary: None,
+                            summary: classick::daemon::history::SyncSummary::default(),
                             db_restored: false,
                         },
                     )

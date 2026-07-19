@@ -1,12 +1,13 @@
 //! Spawns the per-sync `classick.exe --ipc-mode --apply --ipod <drive>`
 //! subprocess. Forwards every IpcEvent line to the broadcast channel so
 //! UI clients see live progress. Counts per-track errors against
-//! `Summary.total_planned` and bails (Cancel + 5s force-kill) when
+//! `Summary.total_planned` and bails through coordinated cancellation when
 //! `tracks_errored * 2 > total_planned`.
 
-use crate::daemon::history::{SyncOutcome, SyncSummary};
-use crate::daemon::session_admission::EventContext;
+use crate::daemon::history::SyncSummary;
+use crate::daemon::session_admission::{EventContext, SessionPhase};
 use crate::ipc_daemon::DaemonEvent;
+use crate::progress::StopReason;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -17,35 +18,34 @@ use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::Instant;
 
-// The production grace period lives in `crate::daemon::PAUSE_DRAIN_GRACE`
-// (15s). Tests use a much shorter value so the "subprocess never drains"
-// path doesn't add real wall-clock seconds to `cargo test`.
-#[cfg(not(test))]
-use crate::daemon::PAUSE_DRAIN_GRACE;
-#[cfg(test)]
-const PAUSE_DRAIN_GRACE: Duration = Duration::from_millis(150);
+/// Emergency backstop for a finalizing subprocess that has stopped producing
+/// progress. Every valid progress event resets this grace period.
+pub const FINALIZATION_STALL_GRACE: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestratorOutcome {
     Completed {
-        outcome: SyncOutcome,
-        summary: Option<SyncSummary>,
+        summary: SyncSummary,
         /// Mirrors the subprocess `finish` event's `db_restored` field
-        /// (Task 4's auto-restore-from-backup path). Only ever observed on
-        /// this variant: `Aborted`/`Paused` exits (cancel, >50% bail, pause
-        /// backstop) tear the subprocess down before its terminal `finish`
-        /// line is read, so there's nothing to parse it from.
+        /// (Task 4's auto-restore-from-backup path). Only successful syncs
+        /// expose it because interrupted and user-stopped attempts have their
+        /// own terminal outcomes even when a trailing `finish` is drained.
         db_restored: bool,
     },
     Aborted {
         reason: String,
         summary: Option<SyncSummary>,
     },
+    Cancelled {
+        summary: Option<SyncSummary>,
+    },
     /// The subprocess emitted `{"type":"paused"}` (graceful drain +
     /// checkpoint) and then exited on its own. Distinct from `Aborted`:
     /// nothing failed, the user asked to stop, and a later `TriggerSync`
     /// resumes from the checkpoint via the normal diff.
-    Paused { summary: Option<SyncSummary> },
+    Paused {
+        summary: Option<SyncSummary>,
+    },
 }
 
 /// Build the command to spawn. Extracted so tests can verify args
@@ -133,20 +133,19 @@ impl FailureTracker {
 /// Drive the spawned child to completion, until bail, until cancelled, or
 /// until paused.
 ///
-/// `cancel_rx` fires when the user clicks Cancel in the UI; the orchestrator
-/// writes a Cancel command to the subprocess stdin and force-kills after 5s.
+/// `cancel_rx` fires when the user clicks Cancel in the UI. The orchestrator
+/// writes exactly one Cancel command, keeps stdin/stdout open, and forwards
+/// progress through `cancelled` and EOF.
 ///
 /// `pause_rx` fires when the user clicks Pause in the UI; the orchestrator
 /// writes a Pause command to the subprocess stdin and, unlike cancel, does
 /// NOT immediately force-kill — pause is graceful, so the subprocess is
 /// given a chance to finish draining its in-flight window, checkpoint, emit
-/// `{"type":"paused"}`, and exit on its own. That trust is bounded, though:
-/// a `PAUSE_DRAIN_GRACE` deadline is armed the moment pause is requested, and
-/// if the subprocess hasn't exited by then, it's treated as wedged and
-/// force-killed via the same `bounded_kill` path cancel uses. Either way the
-/// outcome is still `Paused` — the subprocess checkpoints incrementally, so
-/// whatever committed before the wedge is preserved and a later `TriggerSync`
-/// resumes normally.
+/// `{"type":"paused"}`, and exit on its own.
+///
+/// Both stop paths use an inactivity watchdog: every progress line resets a
+/// 120-second grace. A child that stops producing progress is killed and
+/// reported as aborted; it is never reported as cancelled or paused.
 ///
 /// `prompt_decisions_rx` carries `(id, choice)` pairs from
 /// `DaemonCommand::DecidePrompt`; each is serialised as
@@ -264,12 +263,36 @@ pub async fn run_scan(
 
 async fn drive_child(
     exe: PathBuf,
+    cmd: Command,
+    cancel_rx: oneshot::Receiver<()>,
+    pause_rx: oneshot::Receiver<()>,
+    prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
+    event_tx: broadcast::Sender<DaemonEvent>,
+    event_context: EventContext,
+) -> Result<OrchestratorOutcome> {
+    drive_child_with_stall_grace(
+        exe,
+        cmd,
+        cancel_rx,
+        pause_rx,
+        prompt_decisions_rx,
+        event_tx,
+        event_context,
+        FINALIZATION_STALL_GRACE,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_child_with_stall_grace(
+    exe: PathBuf,
     mut cmd: Command,
     mut cancel_rx: oneshot::Receiver<()>,
     mut pause_rx: oneshot::Receiver<()>,
     mut prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
     event_context: EventContext,
+    stall_grace: Duration,
 ) -> Result<OrchestratorOutcome> {
     let mut child = cmd
         .spawn()
@@ -282,7 +305,10 @@ async fn drive_child(
     let mut last_summary: Option<SyncSummary> = None;
     let mut finish_success: Option<bool> = None;
     let mut finish_db_restored = false;
+    let mut cancelled = false;
     let mut paused = false;
+    let mut stop_disposition: Option<StopDisposition> = None;
+    let mut watchdog = FinalizationWatchdog::new(stall_grace);
     // A one-shot receiver becomes ready for both an explicit signal and a
     // dropped sender. Track closure separately so sender teardown disables
     // the branch instead of being misread as a cancel/pause request or being
@@ -290,12 +316,6 @@ async fn drive_child(
     let mut cancel_channel_open = true;
     let mut pause_channel_open = true;
     let mut prompt_channel_open = true;
-    // Armed the instant pause is requested; an ABSOLUTE deadline (not a
-    // fresh relative sleep) so re-evaluating it on every loop iteration
-    // still targets the same instant instead of restarting the clock.
-    // `None` means no pause is in flight; the backstop branch below is
-    // effectively disabled in that state.
-    let mut pause_deadline: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -310,8 +330,8 @@ async fn drive_child(
                 // a SyncEvent envelope keeps the daemon protocol independent
                 // from M1 stdio-IPC semver.
                 let _ = event_tx.send(event_context.wrap(line.clone()));
-
                 let Some(value) = serde_json::from_str::<Value>(&line).ok() else { continue };
+                watchdog.record_progress();
                 let ty = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match ty {
                     "summary" => {
@@ -322,20 +342,25 @@ async fn drive_child(
                     "track_done" => { tracker.tracks_completed += 1; }
                     "error" => {
                         tracker.tracks_errored += 1;
-                        if tracker.should_bail() {
-                            let _ = stdin.write_all(b"{\"type\":\"cancel\"}\n").await;
-                            let _ = stdin.flush().await;
-                            drop(stdin);
-                            bounded_kill(&mut child, crate::daemon::SYNC_KILL_GRACE).await;
-                            return Ok(OrchestratorOutcome::Aborted {
-                                reason: format!(
+                        if tracker.should_bail() && stop_disposition.is_none() {
+                            write_stop_command(&mut stdin, StopReason::Cancelled).await;
+                            stop_disposition = Some(StopDisposition::Aborted(format!(
                                     "too_many_failures: {} of {} tracks failed",
                                     tracker.tracks_errored, tracker.total_planned
-                                ),
-                                summary: last_summary,
+                                )));
+                            watchdog.begin(StopReason::Cancelled);
+                        }
+                    }
+                    "finalizing" => {
+                        if let Some(reason) = stop_reason_from_value(&value) {
+                            watchdog.begin(reason);
+                            stop_disposition.get_or_insert(match reason {
+                                StopReason::Cancelled => StopDisposition::Cancelled,
+                                StopReason::Paused => StopDisposition::Paused,
                             });
                         }
                     }
+                    "cancelled" => cancelled = true,
                     "finish" => {
                         finish_success = value.get("success").and_then(|v| v.as_bool());
                         finish_db_restored = db_restored_from_finish_value(&value);
@@ -347,64 +372,50 @@ async fn drive_child(
                         // If a summary event was somehow never seen, fall
                         // back to a zeroed one rather than silently dropping
                         // the fit-pass/artwork rollup.
-                        let summary = last_summary.get_or_insert_with(|| SyncSummary {
+                        let summary = last_summary.get_or_insert(SyncSummary {
                             add: 0, modify: 0, remove: 0, unchanged: 0, skipped: 0,
                             metadata_only: 0, skipped_for_space_tracks: 0,
                             skipped_for_space_bytes: 0, artwork_failed_sources: 0,
                         });
                         merge_finish_fields_into_summary(summary, &value);
                     }
-                    "paused" => {
-                        paused = true;
-                    }
+                    "paused" => paused = true,
                     _ => {}
                 }
             }
             cancel_result = &mut cancel_rx, if cancel_channel_open => {
+                cancel_channel_open = false;
                 match classify_control_signal(cancel_result) {
                     ControlSignal::Requested => {
-                        // User/runtime cancelled. Same teardown sequence as the >50% bail.
-                        let _ = stdin.write_all(b"{\"type\":\"cancel\"}\n").await;
-                        let _ = stdin.flush().await;
-                        drop(stdin);
-                        bounded_kill(&mut child, crate::daemon::SYNC_KILL_GRACE).await;
-                        return Ok(OrchestratorOutcome::Aborted {
-                            reason: "user_cancelled".to_string(),
-                            summary: last_summary,
-                        });
+                        if stop_disposition.is_none() {
+                            write_stop_command(&mut stdin, StopReason::Cancelled).await;
+                            stop_disposition = Some(StopDisposition::Cancelled);
+                            watchdog.begin(StopReason::Cancelled);
+                        }
                     }
-                    ControlSignal::Closed => cancel_channel_open = false,
+                    ControlSignal::Closed => {}
                 }
             }
             pause_result = &mut pause_rx, if pause_channel_open => {
                 pause_channel_open = false;
-                if classify_control_signal(pause_result) == ControlSignal::Requested {
-                    let _ = stdin.write_all(b"{\"type\":\"pause\"}\n").await;
-                    let _ = stdin.flush().await;
-                    // No immediate force-kill: keep looping, relaying lines,
-                    // trusting the subprocess to drain + checkpoint + emit
-                    // "paused" + exit on its own. `pause_deadline` below is the
-                    // bounded backstop in case that trust is misplaced.
-                    pause_deadline = Some(Instant::now() + PAUSE_DRAIN_GRACE);
+                if classify_control_signal(pause_result) == ControlSignal::Requested
+                    && stop_disposition.is_none()
+                {
+                    write_stop_command(&mut stdin, StopReason::Paused).await;
+                    stop_disposition = Some(StopDisposition::Paused);
+                    watchdog.begin(StopReason::Paused);
                 }
             }
-            // Backstop for a paused subprocess that never drains (e.g. a
-            // libgpod/FS write wedged on a slow spinning-HDD + fskit FAT32
-            // volume during the final checkpoint). Deliberately does NOT
-            // use an `if pause_deadline.is_some()` guard combined with
-            // `.unwrap()` on the async expression itself — tokio::select!
-            // still evaluates a disabled branch's async expression (it just
-            // skips polling it), so that would panic on every iteration
-            // before pause is ever requested. Routing through
-            // `pending()` when there's no deadline sidesteps that
-            // entirely: the branch simply never becomes ready.
-            _ = pause_drain_deadline(pause_deadline) => {
+            _ = finalization_stall_deadline(watchdog.deadline()) => {
                 tracing::warn!(
-                    "orchestrator: paused sync did not drain within {:?}; force-killing as a backstop",
-                    PAUSE_DRAIN_GRACE
+                    "orchestrator: finalization made no progress for {:?}; force-killing",
+                    stall_grace
                 );
-                bounded_kill(&mut child, crate::daemon::SYNC_KILL_GRACE).await;
-                return Ok(OrchestratorOutcome::Paused { summary: last_summary });
+                force_kill(&mut child).await;
+                return Ok(OrchestratorOutcome::Aborted {
+                    reason: "finalization_stalled".to_string(),
+                    summary: last_summary,
+                });
             }
             prompt_decision = prompt_decisions_rx.recv(), if prompt_channel_open => {
                 let Some((id, choice)) = prompt_decision else {
@@ -439,22 +450,59 @@ async fn drive_child(
         }
     }
 
-    let _ = child.wait().await;
+    drop(stdin);
+    let status = child.wait().await.context("wait for sync subprocess")?;
 
-    if paused {
-        return Ok(OrchestratorOutcome::Paused {
-            summary: last_summary,
+    match stop_disposition {
+        Some(StopDisposition::Cancelled) if cancelled => {
+            return Ok(OrchestratorOutcome::Cancelled {
+                summary: last_summary,
+            });
+        }
+        Some(StopDisposition::Paused) if paused => {
+            return Ok(OrchestratorOutcome::Paused {
+                summary: last_summary,
+            });
+        }
+        Some(StopDisposition::Aborted(reason)) => {
+            return Ok(OrchestratorOutcome::Aborted {
+                reason,
+                summary: last_summary,
+            });
+        }
+        Some(_) => {
+            return Ok(OrchestratorOutcome::Aborted {
+                reason: "finalization_interrupted".to_string(),
+                summary: last_summary,
+            });
+        }
+        None if cancelled => {
+            return Ok(OrchestratorOutcome::Cancelled {
+                summary: last_summary,
+            });
+        }
+        None if paused => {
+            return Ok(OrchestratorOutcome::Paused {
+                summary: last_summary,
+            });
+        }
+        None => {}
+    }
+
+    if finish_success == Some(true) && status.success() {
+        return Ok(OrchestratorOutcome::Completed {
+            summary: last_summary.unwrap_or_default(),
+            db_restored: finish_db_restored,
         });
     }
 
-    let outcome = match finish_success {
-        Some(true) => SyncOutcome::Ok,
-        _ => SyncOutcome::Error,
-    };
-    Ok(OrchestratorOutcome::Completed {
-        outcome,
+    Ok(OrchestratorOutcome::Aborted {
+        reason: if finish_success == Some(false) {
+            "sync_subprocess_reported_failure".to_string()
+        } else {
+            format!("sync_subprocess_exited_without_success: {status}")
+        },
         summary: last_summary,
-        db_restored: finish_db_restored,
     })
 }
 
@@ -470,6 +518,75 @@ fn classify_control_signal(
     match result {
         Ok(()) => ControlSignal::Requested,
         Err(_) => ControlSignal::Closed,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StopDisposition {
+    Cancelled,
+    Paused,
+    Aborted(String),
+}
+
+#[derive(Debug)]
+struct FinalizationWatchdog {
+    grace: Duration,
+    phase: SessionPhase,
+    deadline: Option<Instant>,
+}
+
+impl FinalizationWatchdog {
+    fn new(grace: Duration) -> Self {
+        Self {
+            grace,
+            phase: SessionPhase::Running,
+            deadline: None,
+        }
+    }
+
+    fn begin(&mut self, reason: StopReason) {
+        if self.phase == SessionPhase::Running {
+            self.phase = SessionPhase::Finalizing { reason };
+            self.deadline = Some(Instant::now() + self.grace);
+        }
+    }
+
+    fn record_progress(&mut self) {
+        if matches!(self.phase, SessionPhase::Finalizing { .. }) {
+            self.deadline = Some(Instant::now() + self.grace);
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    #[cfg(test)]
+    fn is_stalled(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+}
+
+fn stop_reason_from_value(value: &Value) -> Option<StopReason> {
+    match value.get("reason").and_then(Value::as_str) {
+        Some("cancelled") => Some(StopReason::Cancelled),
+        Some("paused") => Some(StopReason::Paused),
+        _ => None,
+    }
+}
+
+async fn write_stop_command(stdin: &mut tokio::process::ChildStdin, reason: StopReason) {
+    let command = match reason {
+        StopReason::Cancelled => b"{\"type\":\"cancel\"}\n".as_slice(),
+        StopReason::Paused => b"{\"type\":\"pause\"}\n".as_slice(),
+    };
+    if let Err(error) = stdin.write_all(command).await {
+        tracing::warn!("orchestrator: failed to write stop command: {error}");
+        return;
+    }
+    if let Err(error) = stdin.flush().await {
+        tracing::warn!("orchestrator: failed to flush stop command: {error}");
     }
 }
 
@@ -527,29 +644,249 @@ fn merge_finish_fields_into_summary(summary: &mut SyncSummary, v: &Value) {
         .unwrap_or(0) as usize;
 }
 
-/// Resolves at `deadline` if one is armed; otherwise never resolves. Lets
-/// the pause backstop live as an ordinary (unguarded) `select!` branch —
-/// see the comment at its call site in `run` for why a guarded `.unwrap()`
-/// would be unsound here.
-async fn pause_drain_deadline(deadline: Option<Instant>) {
+async fn finalization_stall_deadline(deadline: Option<Instant>) {
     match deadline {
         Some(d) => tokio::time::sleep_until(d).await,
         None => std::future::pending().await,
     }
 }
 
-async fn bounded_kill(child: &mut Child, timeout: Duration) {
-    match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(_) => {}
-        Err(_) => {
-            let _ = child.kill().await;
-        }
-    }
+async fn force_kill(child: &mut Child) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn scripted_command(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        command
+    }
+
+    #[cfg(unix)]
+    fn event_context() -> EventContext {
+        EventContext {
+            session_id: 41,
+            serial: Some("RAW-A".to_string()),
+        }
+    }
+
+    #[cfg(unix)]
+    fn summary() -> SyncSummary {
+        SyncSummary {
+            add: 1,
+            modify: 0,
+            remove: 0,
+            unchanged: 2,
+            skipped: 0,
+            metadata_only: 0,
+            skipped_for_space_tracks: 0,
+            skipped_for_space_bytes: 0,
+            artwork_failed_sources: 0,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_is_written_once_then_finalizing_cancelled_and_eof_are_drained() {
+        let record = std::env::temp_dir().join(format!(
+            "classick-cancel-write-{}-{}.txt",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_file(&record);
+        let script = r#"
+            printf '%s\n' '{"type":"summary","add":1,"modify":0,"remove":0,"unchanged":2,"total_planned":1}'
+            IFS= read -r line
+            printf '%s\n' "$line" > "$RECORD_PATH"
+            printf '%s\n' '{"type":"finalizing","reason":"cancelled","staged_albums":1,"staged_tracks":1}'
+            printf '%s\n' '{"type":"cancelled"}'
+            printf '%s\n' '{"type":"finish","success":true}'
+        "#;
+        let mut command = scripted_command(script);
+        command.env("RECORD_PATH", &record);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (_pause_tx, pause_rx) = oneshot::channel();
+        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+
+        let task = tokio::spawn(drive_child_with_stall_grace(
+            PathBuf::from("/bin/sh"),
+            command,
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+            event_tx,
+            event_context(),
+            Duration::from_secs(1),
+        ));
+        cancel_tx.send(()).unwrap();
+
+        let outcome = task.await.unwrap().unwrap();
+        assert_eq!(
+            outcome,
+            OrchestratorOutcome::Cancelled {
+                summary: Some(summary())
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(&record).unwrap(),
+            "{\"type\":\"cancel\"}\n",
+            "cancel must be written exactly once"
+        );
+        let forwarded: Vec<String> = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .filter_map(|event| match event {
+                DaemonEvent::SyncEvent { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            forwarded
+                .iter()
+                .filter_map(|line| {
+                    serde_json::from_str::<Value>(line)
+                        .ok()
+                        .and_then(|value| value["type"].as_str().map(str::to_string))
+                })
+                .collect::<Vec<_>>(),
+            ["summary", "finalizing", "cancelled", "finish"]
+        );
+        let _ = std::fs::remove_file(record);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ordinary_successful_finish_and_eof_are_completed() {
+        let command = scripted_command(
+            r#"
+                printf '%s\n' '{"type":"summary","add":1,"modify":0,"remove":0,"unchanged":2,"total_planned":1}'
+                printf '%s\n' '{"type":"finish","success":true}'
+            "#,
+        );
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let (_pause_tx, pause_rx) = oneshot::channel();
+        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, _) = broadcast::channel(8);
+
+        let outcome = drive_child_with_stall_grace(
+            PathBuf::from("/bin/sh"),
+            command,
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+            event_tx,
+            event_context(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            OrchestratorOutcome::Completed {
+                summary: summary(),
+                db_restored: false,
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_finalization_is_killed_and_aborted() {
+        let command = scripted_command(
+            r#"
+                IFS= read -r line
+                printf '%s\n' '{"type":"finalizing","reason":"cancelled","staged_albums":1,"staged_tracks":1}'
+                sleep 10
+            "#,
+        );
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (_pause_tx, pause_rx) = oneshot::channel();
+        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, _) = broadcast::channel(8);
+        let task = tokio::spawn(drive_child_with_stall_grace(
+            PathBuf::from("/bin/sh"),
+            command,
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+            event_tx,
+            event_context(),
+            Duration::from_millis(50),
+        ));
+        cancel_tx.send(()).unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stalled child must be killed")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            OrchestratorOutcome::Aborted { reason, .. }
+                if reason == "finalization_stalled"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eof_before_cancelled_is_interrupted_not_cancelled() {
+        let command = scripted_command(
+            r#"
+                IFS= read -r line
+                printf '%s\n' '{"type":"finalizing","reason":"cancelled","staged_albums":1,"staged_tracks":1}'
+            "#,
+        );
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (_pause_tx, pause_rx) = oneshot::channel();
+        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, _) = broadcast::channel(8);
+        let task = tokio::spawn(drive_child_with_stall_grace(
+            PathBuf::from("/bin/sh"),
+            command,
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+            event_tx,
+            event_context(),
+            Duration::from_secs(1),
+        ));
+        cancel_tx.send(()).unwrap();
+
+        assert!(matches!(
+            task.await.unwrap().unwrap(),
+            OrchestratorOutcome::Aborted { reason, .. }
+                if reason == "finalization_interrupted"
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn finalization_progress_resets_the_stall_grace() {
+        let grace = Duration::from_secs(120);
+        let mut watchdog = FinalizationWatchdog::new(grace);
+        watchdog.begin(StopReason::Cancelled);
+        let first_deadline = watchdog.deadline().unwrap();
+
+        tokio::time::advance(Duration::from_secs(119)).await;
+        watchdog.record_progress();
+        let reset_deadline = watchdog.deadline().unwrap();
+
+        assert!(reset_deadline > first_deadline);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(!watchdog.is_stalled());
+        tokio::time::advance(Duration::from_secs(118)).await;
+        assert!(watchdog.is_stalled());
+    }
 
     #[tokio::test]
     async fn dropped_pause_sender_is_not_a_pause_request() {
@@ -573,7 +910,7 @@ mod tests {
         );
     }
 
-    // Exercises `pause_drain_deadline` directly rather than driving `run`
+    // Exercises `finalization_stall_deadline` directly rather than driving `run`
     // end-to-end. A real integration test would need a dummy subprocess
     // that ignores stdin and never exits — the task's suggested `cat` does
     // NOT work: `build_command` always appends
@@ -590,9 +927,9 @@ mod tests {
     // full `run()` behavior.
 
     #[tokio::test(start_paused = true)]
-    async fn pause_drain_deadline_resolves_once_armed_deadline_elapses() {
+    async fn finalization_stall_deadline_resolves_once_armed_deadline_elapses() {
         let deadline = Instant::now() + Duration::from_secs(15);
-        pause_drain_deadline(Some(deadline)).await;
+        finalization_stall_deadline(Some(deadline)).await;
         assert!(
             Instant::now() >= deadline,
             "must not resolve before the armed deadline"
@@ -600,12 +937,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pause_drain_deadline_never_resolves_when_unarmed() {
+    async fn finalization_stall_deadline_never_resolves_when_unarmed() {
         // No deadline armed (mirrors `pause_deadline == None` before pause is
         // ever requested) — the backstop branch must stay pending forever so
         // it can safely live in `select!` without a guard.
         tokio::select! {
-            _ = pause_drain_deadline(None) => panic!("must never resolve without an armed deadline"),
+            _ = finalization_stall_deadline(None) => panic!("must never resolve without an armed deadline"),
             _ = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
     }

@@ -44,8 +44,7 @@ Per global AGENTS.md: record discovered conventions, gotchas, debugging insights
 
 - **Symptom (before fix):** Click "Stop sync" in the tray; daemon sends `{"type":"cancel"}` to the subprocess; nothing visible happens for 5 seconds; daemon's `bounded_kill` then `TerminateProcess`s the subprocess. Every track copied via `itdb_cp_track_to_ipod` so far becomes an orphan because `db.write()` never ran.
 - **Root cause:** `IpcCommand::Cancel` in `src/ipc.rs` maps to `Decision::Review(ReviewDecision::Quit)` and pushes it onto `decision_rx`. But `src/apply_loop.rs`'s `for action in actions` loop never reads from `decision_rx` except inside per-track `try_with_prompt` error-retry paths. On a healthy sync those retries never fire, so the queued Quit just sits there. Documented as "M1 limitation" in the source.
-- **Fix:** At the top of each iteration of the apply loop, non-blocking `decision_rx.try_recv()`. If we see `Decision::Review(ReviewDecision::Quit)`, set a `cancelled` flag and `break`. The post-loop code (`db.write()` + `manifest::save_atomic`) still runs, so completed tracks get registered in the iTunesDB and a "Sync cancelled. Completed tracks were saved." log line replaces the normal "Done." Other (stray) decisions are dropped — they have no consumer at this point.
-- **Why this is the right fix:** the orchestrator's `cancel_rx` → write-cancel-to-stdin → `bounded_kill` chain is fine; it just needed the subprocess side to ACT on the cancel within the grace window. Anything more invasive (per-action cancellation tokens, async apply loop) would be a much bigger rewrite for the same observable behaviour.
+- **Current invariant:** daemon cancellation writes exactly one `cancel` command and keeps stdin/stdout open while the subprocess drains its admitted album and publishes through the coordinated checkpoint. `finalizing`, `cancelled`, trailing `finish`, and EOF are all consumed before admission is released; a 120-second inactivity watchdog resets on each progress event. A total-duration timer is unsafe because healthy artwork/DB publication may take longer while still making progress.
 
 ## ffmpeg without `-nostdin` hangs at ~97% of a track (2026-05-24)
 
@@ -62,8 +61,8 @@ Per global AGENTS.md: record discovered conventions, gotchas, debugging insights
 - **Root cause:** `handle_client_command`'s `Shutdown` arm called `std::process::exit(0)`, which skips Drop. Tokio's `Child` Drop (which would run `TerminateProcess` if `kill_on_drop(true)` is set) never fires. On Windows there is no SIGHUP-style parent-death signal, so the child becomes a true orphan.
 - **Fix:** Two layers in `runtime.rs` + `sync_orchestrator.rs`:
   1. `build_command()` now sets `.kill_on_drop(true)` so any unexpected drop of the `Child` (panic, runtime teardown) kills the subprocess.
-  2. `handle_client_command` returns `bool` ("should exit"); `Shutdown` returns true instead of `std::process::exit`. The main `select!` loop breaks with `ExitReason::Shutdown`, the post-loop code signals cancel + drains for up to `SHUTDOWN_DRAIN_BUDGET` (8s), then returns `Ok(())` so the tokio runtime drops cleanly and `kill_on_drop` is the backstop.
-- **Important: do NOT remove the drain.** Hard-killing the subprocess mid-`itdb_write` would corrupt the iPod's iTunesDB. The drain gives the orchestrator's `cancel\n`-then-`bounded_kill(SYNC_KILL_GRACE)` sequence time to complete first.
+  2. `handle_client_command` returns `bool` ("should exit"); `Shutdown` returns true instead of `std::process::exit`. The main `select!` loop breaks with `ExitReason::Shutdown`, signals cancel once, then keeps receiving the matching terminal internal event for longer than the orchestrator's 120-second inactivity grace.
+- **Important: do NOT remove the drain.** Hard-killing the subprocess mid-publication could corrupt the iPod's DB/artwork state. The outer shutdown budget must remain longer than the progress-reset finalization watchdog so only a genuinely stalled child reaches `kill_on_drop`.
 
 ## Daemon's configured_serial was captured-once at startup (2026-05-24)
 

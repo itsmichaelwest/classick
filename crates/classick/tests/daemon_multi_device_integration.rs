@@ -361,8 +361,7 @@ fn write_registry(config_path: &Path, records: &[(&str, bool)]) {
 
 fn completed(summary: Option<SyncSummary>) -> OrchestratorOutcome {
     OrchestratorOutcome::Completed {
-        outcome: SyncOutcome::Ok,
-        summary,
+        summary: summary.unwrap_or_default(),
         db_restored: false,
     }
 }

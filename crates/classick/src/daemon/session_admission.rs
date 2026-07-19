@@ -3,6 +3,7 @@ use crate::daemon::state::SessionKind;
 pub use crate::daemon::state::SyncSession;
 use crate::ipc_daemon::DaemonEvent;
 pub use crate::ipc_device::SessionId;
+use crate::progress::StopReason;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,9 +40,16 @@ pub enum AdmissionRejection {
     AtCapacity { active_session_id: SessionId },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPhase {
+    Running,
+    Finalizing { reason: StopReason },
+}
+
 pub struct SessionAdmission {
     capacity: usize,
     sessions: BTreeMap<SessionId, SyncSession>,
+    phases: BTreeMap<SessionId, SessionPhase>,
 }
 
 impl SessionAdmission {
@@ -49,6 +57,7 @@ impl SessionAdmission {
         Self {
             capacity: 1,
             sessions: BTreeMap::new(),
+            phases: BTreeMap::new(),
         }
     }
 
@@ -114,11 +123,29 @@ impl SessionAdmission {
         };
         let previous = self.sessions.insert(id, session.clone());
         debug_assert!(previous.is_none());
+        let previous_phase = self.phases.insert(id, SessionPhase::Running);
+        debug_assert!(previous_phase.is_none());
         Ok(session)
     }
 
     pub fn finish(&mut self, id: SessionId) -> bool {
-        self.sessions.remove(&id).is_some()
+        let removed = self.sessions.remove(&id).is_some();
+        if removed {
+            self.phases.remove(&id);
+        }
+        removed
+    }
+
+    pub fn mark_finalizing(&mut self, id: SessionId, reason: StopReason) -> bool {
+        let Some(phase) = self.phases.get_mut(&id) else {
+            return false;
+        };
+        *phase = SessionPhase::Finalizing { reason };
+        true
+    }
+
+    pub fn phase(&self, id: SessionId) -> Option<SessionPhase> {
+        self.phases.get(&id).copied()
     }
 
     pub(crate) fn session(&self, id: SessionId) -> Option<&SyncSession> {
@@ -285,6 +312,27 @@ mod tests {
             admission.try_admit_device("RAW-A", Path::new("/Volumes/A")),
             Err(AdmissionRejection::AtCapacity { active_session_id })
                 if active_session_id == scan.id
+        ));
+    }
+
+    #[test]
+    fn finalizing_a_keeps_capacity_occupied_and_rejects_b() {
+        let mut admission = SessionAdmission::single();
+        let a = admission
+            .try_admit_device("RAW-A", Path::new("/Volumes/A"))
+            .expect("A admitted");
+
+        assert!(admission.mark_finalizing(a.id, crate::progress::StopReason::Cancelled));
+        assert_eq!(
+            admission.phase(a.id),
+            Some(SessionPhase::Finalizing {
+                reason: crate::progress::StopReason::Cancelled
+            })
+        );
+        assert!(matches!(
+            admission.try_admit_device("RAW-B", Path::new("/Volumes/B")),
+            Err(AdmissionRejection::AtCapacity { active_session_id })
+                if active_session_id == a.id
         ));
     }
 }

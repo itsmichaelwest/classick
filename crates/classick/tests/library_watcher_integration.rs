@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use classick::config_file::{DaemonSettings, PersistedConfig, SyncMode};
 use classick::daemon::device_watcher::{DeviceEvent, DeviceWatcher};
-use classick::daemon::history::SyncOutcome;
+use classick::daemon::history::SyncSummary;
 use classick::daemon::runtime::{run_daemon_with_deps, DaemonDeps};
 use classick::daemon::sync_orchestrator::OrchestratorOutcome;
 use tokio::sync::mpsc;
@@ -91,8 +91,7 @@ fn noop_spawn(
 {
     Box::pin(async move {
         Ok(OrchestratorOutcome::Completed {
-            outcome: SyncOutcome::Ok,
-            summary: None,
+            summary: SyncSummary::default(),
             db_restored: false,
         })
     })
@@ -140,8 +139,7 @@ async fn sandbox_with_source() -> WatcherSandbox {
             scan_spawns_for_closure.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 Ok(OrchestratorOutcome::Completed {
-                    outcome: SyncOutcome::Ok,
-                    summary: None,
+                    summary: SyncSummary::default(),
                     db_restored: false,
                 })
             })

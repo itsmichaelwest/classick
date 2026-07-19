@@ -631,16 +631,18 @@ the "stop cleanly and let me come back later" command:
 
 ### Graceful cancel
 
-9. UI sends `{"type":"cancel"}` on stdin and starts a 5 s timer.
-10. The core observes the cancel, maps it (per §5.5), and tears down.
+9. UI sends `{"type":"cancel"}` on stdin exactly once and keeps both pipes
+   open.
+10. The core stops admission, drains the current album, and emits
+    `finalizing` before coordinated publication.
 11. The UI expects:
-    - a `finish` event on stdout,
+    - `cancelled`, then `finish { success: true }`,
     - then stdout EOF,
-    - then process exit, all within the 5 s window.
-12. **If the deadline expires**, the UI calls
-    `Process.Kill(entireProcessTree: true)` (or the OS equivalent on
-    macOS/Linux frontends) and surfaces a warning in the log panel. No
-    orphan core processes should remain.
+    - then process exit.
+12. A 120-second **inactivity** watchdog is armed after the request and reset
+    by every progress event. If it expires, the parent kills the child and
+    reports interrupted finalization; it MUST NOT report cancellation as
+    successfully finalized.
 
 ### Graceful pause
 
@@ -648,12 +650,9 @@ the "stop cleanly and let me come back later" command:
 14. The core finishes draining its in-flight transcode window, commits
     everything already reached in plan order, checkpoints, and emits
     `{"type":"paused"}` (§4.12).
-15. The UI expects a `paused` event, then stdout EOF, then a clean process
-    exit — no force-kill timer needed; pause is not racing a shutdown
-    deadline the way `cancel` is. If the process doesn't exit within a
-    generous bound (tens of seconds — draining the window can legitimately
-    take as long as one transcode), fall back to the same force-kill path
-    as §"Graceful cancel" and log it as unexpected.
+15. The UI expects a `paused` event, then `finish { success: true }`, stdout
+    EOF, and a clean process exit. The same progress-reset 120-second
+    inactivity watchdog is the emergency backstop.
 16. A later sync is an ordinary new run: the UI spawns the core again (or,
     over the daemon-pipe wire, sends `trigger_sync`); the diff-based plan
     resumes from the manifest automatically. There is no dedicated
@@ -841,10 +840,9 @@ re-seed, since the per-device file already exists).
 ### Forwarded sync-subprocess events
 
 When the daemon is running a sync, it spawns `ipod-sync --ipc-mode --apply`
-and forwards every v1.0.0 IpcEvent (`header`, `summary`, `review`, `prompt`,
-`form`, `track_start`, `track_done`, `log`, `error`, `finish`) verbatim to
-subscribed UI clients. UI clients see daemon events and sync events on the
-same pipe and pattern-match on `type`.
+and forwards every subprocess event, including `finalizing`, `cancelled`, and
+`paused`, inside the daemon's `sync_event.line` string. UI clients see daemon
+events and serial/session-scoped sync events on the same transport.
 
 ## M3 addendum (2026-05-25) — Device events go live, TooManyFailures reason
 
@@ -871,8 +869,10 @@ The subprocess speaks the M1 v1.0.0 stdio protocol; the daemon parses
 each line and (M4) will forward to UI clients. Throughout the sync,
 the daemon counts per-track `error` events. When
 `tracks_errored * 2 > total_planned` (strict greater-than, both > 0),
-the daemon sends `{"type":"cancel"}` to the subprocess stdin, starts a
-5-second force-kill timer, and emits:
+the daemon sends `{"type":"cancel"}` to the subprocess stdin exactly once
+and drains the subprocess through coordinated finalization. The same
+progress-reset 120-second inactivity watchdog used for user cancellation is
+the emergency backstop. The daemon emits:
 
 ```json
 {"type":"sync_rejected","reason":"too_many_failures"}
@@ -914,11 +914,9 @@ proceed on a major-version mismatch (§1).
 ```
 
 Forwards to the running sync subprocess as `{"type":"pause"}` on its stdin
-(the subprocess-protocol `pause` command, §5.6) — it does **not** force-kill
-or start a grace-period timer the way `cancel_sync` does, because pause is
-meant to let the subprocess drain and exit on its own. The daemon still
-keeps the same bounded-kill backstop as a defensive fallback in case the
-subprocess never exits. **No-op if the daemon is idle** (no sync running).
+(the subprocess-protocol `pause` command, §5.6). Pause and cancellation both
+drain coordinated finalization and use the same progress-reset 120-second
+inactivity watchdog. **No-op if the daemon is idle** (no sync running).
 When the subprocess emits its terminal `{"type":"paused"}` line, the
 orchestrator records the sync as paused (not aborted, not completed), and
 the daemon broadcasts an Idle `status_update`. Resuming is not a distinct
@@ -1377,6 +1375,28 @@ advances only after a content-changing config write succeeds; reads, failed
 writes, and no-op saves retain the current revision. A new `hello` starts a new
 connection epoch, so clients discard revision ordering from the prior daemon
 process rather than comparing across restarts.
+
+### Cancellation finalization
+
+`cancel_sync` writes one subprocess `cancel` command and does not close stdin
+or stop reading stdout. The admitted session remains occupied while the daemon
+forwards the serial/session-scoped `finalizing`, `cancelled`, and trailing
+`finish` lines inside `sync_event` envelopes. A second device therefore
+receives `sync_rejected { reason: "already_syncing" }` until the first
+subprocess reaches stdout EOF.
+
+Every valid forwarded subprocess event resets a 120-second inactivity grace.
+Grace expiry force-kills the child and records an aborted attempt with
+`finalization_stalled`; EOF before the requested `cancelled` or `paused`
+terminal records `finalization_interrupted`. Neither case advances
+`latest_successful_sync`. A verified cancellation records history outcome
+`cancelled`; `latest_attempt` advances while `latest_successful_sync` remains
+the prior successful entry. Daemon shutdown uses a longer outer drain budget
+so a progressing finalization is not cut off before the inactivity watchdog.
+
+These are new semantics for the existing `sync_event` envelope and string
+history fields, so the daemon handshake remains `2.0.0`; the nested subprocess
+event vocabulary is versioned separately at `1.4.0`.
 
 ### Source availability and recovery
 
