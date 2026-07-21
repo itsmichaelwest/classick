@@ -1,0 +1,11 @@
+# Source-control-safe path-only redaction of the factory-restored layout.
+D iPod_Control
+D iPod_Control/Device
+F iPod_Control/Device/SysInfo
+F iPod_Control/Device/Preferences
+F iPod_Control/Device/alarms
+F iPod_Control/Device/clock
+D iPod_Control/iTunes
+F iPod_Control/iTunes/iTunesControl
+D iPod_Control/Music
+D iPod_Control/Music/F00

@@ -1,0 +1,16 @@
+# Source-control-safe path-only redaction of the Finder-initialized layout.
+D iPod_Control
+D iPod_Control/Device
+F iPod_Control/Device/SysInfo
+F iPod_Control/Device/Preferences
+F iPod_Control/Device/alarms
+F iPod_Control/Device/clock
+D iPod_Control/iTunes
+F iPod_Control/iTunes/iTunesControl
+F iPod_Control/iTunes/iTunesDB
+F iPod_Control/iTunes/Extras.itdb
+F iPod_Control/iTunes/Rentals.plist
+F iPod_Control/iTunes/iTunesPrefs
+F iPod_Control/iTunes/iTunesPrefs.plist
+D iPod_Control/Music
+D iPod_Control/Music/F00
