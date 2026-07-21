@@ -27,7 +27,10 @@ implementation.
   initialization boundaries, and stable `SysInfoExtended` generation.
 - [Native device protocol implementation plan](plans/2026-07-19-native-device-protocol.md)
   — staged code, test, review, and physical-device work needed to reach that
-  target.
+  target, with implementation-ready component plans for the
+  [Rust core](plans/2026-07-19-native-device-protocol-rust.md),
+  [Windows UI](plans/2026-07-19-native-device-protocol-windows.md), and
+  [macOS UI](plans/2026-07-19-native-device-protocol-macos.md).
 
 The documents in this section describe approved future behavior. The current
 references above continue to describe shipped behavior until an implementation
