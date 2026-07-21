@@ -6,7 +6,13 @@ const ONE_HUNDRED_GB: u64 = 100_000_000_000;
 const ONE_HUNDRED_FORTY_GB: u64 = 140_000_000_000;
 
 pub fn hardware_facts_from_reported_model_code(model_code: &str) -> Option<HardwareFacts> {
-    hardware_facts_from_model_code(model_code, Fact::reported)
+    hardware_facts_from_model_code(model_code, |canonical| {
+        if model_code.len() == canonical.len() {
+            Fact::reported(canonical)
+        } else {
+            Fact::decoded(canonical)
+        }
+    })
 }
 
 pub fn hardware_facts_from_decoded_model_code(model_code: &str) -> Option<HardwareFacts> {

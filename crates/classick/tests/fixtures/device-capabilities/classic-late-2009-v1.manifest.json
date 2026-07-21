@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "fixture": "classic-late-2009-v1.json",
+  "source": "privacy-redacted physical Late-2009 160 GB iPod Classic captures under ignored device-dumps/",
+  "provenance": [
+    {
+      "capture_state": "factory_restored",
+      "observation": "live_extended_inquiry",
+      "observed_on": "2026-07-19"
+    },
+    {
+      "capture_state": "finder_initialized",
+      "observation": "live_extended_inquiry",
+      "observed_on": "2026-07-19"
+    },
+    {
+      "capture_state": "finder_initialized",
+      "observation": "immediate_repeat_extended_inquiry",
+      "observed_on": "2026-07-19"
+    }
+  ],
+  "retained_keys": [
+    "AlbumArt",
+    "ChapterImageSpecs",
+    "DBVersion",
+    "FamilyID",
+    "ImageSpecifications",
+    "SupportsSparseArtwork"
+  ],
+  "derived_fields": [
+    {
+      "fixture_field": "sqlite_db",
+      "source_key": "SQLiteDB",
+      "value": false,
+      "basis": "absent_in_all_source_observations"
+    }
+  ],
+  "removed_keys": [
+    "64Bit",
+    "AppleDRMVersion",
+    "AudioCodecs",
+    "AutoRebootAfterFirmwareUpdate",
+    "BangFolder",
+    "BatteryPollInterval",
+    "BuildID",
+    "BuiltInGames",
+    "CameWithCD",
+    "CanFlashBacklight",
+    "CanHibernate",
+    "ConnectedBus",
+    "CorruptDataPartition",
+    "FWPartSize",
+    "FireWireGUID",
+    "FireWireVersion",
+    "ForcedDiskMode",
+    "GamesPlatformID",
+    "GamesPlatformVersion",
+    "GeniusConfigMaxVersion",
+    "GeniusConfigMinVersion",
+    "GeniusMetadataMaxVersion",
+    "GeniusMetadataMinVersion",
+    "GeniusSimilaritiesMaxVersion",
+    "GeniusSimilaritiesMinVersion",
+    "HotPlugState",
+    "KeyTypeSupportVersion",
+    "Language",
+    "MaxFWBlocks",
+    "MaxFileSizeInGB",
+    "MaxThumbFileSize",
+    "MaxTracks",
+    "MaxTransferSpeed",
+    "MinBuildID",
+    "MinITunesVersion",
+    "OEMA",
+    "OEMID",
+    "OEMU",
+    "PlaylistFoldersSupported",
+    "PodcastsSupported",
+    "PowerInformation",
+    "RAM",
+    "RBRequestVersion",
+    "RentalClockBias",
+    "ReservedMB",
+    "SerialNumber",
+    "SortFieldsSupported",
+    "SupportsGenius",
+    "SupportsGeniusMixes",
+    "UpdateMethod",
+    "UpdaterFamilyID",
+    "VideoCodecs",
+    "VisibleBuildID",
+    "VoiceMemoFormats",
+    "VoiceMemosSupported",
+    "VolumeFormat",
+    "VolumeInformation",
+    "iTunesUSupported",
+    "rbsync",
+    "vCardWithJPEGSupported"
+  ],
+  "validation_authorities": [
+    {
+      "kind": "pinned_libgpod_parser",
+      "revision": "4a8a33ef4bc58eee1baca6793618365f75a5c3fa",
+      "location": "src/itdb_sysinfo_extended_parser.c"
+    },
+    {
+      "kind": "approved_classick_design",
+      "revision": "2026-07-19",
+      "location": "docs/design/2026-07-19-native-device-protocol.md#8-sysinfoextended-capability-projection"
+    }
+  ]
+}

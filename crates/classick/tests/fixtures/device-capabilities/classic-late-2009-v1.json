@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "profile_id": "classic-late-2009-v1",
+  "family_id": 11,
+  "db_version": 3,
+  "supports_sparse_artwork": true,
+  "sqlite_db": false,
+  "album_art": [
+    {
+      "format_id": 1069,
+      "render_width": 142,
+      "render_height": 142,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "back_color": "00000000",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 131072,
+      "excluded_formats": -1
+    },
+    {
+      "format_id": 1055,
+      "render_width": 128,
+      "render_height": 128,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": true,
+      "align_row_bytes": true,
+      "back_color": "00000000",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    },
+    {
+      "format_id": 1068,
+      "render_width": 128,
+      "render_height": 128,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "back_color": "FFFFFFFF",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 2
+    },
+    {
+      "format_id": 1060,
+      "render_width": 320,
+      "render_height": 320,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": true,
+      "align_row_bytes": true,
+      "back_color": "00000000",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    },
+    {
+      "format_id": 1061,
+      "render_width": 55,
+      "render_height": 55,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "back_color": "00000000",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    }
+  ],
+  "image_specifications": [
+    {
+      "format_id": 1067,
+      "render_width": 640,
+      "render_height": 480,
+      "display_width": 720,
+      "pixel_format": "79343230",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": false,
+      "color_adjustment": 1,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    },
+    {
+      "format_id": 1024,
+      "render_width": 320,
+      "render_height": 240,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "rotation": 0,
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    },
+    {
+      "format_id": 1066,
+      "render_width": 64,
+      "render_height": 64,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": true,
+      "align_row_bytes": true,
+      "back_color": "00000000",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    }
+  ],
+  "chapter_image_specs": [
+    {
+      "format_id": 1055,
+      "render_width": 128,
+      "render_height": 128,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "back_color": "FFFFFFFF",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    },
+    {
+      "format_id": 1029,
+      "render_width": 200,
+      "render_height": 200,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "back_color": "FFFFFFFF",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    }
+  ]
+}

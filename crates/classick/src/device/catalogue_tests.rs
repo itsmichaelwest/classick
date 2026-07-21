@@ -23,7 +23,7 @@ fn classic_model_codes_decode_every_catalogue_row_and_input_shape() {
     ];
 
     for (canonical, abbreviated, generation, colour) in cases {
-        let expected = HardwareFacts {
+        let expected_reported = HardwareFacts {
             family: Some(Fact::decoded(IpodFamily::Classic)),
             generation: Some(Fact::decoded(generation.to_owned())),
             model_code: Some(Fact::reported(canonical.to_owned())),
@@ -33,12 +33,19 @@ fn classic_model_codes_decode_every_catalogue_row_and_input_shape() {
 
         assert_eq!(
             hardware_facts_from_reported_model_code(canonical),
-            Some(expected.clone()),
+            Some(expected_reported),
             "canonical code {canonical}"
         );
+        let expected_decoded = HardwareFacts {
+            family: Some(Fact::decoded(IpodFamily::Classic)),
+            generation: Some(Fact::decoded(generation.to_owned())),
+            model_code: Some(Fact::decoded(canonical.to_owned())),
+            colour: Some(Fact::decoded(colour)),
+            ..HardwareFacts::default()
+        };
         assert_eq!(
             hardware_facts_from_reported_model_code(&abbreviated.to_ascii_lowercase()),
-            Some(expected),
+            Some(expected_decoded),
             "abbreviated code {abbreviated}"
         );
     }
