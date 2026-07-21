@@ -80,6 +80,7 @@ pub mod pipeline;
 pub mod playlist;
 pub mod playlist_audit_command;
 pub mod playlist_rules;
+pub mod portable;
 pub mod portable_path;
 pub mod preflight;
 pub mod progress;
