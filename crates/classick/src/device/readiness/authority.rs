@@ -7,9 +7,15 @@ use std::path::Path;
 
 pub(super) enum Inspection {
     Unrecognized,
+    MissingDatabase(DatabaseAuthority),
+    InvalidDatabase(DatabaseAuthority),
+    Database(DatabaseAuthority),
+}
+
+enum InspectionKind {
     MissingDatabase,
     InvalidDatabase,
-    Database(DatabaseAuthority),
+    Database,
 }
 
 pub(crate) struct DatabaseAuthority(platform::DatabaseAuthority);
@@ -22,6 +28,10 @@ impl DatabaseAuthority {
     pub(super) fn is_current(&self) -> bool {
         self.0.is_current()
     }
+
+    pub(super) fn read_sysinfo(&self) -> std::io::Result<String> {
+        self.0.read_sysinfo()
+    }
 }
 
 pub(super) fn inspect(mount: &Path) -> Inspection {
@@ -30,10 +40,11 @@ pub(super) fn inspect(mount: &Path) -> Inspection {
 
 #[cfg(unix)]
 mod platform {
-    use super::{DatabaseAuthority as PublicAuthority, Inspection, OwnedDb};
+    use super::{DatabaseAuthority as PublicAuthority, Inspection, InspectionKind, OwnedDb};
     use std::ffi::CString;
     use std::fs::File;
-    use std::io;
+    use std::io::{self, Read, Seek, SeekFrom};
+    use std::mem::MaybeUninit;
     use std::os::fd::{AsRawFd, FromRawFd, RawFd};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
@@ -46,12 +57,30 @@ mod platform {
         device: File,
         sysinfo: File,
         itunes: File,
-        database: File,
+        database: DatabaseEntry,
+    }
+
+    enum DatabaseEntry {
+        Missing,
+        InvalidFile(File),
+        InvalidPath(EntryIdentity),
+        UnboundInvalid,
+        Present(File),
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct EntryIdentity {
+        device: u64,
+        inode: u64,
+        mode: u32,
     }
 
     impl DatabaseAuthority {
         pub(super) fn is_structurally_valid(&self) -> bool {
-            OwnedDb::parse_from_file_handle(&self.database, &self.mount_path).is_ok()
+            let DatabaseEntry::Present(database) = &self.database else {
+                return false;
+            };
+            OwnedDb::parse_from_file_handle(database, &self.mount_path).is_ok()
         }
 
         pub(super) fn is_current(&self) -> bool {
@@ -85,10 +114,38 @@ mod platform {
             if !same_file(&itunes, &self.itunes) {
                 return false;
             }
-            let Ok(database) = open_child_file(itunes.as_raw_fd(), "iTunesDB") else {
-                return false;
-            };
-            is_regular_file(&database) && same_file(&database, &self.database)
+            self.database.is_current(itunes.as_raw_fd())
+        }
+
+        pub(super) fn read_sysinfo(&self) -> io::Result<String> {
+            let mut sysinfo = self.sysinfo.try_clone()?;
+            sysinfo.seek(SeekFrom::Start(0))?;
+            let mut contents = String::new();
+            sysinfo.read_to_string(&mut contents)?;
+            Ok(contents)
+        }
+    }
+
+    impl DatabaseEntry {
+        fn is_current(&self, itunes: RawFd) -> bool {
+            match self {
+                Self::Missing => open_child_file(itunes, "iTunesDB")
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+                Self::InvalidFile(expected) => {
+                    open_child_file(itunes, "iTunesDB").is_ok_and(|current| {
+                        !is_regular_file(&current) && same_file(&current, expected)
+                    })
+                }
+                Self::InvalidPath(expected) => {
+                    child_identity(itunes, "iTunesDB").is_ok_and(|current| current == *expected)
+                }
+                Self::UnboundInvalid => false,
+                Self::Present(expected) => {
+                    open_child_file(itunes, "iTunesDB").is_ok_and(|current| {
+                        is_regular_file(&current) && same_file(&current, expected)
+                    })
+                }
+            }
         }
     }
 
@@ -111,18 +168,30 @@ mod platform {
         let Ok(itunes) = open_child_directory(control.as_raw_fd(), "iTunes") else {
             return Inspection::Unrecognized;
         };
-        let database = match open_child_file(itunes.as_raw_fd(), "iTunesDB") {
-            Ok(database) => database,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Inspection::MissingDatabase;
+        let (inspection, database) = match open_child_file(itunes.as_raw_fd(), "iTunesDB") {
+            Ok(database) if is_regular_file(&database) => {
+                (InspectionKind::Database, DatabaseEntry::Present(database))
             }
-            Err(_) => return Inspection::InvalidDatabase,
+            Ok(database) => (
+                InspectionKind::InvalidDatabase,
+                DatabaseEntry::InvalidFile(database),
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                (InspectionKind::MissingDatabase, DatabaseEntry::Missing)
+            }
+            Err(_) => match child_identity(itunes.as_raw_fd(), "iTunesDB") {
+                Ok(identity) => (
+                    InspectionKind::InvalidDatabase,
+                    DatabaseEntry::InvalidPath(identity),
+                ),
+                Err(_) => (
+                    InspectionKind::InvalidDatabase,
+                    DatabaseEntry::UnboundInvalid,
+                ),
+            },
         };
-        if !is_regular_file(&database) {
-            return Inspection::InvalidDatabase;
-        }
 
-        Inspection::Database(PublicAuthority(DatabaseAuthority {
+        let authority = PublicAuthority(DatabaseAuthority {
             mount_path: mount_path.to_path_buf(),
             mount,
             control,
@@ -130,7 +199,12 @@ mod platform {
             sysinfo,
             itunes,
             database,
-        }))
+        });
+        match inspection {
+            InspectionKind::MissingDatabase => Inspection::MissingDatabase(authority),
+            InspectionKind::InvalidDatabase => Inspection::InvalidDatabase(authority),
+            InspectionKind::Database => Inspection::Database(authority),
+        }
     }
 
     fn open_path_directory(path: &Path) -> io::Result<File> {
@@ -186,6 +260,28 @@ mod platform {
         left.dev() == right.dev() && left.ino() == right.ino()
     }
 
+    fn child_identity(parent: RawFd, name: &str) -> io::Result<EntryIdentity> {
+        let name = c_string(name.as_bytes(), "child name")?;
+        let mut metadata = MaybeUninit::<libc::stat>::uninit();
+        let result = unsafe {
+            libc::fstatat(
+                parent,
+                name.as_ptr(),
+                metadata.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let metadata = unsafe { metadata.assume_init() };
+        Ok(EntryIdentity {
+            device: metadata.st_dev as u64,
+            inode: metadata.st_ino,
+            mode: metadata.st_mode as u32,
+        })
+    }
+
     fn c_string(bytes: &[u8], label: &str) -> io::Result<CString> {
         CString::new(bytes).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, format!("{label} contains NUL"))
@@ -195,9 +291,9 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
-    use super::{DatabaseAuthority as PublicAuthority, Inspection, OwnedDb};
+    use super::{DatabaseAuthority as PublicAuthority, Inspection, InspectionKind, OwnedDb};
     use std::fs::{File, OpenOptions};
-    use std::io;
+    use std::io::{self, Read, Seek, SeekFrom};
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use std::path::{Path, PathBuf};
@@ -222,11 +318,21 @@ mod platform {
         device: File,
         sysinfo: File,
         itunes: File,
-        database: File,
+        database: DatabaseEntry,
+    }
+
+    enum DatabaseEntry {
+        Missing,
+        Invalid(File),
+        UnboundInvalid,
+        Present(File),
     }
 
     impl DatabaseAuthority {
         pub(super) fn is_structurally_valid(&self) -> bool {
+            if !matches!(&self.database, DatabaseEntry::Present(_)) {
+                return false;
+            }
             OwnedDb::open(&self.mount_path).is_ok()
         }
 
@@ -239,7 +345,31 @@ mod platform {
                 && same_directory(&device_path, &self.device)
                 && same_regular_file(&device_path.join("SysInfo"), &self.sysinfo)
                 && same_directory(&itunes_path, &self.itunes)
-                && same_regular_file(&itunes_path.join("iTunesDB"), &self.database)
+                && self.database.is_current(&itunes_path)
+        }
+
+        pub(super) fn read_sysinfo(&self) -> io::Result<String> {
+            let mut sysinfo = self.sysinfo.try_clone()?;
+            sysinfo.seek(SeekFrom::Start(0))?;
+            let mut contents = String::new();
+            sysinfo.read_to_string(&mut contents)?;
+            Ok(contents)
+        }
+    }
+
+    impl DatabaseEntry {
+        fn is_current(&self, path: &Path) -> bool {
+            match self {
+                Self::Missing => open_entry(path, FILE_SHARE_READ)
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+                Self::Invalid(expected) => open_entry(path, FILE_SHARE_READ).is_ok_and(|current| {
+                    identity(&current).is_ok_and(|(_, attributes)| {
+                        attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0
+                    }) && same_file(&current, expected)
+                }),
+                Self::UnboundInvalid => false,
+                Self::Present(expected) => same_regular_file(path, expected),
+            }
         }
     }
 
@@ -262,15 +392,34 @@ mod platform {
         let Ok(itunes) = open_directory(&itunes_path) else {
             return Inspection::Unrecognized;
         };
-        let database = match open_regular_file(&itunes_path.join("iTunesDB")) {
-            Ok(database) => database,
+        let database_path = itunes_path.join("iTunesDB");
+        let (inspection, database) = match open_entry(&database_path, FILE_SHARE_READ) {
+            Ok(database) => match identity(&database) {
+                Ok((_, attributes))
+                    if attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)
+                        == 0 =>
+                {
+                    (InspectionKind::Database, DatabaseEntry::Present(database))
+                }
+                Ok(_) => (
+                    InspectionKind::InvalidDatabase,
+                    DatabaseEntry::Invalid(database),
+                ),
+                Err(_) => (
+                    InspectionKind::InvalidDatabase,
+                    DatabaseEntry::UnboundInvalid,
+                ),
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Inspection::MissingDatabase;
+                (InspectionKind::MissingDatabase, DatabaseEntry::Missing)
             }
-            Err(_) => return Inspection::InvalidDatabase,
+            Err(_) => (
+                InspectionKind::InvalidDatabase,
+                DatabaseEntry::UnboundInvalid,
+            ),
         };
 
-        Inspection::Database(PublicAuthority(DatabaseAuthority {
+        let authority = PublicAuthority(DatabaseAuthority {
             mount_path: mount_path.to_path_buf(),
             mount,
             control,
@@ -278,7 +427,12 @@ mod platform {
             sysinfo,
             itunes,
             database,
-        }))
+        });
+        match inspection {
+            InspectionKind::MissingDatabase => Inspection::MissingDatabase(authority),
+            InspectionKind::InvalidDatabase => Inspection::InvalidDatabase(authority),
+            InspectionKind::Database => Inspection::Database(authority),
+        }
     }
 
     fn open_directory(path: &Path) -> io::Result<File> {
@@ -297,11 +451,7 @@ mod platform {
     }
 
     fn open_regular_file(path: &Path) -> io::Result<File> {
-        let file = OpenOptions::new()
-            .access_mode(FILE_GENERIC_READ)
-            .share_mode(FILE_SHARE_READ)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)?;
+        let file = open_entry(path, FILE_SHARE_READ)?;
         let (_, attributes) = identity(&file)?;
         if attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
             return Err(io::Error::other(
@@ -309,6 +459,14 @@ mod platform {
             ));
         }
         Ok(file)
+    }
+
+    fn open_entry(path: &Path, share_mode: u32) -> io::Result<File> {
+        OpenOptions::new()
+            .access_mode(FILE_GENERIC_READ)
+            .share_mode(share_mode)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
     }
 
     fn same_directory(path: &Path, expected: &File) -> bool {

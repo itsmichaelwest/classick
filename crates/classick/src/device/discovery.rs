@@ -1,6 +1,7 @@
+use super::readiness::inspect_device_readiness;
 use super::{
-    classify_device_readiness, hardware_facts_from_reported_model_code, hardware_facts_from_usb,
-    DeviceId, DeviceReadiness, Fact, HardwareFacts,
+    hardware_facts_from_reported_model_code, hardware_facts_from_usb, DeviceId, DeviceReadiness,
+    Fact, HardwareFacts,
 };
 use std::path::{Path, PathBuf};
 
@@ -144,9 +145,17 @@ pub(super) fn observe_mount_with_probe(
     observation_id: ObservationId,
     probe: impl FnOnce(&Path) -> Option<OrdinaryUsbFacts>,
 ) -> Option<DeviceObservation> {
-    let readiness = classify_device_readiness(mount_path)?;
+    let readiness_authority = inspect_device_readiness(mount_path)?;
     let usb = probe(mount_path).unwrap_or_default();
-    let sysinfo = read_existing_sysinfo_facts(mount_path);
+    let sysinfo = readiness_authority
+        .read_sysinfo()
+        .as_deref()
+        .map(existing_sysinfo_facts)
+        .unwrap_or_default();
+    if !readiness_authority.is_current() {
+        return None;
+    }
+    let readiness = readiness_authority.readiness();
 
     assemble_device_observation(
         ReportedDeviceObservation {
@@ -168,21 +177,10 @@ struct ExistingSysInfoFacts {
     firmware: Option<String>,
 }
 
-fn read_existing_sysinfo_facts(mount_path: &Path) -> ExistingSysInfoFacts {
-    let path = crate::ipod::layout::sysinfo_path(mount_path);
-    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-        return ExistingSysInfoFacts::default();
-    };
-    if !metadata.file_type().is_file() {
-        return ExistingSysInfoFacts::default();
-    }
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return ExistingSysInfoFacts::default();
-    };
-
+fn existing_sysinfo_facts(contents: &str) -> ExistingSysInfoFacts {
     ExistingSysInfoFacts {
-        model_code: flat_sysinfo_field(&contents, "ModelNumStr"),
-        firmware: flat_sysinfo_field(&contents, "FirmwareVersion"),
+        model_code: flat_sysinfo_field(contents, "ModelNumStr"),
+        firmware: flat_sysinfo_field(contents, "FirmwareVersion"),
     }
 }
 

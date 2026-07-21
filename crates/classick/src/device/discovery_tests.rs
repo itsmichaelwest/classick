@@ -1,8 +1,11 @@
 use super::discovery::{observe_mount_with_probe, OrdinaryUsbFacts};
 use super::{DeviceObservationIdentity, DeviceReadiness, Fact, IpodFamily, ObservationId};
+use crate::ffi;
 use std::cell::Cell;
+use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const DEVICE_ID: &str = "A1B2C3D4E5F60708";
@@ -156,6 +159,55 @@ fn ordinary_probe_runs_once_and_only_after_the_mount_is_recognized() {
     assert_eq!(calls.get(), 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn mount_replacement_during_usb_probe_is_rejected() {
+    let mount = TestMount::recognizable(
+        "mount-swap-original",
+        "ModelNumStr: MC293\nFirmwareVersion: 2.0.4\n",
+    );
+    let replacement = TestMount::recognizable(
+        "mount-swap-replacement",
+        "ModelNumStr: MC297\nFirmwareVersion: 2.0.5\n",
+    );
+    write_valid_itunesdb(mount.path());
+    let retired = mount.path().with_extension("retired");
+
+    let observation = observe_mount_with_probe(mount.path(), ObservationId::new(72), |_| {
+        fs::rename(mount.path(), &retired).unwrap();
+        fs::rename(replacement.path(), mount.path()).unwrap();
+        Some(usb_facts(Some(DEVICE_ID), Some(0x1261), None))
+    });
+
+    fs::rename(mount.path(), replacement.path()).unwrap();
+    fs::rename(retired, mount.path()).unwrap();
+    assert_eq!(observation, None);
+}
+
+#[cfg(unix)]
+#[test]
+fn sysinfo_replacement_during_usb_probe_is_rejected() {
+    let mount = TestMount::recognizable(
+        "sysinfo-swap",
+        "ModelNumStr: MC293\nFirmwareVersion: 2.0.4\n",
+    );
+    let sysinfo = mount.path().join("iPod_Control/Device/SysInfo");
+    let original = sysinfo.with_extension("original");
+    let replacement = sysinfo.with_extension("replacement");
+    fs::write(&replacement, "ModelNumStr: MC297\nFirmwareVersion: 2.0.5\n").unwrap();
+
+    let observation = observe_mount_with_probe(mount.path(), ObservationId::new(73), |_| {
+        fs::rename(&sysinfo, &original).unwrap();
+        fs::rename(&replacement, &sysinfo).unwrap();
+        Some(usb_facts(Some(DEVICE_ID), Some(0x1261), None))
+    });
+
+    fs::rename(&sysinfo, &replacement).unwrap();
+    fs::rename(original, &sysinfo).unwrap();
+    fs::remove_file(replacement).unwrap();
+    assert_eq!(observation, None);
+}
+
 #[test]
 fn ordinary_usb_facts_expose_only_the_approved_os_observations() {
     let facts = usb_facts(Some(DEVICE_ID), Some(0x1261), Some(160_000_000_000));
@@ -191,6 +243,30 @@ fn usb_facts(
         usb_product_id,
         capacity_bytes,
     }
+}
+
+fn write_valid_itunesdb(mount: &Path) {
+    fs::create_dir_all(mount.join("iPod_Control/Music/F00")).unwrap();
+    let sysinfo = mount.join("iPod_Control/Device/SysInfo");
+    let sysinfo_contents = fs::read(&sysinfo).unwrap();
+    fs::write(&sysinfo, []).unwrap();
+
+    unsafe {
+        let database = ffi::itdb_new();
+        assert!(!database.is_null(), "itdb_new returned null");
+        let mount = CString::new(mount.to_str().unwrap()).unwrap();
+        ffi::itdb_set_mountpoint(database, mount.as_ptr());
+        let title = CString::new("iPod").unwrap();
+        let master = ffi::itdb_playlist_new(title.as_ptr(), 0);
+        assert!(!master.is_null(), "itdb_playlist_new returned null");
+        ffi::itdb_playlist_set_mpl(master);
+        ffi::itdb_playlist_add(database, master, -1);
+        let mut error: *mut ffi::GError = ptr::null_mut();
+        let written = ffi::itdb_write(database, &mut error);
+        ffi::itdb_free(database);
+        assert_ne!(written, 0, "itdb_write failed generating test database");
+    }
+    fs::write(sysinfo, sysinfo_contents).unwrap();
 }
 
 struct TestMount(PathBuf);
