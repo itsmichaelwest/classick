@@ -4,6 +4,10 @@ use crate::ffi;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, CString};
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::ptr;
 
@@ -71,6 +75,22 @@ impl OwnedDb {
     /// itdb_filename_on_ipod, etc.) know where to put files on disk.
     pub fn open(ipod_mount: &Path) -> Result<Self> {
         let db_path = crate::ipod::layout::itunes_db_path(ipod_mount);
+        Self::open_path_at_mount(&db_path, ipod_mount)
+    }
+
+    #[cfg(unix)]
+    /// Parse through an already-open regular-file authority without resolving
+    /// the device pathname again.
+    pub(crate) fn parse_from_file_handle(database: &File, ipod_mount: &Path) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        let descriptor_root = Path::new("/proc/self/fd");
+        #[cfg(not(target_os = "linux"))]
+        let descriptor_root = Path::new("/dev/fd");
+        let descriptor_path = descriptor_root.join(database.as_raw_fd().to_string());
+        Self::open_path_at_mount(&descriptor_path, ipod_mount)
+    }
+
+    fn open_path_at_mount(db_path: &Path, ipod_mount: &Path) -> Result<Self> {
         let path_c = path_to_cstring(&db_path)?;
         let mount_c = path_to_cstring(ipod_mount)?;
         unsafe {
