@@ -17,7 +17,9 @@ incidents and completed gate reports are archived in
   mount paths, volume UUIDs, labels, names, flat `SysInfo` identity fields, and
   privileged SCSI inquiry are not identity authorities. Flat `SysInfo` may
   enrich model/firmware only. Ordinary discovery and libgpod identity
-  resolution must never invoke SCSI automatically.
+  resolution must never invoke SCSI automatically. Two live mounts claiming
+  one canonical ID both fail closed until the ambiguity clears; an
+  identity-unavailable mount has only connection-scoped ephemeral identity.
 - USB identity does not always reveal exact hardware. Classic PID `0x1261`
   plus 160 GB is ambiguous between the 2007 thick and 2009 thin generations,
   and USB does not report colour. Use a real device-file fact, a previously

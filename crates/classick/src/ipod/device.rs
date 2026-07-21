@@ -158,24 +158,16 @@ pub struct DetectedIpod {
     pub volume_guid: Option<String>,
 }
 
-/// Scan for every mounted iPod (presence of both `iPod_Control\Device\SysInfo`
-/// AND `iPod_Control\iTunes\iTunesDB` — see `is_ipod_mount`).
+/// Scan typed observations and adapt uniquely identified, ready devices to the
+/// legacy v2 shape. The inventory retains non-ready and unavailable devices,
+/// but v2 callers cannot represent them safely.
 ///
 /// Uses [`candidate_mount_points`] for enumeration, which on Windows
 /// natively asks the OS which drive letters are present + removable/fixed
 /// (no per-letter `Path::exists()` probe, no walking through 26 missing
 /// letters every poll, no hanging on slow network mounts).
 pub fn scan_for_ipods() -> Vec<DetectedIpod> {
-    let mut detected: Vec<_> = candidate_mount_points()
-        .into_iter()
-        .filter_map(|mount| scan_drive_for_ipod(&mount))
-        .collect();
-    detected.sort_by(|left, right| {
-        left.serial
-            .cmp(&right.serial)
-            .then_with(|| left.drive.cmp(&right.drive))
-    });
-    detected
+    crate::device::legacy_v2::scan_for_ipods()
 }
 
 /// Compatibility wrapper for callers that can only work with one device.
@@ -185,8 +177,8 @@ pub fn scan_for_ipod() -> Option<DetectedIpod> {
     scan_for_ipods().into_iter().next()
 }
 
-/// Check a specific drive (or any path) for the canonical initialized layout,
-/// then obtain identity from ordinary USB enumeration.
+/// Compatibility helper for checking one path outside the stateful production
+/// inventory, then obtaining identity from ordinary USB enumeration.
 ///
 /// Modern Apple software can leave SysInfo empty. In that case the legacy v2
 /// adapter recovers the FirewireGuid from ordinary USB enumeration and may use
@@ -349,32 +341,21 @@ pub fn mount_for_volume_guid(volume_guid: &str) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Fast-path device check for the daemon's polling watcher: given a
-/// known volume GUID from a prior full scan, resolve it to the current
-/// mount path and verify the iPod files are still there. Skips the
-/// drive-letter enumeration, per-mount file probes, and USB descriptor lookup,
-/// which only need to run on the cold path (first observation, or after a
-/// fast-path miss).
+/// Fast-path device check for the daemon's polling watcher: given a known
+/// volume GUID from a prior validated ready observation, resolve it to the
+/// current mount path and cheaply verify that the required regular files still
+/// exist. Full database parsing, drive enumeration, and USB lookup stay on the
+/// typed cold path.
 ///
-/// Returns `None` when the volume GUID no longer resolves (device gone
-/// or moved) or when the resolved mount no longer contains the canonical
-/// iPod files. Callers fall back to `scan_for_ipod` in that case.
+/// Returns `None` when the volume GUID no longer resolves (device gone or
+/// moved) or a required layout marker is missing or non-regular. Callers fall
+/// back to the typed `scan_for_ipod` cold path in that case.
 ///
 /// On hit, returns a fresh `DetectedIpod` with the current drive path
 /// (which may differ from the cached observation if Windows reassigned
 /// the letter) and the cached identity carried forward.
 pub fn try_resolve_known_volume(volume_guid: &str, prev: &DetectedIpod) -> Option<DetectedIpod> {
-    let mount = mount_for_volume_guid(volume_guid)?;
-    if !crate::ipod::layout::is_ipod_mount(&mount) {
-        return None;
-    }
-    Some(DetectedIpod {
-        serial: prev.serial.clone(),
-        model_label: prev.model_label.clone(),
-        drive: mount.to_string_lossy().into_owned(),
-        name: prev.name.clone(),
-        volume_guid: Some(volume_guid.to_string()),
-    })
+    crate::device::legacy_v2::try_resolve_known_volume(volume_guid, prev)
 }
 
 /// Extract a leading drive letter from a path like `G:\` → `'G'`.
@@ -395,8 +376,8 @@ fn drive_letter(drive: &std::path::Path) -> Option<char> {
 /// silently degrades to `ITDB_CHECKSUM_NONE` and iTunes refuses the
 /// resulting iTunesDB. `label` is the user-facing string.
 ///
-/// `#[allow(dead_code)]` because the only consumer (`identify_ipod`,
-/// reached from the legacy v2 adapters) may be platform-gated. The
+/// `#[allow(dead_code)]` because the only consumer (`identify_ipod`, reached
+/// from signing and the one-drive compatibility helper) may be platform-gated. The
 /// struct + its consumer still want to live in platform-neutral test
 /// territory — `identify_ipod`'s PID-disambiguation tests cover real
 /// product logic that's worth running on Linux/macOS CI too.
@@ -1304,10 +1285,9 @@ pub fn detect_ipod_mount() -> Result<String> {
     pick_mount(candidates)
 }
 
-/// Enumerate mount-point candidates that might host an iPod. The caller
-/// applies `is_ipod_mount` (which checks for `iPod_Control/Device/SysInfo`
-/// + `iPod_Control/iTunes/iTunesDB`) to reject non-iPod candidates, so
-/// false positives here are cheap. Native enumeration per OS:
+/// Enumerate mount-point candidates that might host an iPod. Callers apply
+/// typed read-only layout/readiness observation, so false positives here are
+/// cheap. Native enumeration per OS:
 ///
 /// **Windows:** `GetLogicalDrives` (one bitmask call returning which
 /// drive letters are currently present) + per-present-letter
@@ -1329,10 +1309,9 @@ pub fn detect_ipod_mount() -> Result<String> {
 ///
 /// FUTURE: on Windows, swap for `FindFirstVolumeW` +
 /// `GetVolumePathNamesForVolumeNameW` to support folder-mounted iPods
-/// (`C:\Mounts\iPod`) and surface the stable `\\?\Volume{GUID}\` path
-/// for persisted config keyed on volume identity rather than the
-/// shufflable drive letter.
-fn candidate_mount_points() -> Vec<std::path::PathBuf> {
+/// (`C:\Mounts\iPod`). Volume GUIDs remain best-effort connection hints;
+/// portable identity comes only from the canonical USB device ID.
+pub(crate) fn candidate_mount_points() -> Vec<std::path::PathBuf> {
     #[cfg(windows)]
     {
         windows_drive_letters_for_mountable_volumes()
@@ -1360,9 +1339,9 @@ fn candidate_mount_points() -> Vec<std::path::PathBuf> {
 ///
 /// Per-line layout (procfs(5)): `device mountpoint fstype options dump pass`.
 /// Whitespace-separated, but paths containing spaces are escaped as `\040`;
-/// since iPod mounts almost never have spaces in their path (and the
-/// `is_ipod_mount` probe just fails on the escaped path, no harm done) we
-/// don't bother unescaping for this filter pass.
+/// since iPod mounts almost never have spaces in their path (and typed
+/// observation rejects the escaped path, no harm done) we don't bother
+/// unescaping for this filter pass.
 #[cfg(target_os = "linux")]
 fn linux_mount_candidates() -> Vec<std::path::PathBuf> {
     let body = match std::fs::read_to_string("/proc/mounts") {
@@ -1381,7 +1360,7 @@ fn linux_mount_candidates() -> Vec<std::path::PathBuf> {
             // Kernel pseudo-FSes — these can never host iPod content.
             // The set isn't exhaustive but covers what Ubuntu / Fedora /
             // Arch / WSL report by default; an unknown pseudo-FS just
-            // takes the slow path through is_ipod_mount, no correctness
+            // takes the slow path through typed observation, no correctness
             // issue.
             if matches!(
                 fstype,
