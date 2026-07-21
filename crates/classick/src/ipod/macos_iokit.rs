@@ -24,7 +24,7 @@ use io_kit_sys::{
 /// USB identity recovered from the IORegistry for a mounted iPod.
 #[derive(Debug, Clone)]
 pub struct IokitUsbIdentity {
-    pub firewire_guid: String,
+    pub firewire_guid: Option<String>,
     pub pid: Option<u16>,
     pub capacity_bytes: Option<u64>,
 }
@@ -71,8 +71,8 @@ fn supported_ipod_added_identity(usb_serial: &str, pid: u16) -> Option<String> {
 }
 
 /// Resolve a mounted iPod volume to its USB identity. Returns `None` if the
-/// mount can't be resolved to a BSD name, isn't backed by an Apple USB
-/// device, or lacks a serial number.
+/// mount can't be resolved to a BSD name or isn't backed by an Apple USB
+/// device. Individual facts remain optional when association succeeds.
 pub fn identity_for_mount(mount: &Path) -> Option<IokitUsbIdentity> {
     let bsd = bsd_name_for_mount(mount)?;
     unsafe { identity_for_bsd_name(&bsd) }
@@ -115,20 +115,24 @@ unsafe fn identity_for_bsd_name(bsd: &str) -> Option<IokitUsbIdentity> {
     // Walk parents (IOService plane) until we hit the Apple USB device.
     let mut guid: Option<String> = None;
     let mut pid: Option<u16> = None;
+    let mut found_apple_usb = false;
     let mut chain: Vec<io_registry_entry_t> = vec![media];
     let mut entry = media;
     // Bounded to avoid any pathological cycle; the USB device is a handful of
     // levels above the IOMedia.
-    // The Apple vendor id (0x05AC) appears on several nodes up the chain
-    // (USB interfaces, then the device). Only the IOUSBHostDevice carries the
-    // serial number, so require BOTH the vendor id and a serial before
-    // accepting a node — otherwise we stop at an interface and miss the guid.
+    // The Apple vendor id (0x05AC) appears on several nodes up the chain.
+    // Retain product facts from those nodes, but keep walking because only the
+    // IOUSBHostDevice carries the serial number.
     for _ in 0..32 {
-        let ser = read_string_prop(entry, "USB Serial Number");
-        if read_u64_prop(entry, "idVendor") == Some(0x05AC) && ser.is_some() {
-            guid = ser.map(|s| format_firewire_guid(&s));
-            pid = read_u64_prop(entry, "idProduct").map(|v| v as u16);
-            break;
+        if read_u64_prop(entry, "idVendor") == Some(0x05AC) {
+            found_apple_usb = true;
+            if let Some(product_id) = read_u64_prop(entry, "idProduct").map(|v| v as u16) {
+                pid = Some(product_id);
+            }
+            if let Some(serial) = read_string_prop(entry, "USB Serial Number") {
+                guid = Some(format_firewire_guid(&serial));
+                break;
+            }
         }
         let mut parent: io_registry_entry_t = 0;
         let plane = b"IOService\0".as_ptr() as *const c_char;
@@ -143,8 +147,8 @@ unsafe fn identity_for_bsd_name(bsd: &str) -> Option<IokitUsbIdentity> {
         IOObjectRelease(e);
     }
 
-    Some(IokitUsbIdentity {
-        firewire_guid: guid?,
+    found_apple_usb.then_some(IokitUsbIdentity {
+        firewire_guid: guid,
         pid,
         capacity_bytes,
     })

@@ -22,7 +22,7 @@ fn main() {
 
     match classick::ipod::macos_iokit::identity_for_mount(p) {
         Some(id) => println!(
-            "identity_for_mount: guid={} pid={:?} capacity_bytes={:?}",
+            "identity_for_mount: guid={:?} pid={:?} capacity_bytes={:?}",
             id.firewire_guid, id.pid, id.capacity_bytes
         ),
         None => println!("identity_for_mount: None (not an Apple USB device, or unmounted)"),

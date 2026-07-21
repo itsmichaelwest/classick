@@ -25,13 +25,13 @@ as a substitute for that serial.
 
 The WinUI 3 tray application owns `classick.exe --daemon` and connects through
 `\\.\pipe\classick`. It bundles the release Rust binary and the libgpod runtime
-DLL closure. Windows-only SCSI inquiry can provision exact device identity when
-the mounted filesystem lacks sufficient SysInfoExtended data.
-
-That SCSI path is current implementation detail, not the approved target. The
+DLL closure. Ordinary mounted-device discovery uses zero-access volume queries
+plus SetupAPI and Configuration Manager; it never issues a SCSI request or asks
+for elevation. When explicitly invoked, the Windows-only SCSI diagnostic may
+inspect and report extended data; discovery, signing, and provisioning never
+call it automatically. The
 [native device protocol design](design/2026-07-19-native-device-protocol.md)
-makes ordinary OS USB enumeration authoritative and retains SCSI only for
-explicit diagnostics.
+defines ordinary OS USB enumeration as authoritative.
 
 ### macOS application
 

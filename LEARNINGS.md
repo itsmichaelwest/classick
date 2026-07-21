@@ -15,7 +15,8 @@ incidents and completed gate reports are archived in
 - The USB iSerial/FireWire GUID is the portable device ID. Normalize it to 16
   uppercase hex characters and obtain it through ordinary OS USB enumeration;
   mount paths, volume UUIDs, labels, names, and privileged SCSI inquiry are not
-  identity authorities.
+  identity authorities. Ordinary discovery and libgpod identity resolution
+  must never invoke SCSI automatically.
 - USB identity does not always reveal exact hardware. Classic PID `0x1261`
   plus 160 GB is ambiguous between the 2007 thick and 2009 thin generations,
   and USB does not report colour. Use a real device-file fact, a previously

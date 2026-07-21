@@ -1,8 +1,15 @@
 use super::{
-    hardware_facts_from_reported_model_code, hardware_facts_from_usb, DeviceId, DeviceReadiness,
-    Fact, HardwareFacts,
+    classify_device_readiness, hardware_facts_from_reported_model_code, hardware_facts_from_usb,
+    DeviceId, DeviceReadiness, Fact, HardwareFacts,
 };
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrdinaryUsbFacts {
+    pub raw_usb_iserial: Option<String>,
+    pub usb_product_id: Option<u16>,
+    pub capacity_bytes: Option<u64>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObservationId(u64);
@@ -118,6 +125,74 @@ pub fn assemble_device_observation(
             reported_firmware,
             capacity_bytes,
         ),
+    })
+}
+
+pub fn observe_mount(
+    mount_path: &Path,
+    observation_id: ObservationId,
+) -> Option<DeviceObservation> {
+    observe_mount_with_probe(
+        mount_path,
+        observation_id,
+        crate::ipod::device::ordinary_usb_facts_for_mount,
+    )
+}
+
+pub(super) fn observe_mount_with_probe(
+    mount_path: &Path,
+    observation_id: ObservationId,
+    probe: impl FnOnce(&Path) -> Option<OrdinaryUsbFacts>,
+) -> Option<DeviceObservation> {
+    let readiness = classify_device_readiness(mount_path)?;
+    let usb = probe(mount_path).unwrap_or_default();
+    let sysinfo = read_existing_sysinfo_facts(mount_path);
+
+    assemble_device_observation(
+        ReportedDeviceObservation {
+            mount_path: mount_path.to_path_buf(),
+            observation_id,
+            raw_usb_iserial: usb.raw_usb_iserial,
+            usb_product_id: usb.usb_product_id,
+            reported_model_code: sysinfo.model_code,
+            reported_firmware: sysinfo.firmware,
+            capacity_bytes: usb.capacity_bytes,
+        },
+        |_| Some(readiness),
+    )
+}
+
+#[derive(Default)]
+struct ExistingSysInfoFacts {
+    model_code: Option<String>,
+    firmware: Option<String>,
+}
+
+fn read_existing_sysinfo_facts(mount_path: &Path) -> ExistingSysInfoFacts {
+    let path = crate::ipod::layout::sysinfo_path(mount_path);
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return ExistingSysInfoFacts::default();
+    };
+    if !metadata.file_type().is_file() {
+        return ExistingSysInfoFacts::default();
+    }
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return ExistingSysInfoFacts::default();
+    };
+
+    ExistingSysInfoFacts {
+        model_code: flat_sysinfo_field(&contents, "ModelNumStr"),
+        firmware: flat_sysinfo_field(&contents, "FirmwareVersion"),
+    }
+}
+
+fn flat_sysinfo_field(contents: &str, key: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let (candidate, value) = line.split_once(':')?;
+        (candidate.trim() == key)
+            .then(|| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
     })
 }
 

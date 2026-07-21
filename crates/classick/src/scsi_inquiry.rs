@@ -41,33 +41,10 @@
 //! at the `DeviceIoControl` call (with zero-access opens). Only an
 //! elevated process can execute the full SCSI INQUIRY sequence.
 //!
-//! Because the failure is universal and not transient, the caller
-//! (`crate::ipod::device::recover_ipod_info_from_usb`) caches the
-//! per-device result for the daemon's lifetime — the IOCTL is
-//! attempted at most ONCE per FirewireGuid per process, then a
-//! cached error short-circuits subsequent polls. The
-//! USB-PID-+-capacity heuristic in `identify_ipod` is the
-//! production-realistic fallback and produces a libgpod-recognised
-//! `ModelNumStr` that's sufficient for iTunes acceptance of the
-//! signed iTunesDB (proven 2026-05-24 against an iPod Classic 7G).
-//!
-//! ## What's the SCSI code still here for, then?
-//!
-//! Three uses:
-//!
-//! 1. `examples/scsi-probe.rs` — diagnostic CLI for elevated
-//!    sessions; dumps the full XML for forensic / debugging work.
-//! 2. Future Nano 5G+ support — those devices use hash72 / hashAB,
-//!    which derive a per-device crypto key from data inside
-//!    `SysInfoExtended` that cannot be reconstructed from USB
-//!    descriptors alone. When we add that support we'll also need
-//!    a privileged path to invoke this code (LocalSystem helper
-//!    service via MSIX `desktop6:Service`, or SDDL grant via a
-//!    traditional installer — see `docs/archive/scsi-research.md` for the analysis).
-//! 3. Belt-and-suspenders for the rare elevated daemon run (e.g.
-//!    dev builds, troubleshooting) — when SCSI succeeds it's the
-//!    authoritative source for `ModelNumStr` and overrides the
-//!    heuristic.
+//! Ordinary discovery and libgpod identity resolution never call this module.
+//! It remains available only to the explicitly invoked `examples/scsi-probe.rs`
+//! diagnostic and future research. See `docs/archive/scsi-research.md` for the
+//! archived transport investigation.
 
 #![cfg(windows)]
 
@@ -138,22 +115,9 @@ struct ScsiPassThroughDirectWithSense {
     sense: [u8; 32],
 }
 
-/// Open the iPod's volume handle (`\\.\X:`) with the absolute minimum
-/// access (`dwDesiredAccess = 0`, query-only). On Windows this opens
-/// the handle in "IOCTL-only" mode — no read or write data access is
-/// granted, but `DeviceIoControl` calls that don't transfer file data
-/// (like our SCSI INQUIRY pass-through) still work, and crucially the
-/// OS does NOT require admin elevation.
-///
-/// We tried both `\\.\PhysicalDriveN` with `GENERIC_READ` and `\\.\X:`
-/// with `GENERIC_READ` first — both got `ERROR_ACCESS_DENIED` from a
-/// normal user session, confirming that any non-zero access mode
-/// against a raw disk/volume triggers Windows' admin requirement on
-/// modern builds. Zero-access + IOCTL pass-through is the documented
-/// non-elevation path for this specific use case (see Microsoft KB
-/// articles on `IOCTL_SCSI_PASS_THROUGH` and the MSDN entry for
-/// `CreateFile`'s `dwDesiredAccess` parameter, "Querying Attributes"
-/// section).
+/// Open the iPod's volume handle (`\\.\X:`) with the read/write access bits
+/// required by `IOCTL_SCSI_PASS_THROUGH_DIRECT`. This diagnostic operation
+/// normally requires an elevated process; ordinary discovery does not use it.
 fn open_volume(drive_letter: char) -> Result<OwnedHandle> {
     let path = format!(r"\\.\{}:", drive_letter.to_ascii_uppercase());
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();

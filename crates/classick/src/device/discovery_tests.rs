@@ -1,0 +1,263 @@
+use super::discovery::{observe_mount_with_probe, OrdinaryUsbFacts};
+use super::{DeviceObservationIdentity, DeviceReadiness, Fact, IpodFamily, ObservationId};
+use std::cell::Cell;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const DEVICE_ID: &str = "A1B2C3D4E5F60708";
+
+#[test]
+fn restored_mount_with_ordinary_usb_identity_is_visible_without_writes() {
+    let mount = TestMount::recognizable("restored", "");
+    let before = snapshot(mount.path());
+
+    let observation = observe_mount_with_probe(mount.path(), ObservationId::new(41), |_| {
+        Some(usb_facts(
+            Some(DEVICE_ID),
+            Some(0x1261),
+            Some(160_000_000_000),
+        ))
+    })
+    .unwrap();
+
+    assert_eq!(
+        observation.readiness(),
+        DeviceReadiness::NeedsAppleInitialization
+    );
+    assert_eq!(observation.device_id().unwrap().as_str(), DEVICE_ID);
+    assert_eq!(snapshot(mount.path()), before);
+}
+
+#[test]
+fn initialized_empty_database_marker_is_invalid_without_writes() {
+    let mount = TestMount::recognizable("invalid-database", "");
+    fs::write(mount.path().join("iPod_Control/iTunes/iTunesDB"), []).unwrap();
+    let before = snapshot(mount.path());
+
+    let observation = observe_mount_with_probe(mount.path(), ObservationId::new(42), |_| {
+        Some(usb_facts(Some(DEVICE_ID), None, None))
+    })
+    .unwrap();
+
+    assert_eq!(observation.readiness(), DeviceReadiness::InvalidDatabase);
+    assert_eq!(snapshot(mount.path()), before);
+}
+
+#[test]
+fn unavailable_usb_identity_keeps_the_supplied_observation_id_and_is_never_mutable() {
+    let cases = [
+        Some(usb_facts(None, Some(0x1261), Some(160_000_000_000))),
+        Some(usb_facts(
+            Some("malformed-private-value"),
+            Some(0x1261),
+            Some(160_000_000_000),
+        )),
+        None,
+    ];
+
+    for (sequence, facts) in cases.into_iter().enumerate() {
+        let mount = TestMount::recognizable(&format!("identity-unavailable-{sequence}"), "");
+        let observation_id = ObservationId::new(sequence as u64 + 50);
+        let before = snapshot(mount.path());
+        let observation =
+            observe_mount_with_probe(mount.path(), observation_id.clone(), move |_| facts).unwrap();
+
+        assert_eq!(
+            observation.identity(),
+            &DeviceObservationIdentity::Unavailable(observation_id.clone())
+        );
+        assert_eq!(observation.observation_id(), Some(&observation_id));
+        assert_eq!(
+            observation.readiness(),
+            DeviceReadiness::IdentityUnavailable
+        );
+        assert!(!observation.is_mutation_eligible());
+        assert_eq!(snapshot(mount.path()), before);
+        assert!(!format!("{observation:?}").contains("malformed-private-value"));
+    }
+}
+
+#[test]
+fn exact_pid_and_capacity_flow_to_the_catalogue_without_inventing_a_classic_variant() {
+    let mount = TestMount::recognizable("ambiguous-classic", "");
+
+    let observation = observe_mount_with_probe(mount.path(), ObservationId::new(60), |_| {
+        Some(usb_facts(
+            Some(DEVICE_ID),
+            Some(0x1261),
+            Some(160_000_000_000),
+        ))
+    })
+    .unwrap();
+    let facts = observation.hardware_facts();
+
+    assert_eq!(facts.family, Some(Fact::decoded(IpodFamily::Classic)));
+    assert_eq!(facts.capacity_bytes, Some(Fact::reported(160_000_000_000)));
+    assert_eq!(facts.generation, None);
+    assert_eq!(facts.model_code, None);
+    assert_eq!(facts.colour, None);
+}
+
+#[test]
+fn genuine_sysinfo_model_and_firmware_are_optional_read_only_facts() {
+    let mount = TestMount::recognizable(
+        "sysinfo-facts",
+        "ModelNumStr: MC297\nFirmwareVersion: 2.0.5\n",
+    );
+    let before = snapshot(mount.path());
+
+    let observation = observe_mount_with_probe(mount.path(), ObservationId::new(61), |_| {
+        Some(usb_facts(
+            Some(DEVICE_ID),
+            Some(0x1261),
+            Some(160_000_000_000),
+        ))
+    })
+    .unwrap();
+    let facts = observation.hardware_facts();
+
+    assert_eq!(facts.model_code, Some(Fact::reported("MC297".to_owned())));
+    assert_eq!(facts.firmware, Some(Fact::reported("2.0.5".to_owned())));
+    assert_eq!(snapshot(mount.path()), before);
+
+    let empty =
+        TestMount::recognizable("empty-sysinfo-facts", "ModelNumStr:   \nFirmwareVersion:\n");
+    let observation = observe_mount_with_probe(empty.path(), ObservationId::new(62), |_| {
+        Some(usb_facts(Some(DEVICE_ID), None, None))
+    })
+    .unwrap();
+    assert_eq!(observation.hardware_facts().model_code, None);
+    assert_eq!(observation.hardware_facts().firmware, None);
+}
+
+#[test]
+fn ordinary_probe_runs_once_and_only_after_the_mount_is_recognized() {
+    let recognized = TestMount::recognizable("probe-once", "");
+    let calls = Cell::new(0);
+
+    let observation = observe_mount_with_probe(recognized.path(), ObservationId::new(70), |_| {
+        calls.set(calls.get() + 1);
+        Some(usb_facts(Some(DEVICE_ID), None, None))
+    });
+
+    assert!(observation.is_some());
+    assert_eq!(calls.get(), 1);
+
+    let non_candidate = TestMount::empty("probe-skipped");
+    let calls = Cell::new(0);
+    let observation =
+        observe_mount_with_probe(non_candidate.path(), ObservationId::new(71), |_| {
+            calls.set(calls.get() + 1);
+            Some(usb_facts(Some(DEVICE_ID), None, None))
+        });
+
+    assert_eq!(observation, None);
+    assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn ordinary_usb_facts_expose_only_the_approved_os_observations() {
+    let facts = usb_facts(Some(DEVICE_ID), Some(0x1261), Some(160_000_000_000));
+    let OrdinaryUsbFacts {
+        raw_usb_iserial,
+        usb_product_id,
+        capacity_bytes,
+    } = facts;
+
+    assert_eq!(raw_usb_iserial.as_deref(), Some(DEVICE_ID));
+    assert_eq!(usb_product_id, Some(0x1261));
+    assert_eq!(capacity_bytes, Some(160_000_000_000));
+}
+
+#[test]
+fn production_device_discovery_and_identity_have_no_scsi_reference() {
+    let discovery = include_str!("discovery.rs");
+    let legacy_adapter = include_str!("../ipod/device.rs");
+
+    for source in [discovery, legacy_adapter] {
+        assert!(!source.contains("crate::scsi_inquiry"));
+        assert!(!source.contains("read_sysinfo_extended"));
+    }
+}
+
+fn usb_facts(
+    raw_usb_iserial: Option<&str>,
+    usb_product_id: Option<u16>,
+    capacity_bytes: Option<u64>,
+) -> OrdinaryUsbFacts {
+    OrdinaryUsbFacts {
+        raw_usb_iserial: raw_usb_iserial.map(str::to_owned),
+        usb_product_id,
+        capacity_bytes,
+    }
+}
+
+struct TestMount(PathBuf);
+
+impl TestMount {
+    fn empty(label: &str) -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-tmp")
+            .join(format!(
+                "ordinary-observation-{label}-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn recognizable(label: &str, sysinfo: &str) -> Self {
+        let mount = Self::empty(label);
+        fs::create_dir_all(mount.path().join("iPod_Control/Device")).unwrap();
+        fs::create_dir_all(mount.path().join("iPod_Control/iTunes")).unwrap();
+        fs::write(mount.path().join("iPod_Control/Device/SysInfo"), sysinfo).unwrap();
+        mount
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestMount {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SnapshotEntry {
+    path: PathBuf,
+    is_directory: bool,
+    bytes: Option<Vec<u8>>,
+}
+
+fn snapshot(root: &Path) -> Vec<SnapshotEntry> {
+    fn walk(root: &Path, current: &Path, entries: &mut Vec<SnapshotEntry>) {
+        let mut children = fs::read_dir(current)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            let path = child.path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            entries.push(SnapshotEntry {
+                path: path.strip_prefix(root).unwrap().to_path_buf(),
+                is_directory: metadata.is_dir(),
+                bytes: metadata.is_file().then(|| fs::read(&path).unwrap()),
+            });
+            if metadata.is_dir() {
+                walk(root, &path, entries);
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    walk(root, root, &mut entries);
+    entries
+}
