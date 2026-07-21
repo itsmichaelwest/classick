@@ -1,9 +1,126 @@
 use super::{FactConfidence, HardwareFacts, IpodFamily, ObservationInventory};
 use crate::ipod::device::{mount_for_volume_guid, volume_guid_for_mount, DetectedIpod};
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 pub(crate) fn scan_for_ipods() -> Vec<DetectedIpod> {
-    adapt_observation_inventory(&super::scan_device_observations())
+    static CACHE: OnceLock<Mutex<LegacyV2PollingCache>> = OnceLock::new();
+
+    let candidates = crate::ipod::device::candidate_mount_points();
+    CACHE
+        .get_or_init(|| Mutex::new(LegacyV2PollingCache::default()))
+        .lock()
+        .expect("legacy v2 polling cache poisoned")
+        .scan_with(
+            candidates,
+            || adapt_observation_inventory(&super::scan_device_observations()),
+            mount_for_volume_guid,
+        )
+}
+
+#[derive(Default)]
+pub(super) struct LegacyV2PollingCache {
+    candidates: BTreeSet<PathBuf>,
+    known: Vec<KnownReadyObservation>,
+}
+
+struct KnownReadyObservation {
+    detected: DetectedIpod,
+    fingerprint: ReadyLayoutFingerprint,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ReadyLayoutFingerprint {
+    sysinfo: FileFingerprint,
+    database: FileFingerprint,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    length: u64,
+    modified: SystemTime,
+}
+
+impl LegacyV2PollingCache {
+    pub(super) fn scan_with(
+        &mut self,
+        candidates: Vec<PathBuf>,
+        cold_scan: impl FnOnce() -> Vec<DetectedIpod>,
+        mut resolve_volume: impl FnMut(&str) -> Option<PathBuf>,
+    ) -> Vec<DetectedIpod> {
+        let candidate_set: BTreeSet<_> = candidates.into_iter().collect();
+        if let Some(cached) = self.revalidate(&candidate_set, &mut resolve_volume) {
+            return cached;
+        }
+
+        let detected = cold_scan();
+        self.remember(candidate_set, &detected);
+        detected
+    }
+
+    fn revalidate(
+        &self,
+        candidates: &BTreeSet<PathBuf>,
+        resolve_volume: &mut impl FnMut(&str) -> Option<PathBuf>,
+    ) -> Option<Vec<DetectedIpod>> {
+        if self.known.is_empty() {
+            return None;
+        }
+
+        let mut expected_candidates = self.candidates.clone();
+        let mut detected = Vec::with_capacity(self.known.len());
+        for known in &self.known {
+            let mount = match known.detected.volume_guid.as_deref() {
+                Some(volume_guid) => resolve_volume(volume_guid)?,
+                None => PathBuf::from(&known.detected.drive),
+            };
+            if ready_layout_fingerprint(&mount)? != known.fingerprint {
+                return None;
+            }
+            expected_candidates.remove(Path::new(&known.detected.drive));
+            expected_candidates.insert(mount.clone());
+
+            let mut current = known.detected.clone();
+            current.drive = mount.to_string_lossy().into_owned();
+            detected.push(current);
+        }
+
+        (*candidates == expected_candidates).then_some(detected)
+    }
+
+    fn remember(&mut self, candidates: BTreeSet<PathBuf>, detected: &[DetectedIpod]) {
+        self.candidates = candidates;
+        self.known = detected
+            .iter()
+            .filter_map(|detected| {
+                let fingerprint = ready_layout_fingerprint(Path::new(&detected.drive))?;
+                Some(KnownReadyObservation {
+                    detected: detected.clone(),
+                    fingerprint,
+                })
+            })
+            .collect();
+    }
+}
+
+fn ready_layout_fingerprint(mount: &Path) -> Option<ReadyLayoutFingerprint> {
+    Some(ReadyLayoutFingerprint {
+        sysinfo: file_fingerprint(&crate::ipod::layout::sysinfo_path(mount))?,
+        database: file_fingerprint(&crate::ipod::layout::itunes_db_path(mount))?,
+    })
+}
+
+fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    Some(FileFingerprint {
+        length: metadata.len(),
+        modified: metadata.modified().ok()?,
+    })
 }
 
 pub(crate) fn try_resolve_known_volume(

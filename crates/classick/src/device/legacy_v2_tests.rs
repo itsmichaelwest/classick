@@ -1,4 +1,4 @@
-use super::legacy_v2::{adapt_known_mount, adapt_observation_inventory};
+use super::legacy_v2::{adapt_known_mount, adapt_observation_inventory, LegacyV2PollingCache};
 use super::{
     assemble_device_observation, DeviceObservation, DeviceObservationScanner, DeviceReadiness,
     ObservationId, OrdinaryUsbFacts, ReportedDeviceObservation,
@@ -236,6 +236,168 @@ fn known_volume_fast_path_checks_layout_without_reparsing_the_database() {
     let _ = fs::remove_dir_all(mount);
 }
 
+#[test]
+fn production_polling_cache_reuses_an_unchanged_ready_observation() {
+    let mount = ready_mount("polling-cache-unchanged");
+    let detected = detected_at(&mount, None);
+    let cold_scans = Cell::new(0);
+    let mut cache = LegacyV2PollingCache::default();
+
+    let first = cache.scan_with(
+        vec![mount.clone()],
+        || {
+            cold_scans.set(cold_scans.get() + 1);
+            vec![detected.clone()]
+        },
+        |_| None,
+    );
+    let second = cache.scan_with(
+        vec![mount.clone()],
+        || {
+            cold_scans.set(cold_scans.get() + 1);
+            vec![detected.clone()]
+        },
+        |_| None,
+    );
+
+    assert_eq!(first, vec![detected.clone()]);
+    assert_eq!(second, vec![detected]);
+    assert_eq!(cold_scans.get(), 1);
+    let _ = fs::remove_dir_all(mount);
+}
+
+#[test]
+fn production_polling_cache_tracks_a_known_volume_mount_change_without_cold_scan() {
+    let original = ready_mount("polling-cache-original-mount");
+    let moved = original.with_file_name(format!(
+        "classick-polling-cache-moved-mount-{}-{}",
+        std::process::id(),
+        NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let detected = detected_at(&original, Some("volume-guid"));
+    let cold_scans = Cell::new(0);
+    let mut cache = LegacyV2PollingCache::default();
+
+    cache.scan_with(
+        vec![original.clone()],
+        || {
+            cold_scans.set(cold_scans.get() + 1);
+            vec![detected]
+        },
+        |_| None,
+    );
+    fs::rename(&original, &moved).unwrap();
+    let current = cache.scan_with(
+        vec![moved.clone()],
+        || {
+            cold_scans.set(cold_scans.get() + 1);
+            Vec::new()
+        },
+        |_| Some(moved.clone()),
+    );
+
+    assert_eq!(cold_scans.get(), 1);
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].drive, moved.to_string_lossy());
+    let _ = fs::remove_dir_all(moved);
+}
+
+#[test]
+fn production_polling_cache_cold_scans_when_the_database_changes() {
+    let mount = ready_mount("polling-cache-database-change");
+    let detected = detected_at(&mount, None);
+    let cold_scans = Cell::new(0);
+    let mut cache = LegacyV2PollingCache::default();
+
+    cache.scan_with(
+        vec![mount.clone()],
+        || {
+            cold_scans.set(cold_scans.get() + 1);
+            vec![detected.clone()]
+        },
+        |_| None,
+    );
+    fs::write(
+        mount.join("iPod_Control/iTunes/iTunesDB"),
+        b"changed database bytes",
+    )
+    .unwrap();
+    let current = cache.scan_with(
+        vec![mount.clone()],
+        || {
+            cold_scans.set(cold_scans.get() + 1);
+            vec![detected.clone()]
+        },
+        |_| None,
+    );
+
+    assert_eq!(cold_scans.get(), 2);
+    assert_eq!(current, vec![detected]);
+    let _ = fs::remove_dir_all(mount);
+}
+
+#[test]
+fn production_polling_cache_cold_scans_when_candidate_inventory_changes() {
+    let first_mount = ready_mount("polling-cache-first-candidate");
+    let second_mount = ready_mount("polling-cache-second-candidate");
+    let first = detected_at(&first_mount, None);
+    let mut second = detected_at(&second_mount, None);
+    second.serial = "0x000A27002138B0A9".to_owned();
+    let cold_scans = Cell::new(0);
+    let mut cache = LegacyV2PollingCache::default();
+
+    cache.scan_with(
+        vec![first_mount.clone()],
+        || {
+            cold_scans.set(cold_scans.get() + 1);
+            vec![first.clone()]
+        },
+        |_| None,
+    );
+    let current = cache.scan_with(
+        vec![first_mount.clone(), second_mount.clone()],
+        || {
+            cold_scans.set(cold_scans.get() + 1);
+            vec![first.clone(), second.clone()]
+        },
+        |_| None,
+    );
+
+    assert_eq!(cold_scans.get(), 2);
+    assert_eq!(current, vec![first, second]);
+    let _ = fs::remove_dir_all(first_mount);
+    let _ = fs::remove_dir_all(second_mount);
+}
+
+#[test]
+fn production_polling_cache_cold_scans_and_drops_a_disconnected_device() {
+    let mount = ready_mount("polling-cache-disconnect");
+    let detected = detected_at(&mount, None);
+    let cold_scans = Cell::new(0);
+    let mut cache = LegacyV2PollingCache::default();
+
+    cache.scan_with(
+        vec![mount.clone()],
+        || {
+            cold_scans.set(cold_scans.get() + 1);
+            vec![detected]
+        },
+        |_| None,
+    );
+    fs::remove_dir_all(&mount).unwrap();
+    let current = cache.scan_with(
+        Vec::new(),
+        || {
+            cold_scans.set(cold_scans.get() + 1);
+            Vec::new()
+        },
+        |_| None,
+    );
+
+    assert_eq!(cold_scans.get(), 2);
+    assert!(current.is_empty());
+}
+
 fn observation(
     mount_path: &Path,
     observation_id: ObservationId,
@@ -281,4 +443,28 @@ fn snapshot(root: &Path) -> Vec<(PathBuf, bool, Vec<u8>)> {
     let mut entries = Vec::new();
     visit(root, root, &mut entries);
     entries
+}
+
+fn ready_mount(label: &str) -> PathBuf {
+    let mount = std::env::temp_dir().join(format!(
+        "classick-{label}-{}-{}",
+        std::process::id(),
+        NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&mount);
+    fs::create_dir_all(mount.join("iPod_Control/Device")).unwrap();
+    fs::create_dir_all(mount.join("iPod_Control/iTunes")).unwrap();
+    fs::write(mount.join("iPod_Control/Device/SysInfo"), []).unwrap();
+    fs::write(mount.join("iPod_Control/iTunes/iTunesDB"), b"database").unwrap();
+    mount
+}
+
+fn detected_at(mount: &Path, volume_guid: Option<&str>) -> DetectedIpod {
+    DetectedIpod {
+        serial: "0x000A27002138B0A8".to_owned(),
+        model_label: "iPod Classic".to_owned(),
+        drive: mount.to_string_lossy().into_owned(),
+        name: None,
+        volume_guid: volume_guid.map(str::to_owned),
+    }
 }

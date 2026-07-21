@@ -88,6 +88,15 @@ fn legacy_firewire_guid(raw_usb_iserial: &str) -> Option<String> {
     Some(format!("0x{device_id}"))
 }
 
+fn trusted_sysinfo_model_for_usb(model_num: &str, usb_product_id: Option<u16>) -> Option<String> {
+    if usb_product_id.is_some_and(|product_id| product_id != 0x1261) {
+        return None;
+    }
+    crate::device::hardware_facts_from_reported_model_code(model_num)?
+        .model_code
+        .map(|fact| fact.value)
+}
+
 /// Resolve the identity libgpod needs to sign the iTunesDB from ordinary USB
 /// enumeration, with an existing SysInfo `ModelNumStr` as optional model
 /// enrichment. The USB PID/capacity model selection is a compatibility adapter
@@ -114,12 +123,14 @@ fn resolve_libgpod_identity_with_probe(
         .ok_or_else(|| anyhow!("USB identity unavailable for {}", ipod_mount.display()))?;
     let firewire_guid = legacy_firewire_guid(&raw_usb_iserial)
         .ok_or_else(|| anyhow!("USB identity unavailable for {}", ipod_mount.display()))?;
-    let model_num_str = disk_model
+    let model_num_str = recovered
+        .usb_product_id
+        .and_then(|pid| identify_ipod(pid, recovered.capacity_bytes))
+        .map(|identity| identity.model_num.to_owned())
         .or_else(|| {
-            recovered
-                .usb_product_id
-                .and_then(|pid| identify_ipod(pid, recovered.capacity_bytes))
-                .map(|identity| identity.model_num.to_owned())
+            disk_model.as_deref().and_then(|model_num| {
+                trusted_sysinfo_model_for_usb(model_num, recovered.usb_product_id)
+            })
         })
         .ok_or_else(|| {
             anyhow!(
@@ -805,6 +816,36 @@ fn usb_parent_instance_id(disk_devinst: u32) -> Option<String> {
 //
 // =========================================================================
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn decode_procfs_field(encoded: &str) -> Option<String> {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+
+        let digits = bytes.get(index + 1..index + 4)?;
+        if !digits.iter().all(|digit| matches!(digit, b'0'..=b'7')) {
+            return None;
+        }
+        let value = u16::from(digits[0] - b'0') * 64
+            + u16::from(digits[1] - b'0') * 8
+            + u16::from(digits[2] - b'0');
+        if value == 0 || value > u16::from(u8::MAX) {
+            return None;
+        }
+        decoded.push(value as u8);
+        index += 4;
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
 #[cfg(target_os = "linux")]
 fn linux_ordinary_usb_facts(mount: &std::path::Path) -> Option<OrdinaryUsbFacts> {
     let block_dev = linux_block_device_for_mount(mount)?;
@@ -855,6 +896,11 @@ fn linux_ordinary_usb_facts(mount: &std::path::Path) -> Option<OrdinaryUsbFacts>
 #[cfg(target_os = "linux")]
 fn linux_block_device_for_mount(mount: &std::path::Path) -> Option<String> {
     let mounts = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    linux_block_device_for_mount_from(mount, &mounts)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_block_device_for_mount_from(mount: &std::path::Path, mounts: &str) -> Option<String> {
     let mount_str = mount.to_string_lossy();
     let mount_norm = mount_str.trim_end_matches('/');
     for line in mounts.lines() {
@@ -862,15 +908,18 @@ fn linux_block_device_for_mount(mount: &std::path::Path) -> Option<String> {
         if parts.len() < 7 {
             continue;
         }
-        let mp = parts[4].trim_end_matches('/');
-        if mp != mount_norm {
+        let Some(mount_field) = decode_procfs_field(parts[4]) else {
+            continue;
+        };
+        let mount_field = mount_field.trim_end_matches('/');
+        if std::path::Path::new(mount_field) != std::path::Path::new(mount_norm) {
             continue;
         }
         // Find the "-" separator marking the end of optional fields.
         let dash = parts.iter().position(|&p| p == "-")?;
         // After "-": fs-type, source, super-opts. Source is at dash+2.
         let source = parts.get(dash + 2)?;
-        return Some((*source).to_string());
+        return decode_procfs_field(source);
     }
     None
 }
@@ -1338,10 +1387,8 @@ pub(crate) fn candidate_mount_points() -> Vec<std::path::PathBuf> {
 /// never host an iPod.
 ///
 /// Per-line layout (procfs(5)): `device mountpoint fstype options dump pass`.
-/// Whitespace-separated, but paths containing spaces are escaped as `\040`;
-/// since iPod mounts almost never have spaces in their path (and typed
-/// observation rejects the escaped path, no harm done) we don't bother
-/// unescaping for this filter pass.
+/// Whitespace-separated fields encode whitespace and backslashes with octal
+/// escapes, which are decoded before constructing mount paths.
 #[cfg(target_os = "linux")]
 fn linux_mount_candidates() -> Vec<std::path::PathBuf> {
     let body = match std::fs::read_to_string("/proc/mounts") {
@@ -1351,11 +1398,16 @@ fn linux_mount_candidates() -> Vec<std::path::PathBuf> {
             return Vec::new();
         }
     };
+    linux_mount_candidates_from(&body)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_mount_candidates_from(body: &str) -> Vec<std::path::PathBuf> {
     body.lines()
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
             let _device = parts.next()?;
-            let mount = parts.next()?;
+            let mount = decode_procfs_field(parts.next()?)?;
             let fstype = parts.next()?;
             // Kernel pseudo-FSes — these can never host iPod content.
             // The set isn't exhaustive but covers what Ubuntu / Fedora /
@@ -1608,6 +1660,81 @@ mod tests {
 
         assert_eq!(identity.firewire_guid, "0x000A27002138B0A8");
         assert_eq!(identity.model_num_str, "MC293");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_identity_replaces_unknown_sysinfo_model_with_usb_backed_model() {
+        let dir = std::env::temp_dir().join(format!(
+            "classick-unknown-model-safe-usb-{}",
+            std::process::id()
+        ));
+        let device_dir = dir.join("iPod_Control").join("Device");
+        std::fs::create_dir_all(&device_dir).unwrap();
+        std::fs::write(
+            device_dir.join("SysInfo"),
+            "ModelNumStr: UNKNOWN_STALE_VALUE\n",
+        )
+        .unwrap();
+
+        let identity = resolve_libgpod_identity_with_probe(&dir, |_| {
+            Some(OrdinaryUsbFacts {
+                raw_usb_iserial: Some("000A27002138B0A8".to_owned()),
+                usb_product_id: Some(0x1261),
+                capacity_bytes: Some(160_000_000_000),
+            })
+        })
+        .expect("USB evidence should provide a safe signing model");
+
+        assert_eq!(identity.model_num_str, "MC293");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_identity_rejects_unknown_sysinfo_model_without_safe_usb_mapping() {
+        let dir = std::env::temp_dir().join(format!(
+            "classick-unknown-model-no-mapping-{}",
+            std::process::id()
+        ));
+        let device_dir = dir.join("iPod_Control").join("Device");
+        std::fs::create_dir_all(&device_dir).unwrap();
+        std::fs::write(
+            device_dir.join("SysInfo"),
+            "ModelNumStr: UNKNOWN_STALE_VALUE\n",
+        )
+        .unwrap();
+
+        let result = resolve_libgpod_identity_with_probe(&dir, |_| {
+            Some(OrdinaryUsbFacts {
+                raw_usb_iserial: Some("000A27002138B0A8".to_owned()),
+                usb_product_id: Some(0xFFFF),
+                capacity_bytes: None,
+            })
+        });
+
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_identity_rejects_catalogue_model_that_conflicts_with_usb_family() {
+        let dir = std::env::temp_dir().join(format!(
+            "classick-stale-model-family-mismatch-{}",
+            std::process::id()
+        ));
+        let device_dir = dir.join("iPod_Control").join("Device");
+        std::fs::create_dir_all(&device_dir).unwrap();
+        std::fs::write(device_dir.join("SysInfo"), "ModelNumStr: MC293\n").unwrap();
+
+        let result = resolve_libgpod_identity_with_probe(&dir, |_| {
+            Some(OrdinaryUsbFacts {
+                raw_usb_iserial: Some("000A27002138B0A8".to_owned()),
+                usb_product_id: Some(0x1267),
+                capacity_bytes: None,
+            })
+        });
+
+        assert!(result.is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1992,5 +2119,39 @@ mod tests {
             "SysInfo without iTunesDB must not be classified as an iPod"
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn procfs_field_decoder_handles_standard_octal_escapes() {
+        assert_eq!(
+            decode_procfs_field(r"/media/My\040iPod\011Classic\134USB"),
+            Some("/media/My iPod\tClassic\\USB".to_owned())
+        );
+    }
+
+    #[test]
+    fn proc_mount_candidates_decode_mount_paths_before_path_construction() {
+        let mounts = concat!(
+            "/dev/sdb1 /media/My\\040iPod vfat rw 0 0\n",
+            "proc /proc proc rw 0 0\n",
+        );
+
+        assert_eq!(
+            linux_mount_candidates_from(mounts),
+            vec![std::path::PathBuf::from("/media/My iPod")]
+        );
+    }
+
+    #[test]
+    fn mountinfo_lookup_decodes_mount_and_source_fields_before_comparison() {
+        let mountinfo = concat!(
+            "36 25 8:17 / /media/My\\040iPod rw,relatime - vfat ",
+            "/dev/disk\\040name rw\n",
+        );
+
+        assert_eq!(
+            linux_block_device_for_mount_from(std::path::Path::new("/media/My iPod"), mountinfo,),
+            Some("/dev/disk name".to_owned())
+        );
     }
 }
