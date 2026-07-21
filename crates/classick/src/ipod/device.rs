@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use std::ffi::{CStr, CString};
 use std::path::Path;
 
-use crate::device::OrdinaryUsbFacts;
+use crate::device::{DeviceId, OrdinaryUsbFacts};
 use crate::ffi;
 
 /// Extract the value of the `FirewireGuid:` line from a SysInfo body.
@@ -83,31 +83,36 @@ pub struct LibgpodIdentity {
     pub model_num_str: String,
 }
 
-/// Resolve the identity libgpod needs to sign the iTunesDB from valid
-/// pre-existing SysInfo fields plus ordinary USB enumeration. The USB
-/// PID/capacity model selection is a compatibility adapter for signing,
-/// not a reported hardware fact.
+fn legacy_firewire_guid(raw_usb_iserial: &str) -> Option<String> {
+    let device_id = DeviceId::parse(raw_usb_iserial).ok()?;
+    Some(format!("0x{device_id}"))
+}
+
+/// Resolve the identity libgpod needs to sign the iTunesDB from ordinary USB
+/// enumeration, with an existing SysInfo `ModelNumStr` as optional model
+/// enrichment. The USB PID/capacity model selection is a compatibility adapter
+/// for signing, not a reported hardware fact.
 ///
-/// Returns an error if neither source can produce a
-/// FirewireGuid — at which point libgpod can't sign anything and
-/// the sync would be DOA regardless.
+/// Returns an error when ordinary enumeration cannot produce a valid
+/// FirewireGuid, at which point libgpod cannot sign anything safely.
 pub fn resolve_libgpod_identity(ipod_mount: &Path) -> Result<LibgpodIdentity> {
+    resolve_libgpod_identity_with_probe(ipod_mount, ordinary_usb_facts_for_mount)
+}
+
+fn resolve_libgpod_identity_with_probe(
+    ipod_mount: &Path,
+    probe: impl FnOnce(&Path) -> Option<OrdinaryUsbFacts>,
+) -> Result<LibgpodIdentity> {
     let sysinfo_path = crate::ipod::layout::sysinfo_path(ipod_mount);
     let sysinfo_text = std::fs::read_to_string(&sysinfo_path).unwrap_or_default();
-    let disk_guid = parse_sysinfo_field(&sysinfo_text, "FirewireGuid").filter(|s| !s.is_empty());
     let disk_model = parse_sysinfo_field(&sysinfo_text, "ModelNumStr").filter(|s| !s.is_empty());
 
-    if let (Some(guid), Some(model_num_str)) = (disk_guid.clone(), disk_model.clone()) {
-        return Ok(LibgpodIdentity {
-            firewire_guid: guid,
-            model_num_str,
-        });
-    }
-
-    let recovered = ordinary_usb_facts_for_mount(ipod_mount)
+    let recovered = probe(ipod_mount)
         .ok_or_else(|| anyhow!("USB recovery failed for {}", ipod_mount.display()))?;
-    let firewire_guid = disk_guid
-        .or(recovered.raw_usb_iserial)
+    let raw_usb_iserial = recovered
+        .raw_usb_iserial
+        .ok_or_else(|| anyhow!("USB identity unavailable for {}", ipod_mount.display()))?;
+    let firewire_guid = legacy_firewire_guid(&raw_usb_iserial)
         .ok_or_else(|| anyhow!("USB identity unavailable for {}", ipod_mount.display()))?;
     let model_num_str = disk_model
         .or_else(|| {
@@ -180,14 +185,21 @@ pub fn scan_for_ipod() -> Option<DetectedIpod> {
     scan_for_ipods().into_iter().next()
 }
 
-/// Test-friendly variant: check a specific drive (or any path) for the
-/// iPod_Control\Device\SysInfo file and read identity from it.
+/// Check a specific drive (or any path) for the canonical initialized layout,
+/// then obtain identity from ordinary USB enumeration.
 ///
 /// Modern Apple software can leave SysInfo empty. In that case the legacy v2
 /// adapter recovers the FirewireGuid from ordinary USB enumeration and may use
 /// PID plus capacity to select a signing-only libgpod model. It never writes
 /// the inferred model or recovered identity to SysInfo.
 pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
+    scan_drive_for_ipod_with_probe(drive, ordinary_usb_facts_for_mount)
+}
+
+fn scan_drive_for_ipod_with_probe(
+    drive: &std::path::Path,
+    probe: impl FnOnce(&Path) -> Option<OrdinaryUsbFacts>,
+) -> Option<DetectedIpod> {
     // F-09: require BOTH SysInfo and iTunesDB. A device with only SysInfo
     // is mid-restore (no DB written yet); the daemon would announce
     // "connected" but a sync attempt would fail at OwnedDb::open. The
@@ -199,48 +211,33 @@ pub fn scan_drive_for_ipod(drive: &std::path::Path) -> Option<DetectedIpod> {
     let sysinfo = crate::ipod::layout::sysinfo_path(drive);
     let text = std::fs::read_to_string(&sysinfo).unwrap_or_default();
 
-    // If on-disk SysInfo already carries identity (older firmware,
-    // a gtkpod user before us, or a pre-fix install of classick
-    // itself), use that — leave the file untouched.
-    let mut serial = parse_sysinfo_field(&text, "FirewireGuid");
+    // Existing SysInfo may enrich the signing/presentation model, but device
+    // identity comes exclusively from ordinary USB enumeration.
     let mut model_num = parse_sysinfo_field(&text, "ModelNumStr").unwrap_or_default();
     let mut model_label_override: Option<String> = None;
 
-    let need_serial_recovery = serial.as_deref().map(str::is_empty).unwrap_or(true);
-    let need_model_recovery = model_num.is_empty();
-
-    if need_serial_recovery || need_model_recovery {
-        if let Some(recovered) = ordinary_usb_facts_for_mount(drive) {
-            let identity = recovered
-                .usb_product_id
-                .and_then(|pid| identify_ipod(pid, recovered.capacity_bytes));
-            tracing::info!(
-                "ipod: ordinary USB recovery for {} → identity_available={}, pid={:?}, \
-                 capacity={:?} bytes, signing_identity={:?}",
-                drive.display(),
-                recovered.raw_usb_iserial.is_some(),
-                recovered.usb_product_id,
-                recovered.capacity_bytes,
-                identity,
-            );
-            if need_serial_recovery {
-                serial = recovered.raw_usb_iserial.clone();
-            }
-            if need_model_recovery {
-                if let Some(identity) = identity {
-                    model_num = identity.model_num.to_string();
-                    model_label_override = Some(identity.label.to_string());
-                } else if let Some(pid) = recovered.usb_product_id {
-                    model_num = format!("xPID_{pid:04X}");
-                }
-            }
+    let recovered = probe(drive)?;
+    let serial = legacy_firewire_guid(recovered.raw_usb_iserial.as_deref()?)?;
+    let identity = recovered
+        .usb_product_id
+        .and_then(|pid| identify_ipod(pid, recovered.capacity_bytes));
+    tracing::info!(
+        "ipod: ordinary USB recovery for {} → identity_available=true, pid={:?}, \
+         capacity={:?} bytes, signing_identity={:?}",
+        drive.display(),
+        recovered.usb_product_id,
+        recovered.capacity_bytes,
+        identity,
+    );
+    if model_num.is_empty() {
+        if let Some(identity) = identity {
+            model_num = identity.model_num.to_string();
+            model_label_override = Some(identity.label.to_string());
+        } else if let Some(pid) = recovered.usb_product_id {
+            model_num = format!("xPID_{pid:04X}");
         }
     }
 
-    let serial = serial?;
-    if serial.is_empty() {
-        return None;
-    }
     let model_label = model_label_override.unwrap_or_else(|| describe_model(&model_num));
     // Stash the volume GUID so the watcher can fast-path subsequent
     // polls (one Win32 resolve vs. re-walking every present volume).
@@ -355,9 +352,9 @@ pub fn mount_for_volume_guid(volume_guid: &str) -> Option<std::path::PathBuf> {
 /// Fast-path device check for the daemon's polling watcher: given a
 /// known volume GUID from a prior full scan, resolve it to the current
 /// mount path and verify the iPod files are still there. Skips the
-/// drive-letter enumeration + per-mount file probes + SCSI INQUIRY +
-/// USB descriptor lookup — all of which only need to run on the cold
-/// path (first observation, or after a fast-path miss).
+/// drive-letter enumeration, per-mount file probes, and USB descriptor lookup,
+/// which only need to run on the cold path (first observation, or after a
+/// fast-path miss).
 ///
 /// Returns `None` when the volume GUID no longer resolves (device gone
 /// or moved) or when the resolved mount no longer contains the canonical
@@ -1568,22 +1565,97 @@ mod tests {
         assert!(extract_firewire_guid(sysinfo).is_err());
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn resolve_identity_reads_on_disk_sysinfo() {
-        // Layer 1 (on-disk SysInfo present) returns without touching USB
-        // recovery — pure, no hardware.
+    fn resolve_identity_rejects_malformed_ordinary_usb_identity() {
         let dir = std::env::temp_dir().join(format!("classick-sysinfo-{}", std::process::id()));
+        let device_dir = dir.join("iPod_Control").join("Device");
+        std::fs::create_dir_all(&device_dir).unwrap();
+        std::fs::write(device_dir.join("SysInfo"), "ModelNumStr: MC293\n").unwrap();
+
+        let result = resolve_libgpod_identity_with_probe(&dir, |_| {
+            Some(OrdinaryUsbFacts {
+                raw_usb_iserial: Some("not-a-device-id".to_owned()),
+                usb_product_id: Some(0x1261),
+                capacity_bytes: Some(160_000_000_000),
+            })
+        });
+
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_identity_does_not_accept_sysinfo_identity_without_usb_identity() {
+        let dir = std::env::temp_dir().join(format!(
+            "classick-sysinfo-without-usb-{}",
+            std::process::id()
+        ));
         let device_dir = dir.join("iPod_Control").join("Device");
         std::fs::create_dir_all(&device_dir).unwrap();
         std::fs::write(
             device_dir.join("SysInfo"),
-            "FirewireGuid: 0x000A27002138B0A8\nModelNumStr: MC293\n",
+            "FirewireGuid: 0x1111111111111111\nModelNumStr: MC293\n",
         )
         .unwrap();
-        let id = resolve_libgpod_identity(&dir).unwrap();
-        assert_eq!(id.firewire_guid, "0x000A27002138B0A8");
-        assert_eq!(id.model_num_str, "MC293");
+
+        let result = resolve_libgpod_identity_with_probe(&dir, |_| None);
+
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_identity_uses_normalized_usb_identity_in_legacy_representation() {
+        let dir = std::env::temp_dir().join(format!(
+            "classick-sysinfo-usb-authority-{}",
+            std::process::id()
+        ));
+        let device_dir = dir.join("iPod_Control").join("Device");
+        std::fs::create_dir_all(&device_dir).unwrap();
+        std::fs::write(
+            device_dir.join("SysInfo"),
+            "FirewireGuid: 0x1111111111111111\nModelNumStr: MC293\n",
+        )
+        .unwrap();
+
+        let identity = resolve_libgpod_identity_with_probe(&dir, |_| {
+            Some(OrdinaryUsbFacts {
+                raw_usb_iserial: Some("000a27002138b0a8".to_owned()),
+                usb_product_id: Some(0x1261),
+                capacity_bytes: Some(160_000_000_000),
+            })
+        })
+        .expect("valid ordinary USB identity should resolve");
+
+        assert_eq!(identity.firewire_guid, "0x000A27002138B0A8");
+        assert_eq!(identity.model_num_str, "MC293");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_identity_ignores_malformed_sysinfo_identity_when_usb_identity_is_valid() {
+        let dir = std::env::temp_dir().join(format!(
+            "classick-malformed-sysinfo-valid-usb-{}",
+            std::process::id()
+        ));
+        let device_dir = dir.join("iPod_Control").join("Device");
+        std::fs::create_dir_all(&device_dir).unwrap();
+        std::fs::write(
+            device_dir.join("SysInfo"),
+            "FirewireGuid: malformed\nModelNumStr: MC293\n",
+        )
+        .unwrap();
+
+        let identity = resolve_libgpod_identity_with_probe(&dir, |_| {
+            Some(OrdinaryUsbFacts {
+                raw_usb_iserial: Some("0X000a27002138b0a8".to_owned()),
+                usb_product_id: None,
+                capacity_bytes: None,
+            })
+        })
+        .expect("valid USB identity should remain authoritative");
+
+        assert_eq!(identity.firewire_guid, "0x000A27002138B0A8");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1612,9 +1684,9 @@ mod tests {
     }
 
     #[test]
-    fn scan_drive_for_ipod_detects_serial_when_both_files_present() {
-        // F-09: scan_drive_for_ipod requires BOTH SysInfo (for identity)
-        // AND iTunesDB (proves it's syncable). A device with only one is
+    fn scan_drive_uses_normalized_usb_identity_in_legacy_representation() {
+        // F-09: scan_drive_for_ipod requires BOTH SysInfo and iTunesDB
+        // (proves it's syncable). A device with only one is
         // mid-restore or corrupted — we don't try to sync to it.
         let tmp = std::env::temp_dir().join(format!("ipod-scan-found-test-{}", std::process::id()));
         let sysinfo_dir = tmp.join("iPod_Control").join("Device");
@@ -1623,12 +1695,97 @@ mod tests {
         std::fs::create_dir_all(&itunes_dir).unwrap();
         std::fs::write(
             sysinfo_dir.join("SysInfo"),
-            "FirewireGuid: 0xEXAMPLE1234\nModelNumStr: xMB029\n",
+            "FirewireGuid: 0x1111111111111111\nModelNumStr: MC293\n",
         )
         .unwrap();
         std::fs::write(itunes_dir.join("iTunesDB"), b"").unwrap();
-        let detected = scan_drive_for_ipod(&tmp).expect("should detect");
-        assert_eq!(detected.serial, "0xEXAMPLE1234");
+        let detected = scan_drive_for_ipod_with_probe(&tmp, |_| {
+            Some(OrdinaryUsbFacts {
+                raw_usb_iserial: Some("0x000a27002138b0a8".to_owned()),
+                usb_product_id: Some(0x1261),
+                capacity_bytes: Some(160_000_000_000),
+            })
+        })
+        .expect("should detect");
+        assert_eq!(detected.serial, "0x000A27002138B0A8");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scan_drive_does_not_accept_sysinfo_identity_without_usb_identity() {
+        let tmp =
+            std::env::temp_dir().join(format!("ipod-scan-without-usb-test-{}", std::process::id()));
+        let sysinfo_dir = tmp.join("iPod_Control").join("Device");
+        let itunes_dir = tmp.join("iPod_Control").join("iTunes");
+        std::fs::create_dir_all(&sysinfo_dir).unwrap();
+        std::fs::create_dir_all(&itunes_dir).unwrap();
+        std::fs::write(
+            sysinfo_dir.join("SysInfo"),
+            "FirewireGuid: 0x1111111111111111\nModelNumStr: MC293\n",
+        )
+        .unwrap();
+        std::fs::write(itunes_dir.join("iTunesDB"), b"").unwrap();
+
+        assert!(scan_drive_for_ipod_with_probe(&tmp, |_| None).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scan_drive_ignores_malformed_sysinfo_identity_when_usb_identity_is_valid() {
+        let tmp = std::env::temp_dir().join(format!(
+            "ipod-scan-malformed-sysinfo-test-{}",
+            std::process::id()
+        ));
+        let sysinfo_dir = tmp.join("iPod_Control").join("Device");
+        let itunes_dir = tmp.join("iPod_Control").join("iTunes");
+        std::fs::create_dir_all(&sysinfo_dir).unwrap();
+        std::fs::create_dir_all(&itunes_dir).unwrap();
+        std::fs::write(
+            sysinfo_dir.join("SysInfo"),
+            "FirewireGuid: malformed\nModelNumStr: MC293\n",
+        )
+        .unwrap();
+        std::fs::write(itunes_dir.join("iTunesDB"), b"").unwrap();
+
+        let detected = scan_drive_for_ipod_with_probe(&tmp, |_| {
+            Some(OrdinaryUsbFacts {
+                raw_usb_iserial: Some("000A27002138B0A8".to_owned()),
+                usb_product_id: None,
+                capacity_bytes: None,
+            })
+        })
+        .expect("valid USB identity should remain authoritative");
+
+        assert_eq!(detected.serial, "0x000A27002138B0A8");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scan_drive_rejects_malformed_ordinary_usb_identity() {
+        let tmp = std::env::temp_dir().join(format!(
+            "ipod-scan-malformed-usb-test-{}",
+            std::process::id()
+        ));
+        let sysinfo_dir = tmp.join("iPod_Control").join("Device");
+        let itunes_dir = tmp.join("iPod_Control").join("iTunes");
+        std::fs::create_dir_all(&sysinfo_dir).unwrap();
+        std::fs::create_dir_all(&itunes_dir).unwrap();
+        std::fs::write(
+            sysinfo_dir.join("SysInfo"),
+            "FirewireGuid: 0x1111111111111111\nModelNumStr: MC293\n",
+        )
+        .unwrap();
+        std::fs::write(itunes_dir.join("iTunesDB"), b"").unwrap();
+
+        let detected = scan_drive_for_ipod_with_probe(&tmp, |_| {
+            Some(OrdinaryUsbFacts {
+                raw_usb_iserial: Some("not-a-device-id".to_owned()),
+                usb_product_id: Some(0x1261),
+                capacity_bytes: Some(160_000_000_000),
+            })
+        });
+
+        assert!(detected.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
