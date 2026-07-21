@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
+#[path = "legacy_v2_polling_identity_tests.rs"]
+mod polling_identity_tests;
+
 #[test]
 fn includes_only_unique_ready_observations_with_truthful_fields() {
     let ready = PathBuf::from("/Volumes/ready");
@@ -250,6 +253,7 @@ fn production_polling_cache_reuses_an_unchanged_ready_observation() {
             vec![detected.clone()]
         },
         |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
     );
     let second = cache.scan_with(
         vec![mount.clone()],
@@ -258,6 +262,7 @@ fn production_polling_cache_reuses_an_unchanged_ready_observation() {
             vec![detected.clone()]
         },
         |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
     );
 
     assert_eq!(first, vec![detected.clone()]);
@@ -285,6 +290,7 @@ fn production_polling_cache_tracks_a_known_volume_mount_change_without_cold_scan
             vec![detected]
         },
         |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
     );
     fs::rename(&original, &moved).unwrap();
     let current = cache.scan_with(
@@ -294,6 +300,7 @@ fn production_polling_cache_tracks_a_known_volume_mount_change_without_cold_scan
             Vec::new()
         },
         |_| Some(moved.clone()),
+        |_| Some(usb_facts("000A27002138B0A8")),
     );
 
     assert_eq!(cold_scans.get(), 1);
@@ -316,6 +323,7 @@ fn production_polling_cache_cold_scans_when_the_database_changes() {
             vec![detected.clone()]
         },
         |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
     );
     fs::write(
         mount.join("iPod_Control/iTunes/iTunesDB"),
@@ -329,6 +337,7 @@ fn production_polling_cache_cold_scans_when_the_database_changes() {
             vec![detected.clone()]
         },
         |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
     );
 
     assert_eq!(cold_scans.get(), 2);
@@ -353,6 +362,7 @@ fn production_polling_cache_cold_scans_when_candidate_inventory_changes() {
             vec![first.clone()]
         },
         |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
     );
     let current = cache.scan_with(
         vec![first_mount.clone(), second_mount.clone()],
@@ -361,6 +371,7 @@ fn production_polling_cache_cold_scans_when_candidate_inventory_changes() {
             vec![first.clone(), second.clone()]
         },
         |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
     );
 
     assert_eq!(cold_scans.get(), 2);
@@ -383,6 +394,7 @@ fn production_polling_cache_cold_scans_and_drops_a_disconnected_device() {
             vec![detected]
         },
         |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
     );
     fs::remove_dir_all(&mount).unwrap();
     let current = cache.scan_with(
@@ -392,6 +404,7 @@ fn production_polling_cache_cold_scans_and_drops_a_disconnected_device() {
             Vec::new()
         },
         |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
     );
 
     assert_eq!(cold_scans.get(), 2);
@@ -466,5 +479,13 @@ fn detected_at(mount: &Path, volume_guid: Option<&str>) -> DetectedIpod {
         drive: mount.to_string_lossy().into_owned(),
         name: None,
         volume_guid: volume_guid.map(str::to_owned),
+    }
+}
+
+fn usb_facts(raw_usb_iserial: &str) -> OrdinaryUsbFacts {
+    OrdinaryUsbFacts {
+        raw_usb_iserial: Some(raw_usb_iserial.to_owned()),
+        usb_product_id: Some(0x1261),
+        capacity_bytes: Some(160_000_000_000),
     }
 }

@@ -1,4 +1,6 @@
-use super::{FactConfidence, HardwareFacts, IpodFamily, ObservationInventory};
+use super::{
+    DeviceId, FactConfidence, HardwareFacts, IpodFamily, ObservationInventory, OrdinaryUsbFacts,
+};
 use crate::ipod::device::{mount_for_volume_guid, volume_guid_for_mount, DetectedIpod};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,7 @@ pub(crate) fn scan_for_ipods() -> Vec<DetectedIpod> {
             candidates,
             || adapt_observation_inventory(&super::scan_device_observations()),
             mount_for_volume_guid,
+            crate::ipod::device::ordinary_usb_facts_for_mount,
         )
 }
 
@@ -49,9 +52,10 @@ impl LegacyV2PollingCache {
         candidates: Vec<PathBuf>,
         cold_scan: impl FnOnce() -> Vec<DetectedIpod>,
         mut resolve_volume: impl FnMut(&str) -> Option<PathBuf>,
+        mut probe_usb: impl FnMut(&Path) -> Option<OrdinaryUsbFacts>,
     ) -> Vec<DetectedIpod> {
         let candidate_set: BTreeSet<_> = candidates.into_iter().collect();
-        if let Some(cached) = self.revalidate(&candidate_set, &mut resolve_volume) {
+        if let Some(cached) = self.revalidate(&candidate_set, &mut resolve_volume, &mut probe_usb) {
             return cached;
         }
 
@@ -64,6 +68,7 @@ impl LegacyV2PollingCache {
         &self,
         candidates: &BTreeSet<PathBuf>,
         resolve_volume: &mut impl FnMut(&str) -> Option<PathBuf>,
+        probe_usb: &mut impl FnMut(&Path) -> Option<OrdinaryUsbFacts>,
     ) -> Option<Vec<DetectedIpod>> {
         if self.known.is_empty() {
             return None;
@@ -77,6 +82,11 @@ impl LegacyV2PollingCache {
                 None => PathBuf::from(&known.detected.drive),
             };
             if ready_layout_fingerprint(&mount)? != known.fingerprint {
+                return None;
+            }
+            let current_device_id = usb_device_id(probe_usb(&mount))?;
+            let cached_device_id = DeviceId::parse(&known.detected.serial).ok()?;
+            if current_device_id != cached_device_id {
                 return None;
             }
             expected_candidates.remove(Path::new(&known.detected.drive));
@@ -103,6 +113,10 @@ impl LegacyV2PollingCache {
             })
             .collect();
     }
+}
+
+fn usb_device_id(facts: Option<OrdinaryUsbFacts>) -> Option<DeviceId> {
+    DeviceId::parse(facts?.raw_usb_iserial.as_deref()?).ok()
 }
 
 fn ready_layout_fingerprint(mount: &Path) -> Option<ReadyLayoutFingerprint> {
