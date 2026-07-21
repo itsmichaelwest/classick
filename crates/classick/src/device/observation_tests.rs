@@ -111,6 +111,20 @@ fn readiness_classifier_runs_exactly_once_for_each_candidate() {
 }
 
 #[test]
+fn callback_identity_unavailable_cannot_create_an_identified_observation() {
+    let calls = Cell::new(0);
+
+    let observation =
+        assemble_device_observation(reported("/Volumes/iPod", 1, Some(DEVICE_ID)), |_| {
+            calls.set(calls.get() + 1);
+            Some(DeviceReadiness::IdentityUnavailable)
+        });
+
+    assert_eq!(observation, None);
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
 fn exact_reported_model_facts_take_precedence_over_ambiguous_usb_facts() {
     let mut input = reported("/Volumes/iPod", 1, Some(DEVICE_ID));
     input.usb_product_id = Some(0x1261);

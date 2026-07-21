@@ -95,6 +95,9 @@ pub fn assemble_device_observation(
     } = reported;
 
     let classified_readiness = classify_readiness(&mount_path)?;
+    if classified_readiness == DeviceReadiness::IdentityUnavailable {
+        return None;
+    }
     let identity = raw_usb_iserial
         .as_deref()
         .and_then(|value| DeviceId::parse(value).ok())
