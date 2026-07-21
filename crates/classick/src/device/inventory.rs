@@ -115,8 +115,13 @@ impl ObservationInventory {
         &self.observations
     }
 
+    /// Returns true only for the exact observation stored in this completed
+    /// inventory and judged eligible against its full conflict set.
     pub fn is_uniquely_mutation_eligible(&self, observation: &DeviceObservation) -> bool {
-        observation.is_mutation_eligible()
+        self.observations
+            .iter()
+            .any(|member| std::ptr::eq(member, observation))
+            && observation.is_mutation_eligible()
             && observation
                 .device_id()
                 .is_some_and(|device_id| !self.duplicate_device_ids.contains(device_id))

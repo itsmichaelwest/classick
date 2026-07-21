@@ -204,6 +204,30 @@ fn distinct_devices_are_independent_and_sorted_by_canonical_id() {
 }
 
 #[test]
+fn ready_identified_observation_outside_the_inventory_is_not_mutation_eligible() {
+    let mount = PathBuf::from("/Volumes/ready");
+    let mut scanner = DeviceObservationScanner::new();
+    let inventory = scanner.scan_with([&mount], |path, id| {
+        Some(observation(
+            path,
+            id,
+            Some("000A27002138B0A8"),
+            DeviceReadiness::Ready,
+        ))
+    });
+    let foreign = observation(
+        &mount,
+        ObservationId::new(999),
+        Some("000A27002138B0A8"),
+        DeviceReadiness::Ready,
+    );
+
+    assert_eq!(&foreign, &inventory.observations()[0]);
+    assert!(inventory.is_uniquely_mutation_eligible(&inventory.observations()[0]));
+    assert!(!inventory.is_uniquely_mutation_eligible(&foreign));
+}
+
+#[test]
 fn each_supplied_candidate_is_observed_once_and_unrecognized_mounts_are_not_retained() {
     let recognized = PathBuf::from("/Volumes/recognized");
     let unrecognized = PathBuf::from("/Volumes/unrecognized");
