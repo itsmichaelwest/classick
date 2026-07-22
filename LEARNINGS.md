@@ -119,7 +119,9 @@ incidents and completed gate reports are archived in
   security. Do not expose host-state load-modify-save or acknowledgement APIs
   until the serialized coordinator holds the shared process/device lease;
   cross-device mutation claims need its durable ledger, and outbox clearing
-  needs verified portable-profile readback rather than a caller-supplied hash.
+  needs exact portable-profile plus companion-file readback and an exact
+  compare-and-swap against the planned outbox, rather than a caller-supplied
+  hash or unconditional empty replacement.
 - Target device commands by raw serial and route sync progress by serial plus
   session ID. Connection generation is also required for off-thread metadata
   reads so stale results cannot attach to a reconnected device.
