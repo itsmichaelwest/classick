@@ -109,6 +109,10 @@ fn accepts_identical_replay_as_a_no_op_and_rejects_changed_reuse() {
     let reused_for_other_device = settings(&other_device, pending.mutation_id().clone(), false);
     assert!(store.accept(&device, reused_for_other_device).is_err());
     assert!(!store.path(&other_device).exists());
+
+    let global_collision = settings(&other_device, pending.mutation_id().clone(), false);
+    assert!(store.accept(&other_device, global_collision).is_err());
+    assert!(!store.path(&other_device).exists());
 }
 
 #[test]

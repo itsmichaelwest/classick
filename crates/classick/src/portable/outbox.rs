@@ -13,13 +13,11 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 pub const OUTBOX_SCHEMA_VERSION: u32 = 1;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationState {
     PendingDevice,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "component", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PendingMutation {
@@ -48,7 +46,6 @@ pub enum PendingMutation {
         state: MutationState,
     },
 }
-
 impl PendingMutation {
     pub fn selection(
         mutation_id: MutationId,
@@ -64,7 +61,6 @@ impl PendingMutation {
             state: MutationState::PendingDevice,
         })
     }
-
     pub fn settings(
         mutation_id: MutationId,
         device_id: DeviceId,
@@ -79,7 +75,6 @@ impl PendingMutation {
             state: MutationState::PendingDevice,
         })
     }
-
     pub fn subscriptions(
         mutation_id: MutationId,
         device_id: DeviceId,
@@ -94,12 +89,10 @@ impl PendingMutation {
             state: MutationState::PendingDevice,
         })
     }
-
     fn validated(mutation: Self) -> Result<Self> {
         mutation.validate()?;
         Ok(mutation)
     }
-
     pub fn mutation_id(&self) -> &MutationId {
         match self {
             Self::Selection { mutation_id, .. }
@@ -107,7 +100,6 @@ impl PendingMutation {
             | Self::Subscriptions { mutation_id, .. } => mutation_id,
         }
     }
-
     pub fn device_id(&self) -> &DeviceId {
         match self {
             Self::Selection { device_id, .. }
@@ -115,7 +107,6 @@ impl PendingMutation {
             | Self::Subscriptions { device_id, .. } => device_id,
         }
     }
-
     pub fn component_name(&self) -> &'static str {
         match self {
             Self::Selection { .. } => "selection",
@@ -123,7 +114,6 @@ impl PendingMutation {
             Self::Subscriptions { .. } => "subscriptions",
         }
     }
-
     fn component_order(&self) -> u8 {
         match self {
             Self::Selection { .. } => 0,
@@ -131,7 +121,6 @@ impl PendingMutation {
             Self::Subscriptions { .. } => 2,
         }
     }
-
     fn validate(&self) -> Result<()> {
         let (name, schema_version) = match self {
             Self::Selection { desired, .. } => ("selection", desired.schema_version),
@@ -150,7 +139,6 @@ impl PendingMutation {
         Ok(())
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingDeviceOutbox {
@@ -159,7 +147,6 @@ pub struct PendingDeviceOutbox {
     pub device_id: DeviceId,
     pub mutations: Vec<PendingMutation>,
 }
-
 impl PendingDeviceOutbox {
     pub fn empty(device_id: DeviceId) -> Self {
         Self {
@@ -168,7 +155,6 @@ impl PendingDeviceOutbox {
             mutations: Vec::new(),
         }
     }
-
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != OUTBOX_SCHEMA_VERSION {
             bail!("unsupported host outbox schema {}", self.schema_version);
@@ -206,7 +192,6 @@ impl OutboxLoad {
         }
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommittedComponentProof {
     Selection {
@@ -225,7 +210,6 @@ pub enum CommittedComponentProof {
         content_hash: ContentHash,
     },
 }
-
 impl CommittedComponentProof {
     pub fn selection(
         device_id: DeviceId,
@@ -238,7 +222,6 @@ impl CommittedComponentProof {
             content_hash,
         }
     }
-
     pub fn settings(
         device_id: DeviceId,
         committed: ProfileComponent<SettingsValue>,
@@ -250,7 +233,6 @@ impl CommittedComponentProof {
             content_hash,
         }
     }
-
     pub fn subscriptions(
         device_id: DeviceId,
         committed: ProfileComponent<SubscriptionsValue>,
@@ -262,7 +244,6 @@ impl CommittedComponentProof {
             content_hash,
         }
     }
-
     fn verify(
         &self,
         expected_device_id: &DeviceId,
@@ -319,18 +300,15 @@ impl CommittedComponentProof {
         }
     }
 }
-
 #[derive(Debug, Clone)]
 pub struct PendingOutboxStore {
     root: PathBuf,
     writer: AtomicFileWriter,
 }
-
 impl PendingOutboxStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self::with_writer(root, AtomicFileWriter::new())
     }
-
     #[doc(hidden)]
     pub fn with_writer(root: impl Into<PathBuf>, writer: AtomicFileWriter) -> Self {
         Self {
@@ -409,6 +387,7 @@ impl PendingOutboxStore {
             }
             bail!("pending mutation ID was reused with different contents");
         }
+        self.reject_cross_device_collision(device_id, mutation.mutation_id())?;
         outbox
             .mutations
             .retain(|existing| existing.component_order() != mutation.component_order());
@@ -436,6 +415,39 @@ impl PendingOutboxStore {
         proof.verify(device_id, mutation_id, &outbox.mutations[index])?;
         outbox.mutations.remove(index);
         self.save(&outbox)
+    }
+
+    fn reject_cross_device_collision(
+        &self,
+        device_id: &DeviceId,
+        mutation_id: &MutationId,
+    ) -> Result<()> {
+        let devices = self.root.join("devices");
+        let entries = match fs::read_dir(&devices) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).context("scan host outboxes for mutation ID reuse"),
+        };
+        for entry in entries {
+            let name = entry?.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Ok(other) = DeviceId::parse(name) else {
+                continue;
+            };
+            if name != other.as_str() || &other == device_id {
+                continue;
+            }
+            if self
+                .load(&other)?
+                .into_outbox()
+                .mutations
+                .iter()
+                .any(|pending| pending.mutation_id() == mutation_id)
+            {
+                bail!("pending mutation ID was reused for a different device");
+            }
+        }
+        Ok(())
     }
 }
 
