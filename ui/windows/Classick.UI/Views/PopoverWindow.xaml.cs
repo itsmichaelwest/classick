@@ -189,9 +189,7 @@ public sealed partial class PopoverWindow : Window
 
     private async void OnSyncNow(object sender, RoutedEventArgs e)
     {
-        var command = ViewModel.CreateTriggerSyncCommand(
-            App.ConfiguredSerial,
-            Guid.NewGuid().ToString("N"));
+        var command = ViewModel.CreateWireTriggerSyncCommand(Guid.NewGuid().ToString("D"));
         if (command is null) return;
         try { await _daemon.SendAsync(command); }
         catch (Exception ex) { Debug.WriteLine($"popover: trigger_sync failed: {ex}"); }
@@ -199,8 +197,8 @@ public sealed partial class PopoverWindow : Window
 
     private async void OnConnectSource(object sender, RoutedEventArgs e)
     {
-        var requestId = Guid.NewGuid().ToString("N");
-        var command = ViewModel.CreateSourceRetryCommand(requestId);
+        var requestId = Guid.NewGuid().ToString("D");
+        var command = ViewModel.CreateWireSourceRetryCommand(requestId);
         if (command is null) return;
 
         try
@@ -216,7 +214,7 @@ public sealed partial class PopoverWindow : Window
 
     private async void OnCancelSync(object sender, RoutedEventArgs e)
     {
-        var command = ViewModel.CreateCancelSyncCommand(Guid.NewGuid().ToString("N"));
+        var command = ViewModel.CreateWireCancelSyncCommand(Guid.NewGuid().ToString("D"));
         if (command is null) return;
         try { await _daemon.SendAsync(command); }
         catch (Exception ex) { Debug.WriteLine($"popover: cancel_sync failed: {ex}"); }
@@ -224,7 +222,7 @@ public sealed partial class PopoverWindow : Window
 
     private async void OnPauseSync(object sender, RoutedEventArgs e)
     {
-        var command = ViewModel.CreatePauseCommand(Guid.NewGuid().ToString("N"));
+        var command = ViewModel.CreateWirePauseSyncCommand(Guid.NewGuid().ToString("D"));
         if (command is null) return;
         try { await _daemon.SendAsync(command); }
         catch (Exception ex) { Debug.WriteLine($"popover: pause failed: {ex}"); }
@@ -261,7 +259,7 @@ public sealed partial class PopoverWindow : Window
             return;
         }
 
-        var command = ViewModel.CreatePromptDecisionCommand(index, Guid.NewGuid().ToString("N"));
+        var command = ViewModel.CreateWirePromptDecisionCommand(index, Guid.NewGuid().ToString("D"));
         if (command is null) return;
         // Optimistic dismiss — the daemon's response is fire-and-
         // forward; keeping the overlay up until a TrackStart arrives

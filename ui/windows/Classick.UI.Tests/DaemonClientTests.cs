@@ -1,322 +1,97 @@
-using System.Text.Json;
 using Classick_UI.Ipc;
-using Xunit;
+using System.Text.Json;
 
-public class DaemonClientWireFormatTests
+namespace Classick_UI.Tests;
+
+public class DaemonClientTests
 {
     [Theory]
-    [InlineData("2.0.0", true)]
-    [InlineData("2.9.4", true)]
-    [InlineData("1.99.0", false)]
-    [InlineData("3.0.0", false)]
-    [InlineData("not-semver", false)]
-    public void Handshake_accepts_only_daemon_protocol_major_two(string version, bool expected)
+    [InlineData("3.0.0", true)]
+    [InlineData("3.8.2", true)]
+    [InlineData("2.99.0", false)]
+    [InlineData("03.0.0", false)]
+    [InlineData("not-a-version", false)]
+    public void IsProtocolVersionSupported_UsesSemanticMajorCompatibility(string version, bool expected)
     {
         Assert.Equal(expected, DaemonClient.IsProtocolVersionSupported(version));
     }
 
     [Fact]
-    public void StatusUpdate_event_deserializes_via_DaemonEvent()
+    public async Task ReadAdmittedEventsAsync_PreservesInputOrderAndIgnoresAdditiveUnknownEvents()
     {
-        var json = """{"type":"status_update","state":"idle","configured":true,"ipod_connected":false,"last_sync":null,"next_scheduled_unix_secs":null,"synced_count":12,"library_count":20,"acknowledged_request_id":"status"}""";
-        var evt = JsonSerializer.Deserialize<DaemonEvent>(json);
-        var status = Assert.IsType<StatusUpdateEvent>(evt);
-        Assert.Equal("idle", status.State);
-        Assert.True(status.Configured);
-        Assert.False(status.IpodConnected);
-        Assert.Equal(12, status.SyncedCount);
-        Assert.Equal(20, status.LibraryCount);
-        Assert.Equal("status", status.AcknowledgedRequestId);
-    }
+        var input = string.Join('\n',
+            """{"type":"library_scan_started","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8808","session_id":43}""",
+            """{"type":"future_daemon_event","value":1}""",
+            """{"type":"library_scan_progress","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8808","session_id":43,"files_scanned":2,"tracks_indexed":1}""",
+            """{"type":"library_scan_finished","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8808","session_id":43,"success":true}""");
+        using var reader = new StringReader(input);
 
-    [Fact]
-    public void SaveConfig_command_serializes_with_required_correlation()
-    {
-        var cmd = new SaveConfigCommand(
-            Source: null,
-            Daemon: null,
-            Ipod: new IpodIdentity("EXAMPLE1234", "iPod 7G", null, CustomSelection: false),
-            RequestId: "request-save");
-        var json = JsonSerializer.Serialize<DaemonCommand>(cmd);
-        Assert.Equal("""{"type":"save_config","ipod":{"serial":"EXAMPLE1234","model_label":"iPod 7G","custom_selection":false},"request_id":"request-save"}""", json);
-    }
-
-    [Fact]
-    public void Targeted_command_round_trips_with_required_serial_and_correlation()
-    {
-        var cmd = new TriggerSyncCommand("manual", "SERIAL-A", "request-sync");
-        var json = JsonSerializer.Serialize<DaemonCommand>(cmd);
-        Assert.Equal("""{"type":"trigger_sync","source":"manual","serial":"SERIAL-A","request_id":"request-sync"}""", json);
-        var back = JsonSerializer.Deserialize<DaemonCommand>(json);
-        var trig = Assert.IsType<TriggerSyncCommand>(back);
-        Assert.Equal("manual", trig.Source);
-        Assert.Equal("SERIAL-A", trig.Serial);
-        Assert.Equal("request-sync", trig.RequestId);
-    }
-
-    [Fact]
-    public void Fieldless_global_shutdown_command_serializes_with_type_only()
-    {
-        var cmd = new ShutdownCommand();
-        var json = JsonSerializer.Serialize<DaemonCommand>(cmd);
-        Assert.Equal("{\"type\":\"shutdown\"}", json);
-    }
-
-    [Fact]
-    public void DeviceConnected_event_carries_all_fields()
-    {
-        var json = """{"type":"device_connected","serial":"X","model_label":"iPod 7G","drive":"G:\\"}""";
-        var evt = JsonSerializer.Deserialize<DaemonEvent>(json);
-        var dev = Assert.IsType<DeviceConnectedEvent>(evt);
-        Assert.Equal("X", dev.Serial);
-        Assert.Equal("iPod 7G", dev.ModelLabel);
-        Assert.Equal("G:\\", dev.Drive);
-    }
-
-    [Theory]
-    [InlineData("{\"type\":\"get_status\"}")]
-    [InlineData("{\"type\":\"save_config\",\"source\":null,\"daemon\":null,\"ipod\":null}")]
-    [InlineData("{\"type\":\"trigger_sync\",\"source\":\"manual\"}")]
-    [InlineData("{\"type\":\"cancel_sync\"}")]
-    public void V2_rejects_old_command_payloads_without_required_fields(string json)
-    {
-        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<DaemonCommand>(json));
-    }
-
-    [Fact]
-    public void Device_inventory_snapshot_decodes_two_independent_devices()
-    {
-        var json = """
-            {"type":"device_inventory_snapshot","revision":42,"devices":[
-              {"identity":{"serial":"A","model_label":"iPod 5G","name":"Alpha"},"configured":true,"connected":true,"mount":"G:\\","phase":"syncing","session_id":7,"storage":{"total_bytes":1000,"free_bytes":400},"synced_count":12,"library_count":20,"latest_successful_sync":null,"latest_attempt":null,"last_terminal_error":null,"selection_revision":3,"settings_revision":4,"subscriptions_revision":5},
-              {"identity":{"serial":"B","model_label":"iPod 7G"},"configured":false,"connected":false,"phase":"unconfigured","synced_count":0,"selection_revision":0,"settings_revision":0,"subscriptions_revision":0}
-            ]}
-            """;
-
-        var evt = JsonSerializer.Deserialize<DaemonEvent>(json);
-
-        var snapshot = Assert.IsType<DeviceInventorySnapshotEvent>(evt);
-        Assert.Equal(42UL, snapshot.Revision);
-        Assert.Collection(snapshot.Devices,
-            first =>
-            {
-                Assert.Equal("A", first.Identity.Serial);
-                Assert.Equal("syncing", first.Phase);
-                Assert.Equal(7UL, first.SessionId);
-                Assert.Equal(400UL, first.Storage!.FreeBytes);
-            },
-            second =>
-            {
-                Assert.Equal("B", second.Identity.Serial);
-                Assert.False(second.Configured);
-                Assert.False(second.Connected);
-                Assert.Equal("unconfigured", second.Phase);
-                Assert.Null(second.SessionId);
-            });
-    }
-
-    [Fact]
-    public void Sync_event_requires_session_and_preserves_optional_serial()
-    {
-        const string json = """{"type":"sync_event","line":"{\"type\":\"track_done\",\"result\":\"applied\"}","serial":"A","session_id":9}""";
-
-        var evt = JsonSerializer.Deserialize<DaemonEvent>(json);
-
-        var sync = Assert.IsType<SyncEventEnvelope>(evt);
-        Assert.Equal("A", sync.Serial);
-        Assert.Equal(9UL, sync.SessionId);
-    }
-
-    [Fact]
-    public void Device_inventory_snapshot_round_trips_without_optional_null_fields()
-    {
-        const string json = """{"type":"device_inventory_snapshot","revision":1,"devices":[{"identity":{"serial":"B","model_label":"iPod 7G"},"configured":false,"connected":false,"phase":"unconfigured","synced_count":0,"selection_revision":0,"settings_revision":0,"subscriptions_revision":0}]}""";
-
-        var evt = JsonSerializer.Deserialize<DaemonEvent>(json);
-        var snapshot = Assert.IsType<DeviceInventorySnapshotEvent>(evt);
-        var roundTripped = JsonSerializer.Serialize<DaemonEvent>(snapshot);
-
-        Assert.Equal(json, roundTripped);
-    }
-
-    [Fact]
-    public void V2_targeted_mutating_commands_emit_serial_and_correlation()
-    {
-        var forget = JsonSerializer.Serialize<DaemonCommand>(new ForgetIpodCommand("SERIAL-A", "request-forget"));
-        var cancel = JsonSerializer.Serialize<DaemonCommand>(new CancelSyncCommand("SERIAL-A", "request-cancel"));
-        var prompt = JsonSerializer.Serialize<DaemonCommand>(new DecidePromptCommand(17, 1, "SERIAL-A", "request-prompt"));
-
-        Assert.Equal("""{"type":"forget_ipod","serial":"SERIAL-A","request_id":"request-forget"}""", forget);
-        Assert.Equal("""{"type":"cancel_sync","serial":"SERIAL-A","request_id":"request-cancel"}""", cancel);
-        Assert.Equal("""{"type":"decide_prompt","id":17,"choice":1,"serial":"SERIAL-A","request_id":"request-prompt"}""", prompt);
-    }
-
-    [Fact]
-    public void Config_update_requires_revision_and_decodes_optional_correlation()
-    {
-        const string json = """{"type":"config_update","source":null,"daemon":null,"ipod":null,"config_revision":5,"acknowledged_request_id":"request-config"}""";
-
-        var evt = JsonSerializer.Deserialize<DaemonEvent>(json);
-        var config = Assert.IsType<ConfigUpdateEvent>(evt);
-
-        Assert.Equal(5UL, config.ConfigRevision);
-        Assert.Equal("request-config", config.AcknowledgedRequestId);
-        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<DaemonEvent>("""{"type":"config_update","source":null,"daemon":null,"ipod":null}"""));
-    }
-
-    [Theory]
-    [InlineData("""{"type":"config_update","daemon":null,"ipod":null,"config_revision":5}""")]
-    [InlineData("""{"type":"config_update","source":null,"ipod":null,"config_revision":5}""")]
-    [InlineData("""{"type":"config_update","source":null,"daemon":null,"config_revision":5}""")]
-    public void V2_config_update_rejects_each_missing_required_nullable_field(string json)
-    {
-        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<DaemonEvent>(json));
-    }
-
-    [Theory]
-    [InlineData("""{"type":"history_update","acknowledged_request_id":"history"}""")]
-    [InlineData("""{"type":"sync_rejected","serial":"A","acknowledged_request_id":"reject"}""")]
-    [InlineData("""{"type":"sync_event","session_id":1}""")]
-    [InlineData("""{"type":"device_connected","model_label":"iPod","drive":"G:\\"}""")]
-    [InlineData("""{"type":"device_disconnected"}""")]
-    [InlineData("""{"type":"library_update","scanned_at_unix_secs":null,"artists":[],"genres":[],"total_tracks":0,"total_bytes":0}""")]
-    [InlineData("""{"type":"library_update","source_root":null,"artists":[],"genres":[],"total_tracks":0,"total_bytes":0}""")]
-    [InlineData("""{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"genres":[],"total_tracks":0,"total_bytes":0}""")]
-    [InlineData("""{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"total_tracks":0,"total_bytes":0}""")]
-    [InlineData("""{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"genres":[],"total_bytes":0}""")]
-    [InlineData("""{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"genres":[],"total_tracks":0}""")]
-    [InlineData("""{"type":"selection_update","rules":[]}""")]
-    [InlineData("""{"type":"selection_update","mode":"all"}""")]
-    [InlineData("""{"type":"playlists_update"}""")]
-    [InlineData("""{"type":"device_preview","serial":"A","selected_tracks":1,"selected_bytes":2,"playlist_extra_tracks":3,"playlist_extra_bytes":4,"acknowledged_request_id":"preview"}""")]
-    public void V2_events_reject_missing_non_optional_wire_fields(string json)
-    {
-        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<DaemonEvent>(json));
-    }
-
-    [Fact]
-    public void Status_update_accepts_omitted_domain_optional_fields()
-    {
-        const string json = """{"type":"status_update","state":"idle","configured":true,"ipod_connected":false,"synced_count":0}""";
-
-        var evt = JsonSerializer.Deserialize<DaemonEvent>(json);
-
-        var status = Assert.IsType<StatusUpdateEvent>(evt);
-        Assert.Null(status.LastSync);
-        Assert.Null(status.NextScheduledUnixSecs);
-    }
-
-    [Fact]
-    public void V2_config_and_history_decode_complete_nested_wire_shapes()
-    {
-        const string configJson = """
-            {"type":"config_update","source":"/music","daemon":{"enabled":true,"autostart_with_windows":false,"first_sync_mode":"review","subsequent_sync_mode":"auto_apply","schedule_minutes":30,"notify_on":"all","rockbox_compat":true},"ipod":{"serial":"A","model_label":"iPod 7G","custom_selection":true},"config_revision":8}
-            """;
-        const string historyJson = """
-            {"type":"history_update","entries":[{"serial":"A","session_id":7,"timestamp":"2026-07-18T12:00:00Z","duration_secs":5,"trigger":"manual","outcome":"ok","summary":{"add":1,"modify":2,"remove":3,"unchanged":4,"skipped":5,"metadata_only":6,"skipped_for_space_tracks":7,"skipped_for_space_bytes":8,"artwork_failed_sources":9},"db_restored":true}],"acknowledged_request_id":"history"}
-            """;
-
-        var config = Assert.IsType<ConfigUpdateEvent>(JsonSerializer.Deserialize<DaemonEvent>(configJson));
-        var history = Assert.IsType<HistoryUpdateEvent>(JsonSerializer.Deserialize<DaemonEvent>(historyJson));
-
-        Assert.True(config.Daemon!.RockboxCompat);
-        Assert.True(config.Ipod!.CustomSelection);
-        Assert.True(history.Entries[0].DbRestored);
-        Assert.Equal(6, history.Entries[0].Summary!.MetadataOnly);
-        Assert.Equal(8UL, history.Entries[0].Summary!.SkippedForSpaceBytes);
-    }
-
-    [Fact]
-    public void Daemon_settings_default_drop_sync_behavior_to_immediate()
-    {
-        const string oldJson = """{"type":"config_update","source":"/music","daemon":{"enabled":true,"autostart_with_windows":false,"first_sync_mode":"review","subsequent_sync_mode":"auto_apply","schedule_minutes":30,"notify_on":"all","rockbox_compat":false},"ipod":null,"config_revision":1}""";
-        const string nextSyncJson = """{"type":"config_update","source":"/music","daemon":{"enabled":true,"autostart_with_windows":false,"first_sync_mode":"review","subsequent_sync_mode":"auto_apply","schedule_minutes":30,"notify_on":"all","rockbox_compat":false,"drop_sync_behavior":"next_sync"},"ipod":null,"config_revision":2}""";
-
-        var oldConfig = Assert.IsType<ConfigUpdateEvent>(JsonSerializer.Deserialize<DaemonEvent>(oldJson));
-        var nextSync = Assert.IsType<ConfigUpdateEvent>(JsonSerializer.Deserialize<DaemonEvent>(nextSyncJson));
-
-        Assert.Equal(DropSyncBehavior.Immediate, oldConfig.Daemon!.DropSyncBehavior);
-        Assert.Equal(DropSyncBehavior.NextSync, nextSync.Daemon!.DropSyncBehavior);
-    }
-
-    [Fact]
-    public void V2_remaining_command_payloads_have_exact_shapes()
-    {
-        var selection = new SelectionState(SelectionMode.Include, [new ArtistSelectionRule("Bowie")]);
-        var playlist = new ManualPlaylistPayload(null, "Favourites", ["Bowie/Heroes.flac"]);
-
-        Assert.Equal("""{"type":"get_library","request_id":"library"}""", JsonSerializer.Serialize<DaemonCommand>(new GetLibraryCommand("library")));
-        Assert.Equal("""{"type":"get_history","request_id":"history"}""", JsonSerializer.Serialize<DaemonCommand>(new GetHistoryCommand(RequestId: "history")));
-        Assert.Equal("""{"type":"scan_library","request_id":"scan"}""", JsonSerializer.Serialize<DaemonCommand>(new ScanLibraryCommand("scan")));
-        Assert.Equal("""{"type":"backfill_rockbox","serial":"A","request_id":"backfill"}""", JsonSerializer.Serialize<DaemonCommand>(new BackfillRockboxCommand("A", "backfill")));
-        Assert.Equal("""{"type":"replace_library","serial":"A","request_id":"replace"}""", JsonSerializer.Serialize<DaemonCommand>(new ReplaceLibraryCommand("A", "replace")));
-        Assert.Equal("""{"type":"preview_selection","mode":"include","rules":[{"kind":"artist","name":"Bowie"}],"serial":"A","request_id":"selection"}""", JsonSerializer.Serialize<DaemonCommand>(new PreviewSelectionCommand(SelectionMode.Include, [new ArtistSelectionRule("Bowie")], "A", "selection")));
-        Assert.Equal("""{"type":"list_playlists","request_id":"list"}""", JsonSerializer.Serialize<DaemonCommand>(new ListPlaylistsCommand("list")));
-        Assert.Equal("""{"type":"get_playlist","slug":"favourites","request_id":"get-playlist"}""", JsonSerializer.Serialize<DaemonCommand>(new GetPlaylistCommand("favourites", "get-playlist")));
-        Assert.Equal("""{"type":"save_playlist","playlist":{"kind":"manual","name":"Favourites","tracks":["Bowie/Heroes.flac"]},"request_id":"save-playlist"}""", JsonSerializer.Serialize<DaemonCommand>(new SavePlaylistCommand(playlist, "save-playlist")));
-        Assert.Equal("""{"type":"delete_playlist","slug":"favourites","request_id":"delete-playlist"}""", JsonSerializer.Serialize<DaemonCommand>(new DeletePlaylistCommand("favourites", "delete-playlist")));
-        Assert.Equal("""{"type":"get_device_config","serial":"A","request_id":"get-device"}""", JsonSerializer.Serialize<DaemonCommand>(new GetDeviceConfigCommand("A", "get-device")));
-        Assert.Equal("""{"type":"save_device_config","serial":"A","selection":{"mode":"include","rules":[{"kind":"artist","name":"Bowie"}]},"request_id":"save-device"}""", JsonSerializer.Serialize<DaemonCommand>(new SaveDeviceConfigCommand("A", selection, null, null, "save-device")));
-        Assert.Equal("""{"type":"preview_device","serial":"A","request_id":"preview-device"}""", JsonSerializer.Serialize<DaemonCommand>(new PreviewDeviceCommand("A", "preview-device")));
-        Assert.Equal("""{"type":"resolve_tracks","rules":[{"kind":"artist","name":"Bowie"}],"request_id":"resolve"}""", JsonSerializer.Serialize<DaemonCommand>(new ResolveTracksCommand([new ArtistSelectionRule("Bowie")], "resolve")));
-        Assert.Equal("""{"type":"add_selection_to_device","serial":"A","rules":[{"kind":"artist","name":"Bowie"}],"request_id":"add-device"}""", JsonSerializer.Serialize<DaemonCommand>(new AddSelectionToDeviceCommand("A", [new ArtistSelectionRule("Bowie")], "add-device")));
-        Assert.Equal("""{"type":"append_selection_to_playlist","slug":"favourites","rules":[{"kind":"artist","name":"Bowie"}],"request_id":"append-playlist"}""", JsonSerializer.Serialize<DaemonCommand>(new AppendSelectionToPlaylistCommand("favourites", [new ArtistSelectionRule("Bowie")], "append-playlist")));
-    }
-
-    [Fact]
-    public void V2_remaining_daemon_events_decode_through_daemon_hierarchy()
-    {
-        var events = new[]
+        var events = new List<WireEvent>();
+        await foreach (var wireEvent in DaemonClient.ReadAdmittedEventsAsync(reader))
         {
-            """{"type":"library_update","source_root":null,"scanned_at_unix_secs":null,"artists":[],"genres":[],"total_tracks":0,"total_bytes":0,"acknowledged_request_id":"library"}""",
-            """{"type":"selection_update","mode":"all","rules":[],"serial":"A","acknowledged_request_id":"selection"}""",
-            """{"type":"selection_preview","selected_tracks":1,"selected_bytes":2,"adds":3,"removes":4,"serial":"A","acknowledged_request_id":"preview"}""",
-            """{"type":"playlists_update","playlists":[{"slug":"favourites","name":"Favourites","kind":"manual","tracks":1,"bytes":2}],"playlist_revision":7,"acknowledged_request_id":"playlists"}""",
-            """{"type":"playlist_detail","slug":"favourites","name":"Favourites","kind":"manual","tracks":["Bowie/Heroes.flac"],"playlist_revision":7,"acknowledged_request_id":"detail"}""",
-            """{"type":"device_config_update","serial":"A","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"settings_revision":4,"subscriptions_revision":5}""",
-            """{"type":"device_preview","serial":"A","selected_tracks":1,"selected_bytes":2,"playlist_extra_tracks":3,"playlist_extra_bytes":4,"projected_free_bytes":null,"acknowledged_request_id":"device-preview"}""",
-            """{"type":"resolved_tracks","tracks":["Bowie/Heroes.flac"],"acknowledged_request_id":"resolve"}""",
+            events.Add(wireEvent);
+        }
+
+        Assert.Collection(events,
+            item => Assert.IsType<LibraryScanStartedEvent>(item),
+            item => Assert.IsType<LibraryScanProgressEvent>(item),
+            item => Assert.IsType<LibraryScanFinishedEvent>(item));
+    }
+
+    [Fact]
+    public void ValidatePeerHello_RejectsMissingRequiredCapability()
+    {
+        var hello = new WireHello
+        {
+            ProtocolVersion = "3.0.0",
+            Role = EndpointRole.Daemon,
+            SoftwareVersion = "1.2.3",
+            Capabilities = ["device_inventory", "portable_profile"],
         };
 
-        var decoded = events.Select(json => JsonSerializer.Deserialize<DaemonEvent>(json)).ToArray();
-
-        Assert.Collection(decoded,
-            item => Assert.IsType<LibraryUpdateEvent>(item),
-            item => Assert.IsType<SelectionUpdateEvent>(item),
-            item => Assert.IsType<SelectionPreviewEvent>(item),
-            item => Assert.IsType<PlaylistsUpdateEvent>(item),
-            item => Assert.IsType<PlaylistDetailEvent>(item),
-            item => Assert.IsType<DeviceConfigUpdateEvent>(item),
-            item => Assert.IsType<DevicePreviewEvent>(item),
-            item => Assert.IsType<ResolvedTracksEvent>(item));
+        Assert.Throws<InvalidOperationException>(() =>
+            WireCodec.ValidatePeerHello(hello, EndpointRole.Daemon, WireCodec.RequiredDaemonCapabilities));
     }
 
     [Fact]
-    public void V2_additive_mutation_events_decode_complete_canonical_results()
+    public void WorkerProgress_ForWrongOwnedSession_IsRejected()
     {
-        var added = Assert.IsType<DeviceSelectionAddedEvent>(JsonSerializer.Deserialize<DaemonEvent>(
-            """{"type":"device_selection_added","acknowledged_request_id":"add-device","serial":"A","matched_tracks":12,"missing_tracks":4,"selection_changed":true,"selection_revision":8,"selection":{"mode":"include","rules":[{"kind":"artist","name":"Birdy"}]},"delivery":"added_and_syncing"}"""));
-        var appended = Assert.IsType<PlaylistSelectionAppendedEvent>(JsonSerializer.Deserialize<DaemonEvent>(
-            """{"type":"playlist_selection_appended","acknowledged_request_id":"append","slug":"favorites","appended_tracks":2,"playlist_revision":9,"playlist":{"slug":"favorites","name":"Favorites","tracks":["Birdy/01.flac","Birdy/02.flac"]}}"""));
-        var rejected = Assert.IsType<LibraryMutationRejectedEvent>(JsonSerializer.Deserialize<DaemonEvent>(
-            """{"type":"library_mutation_rejected","acknowledged_request_id":"reject","target":{"kind":"device_selection","serial":"A"},"code":"invalid_rules","message":"drop rules must not be empty"}"""));
-        var failed = Assert.IsType<CommandFailedEvent>(JsonSerializer.Deserialize<DaemonEvent>(
-            """{"type":"command_failed","acknowledged_request_id":"save","error":"could not persist"}"""));
+        var expected = new OwnedSessionRoute(DeviceId.Parse("000A27002138B0A8"), 42);
+        var json = """{"type":"track_done","device_id":"000A27002138B0A9","session_id":42,"result":"applied"}""";
 
-        Assert.Equal(DropDelivery.AddedAndSyncing, added.Delivery);
-        Assert.Equal(8UL, added.SelectionRevision);
-        Assert.Equal(9UL, appended.PlaylistRevision);
-        Assert.Equal(2, appended.Playlist.Tracks.Count);
-        Assert.IsType<DeviceSelectionMutationTarget>(rejected.Target);
-        Assert.Equal("could not persist", failed.Error);
+        Assert.ThrowsAny<Exception>(() => WireCodec.DecodeAdmittedMessage(
+            json,
+            WireStream.DaemonReceivingWorkerEvents,
+            expected));
     }
 
-    [Theory]
-    [InlineData("""{"type":"playlists_update","playlists":[]}""")]
-    [InlineData("""{"type":"playlist_detail","slug":"x","acknowledged_request_id":"get"}""")]
-    [InlineData("""{"type":"device_config_update","serial":"A","selection":{"mode":"all","rules":[]},"subscriptions":{"playlists":[]},"settings":{"auto_sync":true,"rockbox_compat":false}}""")]
-    public void V2_revisioned_events_reject_missing_revisions(string json)
+    [Fact]
+    public void Encode_RejectsNonCanonicalRoutingCreatedByClientCode()
     {
-        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<DaemonEvent>(json));
+        var command = new GetInventoryCommand("not-a-request-id");
+
+        Assert.ThrowsAny<Exception>(() => WireCodec.Encode(command));
+    }
+
+    [Fact]
+    public void Encode_RejectsNullDeviceIdInjectedByClientCode()
+    {
+        var command = new ForgetDeviceCommand(
+            null!,
+            "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8764");
+
+        Assert.ThrowsAny<Exception>(() => WireCodec.Encode(command));
+    }
+
+    [Fact]
+    public void LegacyCommandSurface_StillSerializesForPendingUiMigration()
+    {
+        DaemonCommand command = new GetHistoryCommand(
+            "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8808",
+            10);
+
+        Assert.Equal(
+            """{"type":"get_history","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8808","limit":10}""",
+            JsonSerializer.Serialize<DaemonCommand>(command));
     }
 }

@@ -22,18 +22,12 @@ public partial class App : Application
     public static TrayIconController? Tray { get; private set; }
     public static NotificationService? Notifications { get; private set; }
 
-    /// <summary>Last ConfigUpdate seen from the daemon. Popover + settings read from this.</summary>
-    public static ConfigUpdateEvent? LatestConfig { get; private set; }
-    public static string? ConfiguredSerial => LatestConfig?.Ipod?.Serial;
-    /// <summary>Latest StatusUpdate. Used to drive popover initial state.</summary>
-    public static StatusUpdateEvent? LatestStatus { get; private set; }
-    /// <summary>Latest HistoryUpdate. Used to seed popover activity feed.</summary>
-    public static HistoryUpdateEvent? LatestHistory { get; private set; }
+    public static DeviceStore Store { get; } = new();
 
     private static readonly PopoverViewModel _popoverState = new();
-    private static DeviceInventorySnapshotEvent? _latestInventory;
     private static PopoverWindow? _popover;
     private static SettingsWindow? _settings;
+    private static TaskCompletionSource<DeviceInventoryEvent>? _initialInventoryWaiter;
 
     /// <summary>Monotonic timestamp (UTC ticks) of the most recent
     /// popover close, used to debounce the tray-icon toggle path. The
@@ -87,51 +81,50 @@ public partial class App : Application
         // wizard) subscribe through it instead of reading the channel
         // directly.
         Router = new DaemonEventRouter(Daemon.Events);
-        Router.StatusUpdated += OnStatusUpdated;
-        Router.ConfigUpdated += OnConfigUpdated;
-        Router.HistoryUpdated += OnHistoryUpdated;
-        Router.DeviceConnected += OnDeviceConnected;
-        Router.DeviceDisconnected += OnDeviceDisconnected;
-        Router.DeviceInventorySnapshotReceived += OnDeviceInventorySnapshot;
-        Router.SourceAvailabilityUpdated += OnSourceAvailabilityUpdated;
+        Router.EventReceived += OnWireEvent;
         Router.SyncEventReceived += OnSyncEvent;
         Router.Start();
 
         // Notification service subscribes to router internally.
         Notifications = new NotificationService(Router,
-            getNotifyOn: () => LatestConfig?.Daemon?.NotifyOn ?? "all");
+            getNotifyOn: () => Store.GlobalConfig?.Settings.NotifyOn switch
+            {
+                NotifyLevel.ErrorsOnly => "errors_only",
+                NotifyLevel.None => "none",
+                _ => "all",
+            });
         Notifications.Initialize();
 
-        // Subscribe a one-shot TCS for the daemon's ConfigUpdate event BEFORE
-        // sending GetConfig — guarantees we observe the reply even if it
-        // arrives before SendAsync returns. The 2s cap is a defensive ceiling,
-        // not the primary signal.
-        var configReceived = new TaskCompletionSource<ConfigUpdateEvent>(
+        var inventoryReceived = new TaskCompletionSource<DeviceInventoryEvent>(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        void OneShotConfig(ConfigUpdateEvent c)
-        {
-            Router!.ConfigUpdated -= OneShotConfig;
-            configReceived.TrySetResult(c);
-        }
-        Router.ConfigUpdated += OneShotConfig;
+        _initialInventoryWaiter = inventoryReceived;
 
-        // Ask for the initial config + status + history.
-        await Daemon.SendAsync(new GetConfigCommand(Guid.NewGuid().ToString("N")));
-        await Daemon.SendAsync(new GetStatusCommand(Guid.NewGuid().ToString("N")));
-        await Daemon.SendAsync(new GetHistoryCommand(Limit: 10, RequestId: Guid.NewGuid().ToString("N")));
+        await Daemon.SendAsync(new GetGlobalConfigCommand(NewRequestId()));
+        await Daemon.SendAsync(new GetInventoryCommand(NewRequestId()));
+        await Daemon.SendAsync(new WireGetHistoryCommand(NewRequestId(), 10));
+        await Daemon.SendAsync(new SubscribeInventoryCommand(NewRequestId()));
 
         // Wait for the actual ConfigUpdate, capped at 2s so a dead daemon
         // doesn't wedge startup forever. Either outcome: we make the wizard
         // decision below using whatever LatestConfig holds.
-        try { await configReceived.Task.WaitAsync(TimeSpan.FromSeconds(2)); }
-        catch (TimeoutException) { Router.ConfigUpdated -= OneShotConfig; }
+        try { await inventoryReceived.Task.WaitAsync(TimeSpan.FromSeconds(2)); }
+        catch (TimeoutException) { }
+        finally
+        {
+            if (ReferenceEquals(_initialInventoryWaiter, inventoryReceived))
+                _initialInventoryWaiter = null;
+        }
 
         // Open wizard if config has no iPod identity. The wizard also
         // subscribes to the router (T14) so the channel-exclusivity
         // hack from M3 goes away.
-        if (LatestConfig?.Ipod is null)
+        if (!HasAdoptedDevice())
         {
-            ShowWizard();
+            // W3 replaces the serial-keyed wizard. Do not launch the legacy
+            // flow against a protocol-3 daemon or send identity-unsafe v2
+            // commands while that migration is pending.
+            Debug.WriteLine("app: setup unavailable until the protocol-3 device wizard migration");
+            UpdateTrayVisibility();
         }
         else
         {
@@ -155,149 +148,72 @@ public partial class App : Application
     /// every code path that flips either signal.</summary>
     private static void UpdateTrayVisibility()
     {
-        Tray?.SetVisible(!_wizardActive && LatestConfig?.Ipod is not null);
+        Tray?.SetVisible(!_wizardActive && HasAdoptedDevice());
     }
 
-    private void OnStatusUpdated(StatusUpdateEvent s)
+    private void OnWireEvent(WireEvent wireEvent)
     {
-        LatestStatus = s;
         DispatcherQueue.TryEnqueue(() =>
         {
-            UpdateTrayFromStatus(s);
-            if (_latestInventory is null && _popoverState.ActiveSyncContext is null)
+            if (!Store.Reduce(wireEvent)) return;
+            if (wireEvent is WireSourceAvailabilityEvent availability)
             {
-                _popoverState.Update(s);
+                _popoverState.ApplySourceAvailability(availability);
             }
-        });
-    }
-
-    private void OnConfigUpdated(ConfigUpdateEvent c)
-    {
-        LatestConfig = c;
-        // Config updates carry the latest friendly iPod name (the
-        // daemon writes it after reading iTunesDB on plug-in). Push
-        // it into an open popover so the label flips from model →
-        // friendly name without needing the user to reopen the flyout.
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            if (_popoverState.ActiveSyncContext is null)
-            {
-                _popoverState.SetDeviceLabel(c.Ipod?.Name, c.Ipod?.ModelLabel);
-            }
-            // Pair / forget transitions flip the tray's visibility
-            // automatically — no separate notification needed.
+            ApplyFocusedDevice();
+            UpdateTrayFromStore();
             UpdateTrayVisibility();
-        });
-    }
-    private void OnHistoryUpdated(HistoryUpdateEvent h)
-    {
-        LatestHistory = h;
-        DispatcherQueue.TryEnqueue(() => _popoverState.ApplyHistory(h));
-    }
-
-    private void OnSourceAvailabilityUpdated(SourceAvailabilityEvent availability)
-    {
-        DispatcherQueue.TryEnqueue(
-            () => _popoverState.ApplySourceAvailability(availability));
-    }
-    private void OnDeviceConnected(DeviceConnectedEvent dc)
-    {
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            Tray?.SetState(TrayState.Idle, $"iPod connected ({dc.Name ?? dc.ModelLabel})");
-            if (_latestInventory is null &&
-                _popoverState.ActiveSyncContext is null &&
-                string.Equals(dc.Serial, ConfiguredSerial, StringComparison.OrdinalIgnoreCase))
+            if (wireEvent is DeviceInventoryEvent inventory)
             {
-                _popoverState.SetDeviceLabel(dc.Name, dc.ModelLabel);
+                _initialInventoryWaiter?.TrySetResult(inventory);
             }
         });
     }
-    private void OnDeviceDisconnected(DeviceDisconnectedEvent disconnected)
+
+    private static void ApplyFocusedDevice()
     {
-        if (!string.Equals(disconnected.Serial, ConfiguredSerial, StringComparison.OrdinalIgnoreCase))
+        if (Store.FocusedDeviceId is not { } focusedId ||
+            !Store.Devices.TryGetValue(focusedId, out var focused))
         {
+            _popoverState.ClearDisplayedDevice();
             return;
         }
 
-        DispatcherQueue.TryEnqueue(() => Tray?.SetState(TrayState.Offline, "iPod not connected"));
+        _popoverState.Update(focused.Inventory);
+        if (focused.ActiveSessionId is { } sessionId)
+        {
+            _popoverState.SetActiveDeviceSession(new DeviceSessionTarget(focusedId, sessionId));
+        }
+        else
+        {
+            _popoverState.ClearActiveDeviceSession();
+        }
     }
 
-    private void UpdateTrayFromStatus(StatusUpdateEvent s)
+    private static void UpdateTrayFromStore()
     {
         if (Tray is null) return;
-        var (state, tooltip) = (s.State, s.IpodConnected) switch
+        if (Store.Devices.Values.Any(device => device.ActiveSessionId is not null))
         {
-            ("syncing", _) => (TrayState.Syncing, "Syncing iPod…"),
-            (_, true) => (TrayState.Idle, "iPod connected · idle"),
-            _ => (TrayState.Offline, "iPod not connected"),
-        };
-        Tray.SetState(state, tooltip);
-    }
-
-    private void OnDeviceInventorySnapshot(DeviceInventorySnapshotEvent snapshot)
-    {
-        _latestInventory = snapshot;
-        DispatcherQueue.TryEnqueue(() =>
+            Tray.SetState(TrayState.Syncing, "Syncing iPod…");
+            return;
+        }
+        if (Store.Devices.Values.Any(device => device.Inventory.Connected))
         {
-            var activeDevices = snapshot.Devices
-                .Where(device => device.SessionId is not null)
-                .ToArray();
-            var focused = activeDevices.FirstOrDefault(device =>
-                _popoverState.ActiveSyncContext is { } current &&
-                string.Equals(
-                    device.Identity.Serial,
-                    current.Serial,
-                    StringComparison.OrdinalIgnoreCase) &&
-                device.SessionId == current.SessionId);
-            if (focused is null && activeDevices.Length == 1)
-            {
-                focused = activeDevices[0];
-            }
-
-            if (focused?.SessionId is { } sessionId)
-            {
-                _popoverState.SetActiveSyncSession(
-                    new SyncEventContext(sessionId, focused.Identity.Serial));
-                _popoverState.Update(focused);
-                return;
-            }
-
-            if (activeDevices.Length == 0)
-            {
-                var previousSerial = _popoverState.ActiveSyncContext?.Serial;
-                _popoverState.ClearActiveSyncSession();
-                var pausedDevices = snapshot.Devices
-                    .Where(device => device.Connected && device.Phase == "paused")
-                    .ToArray();
-                var destination = snapshot.Devices.FirstOrDefault(device =>
-                    string.Equals(
-                        device.Identity.Serial,
-                        previousSerial,
-                        StringComparison.OrdinalIgnoreCase));
-                destination ??= pausedDevices.Length == 1
-                    ? pausedDevices[0]
-                    : snapshot.Devices.FirstOrDefault(device =>
-                    string.Equals(
-                        device.Identity.Serial,
-                        ConfiguredSerial,
-                        StringComparison.OrdinalIgnoreCase));
-                if (destination is not null)
-                {
-                    _popoverState.Update(destination);
-                }
-            }
-        });
+            Tray.SetState(TrayState.Idle, "iPod connected · idle");
+            return;
+        }
+        Tray.SetState(TrayState.Offline, "iPod not connected");
     }
 
     private void OnSyncEvent(RoutedSyncEvent routed)
     {
-        if (!routed.Context.IsDeviceSession)
+        if (routed.DeviceId is null)
         {
             return;
         }
 
-        DispatcherQueue.TryEnqueue(() => _popoverState.ApplySyncProgress(routed));
+        DispatcherQueue.TryEnqueue(() => _popoverState.ApplyWireProgress(routed));
     }
 
     private void OnPopoverRequested()
@@ -309,7 +225,7 @@ public partial class App : Application
             // in normal use this branch is unreachable, but the
             // guard is cheap and survives the user re-showing the
             // tray via another path (e.g. notification action).
-            if (_wizardActive || LatestConfig?.Ipod is null) return;
+            if (_wizardActive || !HasAdoptedDevice()) return;
 
             // Tray-icon toggle: a tray click while the popover is open
             // means "close it". Replaces the prior "re-Activate the
@@ -348,16 +264,10 @@ public partial class App : Application
             // overlapping flyouts anchored to the same tray corner.
             _popover?.Close();
             if (_settings is not null) { _settings.Activate(); return; }
-            if (Daemon is null || Router is null || LatestConfig is null) return;
-            var vm = new SettingsViewModel(Daemon, Router, LatestConfig);
-            _settings = new SettingsWindow(vm);
-            SettingsWindowHandle = WinRT.Interop.WindowNative.GetWindowHandle(_settings);
-            _settings.Closed += (_, _) =>
-            {
-                _settings = null;
-                SettingsWindowHandle = IntPtr.Zero;
-            };
-            _settings.Activate();
+            // The per-device settings surface migrates in W4. W2 deliberately
+            // refuses to synthesize a legacy serial-keyed configuration from
+            // protocol-3 device identity.
+            Debug.WriteLine("app: settings unavailable until the per-device settings migration");
         });
     }
 
@@ -370,7 +280,7 @@ public partial class App : Application
         {
             _settings?.Close();
             _popover?.Close();
-            ShowWizardStatic();
+            Debug.WriteLine("app: pair-device flow unavailable until the protocol-3 wizard migration");
         });
     }
 
@@ -412,7 +322,7 @@ public partial class App : Application
     {
         if (Daemon is not null)
         {
-            try { await Daemon.SendAsync(new ShutdownCommand()); }
+            try { await Daemon.SendAsync(new WireShutdownCommand(NewRequestId())); }
             catch { /* daemon may already be dead */ }
             await Daemon.DisposeAsync();
         }
@@ -425,8 +335,8 @@ public partial class App : Application
     {
         DispatcherQueue.TryEnqueue(async () =>
         {
-            if (Daemon is null || ConfiguredSerial is not { } serial) return;
-            try { await Daemon.SendAsync(new TriggerSyncCommand("manual", serial, Guid.NewGuid().ToString("N"))); }
+            if (Daemon is null || Store.CaptureFocusedDeviceAction() is not { } target) return;
+            try { await Daemon.SendAsync(new WireTriggerSyncCommand(target.DeviceId, NewRequestId(), SyncTrigger.Manual)); }
             catch (Exception e) { Debug.WriteLine($"app: trigger_sync failed: {e}"); }
         });
     }
@@ -437,7 +347,7 @@ public partial class App : Application
         {
             if (Daemon is not null)
             {
-                try { await Daemon.SendAsync(new ShutdownCommand()); }
+                try { await Daemon.SendAsync(new WireShutdownCommand(NewRequestId())); }
                 catch { /* daemon may already be dead */ }
                 await Daemon.DisposeAsync();
             }
@@ -486,4 +396,9 @@ public partial class App : Application
         };
         Process.Start(psi);
     }
+
+    private static bool HasAdoptedDevice() => Store.Devices.Values.Any(device =>
+        device.Inventory.ProfileStatus == ProfileStatus.Adopted);
+
+    private static string NewRequestId() => Guid.NewGuid().ToString("D");
 }

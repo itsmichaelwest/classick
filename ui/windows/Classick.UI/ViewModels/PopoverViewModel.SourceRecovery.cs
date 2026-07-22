@@ -74,6 +74,38 @@ public partial class PopoverViewModel
         }
     }
 
+    public void ApplySourceAvailability(WireSourceAvailabilityEvent availability)
+    {
+        ArgumentNullException.ThrowIfNull(availability);
+        if (availability.RequestId is { } requestId &&
+            _pendingSourceRetryRequestId is { } pendingRequestId)
+        {
+            if (!string.Equals(requestId, pendingRequestId, StringComparison.Ordinal)) return;
+            ClearPendingSourceRetry();
+        }
+        else if (availability.RequestId is null &&
+                 availability.State != SourceAvailabilityState.Remounting)
+        {
+            ClearPendingSourceRetry();
+        }
+        SourceAttentionVisible = availability.State is
+            SourceAvailabilityState.AuthRequired or SourceAvailabilityState.Unavailable;
+        SourceRemounting = availability.State == SourceAvailabilityState.Remounting;
+        if (availability.State == SourceAvailabilityState.Available)
+        {
+            AvailableSourceRoot = availability.SourceRoot;
+        }
+    }
+
+    public WireRetrySourceMountCommand? CreateWireSourceRetryCommand(string requestId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        if (!SourceAttentionVisible || _pendingSourceRetryRequestId is not null) return null;
+        _pendingSourceRetryRequestId = requestId;
+        SourceRetryPending = true;
+        return new WireRetrySourceMountCommand(requestId, AllowUi: true);
+    }
+
     public RetrySourceMountCommand? CreateSourceRetryCommand(string requestId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);

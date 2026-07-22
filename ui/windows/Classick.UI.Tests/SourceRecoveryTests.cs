@@ -6,6 +6,31 @@ using Classick_UI.ViewModels;
 public sealed class SourceRecoveryWireTests
 {
     [Fact]
+    public void Protocol3_retry_clears_only_on_matching_correlated_terminal_state()
+    {
+        var viewModel = new PopoverViewModel();
+        viewModel.ApplySourceAvailability(new WireSourceAvailabilityEvent(
+            null,
+            SourceAvailabilityState.AuthRequired,
+            null));
+        const string requestId = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8840";
+        _ = viewModel.CreateWireSourceRetryCommand(requestId);
+
+        viewModel.ApplySourceAvailability(new WireSourceAvailabilityEvent(
+            "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8841",
+            SourceAvailabilityState.Unavailable,
+            null));
+        Assert.True(viewModel.SourceRetryPending);
+
+        viewModel.ApplySourceAvailability(new WireSourceAvailabilityEvent(
+            requestId,
+            SourceAvailabilityState.Unavailable,
+            null));
+        Assert.False(viewModel.SourceRetryPending);
+        Assert.True(viewModel.SourceRetryAvailable);
+    }
+
+    [Fact]
     public void Retry_source_mount_command_serializes_exact_v2_shape()
     {
         var command = new RetrySourceMountCommand(AllowUi: true, RequestId: "request-source");

@@ -3,15 +3,60 @@ using System.Text.Json.Serialization;
 
 namespace Classick_UI.Ipc;
 
-[JsonConverter(typeof(JsonStringEnumConverter<SelectionMode>))]
+[JsonConverter(typeof(DeviceIdJsonConverter))]
+public sealed record DeviceId
+{
+    private DeviceId(string value) => Value = value;
+
+    public string Value { get; }
+
+    public static DeviceId Parse(string value)
+    {
+        if (value.Length != 16 || value.Any(character => !Uri.IsHexDigit(character)) ||
+            !string.Equals(value, value.ToUpperInvariant(), StringComparison.Ordinal))
+        {
+            throw new FormatException("device ID must be exactly 16 uppercase hexadecimal characters");
+        }
+
+        return new DeviceId(value);
+    }
+
+    public override string ToString() => Value;
+}
+
+public sealed class DeviceIdJsonConverter : JsonConverter<DeviceId>
+{
+    public override DeviceId Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var value = reader.GetString() ?? throw new JsonException("device ID must be a string");
+        try
+        {
+            return DeviceId.Parse(value);
+        }
+        catch (FormatException exception)
+        {
+            throw new JsonException(exception.Message, exception);
+        }
+    }
+
+    public override void Write(Utf8JsonWriter writer, DeviceId value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value.Value);
+}
+
+[JsonConverter(typeof(StrictStringEnumConverter<EndpointRole>))]
+public enum EndpointRole
+{
+    [JsonStringEnumMemberName("desktop")] Desktop,
+    [JsonStringEnumMemberName("daemon")] Daemon,
+    [JsonStringEnumMemberName("worker")] Worker,
+}
+
+[JsonConverter(typeof(StrictStringEnumConverter<SelectionMode>))]
 public enum SelectionMode
 {
-    [JsonStringEnumMemberName("all")]
-    All,
-    [JsonStringEnumMemberName("include")]
-    Include,
-    [JsonStringEnumMemberName("exclude")]
-    Exclude,
+    [JsonStringEnumMemberName("all")] All,
+    [JsonStringEnumMemberName("include")] Include,
+    [JsonStringEnumMemberName("exclude")] Exclude,
 }
 
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
@@ -21,163 +66,42 @@ public enum SelectionMode
 public abstract record SelectionRule;
 
 public sealed record ArtistSelectionRule(
-    [property: JsonRequired, JsonPropertyName("name")] string Name
-) : SelectionRule;
+    [property: JsonRequired, JsonPropertyName("name")] string Name) : SelectionRule;
 
 public sealed record AlbumSelectionRule(
     [property: JsonRequired, JsonPropertyName("artist")] string Artist,
-    [property: JsonRequired, JsonPropertyName("album")] string Album
-) : SelectionRule;
+    [property: JsonRequired, JsonPropertyName("album")] string Album) : SelectionRule;
 
 public sealed record GenreSelectionRule(
-    [property: JsonRequired, JsonPropertyName("name")] string Name
-) : SelectionRule;
+    [property: JsonRequired, JsonPropertyName("name")] string Name) : SelectionRule;
 
-public sealed record SelectionState(
-    [property: JsonPropertyName("mode")] SelectionMode Mode,
-    [property: JsonPropertyName("rules")] IReadOnlyList<SelectionRule> Rules
-);
+public sealed record SelectionValue(
+    [property: JsonRequired, JsonPropertyName("schema_version")] uint SchemaVersion,
+    [property: JsonRequired, JsonPropertyName("mode")] SelectionMode Mode,
+    [property: JsonRequired, JsonPropertyName("rules")] IReadOnlyList<SelectionRule> Rules);
 
-[JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
-[JsonDerivedType(typeof(ManualPlaylistPayload), "manual")]
-[JsonDerivedType(typeof(SmartPlaylistPayload), "smart")]
-public abstract record PlaylistPayload;
+public sealed record SettingsValue(
+    [property: JsonRequired, JsonPropertyName("schema_version")] uint SchemaVersion,
+    [property: JsonRequired, JsonPropertyName("auto_sync")] bool AutoSync,
+    [property: JsonRequired, JsonPropertyName("rockbox_compat")] bool RockboxCompat);
 
-public sealed record ManualPlaylistPayload(
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("slug")] string? Slug,
-    [property: JsonRequired, JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("tracks")] IReadOnlyList<string> Tracks
-) : PlaylistPayload;
+public sealed record SubscriptionsValue(
+    [property: JsonRequired, JsonPropertyName("schema_version")] uint SchemaVersion,
+    [property: JsonRequired, JsonPropertyName("playlists")] IReadOnlyList<string> Playlists);
 
-public sealed record SmartPlaylistPayload(
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("slug")] string? Slug,
-    [property: JsonRequired, JsonPropertyName("name")] string Name,
-    [property: JsonRequired, JsonPropertyName("rules")] SmartRules Rules
-) : PlaylistPayload;
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "state")]
+[JsonDerivedType(typeof(PendingDeviceDelivery), "pending_device")]
+[JsonDerivedType(typeof(DeviceCommittedDelivery), "device_committed")]
+public abstract record ConfigDelivery;
 
-[JsonConverter(typeof(JsonStringEnumConverter<SmartMatching>))]
-public enum SmartMatching
-{
-    [JsonStringEnumMemberName("all")]
-    All,
-    [JsonStringEnumMemberName("any")]
-    Any,
-}
+public sealed record PendingDeviceDelivery(
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("last_failure")]
+    string? LastFailure = null) : ConfigDelivery;
 
-[JsonConverter(typeof(JsonStringEnumConverter<SmartField>))]
-public enum SmartField
-{
-    [JsonStringEnumMemberName("artist")]
-    Artist,
-    [JsonStringEnumMemberName("album")]
-    Album,
-    [JsonStringEnumMemberName("genre")]
-    Genre,
-    [JsonStringEnumMemberName("year")]
-    Year,
-}
+public sealed record DeviceCommittedDelivery : ConfigDelivery;
 
-[JsonConverter(typeof(JsonStringEnumConverter<SmartOperation>))]
-public enum SmartOperation
-{
-    [JsonStringEnumMemberName("is")]
-    Is,
-    [JsonStringEnumMemberName("contains")]
-    Contains,
-    [JsonStringEnumMemberName("gte")]
-    Gte,
-    [JsonStringEnumMemberName("lte")]
-    Lte,
-}
-
-[JsonConverter(typeof(JsonStringEnumConverter<SmartOrder>))]
-public enum SmartOrder
-{
-    [JsonStringEnumMemberName("recently_modified")]
-    RecentlyModified,
-    [JsonStringEnumMemberName("random_stable")]
-    RandomStable,
-    [JsonStringEnumMemberName("alpha")]
-    Alpha,
-}
-
-public sealed record SmartRule(
-    [property: JsonRequired, JsonPropertyName("field")] SmartField Field,
-    [property: JsonRequired, JsonPropertyName("op")] SmartOperation Operation,
-    [property: JsonRequired, JsonPropertyName("value")] string Value
-);
-
-public sealed record SmartRules(
-    [property: JsonPropertyName("version")] uint Version,
-    [property: JsonPropertyName("matching")] SmartMatching Matching,
-    [property: JsonPropertyName("rules")] IReadOnlyList<SmartRule> Rules,
-    [property: JsonPropertyName("limit")] JsonElement? Limit,
-    [property: JsonPropertyName("order")] SmartOrder Order,
-    [property: JsonPropertyName("seed")] ulong Seed
-);
-
-[JsonConverter(typeof(JsonStringEnumConverter<PlaylistKind>))]
-public enum PlaylistKind
-{
-    [JsonStringEnumMemberName("manual")]
-    Manual,
-    [JsonStringEnumMemberName("smart")]
-    Smart,
-}
-
-public sealed record PlaylistSummary(
-    [property: JsonRequired, JsonPropertyName("slug")] string Slug,
-    [property: JsonRequired, JsonPropertyName("name")] string Name,
-    [property: JsonRequired, JsonPropertyName("kind")] PlaylistKind Kind,
-    [property: JsonRequired, JsonPropertyName("tracks")] int Tracks,
-    [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("error")] string? Error = null
-);
-
-public sealed record Subscriptions(
-    [property: JsonPropertyName("playlists")] IReadOnlyList<string> Playlists
-);
-
-public sealed record DeviceSettings(
-    [property: JsonPropertyName("auto_sync")] bool AutoSync,
-    [property: JsonPropertyName("rockbox_compat")] bool RockboxCompat
-);
-
-[JsonConverter(typeof(JsonStringEnumConverter<DropSyncBehavior>))]
-public enum DropSyncBehavior
-{
-    [JsonStringEnumMemberName("immediate")]
-    Immediate,
-    [JsonStringEnumMemberName("next_sync")]
-    NextSync,
-}
-
-[JsonConverter(typeof(JsonStringEnumConverter<DropDelivery>))]
-public enum DropDelivery
-{
-    [JsonStringEnumMemberName("added_and_syncing")]
-    AddedAndSyncing,
-    [JsonStringEnumMemberName("added_for_next_sync")]
-    AddedForNextSync,
-    [JsonStringEnumMemberName("already_present")]
-    AlreadyPresent,
-}
-
-public sealed record ManualPlaylist(
-    [property: JsonRequired, JsonPropertyName("slug")] string Slug,
-    [property: JsonRequired, JsonPropertyName("name")] string Name,
-    [property: JsonRequired, JsonPropertyName("tracks")] IReadOnlyList<string> Tracks
-);
-
-[JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
-[JsonDerivedType(typeof(DeviceSelectionMutationTarget), "device_selection")]
-[JsonDerivedType(typeof(ManualPlaylistMutationTarget), "manual_playlist")]
-public abstract record LibraryMutationTarget;
-
-public sealed record DeviceSelectionMutationTarget(
-    [property: JsonRequired, JsonPropertyName("serial")] string Serial
-) : LibraryMutationTarget;
-
-public sealed record ManualPlaylistMutationTarget(
-    [property: JsonRequired, JsonPropertyName("slug")] string Slug
-) : LibraryMutationTarget;
+public sealed record DeliveredComponent<T>(
+    [property: JsonRequired, JsonPropertyName("revision")] ulong Revision,
+    [property: JsonRequired, JsonPropertyName("mutation_id")] string MutationId,
+    [property: JsonRequired, JsonPropertyName("value")] T Value,
+    [property: JsonRequired, JsonPropertyName("delivery")] ConfigDelivery Delivery);

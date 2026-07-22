@@ -1,41 +1,24 @@
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Text.Json;
-using System.Threading;
 using System.Threading.Channels;
-using System.Threading.Tasks;
 
 namespace Classick_UI.Ipc;
 
-/// <summary>
-/// Owns the only consumer of <see cref="DaemonClient.Events"/> and
-/// dispatches typed events to N concurrent .NET subscribers. Solves
-/// the M3 "wizard vs tray loop have exclusive read on the channel"
-/// architectural gap.
-///
-/// Subscribers attach via standard <c>+=</c> on the typed events.
-/// All handlers fire on a background task (not the UI thread);
-/// subscribers that mutate UI state must marshal via
-/// <c>DispatcherQueue.TryEnqueue</c> themselves.
-///
-/// Lifecycle: <see cref="Start"/> spawns the reader task;
-/// <see cref="Stop"/> cancels it. Idempotent on both.
-/// </summary>
 public sealed class DaemonEventRouter : IDisposable
 {
-    private readonly ChannelReader<object> _source;
-    private readonly Dictionary<string, (string RawSerial, ulong SessionId)> _activeDeviceSessions =
-        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Func<CancellationToken, IAsyncEnumerable<object>> _readEvents;
+    private readonly Dictionary<DeviceId, ulong> _activeSessions = [];
     private CancellationTokenSource? _cts;
-    private Task? _readerTask;
+    private Task? _loop;
     private ulong? _inventoryRevision;
 
-    public DaemonEventRouter(ChannelReader<object> source)
-    {
-        _source = source;
-    }
+    public DaemonEventRouter(ChannelReader<WireEvent> source) =>
+        _readEvents = cancellationToken => ReadWireEvents(source, cancellationToken);
 
+    public DaemonEventRouter(ChannelReader<object> source) =>
+        _readEvents = cancellationToken => source.ReadAllAsync(cancellationToken);
+
+    public event Action<WireEvent>? EventReceived;
+    public event Action<DeviceInventoryEvent>? DeviceInventoryReceived;
     public event Action<StatusUpdateEvent>? StatusUpdated;
     public event Action<ConfigUpdateEvent>? ConfigUpdated;
     public event Action<HistoryUpdateEvent>? HistoryUpdated;
@@ -43,148 +26,152 @@ public sealed class DaemonEventRouter : IDisposable
     public event Action<DeviceDisconnectedEvent>? DeviceDisconnected;
     public event Action<SyncRejectedEvent>? SyncRejected;
     public event Action<DeviceInventorySnapshotEvent>? DeviceInventorySnapshotReceived;
-    public event Action<SourceAvailabilityEvent>? SourceAvailabilityUpdated;
     public event Action<DaemonEvent>? DaemonEventReceived;
     public event Action<RoutedSyncEvent>? SyncEventReceived;
+    public event Action<SourceAvailabilityEvent>? SourceAvailabilityUpdated;
 
     public void Start()
     {
-        if (_cts is not null) return;
+        if (_loop is not null) return;
         _cts = new CancellationTokenSource();
-        _readerTask = Task.Run(() => ReaderLoop(_cts.Token));
-    }
-
-    public async Task StopAsync()
-    {
-        _cts?.Cancel();
-        if (_readerTask is not null)
-        {
-            try { await _readerTask.ConfigureAwait(false); } catch { /* expected */ }
-        }
-        _readerTask = null;
-        _cts?.Dispose();
-        _cts = null;
+        _loop = RunAsync(_cts.Token);
     }
 
     public void Stop() => StopAsync().GetAwaiter().GetResult();
 
-    private async Task ReaderLoop(CancellationToken ct)
+    public async Task StopAsync()
+    {
+        if (_cts is null) return;
+        var cts = _cts;
+        var loop = _loop;
+        cts.Cancel();
+        if (loop is not null)
+        {
+            try
+            {
+                await loop.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+        if (ReferenceEquals(_cts, cts))
+        {
+            _cts = null;
+            _loop = null;
+        }
+        cts.Dispose();
+    }
+
+    private async Task RunAsync(CancellationToken cancellationToken)
     {
         try
         {
-            await foreach (var evt in _source.ReadAllAsync(ct))
+            await foreach (var message in _readEvents(cancellationToken).ConfigureAwait(false))
             {
-                Dispatch(evt);
+                switch (message)
+                {
+                    case WireEvent wireEvent:
+                        Route(wireEvent);
+                        break;
+                    case DaemonEvent daemonEvent:
+                        RouteLegacy(daemonEvent);
+                        break;
+                }
             }
         }
-        catch (OperationCanceledException) { /* expected */ }
-        catch (Exception e)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            Debug.WriteLine($"daemon-event-router: reader terminated: {e}");
         }
     }
 
-    private void Dispatch(object evt)
+    private void RouteLegacy(DaemonEvent daemonEvent)
     {
-        if (evt is DaemonEvent daemonEvent)
+        DaemonEventReceived?.Invoke(daemonEvent);
+        switch (daemonEvent)
         {
-            DaemonEventReceived?.Invoke(daemonEvent);
-        }
-
-        switch (evt)
-        {
-            case StatusUpdateEvent s:
-                StatusUpdated?.Invoke(s);
+            case StatusUpdateEvent status:
+                StatusUpdated?.Invoke(status);
                 break;
-            case ConfigUpdateEvent c:
-                ConfigUpdated?.Invoke(c);
+            case ConfigUpdateEvent config:
+                ConfigUpdated?.Invoke(config);
                 break;
-            case HistoryUpdateEvent h:
-                HistoryUpdated?.Invoke(h);
+            case HistoryUpdateEvent history:
+                HistoryUpdated?.Invoke(history);
                 break;
-            case DeviceConnectedEvent dc:
-                DeviceConnected?.Invoke(dc);
+            case DeviceConnectedEvent connected:
+                DeviceConnected?.Invoke(connected);
                 break;
-            case DeviceDisconnectedEvent dd:
-                DeviceDisconnected?.Invoke(dd);
+            case DeviceDisconnectedEvent disconnected:
+                DeviceDisconnected?.Invoke(disconnected);
                 break;
-            case SyncRejectedEvent sr:
-                SyncRejected?.Invoke(sr);
+            case SyncRejectedEvent rejected:
+                SyncRejected?.Invoke(rejected);
                 break;
-            case SourceAvailabilityEvent sourceAvailability:
-                SourceAvailabilityUpdated?.Invoke(sourceAvailability);
+            case DeviceInventorySnapshotEvent inventory:
+                DeviceInventorySnapshotReceived?.Invoke(inventory);
                 break;
-            case DeviceInventorySnapshotEvent snapshot:
-                if (UpdateActiveSessions(snapshot))
-                {
-                    DeviceInventorySnapshotReceived?.Invoke(snapshot);
-                }
-                break;
-            case SyncEventEnvelope env:
-                RouteSyncEvent(env);
-                break;
-            case IpcEvent ie:
-                Debug.WriteLine(
-                    $"daemon-event-router: rejected unscoped sync event {ie.GetType().Name}");
-                break;
-            default:
-                Debug.WriteLine($"daemon-event-router: unrouted event type {evt.GetType().Name}");
+            case SourceAvailabilityEvent availability:
+                SourceAvailabilityUpdated?.Invoke(availability);
                 break;
         }
     }
 
-    private bool UpdateActiveSessions(DeviceInventorySnapshotEvent snapshot)
+    internal void Route(WireEvent wireEvent)
     {
-        if (_inventoryRevision is not null && snapshot.Revision < _inventoryRevision)
+        switch (wireEvent)
         {
-            Debug.WriteLine(
-                $"daemon-event-router: ignored stale inventory revision {snapshot.Revision}");
+            case DeviceInventoryEvent inventory when !UpdateActiveSessions(inventory):
+                return;
+            case DeviceInventoryEvent inventory:
+                DeviceInventoryReceived?.Invoke(inventory);
+                break;
+            case SyncAcceptedEvent accepted:
+                _activeSessions[accepted.DeviceId] = accepted.SessionId;
+                break;
+        }
+
+        if (wireEvent is not ISessionRoutedMessage routed || wireEvent is SyncAcceptedEvent)
+        {
+            EventReceived?.Invoke(wireEvent);
+            return;
+        }
+        if (!_activeSessions.TryGetValue(routed.DeviceId, out var activeSession) || activeSession != routed.SessionId)
+        {
+            Debug.WriteLine($"daemon-event-router: ignored stale {wireEvent.GetType().Name} for {routed.DeviceId} session {routed.SessionId}");
+            return;
+        }
+        EventReceived?.Invoke(wireEvent);
+        SyncEventReceived?.Invoke(new RoutedSyncEvent(routed.DeviceId, routed.SessionId, wireEvent));
+    }
+
+    private bool UpdateActiveSessions(DeviceInventoryEvent inventory)
+    {
+        if (_inventoryRevision is not null && inventory.Revision < _inventoryRevision)
+        {
+            Debug.WriteLine($"daemon-event-router: ignored stale inventory revision {inventory.Revision}");
             return false;
         }
 
-        _inventoryRevision = snapshot.Revision;
-        _activeDeviceSessions.Clear();
-        foreach (var device in snapshot.Devices)
+        _inventoryRevision = inventory.Revision;
+        _activeSessions.Clear();
+        foreach (var device in inventory.Devices)
         {
-            if (device.SessionId is not { } sessionId)
+            if (device.SessionId is { } sessionId)
             {
-                continue;
+                _activeSessions[device.DeviceId] = sessionId;
             }
-
-            _activeDeviceSessions[device.Identity.Serial] = (device.Identity.Serial, sessionId);
         }
-
         return true;
     }
 
-    private void RouteSyncEvent(SyncEventEnvelope envelope)
+    private static async IAsyncEnumerable<object> ReadWireEvents(
+        ChannelReader<WireEvent> source,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var context = new SyncEventContext(envelope.SessionId, envelope.Serial);
-        if (envelope.Serial is { } serial)
+        await foreach (var wireEvent in source.ReadAllAsync(cancellationToken).ConfigureAwait(false))
         {
-            if (!_activeDeviceSessions.TryGetValue(serial, out var active) ||
-                active.SessionId != envelope.SessionId)
-            {
-                Debug.WriteLine(
-                    $"daemon-event-router: ignored stale sync_event for {serial} session {envelope.SessionId}");
-                return;
-            }
-
-            context = new SyncEventContext(envelope.SessionId, active.RawSerial);
-        }
-
-        try
-        {
-            var inner = JsonSerializer.Deserialize<IpcEvent>(envelope.Line);
-            if (inner is not null)
-            {
-                SyncEventReceived?.Invoke(new RoutedSyncEvent(context, inner));
-            }
-        }
-        catch (Exception e)
-        {
-            Debug.WriteLine(
-                $"daemon-event-router: bad sync_event line `{envelope.Line}`: {e.Message}");
+            yield return wireEvent;
         }
     }
 

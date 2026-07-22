@@ -1,152 +1,145 @@
-using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
 namespace Classick_UI.Ipc;
 
-/// <summary>
-/// Base type for events emitted by the Rust core on stdout in --ipc-mode.
-/// Wire format: newline-delimited JSON, snake_case "type" discriminator.
-/// See docs/ipc/subprocess.md for the authoritative schema.
-/// </summary>
-[JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
-[JsonDerivedType(typeof(HelloEvent), "hello")]
-[JsonDerivedType(typeof(HeaderEvent), "header")]
-[JsonDerivedType(typeof(SummaryEvent), "summary")]
-[JsonDerivedType(typeof(ReviewEvent), "review")]
-[JsonDerivedType(typeof(PromptEvent), "prompt")]
-[JsonDerivedType(typeof(FormEvent), "form")]
-[JsonDerivedType(typeof(TrackStartEvent), "track_start")]
-[JsonDerivedType(typeof(TrackDoneEvent), "track_done")]
-[JsonDerivedType(typeof(FinalizingEvent), "finalizing")]
-[JsonDerivedType(typeof(CancelledEvent), "cancelled")]
-[JsonDerivedType(typeof(LogEvent), "log")]
-[JsonDerivedType(typeof(ErrorEvent), "error")]
-[JsonDerivedType(typeof(FinishEvent), "finish")]
-[JsonDerivedType(typeof(PausedEvent), "paused")]
-public abstract record IpcEvent;
+public abstract record WireMessage;
 
-/// <summary>Handshake; first event emitted after spawn. See §4.1.</summary>
-public sealed record HelloEvent(
-    [property: JsonPropertyName("protocol_version")] string ProtocolVersion,
-    [property: JsonPropertyName("core_version")] string CoreVersion
-) : IpcEvent;
+public sealed record WireHello : WireMessage
+{
+    [JsonPropertyOrder(-100), JsonPropertyName("type")]
+    public string Type => "hello";
 
-/// <summary>Resolved paths for display. See §4.2.</summary>
-public sealed record HeaderEvent(
-    [property: JsonPropertyName("source")] string Source,
-    [property: JsonPropertyName("ipod")] string Ipod,
-    [property: JsonPropertyName("manifest")] string Manifest
-) : IpcEvent;
+    [JsonRequired, JsonPropertyName("protocol_version")]
+    public required string ProtocolVersion { get; init; }
 
-/// <summary>Action plan counts. See §4.3.</summary>
-public sealed record SummaryEvent(
-    [property: JsonPropertyName("add")] int Add,
-    [property: JsonPropertyName("modify")] int Modify,
-    [property: JsonPropertyName("metadata_only")] int MetadataOnly,
-    [property: JsonPropertyName("remove")] int Remove,
-    [property: JsonPropertyName("unchanged")] int Unchanged,
-    [property: JsonPropertyName("total_planned")] int TotalPlanned
-) : IpcEvent;
+    [JsonRequired, JsonPropertyName("role")]
+    public required EndpointRole Role { get; init; }
 
-/// <summary>Nested action-plan summary used by <see cref="ReviewEvent"/>.</summary>
-public sealed record ActionPlanSummary(
-    [property: JsonPropertyName("add")] int Add,
-    [property: JsonPropertyName("modify")] int Modify,
-    [property: JsonPropertyName("metadata_only")] int MetadataOnly,
-    [property: JsonPropertyName("remove")] int Remove,
-    [property: JsonPropertyName("unchanged")] int Unchanged
-);
+    [JsonRequired, JsonPropertyName("software_version")]
+    public required string SoftwareVersion { get; init; }
 
-/// <summary>Request a review decision from the user. See §4.4.</summary>
-public sealed record ReviewEvent(
-    [property: JsonPropertyName("summary")] ActionPlanSummary Summary,
-    [property: JsonPropertyName("no_delete")] bool NoDelete
-) : IpcEvent;
+    [JsonRequired, JsonPropertyName("capabilities")]
+    public required IReadOnlyList<string> Capabilities { get; init; }
+}
 
-/// <summary>Modal multi-choice prompt. See §4.5.</summary>
-public sealed record PromptEvent(
-    [property: JsonPropertyName("id")] ulong Id,
-    [property: JsonPropertyName("message")] string Message,
-    [property: JsonPropertyName("options")] IReadOnlyList<string> Options
-) : IpcEvent;
+public interface ISessionRoutedMessage
+{
+    DeviceId DeviceId { get; }
+    ulong SessionId { get; }
+}
 
-/// <summary>Modal text-input prompt. See §4.6.</summary>
-public sealed record FormEvent(
-    [property: JsonPropertyName("id")] ulong Id,
-    [property: JsonPropertyName("label")] string Label,
-    [property: JsonPropertyName("initial")] string Initial,
-    [property: JsonPropertyName("hint")] string Hint
-) : IpcEvent;
+public sealed record WireActionPlanSummary(
+    [property: JsonRequired, JsonPropertyName("add")] ulong Add,
+    [property: JsonRequired, JsonPropertyName("modify")] ulong Modify,
+    [property: JsonRequired, JsonPropertyName("metadata_only")] ulong MetadataOnly,
+    [property: JsonRequired, JsonPropertyName("remove")] ulong Remove,
+    [property: JsonRequired, JsonPropertyName("unchanged")] ulong Unchanged,
+    [property: JsonRequired, JsonPropertyName("total_planned")] ulong TotalPlanned);
 
-/// <summary>Per-track operation begin. See §4.7.</summary>
-public sealed record TrackStartEvent(
-    [property: JsonPropertyName("current")] int Current,
-    [property: JsonPropertyName("total")] int Total,
-    [property: JsonPropertyName("label")] string Label,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("eta_secs")] ulong? EtaSecs = null
-) : IpcEvent;
-
-/// <summary>Per-track operation end. See §4.8.</summary>
-public sealed record TrackDoneEvent(
-    [property: JsonRequired, JsonPropertyName("result")] TrackResult Result
-) : IpcEvent;
-
-[JsonConverter(typeof(JsonStringEnumConverter<TrackResult>))]
+[JsonConverter(typeof(StrictStringEnumConverter<TrackResult>))]
 public enum TrackResult
 {
-    [JsonStringEnumMemberName("applied")]
-    Applied,
-    [JsonStringEnumMemberName("skipped")]
-    Skipped,
+    [JsonStringEnumMemberName("applied")] Applied,
+    [JsonStringEnumMemberName("skipped")] Skipped,
 }
 
-[JsonConverter(typeof(JsonStringEnumConverter<FinalizationReason>))]
-public enum FinalizationReason
+[JsonConverter(typeof(StrictStringEnumConverter<StopReason>))]
+public enum StopReason
 {
-    [JsonStringEnumMemberName("cancelled")]
-    Cancelled,
-    [JsonStringEnumMemberName("paused")]
-    Paused,
+    [JsonStringEnumMemberName("cancelled")] Cancelled,
+    [JsonStringEnumMemberName("paused")] Paused,
 }
-
-public sealed record FinalizingEvent(
-    [property: JsonRequired, JsonPropertyName("reason")] FinalizationReason Reason,
-    [property: JsonRequired, JsonPropertyName("staged_albums")] int StagedAlbums,
-    [property: JsonRequired, JsonPropertyName("staged_tracks")] int StagedTracks
-) : IpcEvent;
-
-public sealed record CancelledEvent : IpcEvent;
-
-/// <summary>Graceful sync checkpoint reached after a pause request.</summary>
-public sealed record PausedEvent : IpcEvent;
-
-/// <summary>Informational log line. See §4.9.</summary>
-public sealed record LogEvent(
-    [property: JsonPropertyName("message")] string Message
-) : IpcEvent;
-
-/// <summary>Non-fatal or fatal error. See §4.10.</summary>
-public sealed record ErrorEvent(
-    [property: JsonPropertyName("message")] string Message,
-    [property: JsonPropertyName("recovery_hints")] IReadOnlyList<string>? RecoveryHints = null
-) : IpcEvent;
-
-/// <summary>Final event of a run. See §4.11.</summary>
-public sealed record FinishEvent(
-    [property: JsonRequired, JsonPropertyName("success")] bool Success,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("skipped_for_space")] SkippedForSpaceSummary? SkippedForSpace = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("artwork")] ArtworkSummary? Artwork = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault), JsonPropertyName("db_restored")] bool DbRestored = false
-) : IpcEvent;
 
 public sealed record SkippedForSpaceSummary(
-    [property: JsonRequired, JsonPropertyName("albums")] int Albums,
-    [property: JsonRequired, JsonPropertyName("tracks")] int Tracks,
-    [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes
-);
+    [property: JsonRequired, JsonPropertyName("albums")] ulong Albums,
+    [property: JsonRequired, JsonPropertyName("tracks")] ulong Tracks,
+    [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes);
 
 public sealed record ArtworkSummary(
-    [property: JsonRequired, JsonPropertyName("embedded")] int Embedded,
-    [property: JsonRequired, JsonPropertyName("eligible")] int Eligible,
-    [property: JsonRequired, JsonPropertyName("failed_sources")] int FailedSources
-);
+    [property: JsonRequired, JsonPropertyName("embedded")] ulong Embedded,
+    [property: JsonRequired, JsonPropertyName("eligible")] ulong Eligible,
+    [property: JsonRequired, JsonPropertyName("failed_sources")] ulong FailedSources);
+
+public sealed record RunHeaderEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("source")] string Source,
+    [property: JsonRequired, JsonPropertyName("ipod")] string Ipod,
+    [property: JsonRequired, JsonPropertyName("manifest")] string Manifest) : WireEvent, ISessionRoutedMessage;
+
+public sealed record SyncSummaryEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("summary")] WireActionPlanSummary Summary) : WireEvent, ISessionRoutedMessage;
+
+public sealed record ReviewRequestedEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("summary")] WireActionPlanSummary Summary,
+    [property: JsonRequired, JsonPropertyName("no_delete")] bool NoDelete) : WireEvent, ISessionRoutedMessage;
+
+public sealed record WirePromptEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("prompt_id")] ulong PromptId,
+    [property: JsonRequired, JsonPropertyName("message")] string Message,
+    [property: JsonRequired, JsonPropertyName("options")] IReadOnlyList<string> Options) : WireEvent, ISessionRoutedMessage;
+
+public sealed record WireFormEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("prompt_id")] ulong PromptId,
+    [property: JsonRequired, JsonPropertyName("label")] string Label,
+    [property: JsonRequired, JsonPropertyName("initial")] string Initial,
+    [property: JsonRequired, JsonPropertyName("hint")] string Hint) : WireEvent, ISessionRoutedMessage;
+
+public sealed record WireTrackStartEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("current")] ulong Current,
+    [property: JsonRequired, JsonPropertyName("total")] ulong Total,
+    [property: JsonRequired, JsonPropertyName("label")] string Label,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("eta_secs")] ulong? EtaSecs = null) : WireEvent, ISessionRoutedMessage;
+
+public sealed record WireTrackDoneEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("result")] TrackResult Result) : WireEvent, ISessionRoutedMessage;
+
+public sealed record WireFinalizingEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("reason")] StopReason Reason,
+    [property: JsonRequired, JsonPropertyName("staged_albums")] ulong StagedAlbums,
+    [property: JsonRequired, JsonPropertyName("staged_tracks")] ulong StagedTracks) : WireEvent, ISessionRoutedMessage;
+
+public sealed record SyncCancelledEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId) : WireEvent, ISessionRoutedMessage;
+
+public sealed record SyncPausedEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId) : WireEvent, ISessionRoutedMessage;
+
+public sealed record SyncLogEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("message")] string Message) : WireEvent, ISessionRoutedMessage;
+
+public sealed record SyncErrorEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("message")] string Message,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault), JsonPropertyName("recovery_hints")]
+    IReadOnlyList<string>? RecoveryHints = null) : WireEvent, ISessionRoutedMessage;
+
+public sealed record SyncFinishedEvent(
+    [property: JsonRequired, JsonPropertyName("device_id")] DeviceId DeviceId,
+    [property: JsonRequired, JsonPropertyName("session_id")] ulong SessionId,
+    [property: JsonRequired, JsonPropertyName("success")] bool Success,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("skipped_for_space")]
+    SkippedForSpaceSummary? SkippedForSpace = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("artwork")]
+    ArtworkSummary? Artwork = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault), JsonPropertyName("db_restored")]
+    bool DbRestored = false) : WireEvent, ISessionRoutedMessage;

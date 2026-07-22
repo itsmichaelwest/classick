@@ -120,7 +120,10 @@ public partial class PopoverViewModel : ObservableObject
         !FinishingSync && !ShowSourceRecovery;
     public bool CanControlActiveSync => ActiveSyncContext is not null &&
         IpodConnected && Syncing && !FinishingSync;
-    public bool ShowSyncControls => CanControlActiveSync && !PromptActive && !ShowSourceRecovery;
+    public bool CanControlActiveDeviceSync => ActiveDeviceSession is not null &&
+        IpodConnected && Syncing && !FinishingSync;
+    public bool ShowSyncControls => (CanControlActiveSync || CanControlActiveDeviceSync) &&
+        !PromptActive && !ShowSourceRecovery;
     public string SyncActionLabel => Paused ? "Resume sync" : "Sync now";
 
     /// <summary>True between sync start and the first SummaryEvent /
@@ -296,6 +299,36 @@ public partial class PopoverViewModel : ObservableObject
         }
     }
 
+    public void Update(IdentifiedDeviceSnapshot device)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        DisplayedDeviceId = device.DeviceId;
+        SetDeviceLabel(device.Name, device.Hardware.Generation?.Value ?? device.Hardware.Family?.Value.ToString());
+        FinishingSync = false;
+        Paused = device.Phase == DevicePhase.Paused;
+        Syncing = device.Phase == DevicePhase.Syncing;
+        IpodConnected = device.Connected;
+        ApplyStorage(device.Storage);
+        if (Syncing)
+        {
+            StatusText = "Syncing iPod…";
+            LastSyncedLabel = "Syncing now";
+        }
+        else if (!device.Connected)
+        {
+            StatusText = "iPod not connected";
+            LastSyncedLabel = "";
+        }
+        else if (device.LastTerminalError is { } error)
+        {
+            StatusText = $"Last sync failed: {error}";
+        }
+        else
+        {
+            StatusText = "Up to date · iPod connected";
+        }
+    }
+
     /// <summary>Set the device label, preferring the iPod's user-set
     /// firmware name (e.g. "Michael's iPod") over the generic model
     /// label ("iPod Classic 7G"). Either can be null/empty; falls back
@@ -402,6 +435,11 @@ public partial class PopoverViewModel : ObservableObject
             ? 0
             : (double)used / info.TotalBytes * 100.0;
         HasStorage = true;
+    }
+
+    private void ApplyStorage(StorageSnapshot? info)
+    {
+        ApplyStorage(info is null ? null : new StorageInfo(info.TotalBytes, info.FreeBytes));
     }
 
     // Format like "120 GB" / "1.4 TB" — units round to the nearest sensible

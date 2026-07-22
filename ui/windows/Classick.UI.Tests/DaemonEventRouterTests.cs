@@ -1,209 +1,143 @@
-using System.Threading;
 using System.Threading.Channels;
-using System.Threading.Tasks;
 using Classick_UI.Ipc;
-using Xunit;
+
+namespace Classick_UI.Tests;
 
 public class DaemonEventRouterTests
 {
-    [Fact]
-    public async Task Routes_status_update_to_typed_subscribers()
-    {
-        var channel = Channel.CreateUnbounded<object>();
-        StatusUpdateEvent? received = null;
-        var router = new DaemonEventRouter(channel.Reader);
-        router.StatusUpdated += s => received = s;
+    private static readonly DeviceId Device = DeviceId.Parse("000A27002138B0A8");
 
-        router.Start();
-        await channel.Writer.WriteAsync(new StatusUpdateEvent("idle", true, true, null, null, null, 0, null, null));
-        await Task.Delay(50);
+    [Fact]
+    public void Route_DirectTypedProgress_RequiresCurrentInventorySession()
+    {
+        var channel = Channel.CreateUnbounded<WireEvent>();
+        using var router = new DaemonEventRouter(channel.Reader);
+        var received = new List<RoutedSyncEvent>();
+        router.SyncEventReceived += received.Add;
+        router.Route(Inventory(1, 42));
+
+        router.Route(new WireTrackDoneEvent(Device, 41, TrackResult.Applied));
+        router.Route(new WireTrackDoneEvent(Device, 42, TrackResult.Applied));
+
+        var routed = Assert.Single(received);
+        Assert.Equal(Device, routed.DeviceId);
+        Assert.Equal((ulong)42, routed.SessionId);
+        Assert.IsType<WireTrackDoneEvent>(routed.Event);
+    }
+
+    [Fact]
+    public void Route_StaleProgress_IsNotPublishedOnGeneralEventStream()
+    {
+        var channel = Channel.CreateUnbounded<WireEvent>();
+        using var router = new DaemonEventRouter(channel.Reader);
+        var received = new List<WireEvent>();
+        router.EventReceived += received.Add;
+        router.Route(Inventory(1, 42));
+
+        router.Route(new SyncLogEvent(Device, 41, "stale"));
+
+        Assert.DoesNotContain(received, item => item is SyncLogEvent);
+    }
+
+    [Fact]
+    public void Route_SyncAcceptedEstablishesSessionBeforeNextInventory()
+    {
+        var channel = Channel.CreateUnbounded<WireEvent>();
+        using var router = new DaemonEventRouter(channel.Reader);
+        RoutedSyncEvent? received = null;
+        router.SyncEventReceived += progress => received = progress;
+
+        router.Route(new SyncAcceptedEvent(
+            Device,
+            51,
+            "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8803",
+            SyncOperation.Sync));
+        router.Route(new SyncLogEvent(Device, 51, "Starting"));
 
         Assert.NotNull(received);
-        Assert.Equal("idle", received!.State);
-        router.Stop();
+        Assert.Equal((ulong)51, received.SessionId);
     }
 
     [Fact]
-    public async Task Multiple_subscribers_all_receive_event()
+    public void Route_StaleInventory_DoesNotReplaceCurrentSession()
     {
-        var channel = Channel.CreateUnbounded<object>();
-        int count1 = 0, count2 = 0;
-        var router = new DaemonEventRouter(channel.Reader);
-        router.StatusUpdated += _ => count1++;
-        router.StatusUpdated += _ => count2++;
+        var channel = Channel.CreateUnbounded<WireEvent>();
+        using var router = new DaemonEventRouter(channel.Reader);
+        var received = new List<RoutedSyncEvent>();
+        router.SyncEventReceived += received.Add;
+        router.Route(Inventory(2, 62));
+        router.Route(Inventory(1, 61));
 
-        router.Start();
-        await channel.Writer.WriteAsync(new StatusUpdateEvent("idle", true, true, null, null, null, 0, null, null));
-        await Task.Delay(50);
+        router.Route(new SyncLogEvent(Device, 61, "stale"));
+        router.Route(new SyncLogEvent(Device, 62, "current"));
 
-        Assert.Equal(1, count1);
-        Assert.Equal(1, count2);
-        router.Stop();
+        var routed = Assert.Single(received);
+        Assert.Equal("current", Assert.IsType<SyncLogEvent>(routed.Event).Message);
     }
 
     [Fact]
-    public async Task Routes_device_connected_separately_from_status()
+    public async Task Start_RoutesChannelEventsInOrder()
     {
-        var channel = Channel.CreateUnbounded<object>();
-        StatusUpdateEvent? status = null;
-        DeviceConnectedEvent? device = null;
-        var router = new DaemonEventRouter(channel.Reader);
-        router.StatusUpdated += s => status = s;
-        router.DeviceConnected += d => device = d;
-
+        var channel = Channel.CreateUnbounded<WireEvent>();
+        using var router = new DaemonEventRouter(channel.Reader);
+        var received = new List<Type>();
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        router.EventReceived += wireEvent =>
+        {
+            received.Add(wireEvent.GetType());
+            if (received.Count == 3) completed.SetResult();
+        };
         router.Start();
-        await channel.Writer.WriteAsync(new DeviceConnectedEvent("0xABC", "iPod 7G", "G:\\"));
-        await Task.Delay(50);
 
-        Assert.Null(status);
-        Assert.NotNull(device);
-        Assert.Equal("0xABC", device!.Serial);
-        router.Stop();
+        await channel.Writer.WriteAsync(Inventory(1, 70));
+        await channel.Writer.WriteAsync(new SyncLogEvent(Device, 70, "one"));
+        await channel.Writer.WriteAsync(new WireTrackDoneEvent(Device, 70, TrackResult.Applied));
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(
+            [typeof(DeviceInventoryEvent), typeof(SyncLogEvent), typeof(WireTrackDoneEvent)],
+            received);
     }
 
     [Fact]
-    public async Task Unsubscribe_stops_delivery()
+    public async Task Start_RoutesLegacyAppEventsAndStopWaitsForReader()
     {
         var channel = Channel.CreateUnbounded<object>();
-        int count = 0;
-        void Handler(StatusUpdateEvent _) => count++;
-        var router = new DaemonEventRouter(channel.Reader);
-        router.StatusUpdated += Handler;
-
+        using var router = new DaemonEventRouter(channel.Reader);
+        ConfigUpdateEvent? received = null;
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        router.ConfigUpdated += config =>
+        {
+            received = config;
+            completed.SetResult();
+        };
         router.Start();
-        await channel.Writer.WriteAsync(new StatusUpdateEvent("idle", true, true, null, null, null, 0, null, null));
-        await Task.Delay(50);
-        Assert.Equal(1, count);
 
-        router.StatusUpdated -= Handler;
-        await channel.Writer.WriteAsync(new StatusUpdateEvent("syncing", true, true, null, null, null, 0, null, null));
-        await Task.Delay(50);
-        Assert.Equal(1, count);  // unchanged
-        router.Stop();
-    }
-
-    [Fact]
-    public async Task Sync_event_preserves_device_and_session_identity()
-    {
-        var channel = Channel.CreateUnbounded<object>();
-        var received = new TaskCompletionSource<RoutedSyncEvent>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var router = new DaemonEventRouter(channel.Reader);
-        router.SyncEventReceived += received.SetResult;
-
-        router.Start();
-        await channel.Writer.WriteAsync(Inventory(
-            revision: 1,
-            ("A", "idle", null),
-            ("B", "syncing", 11)));
-        await channel.Writer.WriteAsync(new SyncEventEnvelope(
-            @"{""type"":""track_done"",""result"":""applied""}", "b", 11));
-
-        var routed = await received.Task.WaitAsync(TimeSpan.FromSeconds(1));
-        Assert.IsType<TrackDoneEvent>(routed.Event);
-        Assert.Equal("B", routed.Context.Serial);
-        Assert.Equal(11UL, routed.Context.SessionId);
+        await channel.Writer.WriteAsync(new ConfigUpdateEvent(null, null, null, 4));
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await router.StopAsync();
-    }
-
-    [Fact]
-    public async Task Sync_event_from_stale_session_is_rejected()
-    {
-        var channel = Channel.CreateUnbounded<object>();
-        var received = new TaskCompletionSource<RoutedSyncEvent>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var router = new DaemonEventRouter(channel.Reader);
-        router.SyncEventReceived += received.SetResult;
-
-        router.Start();
-        await channel.Writer.WriteAsync(Inventory(revision: 1, ("B", "syncing", 12)));
-        await channel.Writer.WriteAsync(new SyncEventEnvelope(
-            @"{""type"":""track_done"",""result"":""applied""}", "B", 11));
-        await channel.Writer.WriteAsync(new SyncEventEnvelope(@"{""type"":""paused""}", "B", 12));
-
-        var routed = await received.Task.WaitAsync(TimeSpan.FromSeconds(1));
-        Assert.IsType<PausedEvent>(routed.Event);
-        Assert.Equal(12UL, routed.Context.SessionId);
-        await router.StopAsync();
-    }
-
-    [Fact]
-    public async Task Routes_device_inventory_snapshot_to_typed_subscribers()
-    {
-        var channel = Channel.CreateUnbounded<object>();
-        DeviceInventorySnapshotEvent? received = null;
-        var router = new DaemonEventRouter(channel.Reader);
-        router.DeviceInventorySnapshotReceived += snapshot => received = snapshot;
-
-        router.Start();
-        await channel.Writer.WriteAsync(new DeviceInventorySnapshotEvent(
-            Revision: 3,
-            Devices:
-            [
-                new DeviceSnapshot(
-                    new DeviceIdentitySnapshot("A", "iPod 5G"),
-                    Configured: true,
-                    Connected: true,
-                    Mount: "G:\\",
-                    Phase: "idle",
-                    SessionId: null,
-                    Storage: null,
-                    SyncedCount: 1,
-                    LibraryCount: 2,
-                    LatestSuccessfulSync: null,
-                    LatestAttempt: null,
-                    LastTerminalError: null,
-                    SelectionRevision: 1,
-                    SettingsRevision: 1,
-                    SubscriptionsRevision: 1)
-            ]));
-        await Task.Delay(50);
 
         Assert.NotNull(received);
-        Assert.Equal(3UL, received!.Revision);
-        Assert.Single(received.Devices);
-        Assert.Equal("A", received.Devices[0].Identity.Serial);
-        router.Stop();
+        Assert.Equal((ulong)4, received.ConfigRevision);
     }
 
-    [Fact]
-    public async Task Routes_remaining_v2_daemon_events_without_treating_them_as_subprocess_events()
-    {
-        var channel = Channel.CreateUnbounded<object>();
-        DaemonEvent? received = null;
-        var router = new DaemonEventRouter(channel.Reader);
-        router.DaemonEventReceived += daemonEvent => received = daemonEvent;
-
-        router.Start();
-        await channel.Writer.WriteAsync(new ResolvedTracksEvent(["Bowie/Heroes.flac"], "resolve"));
-        await Task.Delay(50);
-
-        var resolved = Assert.IsType<ResolvedTracksEvent>(received);
-        Assert.Equal("resolve", resolved.AcknowledgedRequestId);
-        router.Stop();
-    }
-
-    private static DeviceInventorySnapshotEvent Inventory(
-        ulong revision,
-        params (string Serial, string Phase, ulong? SessionId)[] devices)
-    {
-        return new DeviceInventorySnapshotEvent(
+    private static DeviceInventoryEvent Inventory(ulong revision, ulong sessionId) =>
+        new(
+            null,
             revision,
-            devices.Select(device => new DeviceSnapshot(
-                new DeviceIdentitySnapshot(device.Serial, "iPod"),
-                Configured: true,
-                Connected: true,
-                Mount: $"{device.Serial}:\\",
-                Phase: device.Phase,
-                SessionId: device.SessionId,
-                Storage: null,
-                SyncedCount: 0,
-                LibraryCount: null,
-                LatestSuccessfulSync: null,
-                LatestAttempt: null,
-                LastTerminalError: null,
-                SelectionRevision: 0,
-                SettingsRevision: 0,
-                SubscriptionsRevision: 0)).ToArray());
-    }
+            [new IdentifiedDeviceSnapshot(
+                Device,
+                "iPod",
+                DeviceReadiness.Ready,
+                new HardwareFacts(),
+                ProfileStatus.Adopted,
+                true,
+                "/Volumes/iPod",
+                DevicePhase.Syncing,
+                sessionId,
+                null,
+                0,
+                null,
+                null)],
+            []);
 }

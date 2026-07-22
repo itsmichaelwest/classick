@@ -1,12 +1,25 @@
 namespace Classick_UI.Ipc;
 
-public sealed record SyncEventContext(
-    ulong SessionId,
-    string? Serial)
+public sealed record RoutedSyncEvent
 {
-    public bool IsDeviceSession => !string.IsNullOrWhiteSpace(Serial);
-}
+    public RoutedSyncEvent(DeviceId deviceId, ulong sessionId, WireEvent wireEvent)
+    {
+        DeviceId = deviceId;
+        SessionId = sessionId;
+        Context = new SyncEventContext(sessionId, deviceId.Value);
+        Event = wireEvent;
+    }
 
-public sealed record RoutedSyncEvent(
-    SyncEventContext Context,
-    IpcEvent Event);
+    public RoutedSyncEvent(SyncEventContext context, IpcEvent wireEvent)
+    {
+        Context = context;
+        SessionId = context.SessionId;
+        DeviceId = null;
+        Event = wireEvent;
+    }
+
+    public DeviceId? DeviceId { get; }
+    public ulong SessionId { get; }
+    public SyncEventContext Context { get; }
+    public IpcEvent Event { get; }
+}

@@ -6,6 +6,7 @@ using Xunit;
 
 public class PopoverViewModelTests
 {
+    private static readonly DeviceId WireDeviceId = DeviceId.Parse("000A27002138B0A8");
     private static StatusUpdateEvent Status(string state, bool ipodConnected, HistoryEntry? last = null)
         => new StatusUpdateEvent(state, true, ipodConnected, last, null, null, 0, null, null);
 
@@ -173,6 +174,46 @@ public class PopoverViewModelTests
         Assert.Null(vm.CreatePromptDecisionCommand(choice: 0, "stale-request"));
     }
 
+    [Fact]
+    public void Protocol3_controls_capture_device_and_session()
+    {
+        var vm = new PopoverViewModel();
+        vm.Update(WireDevice(sessionId: 42));
+        vm.SetActiveDeviceSession(new DeviceSessionTarget(WireDeviceId, 42));
+
+        var cancel = vm.CreateWireCancelSyncCommand("018f9d7e-2f2b-7b52-9f1d-f78bdb2f8820");
+        var pause = vm.CreateWirePauseSyncCommand("018f9d7e-2f2b-7b52-9f1d-f78bdb2f8821");
+
+        Assert.Equal(WireDeviceId, cancel?.DeviceId);
+        Assert.Equal((ulong)42, cancel?.SessionId);
+        Assert.Equal(WireDeviceId, pause?.DeviceId);
+        Assert.Equal((ulong)42, pause?.SessionId);
+    }
+
+    [Fact]
+    public void Protocol3_manual_sync_targets_displayed_device()
+    {
+        var vm = new PopoverViewModel();
+        vm.Update(WireDevice(sessionId: null));
+
+        var command = vm.CreateWireTriggerSyncCommand("018f9d7e-2f2b-7b52-9f1d-f78bdb2f8822");
+
+        Assert.Equal(WireDeviceId, command?.DeviceId);
+        Assert.Equal(SyncTrigger.Manual, command?.Trigger);
+    }
+
+    [Fact]
+    public void Clearing_ambiguous_focus_disables_protocol3_mutation()
+    {
+        var vm = new PopoverViewModel();
+        vm.Update(WireDevice(sessionId: null));
+
+        vm.ClearDisplayedDevice();
+
+        Assert.Null(vm.DisplayedDeviceId);
+        Assert.Null(vm.CreateWireTriggerSyncCommand("018f9d7e-2f2b-7b52-9f1d-f78bdb2f8823"));
+    }
+
     private static DeviceSnapshot Device(
         string serial,
         bool connected,
@@ -196,6 +237,24 @@ public class PopoverViewModelTests
             SettingsRevision: 1,
             SubscriptionsRevision: 1);
     }
+
+    private static IdentifiedDeviceSnapshot WireDevice(ulong? sessionId) => new(
+        WireDeviceId,
+        "Michael's iPod",
+        DeviceReadiness.Ready,
+        new HardwareFacts(Family: new HardwareFact<IpodFamily>(
+            IpodFamily.Classic,
+            FactSource.Decoded,
+            FactConfidence.Certain)),
+        ProfileStatus.Adopted,
+        true,
+        "D:\\",
+        sessionId is null ? DevicePhase.Idle : DevicePhase.Syncing,
+        sessionId,
+        null,
+        0,
+        null,
+        null);
 
     [Fact]
     public void TrackStart_clears_pending_prompt_defensively()
