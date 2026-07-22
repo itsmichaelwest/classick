@@ -250,6 +250,15 @@ fn read_negative(path: &str) -> &'static str {
         "device/negative/inventory-connected-disconnected-phase.json" => {
             include_str!("data/wire-v3/device/negative/inventory-connected-disconnected-phase.json")
         }
+        "device/negative/inventory-connected-missing-mount.json" => {
+            include_str!("data/wire-v3/device/negative/inventory-connected-missing-mount.json")
+        }
+        "device/negative/inventory-relative-mount.json" => {
+            include_str!("data/wire-v3/device/negative/inventory-relative-mount.json")
+        }
+        "device/negative/inventory-duplicate-mount.json" => {
+            include_str!("data/wire-v3/device/negative/inventory-duplicate-mount.json")
+        }
         "device/negative/inventory-unready-syncing.json" => {
             include_str!("data/wire-v3/device/negative/inventory-unready-syncing.json")
         }

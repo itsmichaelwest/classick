@@ -47,6 +47,8 @@ pub struct IdentifiedDeviceSnapshot {
     pub hardware: HardwareFacts,
     pub profile_status: ProfileStatus,
     pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_path: Option<String>,
     pub phase: DevicePhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<super::SessionId>,
@@ -79,12 +81,25 @@ impl DeviceInventorySnapshot {
             bail!("inventory revision must be nonzero");
         }
         let mut device_ids = HashSet::new();
+        let mut mount_paths = HashSet::new();
         for device in &self.devices {
             if !device_ids.insert(&device.device_id) {
                 bail!("inventory repeats device {}", device.device_id);
             }
             if device.name.as_ref().is_some_and(String::is_empty) {
                 bail!("device name must not be empty when present");
+            }
+            if device
+                .mount_path
+                .as_deref()
+                .is_some_and(|path| !is_absolute_native_path(path))
+            {
+                bail!("device mount path must be an absolute native path");
+            }
+            if let Some(path) = &device.mount_path {
+                if !mount_paths.insert(path) {
+                    bail!("inventory repeats connected mount path {path}");
+                }
             }
             device.hardware.validate()?;
             if device.readiness == DeviceReadiness::IdentityUnavailable {
@@ -96,9 +111,14 @@ impl DeviceInventorySnapshot {
                 bail!("device storage snapshot is inconsistent");
             }
             if !device.connected
-                && (device.session_id.is_some() || device.phase != DevicePhase::Disconnected)
+                && (device.mount_path.is_some()
+                    || device.session_id.is_some()
+                    || device.phase != DevicePhase::Disconnected)
             {
                 bail!("disconnected device retains connected-only inventory state");
+            }
+            if device.connected && device.mount_path.is_none() {
+                bail!("connected device requires a mount path");
             }
             if device.connected && device.phase == DevicePhase::Disconnected {
                 bail!("connected device cannot use the disconnected phase");
@@ -136,4 +156,18 @@ impl DeviceInventorySnapshot {
         }
         Ok(())
     }
+}
+
+fn is_absolute_native_path(path: &str) -> bool {
+    if path.is_empty() || path.contains('\0') {
+        return false;
+    }
+
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with(r"\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/'))
 }
