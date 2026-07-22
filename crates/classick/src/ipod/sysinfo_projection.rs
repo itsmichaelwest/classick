@@ -3,7 +3,7 @@
 //! This module does not read or write a mounted device. Publication belongs to
 //! the coordinated device transaction.
 
-use super::{ImageFormat, ValidatedCapabilityProfile};
+use super::{CapabilityProfileId, ImageFormat, ValidatedCapabilityProfile};
 use crate::device::DeviceId;
 use crate::portable::profile::ContentHash;
 
@@ -15,11 +15,21 @@ const XML_HEADER: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 /// Deterministic plist bytes and their lowercase BLAKE3 hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SysInfoExtendedProjection {
+    device_id: DeviceId,
+    capability_profile_id: CapabilityProfileId,
     bytes: Vec<u8>,
     content_hash: ContentHash,
 }
 
 impl SysInfoExtendedProjection {
+    pub fn device_id(&self) -> &DeviceId {
+        &self.device_id
+    }
+
+    pub fn capability_profile_id(&self) -> &CapabilityProfileId {
+        &self.capability_profile_id
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -77,6 +87,8 @@ pub fn project_sysinfo_extended(
     let content_hash = ContentHash::parse(hash.as_str())
         .expect("BLAKE3 always returns a 64-character lowercase hexadecimal hash");
     Ok(SysInfoExtendedProjection {
+        device_id: device_id.clone(),
+        capability_profile_id: profile.profile_id.clone(),
         bytes,
         content_hash,
     })

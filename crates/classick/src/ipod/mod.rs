@@ -10,6 +10,7 @@ pub mod playlist_normalize;
 pub mod playlist_ownership;
 pub mod playlist_profile;
 pub mod sysinfo_foreign;
+pub mod sysinfo_policy;
 pub mod sysinfo_projection;
 pub mod sysinfo_provision;
 
@@ -24,6 +25,10 @@ pub use sysinfo_foreign::{
     ForeignSysInfoCapability, ForeignSysInfoCollection, ForeignSysInfoFormatField,
     ForeignSysInfoInspection, ForeignSysInfoIssue, ForeignSysInfoStableFacts,
     ForeignSysInfoStableField,
+};
+pub use sysinfo_policy::{
+    assess_sysinfo_for_artwork, OwnedSysInfoAuthority, SysInfoArtworkAdmission,
+    SysInfoArtworkBlockReason,
 };
 pub use sysinfo_projection::{
     decide_sysinfo_extended, project_sysinfo_extended, SysInfoExtendedDecision,
