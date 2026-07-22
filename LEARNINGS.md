@@ -53,7 +53,11 @@ incidents and completed gate reports are archived in
 - Registry-v2 migration is all-or-nothing: reject duplicate or noncanonical
   device keys and unknown metadata at every nested boundary. Legacy revisions
   remain `pending_legacy_import`; they are not imported portable-profile
-  authority until the cache and outbox are durably published.
+  authority until the cache and outbox are durably published. Legacy import
+  must resolve absent per-device selection/settings through the shared
+  selection and global daemon settings before planning; file absence alone is
+  not evidence of defaults, and only a configured pending registry record may
+  authorize adoption.
 - Recover pending journals before planning a new diff. Require exact schema,
   mount, raw serial, session identity, hashes, and owned paths; ambiguous or
   escaping journals stay untouched and block mutation.

@@ -17,6 +17,21 @@ use std::fmt;
 
 pub const REGISTRY_V2_SCHEMA_VERSION: u32 = 2;
 
+/// Proof that registry migration marked this configured device for adoption.
+///
+/// Construction is private to this module so callers cannot bypass the
+/// registry state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyImportEligibility {
+    device_id: DeviceId,
+}
+
+impl LegacyImportEligibility {
+    pub fn device_id(&self) -> &DeviceId {
+        &self.device_id
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryPresentation {
@@ -143,6 +158,21 @@ impl DeviceRegistryV2 {
 
     pub fn device(&self, device_id: &DeviceId) -> Option<&RegistryDeviceRecordV2> {
         self.devices.get(device_id.as_str())
+    }
+
+    pub fn legacy_import_eligibility(
+        &self,
+        device_id: &DeviceId,
+    ) -> Option<LegacyImportEligibility> {
+        let record = self.device(device_id)?;
+        match (&record.migration_status, record.configured) {
+            (RegistryMigrationStatus::PendingLegacyImport { .. }, true) => {
+                Some(LegacyImportEligibility {
+                    device_id: device_id.clone(),
+                })
+            }
+            _ => None,
+        }
     }
 
     pub fn validate(&self) -> Result<()> {
