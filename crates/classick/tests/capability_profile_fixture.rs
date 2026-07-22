@@ -2,9 +2,9 @@ use classick::ipod::{CapabilityProfile, CapabilityProfileId};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-const FIXTURE: &str = include_str!("fixtures/device-capabilities/classic-late-2009-v1.json");
+const FIXTURE: &str = include_str!("../data/device-capabilities/classic-late-2009-v1.json");
 const MANIFEST: &str =
-    include_str!("fixtures/device-capabilities/classic-late-2009-v1.manifest.json");
+    include_str!("../data/device-capabilities/classic-late-2009-v1.manifest.json");
 
 #[test]
 fn late_2009_fixture_is_a_complete_validated_stable_profile() {

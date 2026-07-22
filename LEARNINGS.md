@@ -30,7 +30,9 @@ incidents and completed gate reports are archived in
   opaque `rbsync` bytes. Never persist a raw inquiry or a donor plist with only
   its GUID replaced. Generate a typed stable capability projection, and include
   complete artwork format arrays because libgpod treats a present file as
-  authoritative instead of using its fallback table.
+  authoritative instead of using its fallback table. Structural validation
+  alone does not grant projection authority; only an exact content-hash-bound
+  catalogue asset may construct the opaque validated capability type.
 - On-device verification shows that a Classick-managed database is not
   intrinsically unreadable to iTunes/Music. Do not repeat the earlier
   "libgpod iPods are always rejected" claim. The running-process preflight is

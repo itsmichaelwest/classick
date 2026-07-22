@@ -3,7 +3,7 @@
 //! This module does not read or write a mounted device. Publication belongs to
 //! the coordinated device transaction.
 
-use super::{CapabilityProfile, ImageFormat};
+use super::{ImageFormat, ValidatedCapabilityProfile};
 use crate::device::DeviceId;
 use crate::portable::profile::ContentHash;
 
@@ -45,8 +45,9 @@ pub enum SysInfoExtendedDecision<'a> {
 /// Project a validated capability profile into the stable libgpod plist shape.
 pub fn project_sysinfo_extended(
     device_id: &DeviceId,
-    profile: &CapabilityProfile,
+    validated_profile: &ValidatedCapabilityProfile,
 ) -> Result<SysInfoExtendedProjection, super::capability::CapabilityProfileError> {
+    let profile = validated_profile.profile();
     profile.validate()?;
 
     let mut xml = String::from(XML_HEADER);

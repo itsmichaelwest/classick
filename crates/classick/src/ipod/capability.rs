@@ -5,6 +5,12 @@ use std::str::FromStr;
 
 pub const CAPABILITY_PROFILE_SCHEMA_VERSION: u32 = 1;
 
+const LATE_2009_PROFILE_ID: &str = "classic-late-2009-v1";
+const LATE_2009_PROFILE_HASH: &str =
+    "2f60c2fb1643be186c49a767f9b4c4b4e3e9087284f9405f915ee3a64f9f22dd";
+const LATE_2009_PROFILE_ASSET: &[u8] =
+    include_bytes!("../../data/device-capabilities/classic-late-2009-v1.json");
+
 const ID_REQUIREMENT: &str =
     "capability profile ID must be lowercase ASCII letters or digits separated by single hyphens";
 
@@ -89,6 +95,59 @@ pub struct CapabilityProfile {
     pub album_art: Vec<ImageFormat>,
     pub image_specifications: Vec<ImageFormat>,
     pub chapter_image_specs: Vec<ImageFormat>,
+}
+
+/// A catalogue capability whose provenance and exact bytes are trusted.
+///
+/// Only [`resolve_validated_capability_profile`] can construct this type.
+#[derive(Debug)]
+pub struct ValidatedCapabilityProfile {
+    profile: CapabilityProfile,
+}
+
+impl ValidatedCapabilityProfile {
+    pub(super) fn profile(&self) -> &CapabilityProfile {
+        &self.profile
+    }
+}
+
+/// Resolve the sole independently validated capability catalogue entry.
+///
+/// Unknown IDs return `None`. If the embedded asset no longer matches its
+/// reviewed bytes or typed schema, resolution fails rather than granting it
+/// projection authority.
+pub fn resolve_validated_capability_profile(
+    profile_id: &CapabilityProfileId,
+) -> Result<Option<ValidatedCapabilityProfile>, CapabilityProfileError> {
+    if profile_id.as_str() != LATE_2009_PROFILE_ID {
+        return Ok(None);
+    }
+
+    validate_catalogue_asset(LATE_2009_PROFILE_ASSET).map(Some)
+}
+
+fn validate_catalogue_asset(
+    asset: &[u8],
+) -> Result<ValidatedCapabilityProfile, CapabilityProfileError> {
+    let actual_hash = blake3::hash(asset).to_hex();
+    if actual_hash.as_str() != LATE_2009_PROFILE_HASH {
+        return Err(CapabilityProfileError::Invalid(format!(
+            "validated capability asset hash mismatch: expected {LATE_2009_PROFILE_HASH}, got {actual_hash}"
+        )));
+    }
+
+    let json = std::str::from_utf8(asset).map_err(|error| {
+        CapabilityProfileError::Invalid(format!("validated capability asset is not UTF-8: {error}"))
+    })?;
+    let profile = CapabilityProfile::from_json(json)?;
+    if profile.profile_id.as_str() != LATE_2009_PROFILE_ID {
+        return Err(CapabilityProfileError::Invalid(format!(
+            "validated capability asset declares unexpected profile ID {}",
+            profile.profile_id
+        )));
+    }
+
+    Ok(ValidatedCapabilityProfile { profile })
 }
 
 impl CapabilityProfile {
@@ -240,5 +299,40 @@ impl std::error::Error for CapabilityProfileError {
 impl From<serde_json::Error> for CapabilityProfileError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error)
+    }
+}
+
+#[cfg(test)]
+mod validated_catalogue_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    const ASSET: &str = include_str!("../../data/device-capabilities/classic-late-2009-v1.json");
+
+    #[test]
+    fn changed_structurally_valid_profiles_never_gain_catalogue_authority() {
+        let mut cases = Vec::new();
+
+        let mut profile_id: Value = serde_json::from_str(ASSET).unwrap();
+        profile_id["profile_id"] = json!("classic-late-2009-v2");
+        cases.push(profile_id);
+
+        let mut family_id: Value = serde_json::from_str(ASSET).unwrap();
+        family_id["family_id"] = json!(12);
+        cases.push(family_id);
+
+        let mut db_version: Value = serde_json::from_str(ASSET).unwrap();
+        db_version["db_version"] = json!(4);
+        cases.push(db_version);
+
+        let mut format: Value = serde_json::from_str(ASSET).unwrap();
+        format["album_art"][0]["render_width"] = json!(143);
+        cases.push(format);
+
+        for changed in cases {
+            let json = serde_json::to_string(&changed).unwrap();
+            CapabilityProfile::from_json(&json).expect("case remains structurally valid");
+            assert!(validate_catalogue_asset(json.as_bytes()).is_err());
+        }
     }
 }

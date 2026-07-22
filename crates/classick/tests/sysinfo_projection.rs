@@ -1,14 +1,14 @@
 use classick::device::DeviceId;
 use classick::ipod::{
-    decide_sysinfo_extended, project_sysinfo_extended, CapabilityProfile, ImageFormat,
-    SysInfoExtendedDecision,
+    decide_sysinfo_extended, project_sysinfo_extended, resolve_validated_capability_profile,
+    CapabilityProfile, CapabilityProfileId, ImageFormat, SysInfoExtendedDecision,
 };
 use classick::portable::profile::ContentHash;
 use plist::{Dictionary, Value};
 use std::collections::BTreeSet;
 
 const CAPABILITY_FIXTURE: &str =
-    include_str!("fixtures/device-capabilities/classic-late-2009-v1.json");
+    include_str!("../data/device-capabilities/classic-late-2009-v1.json");
 const LATE_2009_PROJECTION_HASH: &str =
     "6b143e08ca34df8ab9ac50957fe927c46fb516c0af7c110ead8a78c6a39af453";
 
@@ -16,9 +16,12 @@ const LATE_2009_PROJECTION_HASH: &str =
 fn projects_the_complete_validated_profile_to_deterministic_golden_bytes() {
     let device_id = DeviceId::parse("0x000a27002138b0a8").unwrap();
     let profile = CapabilityProfile::from_json(CAPABILITY_FIXTURE).unwrap();
+    let validated = resolve_validated_capability_profile(&profile.profile_id)
+        .unwrap()
+        .unwrap();
 
-    let first = project_sysinfo_extended(&device_id, &profile).unwrap();
-    let second = project_sysinfo_extended(&device_id, &profile).unwrap();
+    let first = project_sysinfo_extended(&device_id, &validated).unwrap();
+    let second = project_sysinfo_extended(&device_id, &validated).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(
@@ -98,7 +101,10 @@ fn projects_the_complete_validated_profile_to_deterministic_golden_bytes() {
 fn classifies_existing_bytes_only_from_exact_owned_hash_authority() {
     let device_id = DeviceId::parse("000A27002138B0A8").unwrap();
     let profile = CapabilityProfile::from_json(CAPABILITY_FIXTURE).unwrap();
-    let expected = project_sysinfo_extended(&device_id, &profile).unwrap();
+    let validated = resolve_validated_capability_profile(&profile.profile_id)
+        .unwrap()
+        .unwrap();
+    let expected = project_sysinfo_extended(&device_id, &validated).unwrap();
     let legacy_donor = include_bytes!("../data/sysinfo-extended/classic-late2009.plist");
 
     assert_eq!(
@@ -150,6 +156,15 @@ fn classifies_existing_bytes_only_from_exact_owned_hash_authority() {
             existing_bytes: conflicting
         }
     );
+}
+
+#[test]
+fn unknown_capability_profile_ids_have_no_projection_authority() {
+    let unknown = CapabilityProfileId::parse("classic-late-2009-v2").unwrap();
+
+    assert!(resolve_validated_capability_profile(&unknown)
+        .unwrap()
+        .is_none());
 }
 
 fn assert_formats(root: &Dictionary, key: &str, expected: &[ImageFormat]) {
