@@ -1,0 +1,15 @@
+{
+  "vectors": [
+    {"path":"valid/hello-desktop.json","expectation":"valid_hello","expected_role":"desktop","required_capabilities":["config_mutation"]},
+    {"path":"valid/hello-daemon.json","expectation":"valid_hello","expected_role":"daemon","required_capabilities":["device_inventory","portable_profile","typed_sync_progress"]},
+    {"path":"valid/hello-worker.json","expectation":"valid_hello","expected_role":"worker","required_capabilities":["typed_sync_progress"]},
+    {"path":"admission-failure/hello-old-major.json","expectation":"admission_failure","expected_role":"daemon"},
+    {"path":"admission-failure/hello-wrong-role.json","expectation":"admission_failure","expected_role":"daemon"},
+    {"path":"decode-failure/hello-duplicate-capability.json","expectation":"decode_failure"},
+    {"path":"decode-failure/hello-leading-zero-version.json","expectation":"decode_failure"},
+    {"path":"decode-failure/hello-empty-prerelease.json","expectation":"decode_failure"},
+    {"path":"decode-failure/hello-malformed-software-version.json","expectation":"decode_failure"},
+    {"path":"canonicalize/hello-unsorted-capabilities.json","expectation":"canonicalize_hello"},
+    {"path":"compatibility/unknown-daemon-event.json","expectation":"ignored_desktop_event"}
+  ]
+}
