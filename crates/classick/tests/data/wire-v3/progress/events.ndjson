@@ -1,0 +1,20 @@
+{"type":"run_header","device_id":"000A27002138B0A8","session_id":42,"source":"/music","ipod":"/Volumes/IPOD","manifest":"/Volumes/IPOD/iPod_Control/classick/manifest.json"}
+{"type":"sync_summary","device_id":"000A27002138B0A8","session_id":42,"summary":{"add":1,"modify":2,"metadata_only":3,"remove":4,"unchanged":5,"total_planned":10}}
+{"type":"sync_summary","device_id":"000A27002138B0A8","session_id":42,"summary":{"add":1,"modify":0,"metadata_only":0,"remove":4,"unchanged":5,"total_planned":1}}
+{"type":"review_requested","device_id":"000A27002138B0A8","session_id":42,"summary":{"add":1,"modify":2,"metadata_only":3,"remove":4,"unchanged":5,"total_planned":10},"no_delete":false}
+{"type":"prompt","device_id":"000A27002138B0A8","session_id":42,"prompt_id":7,"message":"Retry?","options":["Retry","Skip","Abort"]}
+{"type":"form","device_id":"000A27002138B0A8","session_id":42,"prompt_id":8,"label":"Value","initial":"","hint":"Enter a value"}
+{"type":"track_start","device_id":"000A27002138B0A8","session_id":42,"current":1,"total":10,"label":"Artist — Track","eta_secs":90}
+{"type":"track_start","device_id":"000A27002138B0A8","session_id":42,"current":1,"total":10,"label":"Artist — Track"}
+{"type":"track_done","device_id":"000A27002138B0A8","session_id":42,"result":"applied"}
+{"type":"track_done","device_id":"000A27002138B0A8","session_id":42,"result":"skipped"}
+{"type":"finalizing","device_id":"000A27002138B0A8","session_id":42,"reason":"cancelled","staged_albums":2,"staged_tracks":20}
+{"type":"finalizing","device_id":"000A27002138B0A8","session_id":42,"reason":"paused","staged_albums":2,"staged_tracks":20}
+{"type":"sync_cancelled","device_id":"000A27002138B0A8","session_id":42}
+{"type":"sync_paused","device_id":"000A27002138B0A8","session_id":42}
+{"type":"sync_log","device_id":"000A27002138B0A8","session_id":42,"message":"Checkpoint saved"}
+{"type":"sync_error","device_id":"000A27002138B0A8","session_id":42,"message":"Track skipped","recovery_hints":["Check the source file"]}
+{"type":"sync_error","device_id":"000A27002138B0A8","session_id":42,"message":"Track skipped"}
+{"type":"sync_finished","device_id":"000A27002138B0A8","session_id":42,"success":true,"skipped_for_space":{"albums":1,"tracks":8,"bytes":123456},"artwork":{"embedded":9,"eligible":10,"failed_sources":1},"db_restored":true}
+{"type":"sync_finished","device_id":"000A27002138B0A8","session_id":42,"success":false}
+{"type":"command_failed","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8757","message":"Request was not accepted"}

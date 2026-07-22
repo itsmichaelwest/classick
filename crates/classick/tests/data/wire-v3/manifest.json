@@ -11,5 +11,21 @@
     {"path":"decode-failure/hello-malformed-software-version.json","expectation":"decode_failure"},
     {"path":"canonicalize/hello-unsorted-capabilities.json","expectation":"canonicalize_hello"},
     {"path":"compatibility/unknown-daemon-event.json","expectation":"ignored_desktop_event"}
-  ]
+  ],
+  "progress": {
+    "positive_collections": [
+      {"path":"progress/commands.ndjson","stream":"desktop_to_daemon_commands"},
+      {"path":"progress/events.ndjson","stream":"daemon_to_desktop_events"}
+    ],
+    "negative_vectors": [
+      {"path":"progress/negative/track-done-missing-device.json","expectation":"decode_failure","stream":"daemon_to_desktop_events"},
+      {"path":"progress/negative/track-done-malformed-device.json","expectation":"decode_failure","stream":"daemon_to_desktop_events"},
+      {"path":"progress/negative/track-done-wrong-device.json","expectation":"owned_session_mismatch","stream":"worker_to_daemon_events","expected_device_id":"000A27002138B0A8","expected_session_id":42},
+      {"path":"progress/negative/track-done-wrong-session.json","expectation":"owned_session_mismatch","stream":"worker_to_daemon_events","expected_device_id":"000A27002138B0A8","expected_session_id":42},
+      {"path":"progress/negative/cancel-wrong-direction.json","expectation":"wrong_direction","stream":"daemon_to_desktop_events"},
+      {"path":"progress/negative/track-start-invalid-position.json","expectation":"semantic_failure","stream":"worker_to_daemon_events","expected_device_id":"000A27002138B0A8","expected_session_id":42},
+      {"path":"progress/negative/prompt-empty-options.json","expectation":"semantic_failure","stream":"worker_to_daemon_events","expected_device_id":"000A27002138B0A8","expected_session_id":42},
+      {"path":"progress/negative/prompt-decision-out-of-range.json","expectation":"pending_interaction_mismatch","stream":"daemon_to_worker_commands","expected_device_id":"000A27002138B0A8","expected_session_id":42,"prompt_id":7,"option_count":3}
+    ]
+  }
 }

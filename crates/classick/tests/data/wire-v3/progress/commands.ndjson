@@ -1,0 +1,8 @@
+{"type":"apply_review","device_id":"000A27002138B0A8","session_id":42,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8750","no_delete":false}
+{"type":"dry_run_review","device_id":"000A27002138B0A8","session_id":42,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8751"}
+{"type":"quit_review","device_id":"000A27002138B0A8","session_id":42,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8752"}
+{"type":"prompt_decision","device_id":"000A27002138B0A8","session_id":42,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8753","prompt_id":7,"choice":2}
+{"type":"form_decision","device_id":"000A27002138B0A8","session_id":42,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8754","prompt_id":8,"value":"answer"}
+{"type":"form_decision","device_id":"000A27002138B0A8","session_id":42,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8758","prompt_id":8,"value":null}
+{"type":"cancel_sync","device_id":"000A27002138B0A8","session_id":42,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8755"}
+{"type":"pause_sync","device_id":"000A27002138B0A8","session_id":42,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8756"}
