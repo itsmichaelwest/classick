@@ -1,9 +1,6 @@
-use super::host_cache::{deserialize_canonical_device_id, reject_host_symlinks};
-use super::profile::{
-    ContentHash, MutationId, ProfileComponent, SelectionValue, SettingsValue, SubscriptionsValue,
-};
+use super::host_cache::{deserialize_canonical_device_id, validate_existing_host_path};
+use super::profile::{MutationId, SelectionValue, SettingsValue, SubscriptionsValue};
 use super::profile_values::COMPONENT_SCHEMA_VERSION;
-use crate::atomic_file::AtomicFileWriter;
 use crate::device::DeviceId;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -185,136 +182,34 @@ pub enum OutboxLoad {
     Loaded(PendingDeviceOutbox),
 }
 
-impl OutboxLoad {
-    fn into_outbox(self) -> PendingDeviceOutbox {
-        match self {
-            Self::Missing(outbox) | Self::Loaded(outbox) => outbox,
-        }
-    }
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommittedComponentProof {
-    Selection {
-        device_id: DeviceId,
-        committed: ProfileComponent<SelectionValue>,
-        content_hash: ContentHash,
-    },
-    Settings {
-        device_id: DeviceId,
-        committed: ProfileComponent<SettingsValue>,
-        content_hash: ContentHash,
-    },
-    Subscriptions {
-        device_id: DeviceId,
-        committed: ProfileComponent<SubscriptionsValue>,
-        content_hash: ContentHash,
-    },
-}
-impl CommittedComponentProof {
-    pub fn selection(
-        device_id: DeviceId,
-        committed: ProfileComponent<SelectionValue>,
-        content_hash: ContentHash,
-    ) -> Self {
-        Self::Selection {
-            device_id,
-            committed,
-            content_hash,
-        }
-    }
-    pub fn settings(
-        device_id: DeviceId,
-        committed: ProfileComponent<SettingsValue>,
-        content_hash: ContentHash,
-    ) -> Self {
-        Self::Settings {
-            device_id,
-            committed,
-            content_hash,
-        }
-    }
-    pub fn subscriptions(
-        device_id: DeviceId,
-        committed: ProfileComponent<SubscriptionsValue>,
-        content_hash: ContentHash,
-    ) -> Self {
-        Self::Subscriptions {
-            device_id,
-            committed,
-            content_hash,
-        }
-    }
-    fn verify(
-        &self,
-        expected_device_id: &DeviceId,
-        expected_mutation_id: &MutationId,
-        pending: &PendingMutation,
-    ) -> Result<()> {
-        match (self, pending) {
-            (
-                Self::Selection {
-                    device_id,
-                    committed,
-                    content_hash,
-                },
-                PendingMutation::Selection { desired, .. },
-            ) => verify_component(
-                device_id,
-                committed,
-                content_hash,
-                desired,
-                expected_device_id,
-                expected_mutation_id,
-            ),
-            (
-                Self::Settings {
-                    device_id,
-                    committed,
-                    content_hash,
-                },
-                PendingMutation::Settings { desired, .. },
-            ) => verify_component(
-                device_id,
-                committed,
-                content_hash,
-                desired,
-                expected_device_id,
-                expected_mutation_id,
-            ),
-            (
-                Self::Subscriptions {
-                    device_id,
-                    committed,
-                    content_hash,
-                },
-                PendingMutation::Subscriptions { desired, .. },
-            ) => verify_component(
-                device_id,
-                committed,
-                content_hash,
-                desired,
-                expected_device_id,
-                expected_mutation_id,
-            ),
-            _ => bail!("committed component proof does not match pending component"),
-        }
-    }
-}
 #[derive(Debug, Clone)]
+/// Read-only access to pending device mutations.
+///
+/// ```compile_fail
+/// use classick::portable::outbox::PendingOutboxStore;
+/// let _ = PendingOutboxStore::save;
+/// ```
+///
+/// ```compile_fail
+/// use classick::portable::outbox::PendingOutboxStore;
+/// let _ = PendingOutboxStore::accept;
+/// ```
+///
+/// ```compile_fail
+/// use classick::portable::outbox::PendingOutboxStore;
+/// let _ = PendingOutboxStore::confirm;
+/// ```
+///
+/// ```compile_fail
+/// use classick::portable::outbox::PendingOutboxStore;
+/// let _ = PendingOutboxStore::with_writer;
+/// ```
 pub struct PendingOutboxStore {
     root: PathBuf,
-    writer: AtomicFileWriter,
 }
 impl PendingOutboxStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self::with_writer(root, AtomicFileWriter::new())
-    }
-    #[doc(hidden)]
-    pub fn with_writer(root: impl Into<PathBuf>, writer: AtomicFileWriter) -> Self {
-        Self {
-            root: root.into(),
-            writer,
-        }
+        Self { root: root.into() }
     }
 
     pub fn path(&self, device_id: &DeviceId) -> PathBuf {
@@ -326,7 +221,7 @@ impl PendingOutboxStore {
 
     pub fn load(&self, device_id: &DeviceId) -> Result<OutboxLoad> {
         let path = self.path(device_id);
-        reject_host_symlinks(&self.root, &path)?;
+        validate_existing_host_path(&self.root, &path)?;
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -345,144 +240,41 @@ impl PendingOutboxStore {
         }
         Ok(OutboxLoad::Loaded(outbox))
     }
-
-    pub fn save(&self, outbox: &PendingDeviceOutbox) -> Result<PendingDeviceOutbox> {
-        outbox.validate()?;
-        let path = self.path(&outbox.device_id);
-        reject_host_symlinks(&self.root, &path)?;
-        let bytes = serialize_outbox(outbox)?;
-        self.writer
-            .write(&path, &bytes)
-            .with_context(|| format!("save host outbox {}", path.display()))?;
-        reject_host_symlinks(&self.root, &path)?;
-        let durable = fs::read(&path)
-            .with_context(|| format!("verify durable host outbox {}", path.display()))?;
-        if durable != bytes {
-            bail!("durable host outbox bytes differ from the accepted value");
-        }
-        let reparsed = parse_outbox(&durable).context("reparse durable host outbox")?;
-        if &reparsed != outbox {
-            bail!("durable host outbox differs after exact reparse");
-        }
-        Ok(reparsed)
-    }
-
-    pub fn accept(
-        &self,
-        device_id: &DeviceId,
-        mutation: PendingMutation,
-    ) -> Result<PendingDeviceOutbox> {
-        mutation.validate()?;
-        if mutation.device_id() != device_id {
-            bail!("pending mutation device ID does not match the target device");
-        }
-        let mut outbox = self.load(device_id)?.into_outbox();
-        if let Some(existing) = outbox
-            .mutations
-            .iter()
-            .find(|existing| existing.mutation_id() == mutation.mutation_id())
-        {
-            if existing == &mutation {
-                return Ok(outbox);
-            }
-            bail!("pending mutation ID was reused with different contents");
-        }
-        self.reject_cross_device_collision(device_id, mutation.mutation_id())?;
-        outbox
-            .mutations
-            .retain(|existing| existing.component_order() != mutation.component_order());
-        outbox.mutations.push(mutation);
-        outbox
-            .mutations
-            .sort_by_key(PendingMutation::component_order);
-        self.save(&outbox)
-    }
-
-    pub fn confirm(
-        &self,
-        device_id: &DeviceId,
-        mutation_id: &MutationId,
-        proof: &CommittedComponentProof,
-    ) -> Result<PendingDeviceOutbox> {
-        let mut outbox = self.load(device_id)?.into_outbox();
-        let Some(index) = outbox
-            .mutations
-            .iter()
-            .position(|pending| pending.mutation_id() == mutation_id)
-        else {
-            bail!("pending mutation ID is not present in the device outbox");
-        };
-        proof.verify(device_id, mutation_id, &outbox.mutations[index])?;
-        outbox.mutations.remove(index);
-        self.save(&outbox)
-    }
-
-    fn reject_cross_device_collision(
-        &self,
-        device_id: &DeviceId,
-        mutation_id: &MutationId,
-    ) -> Result<()> {
-        let devices = self.root.join("devices");
-        let entries = match fs::read_dir(&devices) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error).context("scan host outboxes for mutation ID reuse"),
-        };
-        for entry in entries {
-            let name = entry?.file_name();
-            let Some(name) = name.to_str() else { continue };
-            let Ok(other) = DeviceId::parse(name) else {
-                continue;
-            };
-            if name != other.as_str() || &other == device_id {
-                continue;
-            }
-            if self
-                .load(&other)?
-                .into_outbox()
-                .mutations
-                .iter()
-                .any(|pending| pending.mutation_id() == mutation_id)
-            {
-                bail!("pending mutation ID was reused for a different device");
-            }
-        }
-        Ok(())
-    }
 }
 
-fn verify_component<T>(
-    device_id: &DeviceId,
-    committed: &ProfileComponent<T>,
-    content_hash: &ContentHash,
-    desired: &T,
-    expected_device_id: &DeviceId,
-    expected_mutation_id: &MutationId,
-) -> Result<()>
-where
-    T: PartialEq + Serialize,
-{
-    if device_id != expected_device_id {
-        bail!("committed component proof has the wrong device ID");
+// Pure planning only; the future lease-owning coordinator decides when it may be persisted.
+#[allow(dead_code)]
+pub(super) fn coalesce_pending(
+    current: &PendingDeviceOutbox,
+    mutation: &PendingMutation,
+) -> Result<PendingDeviceOutbox> {
+    current.validate()?;
+    mutation.validate()?;
+    if mutation.device_id() != &current.device_id {
+        bail!("pending mutation device ID does not match host outbox");
     }
-    if committed.revision == 0 {
-        bail!("committed component proof has a zero revision");
+    if let Some(existing) = current
+        .mutations
+        .iter()
+        .find(|existing| existing.mutation_id() == mutation.mutation_id())
+    {
+        if existing == mutation {
+            return Ok(current.clone());
+        }
+        bail!("pending mutation ID was reused with different contents");
     }
-    if &committed.mutation_id != expected_mutation_id {
-        bail!("committed component proof has the wrong mutation ID");
-    }
-    if &committed.value != desired {
-        bail!("committed component proof value differs from pending desired state");
-    }
-    let bytes = serde_json::to_vec(committed)?;
-    let actual = blake3::hash(&bytes).to_hex().to_string();
-    if content_hash.as_str() != actual {
-        bail!("committed component proof hash does not match its revision and value");
-    }
-    Ok(())
+    let mut next = current.clone();
+    next.mutations
+        .retain(|existing| existing.component_order() != mutation.component_order());
+    next.mutations.push(mutation.clone());
+    next.mutations.sort_by_key(PendingMutation::component_order);
+    next.validate()?;
+    Ok(next)
 }
 
-fn serialize_outbox(outbox: &PendingDeviceOutbox) -> Result<Vec<u8>> {
+// Retained for the future lease-owning coordinator; this module exposes no write operation.
+#[allow(dead_code)]
+pub(super) fn serialize_outbox(outbox: &PendingDeviceOutbox) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(outbox)?;
     bytes.push(b'\n');
     let reparsed = parse_outbox(&bytes).context("reparse serialized host outbox")?;
@@ -497,3 +289,6 @@ fn parse_outbox(bytes: &[u8]) -> Result<PendingDeviceOutbox> {
     outbox.validate()?;
     Ok(outbox)
 }
+
+#[cfg(test)]
+mod tests;

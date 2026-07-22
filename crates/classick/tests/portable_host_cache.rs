@@ -1,4 +1,3 @@
-use classick::atomic_file::AtomicFileWriter;
 use classick::device::DeviceId;
 use classick::portable::host_cache::{
     HostCache, HostCacheLoad, HostCacheStore, HOST_CACHE_SCHEMA_VERSION,
@@ -84,14 +83,13 @@ fn missing_cache_is_explicit_and_read_only() {
 }
 
 #[test]
-fn saves_and_loads_only_the_last_imported_canonical_profile() {
+fn loads_only_the_last_imported_canonical_profile() {
     let root = temp_root("round-trip");
     let store = HostCacheStore::new(&root);
     let expected = HostCache::new(device_id(), Some(profile(&device_id()))).unwrap();
+    let value = serde_json::to_value(&expected).unwrap();
+    write_json(&root, &device_id(), &value);
 
-    let persisted = store.save(&expected).unwrap();
-
-    assert_eq!(persisted, expected);
     assert_eq!(
         store.load(&device_id()).unwrap(),
         HostCacheLoad::Loaded(expected)
@@ -109,8 +107,9 @@ fn accepts_an_explicitly_empty_cache() {
     let root = temp_root("empty");
     let store = HostCacheStore::new(&root);
     let expected = HostCache::new(device_id(), None).unwrap();
+    let value = serde_json::to_value(&expected).unwrap();
 
-    store.save(&expected).unwrap();
+    write_json(&root, &device_id(), &value);
 
     assert_eq!(
         store.load(&device_id()).unwrap(),
@@ -156,31 +155,9 @@ fn rejects_corrupt_unknown_versioned_or_mismatched_cache_files() {
     assert!(store.load(&expected_device).is_err());
 }
 
-#[test]
-fn failed_atomic_save_retains_the_previous_durable_bytes() {
-    let root = temp_root("atomic-failure");
-    let normal = HostCacheStore::new(&root);
-    let old = HostCache::new(device_id(), None).unwrap();
-    normal.save(&old).unwrap();
-    let path = normal.path(&device_id());
-    let old_bytes = std::fs::read(&path).unwrap();
-    let failing = HostCacheStore::with_writer(
-        &root,
-        AtomicFileWriter::failing_before_replace(path.clone()),
-    );
-    let replacement = HostCache::new(device_id(), Some(profile(&device_id()))).unwrap();
-
-    assert!(failing.save(&replacement).is_err());
-    assert_eq!(std::fs::read(&path).unwrap(), old_bytes);
-    assert_eq!(
-        normal.load(&device_id()).unwrap(),
-        HostCacheLoad::Loaded(old)
-    );
-}
-
 #[cfg(unix)]
 #[test]
-fn rejects_symlink_substitution_below_the_host_root() {
+fn detects_an_unexpected_symlink_below_the_trusted_host_root() {
     use std::os::unix::fs::symlink;
 
     let root = temp_root("symlink");
@@ -191,8 +168,5 @@ fn rejects_symlink_substitution_below_the_host_root() {
     let store = HostCacheStore::new(&root);
 
     assert!(store.load(&device_id()).is_err());
-    assert!(store
-        .save(&HostCache::new(device_id(), None).unwrap())
-        .is_err());
     assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
 }

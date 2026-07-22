@@ -1,5 +1,4 @@
 use super::profile::PortableProfile;
-use crate::atomic_file::AtomicFileWriter;
 use crate::device::DeviceId;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -56,22 +55,24 @@ pub enum HostCacheLoad {
 }
 
 #[derive(Debug, Clone)]
+/// Read-only access to the per-device host cache.
+///
+/// ```compile_fail
+/// use classick::portable::host_cache::HostCacheStore;
+/// let _ = HostCacheStore::save;
+/// ```
+///
+/// ```compile_fail
+/// use classick::portable::host_cache::HostCacheStore;
+/// let _ = HostCacheStore::with_writer;
+/// ```
 pub struct HostCacheStore {
     root: PathBuf,
-    writer: AtomicFileWriter,
 }
 
 impl HostCacheStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self::with_writer(root, AtomicFileWriter::new())
-    }
-
-    #[doc(hidden)]
-    pub fn with_writer(root: impl Into<PathBuf>, writer: AtomicFileWriter) -> Self {
-        Self {
-            root: root.into(),
-            writer,
-        }
+        Self { root: root.into() }
     }
 
     pub fn path(&self, device_id: &DeviceId) -> PathBuf {
@@ -83,7 +84,7 @@ impl HostCacheStore {
 
     pub fn load(&self, device_id: &DeviceId) -> Result<HostCacheLoad> {
         let path = self.path(device_id);
-        reject_host_symlinks(&self.root, &path)?;
+        validate_existing_host_path(&self.root, &path)?;
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(HostCacheLoad::Missing),
@@ -98,30 +99,11 @@ impl HostCacheStore {
         }
         Ok(HostCacheLoad::Loaded(cache))
     }
-
-    pub fn save(&self, cache: &HostCache) -> Result<HostCache> {
-        cache.validate()?;
-        let path = self.path(&cache.device_id);
-        reject_host_symlinks(&self.root, &path)?;
-        let bytes = serialize_cache(cache)?;
-        self.writer
-            .write(&path, &bytes)
-            .with_context(|| format!("save host cache {}", path.display()))?;
-        reject_host_symlinks(&self.root, &path)?;
-        let durable = fs::read(&path)
-            .with_context(|| format!("verify durable host cache {}", path.display()))?;
-        if durable != bytes {
-            bail!("durable host cache bytes differ from the accepted value");
-        }
-        let reparsed = parse_cache(&durable).context("reparse durable host cache")?;
-        if &reparsed != cache {
-            bail!("durable host cache differs after exact reparse");
-        }
-        Ok(reparsed)
-    }
 }
 
-fn serialize_cache(cache: &HostCache) -> Result<Vec<u8>> {
+// Retained for the future lease-owning coordinator; this module exposes no write operation.
+#[allow(dead_code)]
+pub(super) fn serialize_cache(cache: &HostCache) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(cache)?;
     bytes.push(b'\n');
     let reparsed = parse_cache(&bytes).context("reparse serialized host cache")?;
@@ -151,7 +133,9 @@ where
     Ok(device_id)
 }
 
-pub(super) fn reject_host_symlinks(root: &Path, target: &Path) -> Result<()> {
+// The configured host root is trusted. This detects accidental or corrupt path
+// substitution, but it is not a no-follow write primitive or TOCTOU boundary.
+pub(super) fn validate_existing_host_path(root: &Path, target: &Path) -> Result<()> {
     let relative = target
         .strip_prefix(root)
         .context("host-state path escapes its configured root")?;
@@ -178,7 +162,7 @@ fn inspect_host_path(path: &Path, final_component: bool) -> Result<()> {
     };
     if metadata.file_type().is_symlink() {
         bail!(
-            "host-state path must not traverse a symlink: {}",
+            "host-state path contains an unexpected symlink: {}",
             path.display()
         );
     }
@@ -190,4 +174,20 @@ fn inspect_host_path(path: &Path, final_component: bool) -> Result<()> {
         bail!("host-state parent is not a directory: {}", path.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_cache, serialize_cache, HostCache};
+    use crate::device::DeviceId;
+
+    #[test]
+    fn private_serialization_round_trips_without_granting_write_authority() {
+        let cache = HostCache::new(DeviceId::parse("000A270012345678").unwrap(), None).unwrap();
+
+        let bytes = serialize_cache(&cache).unwrap();
+
+        assert_eq!(parse_cache(&bytes).unwrap(), cache);
+        assert!(bytes.ends_with(b"\n"));
+    }
 }

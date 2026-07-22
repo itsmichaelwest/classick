@@ -152,7 +152,7 @@ fn rejects_unknown_corrupt_noncanonical_mismatched_or_unordered_state() {
 
 #[cfg(unix)]
 #[test]
-fn rejects_outbox_symlink_substitution() {
+fn detects_an_unexpected_outbox_symlink_below_the_trusted_host_root() {
     use std::os::unix::fs::symlink;
 
     let root = temp_root("symlink");

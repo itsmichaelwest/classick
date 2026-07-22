@@ -100,6 +100,12 @@ incidents and completed gate reports are archived in
 - Every durable mutation keeps its request ID until canonical persisted state
   acknowledges that exact request. An echo, write completion, or uncorrelated
   broadcast is not an acknowledgement.
+- Host cache/outbox roots are trusted user-owned directories; loader checks
+  detect accidental or corrupt path substitution but are not no-follow/TOCTOU
+  security. Do not expose host-state load-modify-save or acknowledgement APIs
+  until the serialized coordinator holds the shared process/device lease;
+  cross-device mutation claims need its durable ledger, and outbox clearing
+  needs verified portable-profile readback rather than a caller-supplied hash.
 - Target device commands by raw serial and route sync progress by serial plus
   session ID. Connection generation is also required for off-thread metadata
   reads so stale results cannot attach to a reconnected device.
