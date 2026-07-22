@@ -32,7 +32,11 @@ incidents and completed gate reports are archived in
   complete artwork format arrays because libgpod treats a present file as
   authoritative instead of using its fallback table. Structural validation
   alone does not grant projection authority; only an exact content-hash-bound
-  catalogue asset may construct the opaque validated capability type.
+  catalogue asset may construct the opaque validated capability type. Foreign
+  inspection must mirror the pinned parser: skip non-dictionary keyed-array
+  labels, default absent booleans to false, distinguish `PixelOrder`, prefer
+  `RowBytesAlignment` over legacy `AlignRowBytes`, and reject pixel formats
+  that libgpod itself drops.
 - On-device verification shows that a Classick-managed database is not
   intrinsically unreadable to iTunes/Music. Do not repeat the earlier
   "libgpod iPods are always rejected" claim. The running-process preflight is
