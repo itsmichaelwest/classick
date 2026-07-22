@@ -6,6 +6,7 @@ mod global;
 mod hello;
 mod history;
 mod inventory;
+mod legacy_command;
 mod legacy_progress;
 mod library;
 mod operations;
@@ -30,6 +31,7 @@ pub use inventory::{
     DeviceInventorySnapshot, DevicePhase, IdentifiedDeviceSnapshot, ProfileStatus,
     StorageFreshness, StorageSnapshot, UnidentifiedDeviceSnapshot,
 };
+pub use legacy_command::translate_legacy_worker_command;
 pub use legacy_progress::{LegacyScanDecoder, LegacyWorkerDecoder};
 pub use library::{
     DevicePreview, LibraryAlbum, LibraryArtist, LibraryGenre, LibrarySnapshot, SelectionPreview,

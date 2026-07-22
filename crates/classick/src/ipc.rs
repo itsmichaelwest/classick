@@ -177,7 +177,7 @@ pub struct ArtworkSummary {
 ///
 /// Serialized as newline-delimited JSON with a `type` discriminator using
 /// `snake_case`. See `docs/ipc/subprocess.md`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcCommand {
     /// Reserved for an explicit start handshake; currently ignored.
@@ -203,7 +203,7 @@ pub enum IpcCommand {
 /// The wire shape uses the same typed-envelope pattern as the top-level
 /// `IpcCommand`, but scoped to this field. The Rust `ReviewDecision` enum
 /// in `progress.rs` is the source of truth for variants.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReviewDecisionPayload {
     Apply { no_delete: bool },
