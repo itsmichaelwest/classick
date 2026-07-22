@@ -48,7 +48,7 @@ fn valid_profile() -> Value {
             "apple_playlist_id": 42,
             "apple_kind": "normal",
             "rockbox": {
-                "relative_filename": "Playlists/favourites.m3u8",
+                "relative_filename": "Favourites--0123456789.m3u8",
                 "content_hash": HASH_A
             }
         }],
@@ -100,40 +100,24 @@ fn accepts_absent_optional_capability_rockbox_and_sysinfo_hash() {
 }
 
 #[test]
-fn rejects_every_excluded_profile_field() {
-    let excluded = [
-        "name",
-        "display_name",
-        "model",
-        "model_code",
-        "family",
-        "generation",
-        "colour",
-        "color",
-        "icon",
-        "artwork_choice",
-        "capacity",
-        "firmware",
-        "firmware_build",
-        "battery",
-        "volume",
-        "volume_uuid",
-        "mount",
-        "mount_path",
-        "host_id",
-        "install_id",
-        "timestamp",
-        "last_seen",
-        "telemetry",
-        "runtime_facts",
-        "library_id",
-        "library_identity",
-        "credentials",
-        "username",
-        "password",
-    ];
+fn rejects_an_owned_sysinfo_hash_without_a_capability_profile() {
+    let mut profile = valid_profile();
+    profile
+        .as_object_mut()
+        .unwrap()
+        .remove("capability_profile_id");
 
-    for key in excluded {
+    assert!(decode(&profile).is_err());
+}
+
+#[test]
+fn rejects_every_excluded_profile_field() {
+    let excluded = "name display_name model model_code family generation colour color icon \
+        artwork_choice capacity firmware firmware_build battery volume volume_uuid mount \
+        mount_path host_id install_id timestamp last_seen telemetry runtime_facts library_id \
+        library_identity credentials username password";
+
+    for key in excluded.split_ascii_whitespace() {
         let mut profile = valid_profile();
         profile[key] = json!("forbidden");
         assert!(decode(&profile).is_err(), "accepted excluded key {key:?}");
@@ -142,21 +126,11 @@ fn rejects_every_excluded_profile_field() {
 
 #[test]
 fn rejects_unknown_fields_at_every_nested_boundary() {
-    let pointers = [
-        "/selection",
-        "/selection/value",
-        "/selection/value/rules/0",
-        "/settings",
-        "/settings/value",
-        "/subscriptions",
-        "/subscriptions/value",
-        "/owned_playlists/0",
-        "/owned_playlists/0/rockbox",
-        "/companion_authorities/0",
-        "/companion_authorities/1",
-    ];
+    let pointers = "/selection /selection/value /selection/value/rules/0 /settings \
+        /settings/value /subscriptions /subscriptions/value /owned_playlists/0 \
+        /owned_playlists/0/rockbox /companion_authorities/0 /companion_authorities/1";
 
-    for pointer in pointers {
+    for pointer in pointers.split_ascii_whitespace() {
         let mut profile = valid_profile();
         profile
             .pointer_mut(pointer)
@@ -190,16 +164,11 @@ fn rejects_noncanonical_or_invalid_device_ids() {
 
 #[test]
 fn rejects_unsupported_or_zero_schema_versions() {
-    let pointers = [
-        "/schema_version",
-        "/selection/value/schema_version",
-        "/settings/value/schema_version",
-        "/subscriptions/value/schema_version",
-        "/companion_authorities/0/schema_version",
-        "/companion_authorities/1/schema_version",
-    ];
+    let pointers = "/schema_version /selection/value/schema_version \
+        /settings/value/schema_version /subscriptions/value/schema_version \
+        /companion_authorities/0/schema_version /companion_authorities/1/schema_version";
 
-    for pointer in pointers {
+    for pointer in pointers.split_ascii_whitespace() {
         for version in [0, 2] {
             let mut profile = valid_profile();
             *profile.pointer_mut(pointer).unwrap() = json!(version);
@@ -224,6 +193,7 @@ fn rejects_zero_revisions_and_invalid_or_reused_mutation_ids() {
         for mutation_id in [
             "018F9D7E-2F2B-7B52-9F1D-F78BDB2F8740",
             "018f9d7e2f2b7b529f1df78bdb2f8740",
+            "00000000-0000-0000-0000-000000000000",
             "not-a-uuid",
         ] {
             let mut profile = valid_profile();
@@ -271,6 +241,17 @@ fn rejects_duplicate_subscription_and_ownership_claims() {
         .unwrap()
         .push(second);
     assert!(decode(&duplicate_rockbox_path).is_err());
+
+    let mut case_alias = valid_profile();
+    let mut second = case_alias["owned_playlists"][0].clone();
+    second["slug"] = json!("running");
+    second["apple_playlist_id"] = json!(43);
+    second["rockbox"]["relative_filename"] = json!("fAVOURITES--0123456789.m3u8");
+    case_alias["owned_playlists"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    assert!(decode(&case_alias).is_err());
 }
 
 #[test]
@@ -311,12 +292,42 @@ fn rejects_zero_apple_ids_unknown_kinds_and_unsafe_slugs() {
         "two--hyphens",
         "has space",
         "under_score",
+        "con",
+        "com1",
+        "lpt9",
     ] {
         let mut profile = valid_profile();
         profile["subscriptions"]["value"]["playlists"][0] = json!(slug);
         profile["owned_playlists"][0]["slug"] = json!(slug);
         profile["companion_authorities"][1]["slug"] = json!(slug);
         assert!(decode(&profile).is_err(), "accepted slug {slug:?}");
+    }
+}
+
+#[test]
+fn rockbox_ownership_accepts_only_a_managed_portable_basename() {
+    for filename in [
+        "Playlists/Classick/Favourites.m3u8",
+        "nested/Favourites.m3u8",
+        r"nested\Favourites.m3u8",
+        "/Favourites.m3u8",
+        "C:Favourites.m3u8",
+        "Favourites.M3U8",
+        "Favourites.m3u",
+        "Favouritesé.m3u8",
+        "con.m3u8",
+        "COM1.m3u8",
+        "Lpt9.m3u8",
+        "Favourites .m3u8",
+        "Favourites..m3u8",
+        "Favourites?.m3u8",
+    ] {
+        let mut profile = valid_profile();
+        profile["owned_playlists"][0]["rockbox"]["relative_filename"] = json!(filename);
+        assert!(
+            decode(&profile).is_err(),
+            "accepted Rockbox filename {filename:?}"
+        );
     }
 }
 
@@ -377,6 +388,52 @@ fn rejects_nonportable_paths_and_credentials() {
 }
 
 #[test]
+fn pins_companion_authority_paths_to_their_canonical_artifacts() {
+    for path in [
+        "Manifest.json",
+        "other.json",
+        "nested/manifest.json",
+        "manifést.json",
+        "CON/manifest.json",
+    ] {
+        let mut profile = valid_profile();
+        profile["companion_authorities"][0]["relative_path"] = json!(path);
+        assert!(decode(&profile).is_err(), "accepted manifest path {path:?}");
+    }
+
+    for path in [
+        "favourites.m3u8",
+        "Playlists/favourites.m3u8",
+        "playlists/Favourites.m3u8",
+        "playlists/running.m3u8",
+        "playlists/favourites.json",
+        "playlists/favourites.M3U8",
+        "playlists/favourites/definition.m3u8",
+        "playlists/favourités.m3u8",
+    ] {
+        let mut profile = valid_profile();
+        profile["companion_authorities"][1]["relative_path"] = json!(path);
+        assert!(
+            decode(&profile).is_err(),
+            "accepted playlist definition path {path:?}"
+        );
+    }
+
+    let mut smart = valid_profile();
+    smart["companion_authorities"][1]["relative_path"] = json!("playlists/favourites.rules.json");
+    decode(&smart).unwrap();
+}
+
+#[test]
+fn rockbox_and_classick_paths_are_distinct_fixed_namespaces() {
+    let mut profile = valid_profile();
+    profile["owned_playlists"][0]["rockbox"]["relative_filename"] = json!("favourites.m3u8");
+    profile["companion_authorities"][1]["relative_path"] = json!("playlists/favourites.m3u8");
+
+    decode(&profile).unwrap();
+}
+
+#[test]
 fn requires_exact_definition_authority_for_each_subscription() {
     let mut missing = valid_profile();
     missing["companion_authorities"]
@@ -392,6 +449,21 @@ fn requires_exact_definition_authority_for_each_subscription() {
     let mut mismatched = valid_profile();
     mismatched["companion_authorities"][1]["slug"] = json!("running");
     assert!(decode(&mismatched).is_err());
+}
+
+#[test]
+fn subscription_intent_and_published_apple_ownership_remain_independent() {
+    let mut unsubscribed_but_owned = valid_profile();
+    unsubscribed_but_owned["subscriptions"]["value"]["playlists"] = json!([]);
+    unsubscribed_but_owned["companion_authorities"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|authority| authority["kind"] != "playlist_definition");
+    decode(&unsubscribed_but_owned).unwrap();
+
+    let mut subscribed_but_not_owned = valid_profile();
+    subscribed_but_not_owned["owned_playlists"] = json!([]);
+    decode(&subscribed_but_not_owned).unwrap();
 }
 
 #[test]

@@ -4,7 +4,9 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 
-pub use super::profile_scalars::{ContentHash, MutationId, PlaylistSlug, ProfilePath};
+pub use super::profile_scalars::{
+    ContentHash, ManagedRockboxFilename, MutationId, PlaylistSlug, ProfilePath,
+};
 use super::profile_values::COMPONENT_SCHEMA_VERSION;
 pub use super::profile_values::{
     Revised as ProfileComponent, SelectionMode, SelectionRule, SelectionValue, SettingsValue,
@@ -23,7 +25,7 @@ pub enum ApplePlaylistKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnedRockboxPlaylist {
-    pub relative_filename: ProfilePath,
+    pub relative_filename: ManagedRockboxFilename,
     pub content_hash: ContentHash,
 }
 
@@ -123,6 +125,9 @@ impl PortableProfile {
             self.subscriptions.value.schema_version,
         )?;
         validate_unique_mutation_ids(self)?;
+        if self.generated_sysinfo_extended_hash.is_some() && self.capability_profile_id.is_none() {
+            bail!("owned generated SysInfoExtended requires a capability profile");
+        }
         validate_subscriptions(self)?;
         validate_ownership_and_authorities(self)
     }
@@ -201,7 +206,7 @@ fn validate_ownership_and_authorities(profile: &PortableProfile) -> Result<()> {
             );
         }
         if let Some(rockbox) = &owned.rockbox {
-            insert_path_claim(&mut rockbox_path_claims, &rockbox.relative_filename)?;
+            insert_path_claim(&mut rockbox_path_claims, rockbox.relative_filename.as_str())?;
         }
     }
 
@@ -215,13 +220,30 @@ fn validate_ownership_and_authorities(profile: &PortableProfile) -> Result<()> {
                 authority.schema_version()
             );
         }
-        insert_path_claim(&mut authority_path_claims, authority.relative_path())?;
+        insert_path_claim(
+            &mut authority_path_claims,
+            authority.relative_path().as_str(),
+        )?;
         match authority {
-            CompanionAuthority::Manifest { .. } if manifest_seen => {
-                bail!("duplicate manifest authority")
+            CompanionAuthority::Manifest { relative_path, .. } => {
+                if relative_path.as_str() != "manifest.json" {
+                    bail!("manifest authority path must be manifest.json");
+                }
+                if manifest_seen {
+                    bail!("duplicate manifest authority");
+                }
+                manifest_seen = true;
             }
-            CompanionAuthority::Manifest { .. } => manifest_seen = true,
-            CompanionAuthority::PlaylistDefinition { slug, .. } => {
+            CompanionAuthority::PlaylistDefinition {
+                slug,
+                relative_path,
+                ..
+            } => {
+                let manual = format!("playlists/{slug}.m3u8");
+                let smart = format!("playlists/{slug}.rules.json");
+                if relative_path.as_str() != manual && relative_path.as_str() != smart {
+                    bail!("playlist definition path does not match slug {slug}");
+                }
                 if !definition_slugs.insert(slug) {
                     bail!("duplicate playlist definition authority for {slug}");
                 }
@@ -236,8 +258,8 @@ fn validate_ownership_and_authorities(profile: &PortableProfile) -> Result<()> {
     Ok(())
 }
 
-fn insert_path_claim(paths: &mut HashSet<String>, path: &ProfilePath) -> Result<()> {
-    let case_folded = path.as_str().to_ascii_lowercase();
+fn insert_path_claim(paths: &mut HashSet<String>, path: &str) -> Result<()> {
+    let case_folded = path.to_ascii_lowercase();
     if !paths.insert(case_folded) {
         bail!("duplicate portable path claim {}", path);
     }
