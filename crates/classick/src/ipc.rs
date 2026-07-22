@@ -16,7 +16,7 @@ pub const PROTOCOL_VERSION: &str = "1.4.0";
 ///
 /// Serialized as newline-delimited JSON with a `type` discriminator using
 /// `snake_case`. Field names are also `snake_case`. See `docs/ipc/subprocess.md`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcEvent {
     /// Handshake. MUST be the first event after spawn.
@@ -84,7 +84,7 @@ pub enum IpcEvent {
     /// Non-fatal or fatal error. `recovery_hints` is omitted when empty.
     Error {
         message: String,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         recovery_hints: Vec<String>,
     },
     /// Terminal summary. The core closes stdout shortly afterward.
@@ -115,7 +115,7 @@ pub enum IpcEvent {
 }
 
 /// Action-plan summary carried inside `IpcEvent::Review`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IpcActionPlanSummary {
     pub add: usize,
     pub modify: usize,
@@ -128,7 +128,7 @@ pub struct IpcActionPlanSummary {
 /// granularity mirrors `fit::DeferredAlbum` — `albums`/`tracks`/`bytes` are
 /// sums across every album that still didn't fit after the end-of-run retry.
 /// See `docs/ipc/subprocess.md`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkippedForSpace {
     pub albums: usize,
     pub tracks: usize,
@@ -166,7 +166,7 @@ pub(crate) fn format_bytes_human(bytes: u64) -> String {
 /// Artwork embed/refresh rollup attached to `finish`. Counted
 /// across a run's Add/Modify/MetadataOnly actions — see
 /// `apply_loop::ArtworkCounts`. See `docs/ipc/subprocess.md`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtworkSummary {
     pub embedded: usize,
     pub eligible: usize,
