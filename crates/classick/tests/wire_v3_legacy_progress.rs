@@ -189,7 +189,7 @@ fn worker_rejects_incomplete_or_contradictory_lifecycles() {
 
 #[test]
 fn scan_stream_uses_global_request_routing_and_scan_events() {
-    let mut decoder = LegacyScanDecoder::new(request_id(), SessionId::new(43).unwrap());
+    let mut decoder = LegacyScanDecoder::new(Some(request_id()), SessionId::new(43).unwrap());
     assert_eq!(
         decoder.decode(HELLO).unwrap().map(event_value),
         Some(json!({"type":"library_scan_started","request_id":REQUEST_ID,"session_id":43}))
@@ -215,7 +215,17 @@ fn scan_stream_uses_global_request_routing_and_scan_events() {
                 json!({"type":"library_scan_progress","request_id":REQUEST_ID,"session_id":43,"files_scanned":5,"tracks_indexed":1}),
             ),
         ),
-        (r#"{"type":"log","message":"scan: probed=1"}"#, None),
+        (
+            r#"{"type":"track_start","current":2,"total":2,"label":"Two.flac"}"#,
+            None,
+        ),
+        (
+            r#"{"type":"track_done","result":"applied"}"#,
+            Some(
+                json!({"type":"library_scan_progress","request_id":REQUEST_ID,"session_id":43,"files_scanned":5,"tracks_indexed":2}),
+            ),
+        ),
+        (r#"{"type":"log","message":"scan: probed=2"}"#, None),
         (
             r#"{"type":"finish","success":true}"#,
             Some(
@@ -283,6 +293,17 @@ fn scan_decoder_rejects_device_sync_shapes_and_invalid_termination() {
         assert!(admitted_scan().decode(invalid).is_err(), "{invalid}");
     }
     assert!(admitted_scan().on_eof().is_err());
+
+    let mut truncated = admitted_scan();
+    truncated
+        .decode(r#"{"type":"header","source":"/Music","ipod":"","manifest":"/state/library-index.json"}"#)
+        .unwrap();
+    truncated
+        .decode(r#"{"type":"summary","add":1,"modify":0,"metadata_only":0,"remove":0,"unchanged":2,"total_planned":1}"#)
+        .unwrap();
+    assert!(truncated
+        .decode(r#"{"type":"finish","success":true}"#)
+        .is_err());
 }
 
 fn worker() -> LegacyWorkerDecoder {
@@ -299,7 +320,7 @@ fn admitted_worker() -> LegacyWorkerDecoder {
 }
 
 fn admitted_scan() -> LegacyScanDecoder {
-    let mut decoder = LegacyScanDecoder::new(request_id(), SessionId::new(43).unwrap());
+    let mut decoder = LegacyScanDecoder::new(Some(request_id()), SessionId::new(43).unwrap());
     assert_eq!(
         decoder.decode(HELLO).unwrap().map(event_value),
         Some(json!({"type":"library_scan_started","request_id":REQUEST_ID,"session_id":43}))

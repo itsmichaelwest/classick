@@ -126,17 +126,20 @@ pub enum WireEvent {
         snapshot: super::LibrarySnapshot,
     },
     LibraryScanStarted {
-        request_id: RequestId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<RequestId>,
         session_id: SessionId,
     },
     LibraryScanProgress {
-        request_id: RequestId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<RequestId>,
         session_id: SessionId,
         files_scanned: u64,
         tracks_indexed: u64,
     },
     LibraryScanFinished {
-        request_id: RequestId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<RequestId>,
         session_id: SessionId,
         success: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]

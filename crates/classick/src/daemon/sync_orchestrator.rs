@@ -9,7 +9,7 @@ use crate::daemon::session_admission::{EventContext, SessionPhase};
 use crate::device::DeviceId;
 use crate::ipc_daemon::DaemonEvent;
 use crate::progress::StopReason;
-use crate::wire::{LegacyWorkerDecoder, SessionId as WireSessionId};
+use crate::wire::{LegacyScanDecoder, LegacyWorkerDecoder, SessionId as WireSessionId, WireEvent};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -48,6 +48,27 @@ pub enum OrchestratorOutcome {
     Paused {
         summary: Option<SyncSummary>,
     },
+}
+
+enum LegacySubprocessDecoder {
+    Device(LegacyWorkerDecoder),
+    Scan(LegacyScanDecoder),
+}
+
+impl LegacySubprocessDecoder {
+    fn decode(&mut self, line: &str) -> Result<Option<WireEvent>> {
+        match self {
+            Self::Device(decoder) => decoder.decode(line),
+            Self::Scan(decoder) => decoder.decode(line),
+        }
+    }
+
+    fn on_eof(&self) -> Result<()> {
+        match self {
+            Self::Device(decoder) => decoder.on_eof(),
+            Self::Scan(decoder) => decoder.on_eof(),
+        }
+    }
 }
 
 /// Build the command to spawn. Extracted so tests can verify args
@@ -296,17 +317,15 @@ async fn drive_child_with_stall_grace(
     event_context: EventContext,
     stall_grace: Duration,
 ) -> Result<OrchestratorOutcome> {
-    let mut worker_decoder = event_context
-        .serial
-        .as_deref()
-        .map(|serial| -> Result<LegacyWorkerDecoder> {
-            Ok(LegacyWorkerDecoder::new(
-                DeviceId::parse(serial).context("validate admitted worker device ID")?,
-                WireSessionId::new(event_context.session_id)
-                    .context("validate admitted worker session ID")?,
-            ))
-        })
-        .transpose()?;
+    let wire_session_id = WireSessionId::new(event_context.session_id)
+        .context("validate admitted worker session ID")?;
+    let mut worker_decoder = match event_context.serial.as_deref() {
+        Some(serial) => LegacySubprocessDecoder::Device(LegacyWorkerDecoder::new(
+            DeviceId::parse(serial).context("validate admitted worker device ID")?,
+            wire_session_id,
+        )),
+        None => LegacySubprocessDecoder::Scan(LegacyScanDecoder::new(None, wire_session_id)),
+    };
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", exe.display()))?;
@@ -336,7 +355,7 @@ async fn drive_child_with_stall_grace(
                 let line = match line_res {
                     Ok(Some(line)) => line,
                     Ok(None) => break, // subprocess closed stdout (normal completion or crash)
-                    Err(error) if worker_decoder.is_some() => {
+                    Err(error) => {
                         tracing::warn!(
                             session_id = event_context.session_id,
                             "orchestrator: rejected unreadable worker output: {error}"
@@ -347,25 +366,22 @@ async fn drive_child_with_stall_grace(
                             summary: last_summary,
                         });
                     }
-                    Err(error) => return Err(error).context("read scan subprocess output"),
                 };
 
                 // Validate the legacy worker stream against the typed protocol
                 // before it can cross the daemon boundary. The v2 envelope stays
                 // temporarily for client compatibility; the coordinated v3 switch
                 // forwards the already-decoded event directly.
-                if let Some(decoder) = worker_decoder.as_mut() {
-                    if let Err(error) = decoder.decode(&line) {
-                        tracing::warn!(
-                            session_id = event_context.session_id,
-                            "orchestrator: rejected malformed worker output: {error:#}"
-                        );
-                        force_kill(&mut child).await;
-                        return Ok(OrchestratorOutcome::Aborted {
-                            reason: "worker_protocol_error".to_string(),
-                            summary: last_summary,
-                        });
-                    }
+                if let Err(error) = worker_decoder.decode(&line) {
+                    tracing::warn!(
+                        session_id = event_context.session_id,
+                        "orchestrator: rejected malformed worker output: {error:#}"
+                    );
+                    force_kill(&mut child).await;
+                    return Ok(OrchestratorOutcome::Aborted {
+                        reason: "worker_protocol_error".to_string(),
+                        summary: last_summary,
+                    });
                 }
                 let _ = event_tx.send(event_context.wrap(line.clone()));
                 let Some(value) = serde_json::from_str::<Value>(&line).ok() else { continue };
@@ -488,18 +504,16 @@ async fn drive_child_with_stall_grace(
         }
     }
 
-    if let Some(decoder) = worker_decoder.as_ref() {
-        if let Err(error) = decoder.on_eof() {
-            tracing::warn!(
-                session_id = event_context.session_id,
-                "orchestrator: worker stream ended incorrectly: {error:#}"
-            );
-            force_kill(&mut child).await;
-            return Ok(OrchestratorOutcome::Aborted {
-                reason: "worker_protocol_error".to_string(),
-                summary: last_summary,
-            });
-        }
+    if let Err(error) = worker_decoder.on_eof() {
+        tracing::warn!(
+            session_id = event_context.session_id,
+            "orchestrator: worker stream ended incorrectly: {error:#}"
+        );
+        force_kill(&mut child).await;
+        return Ok(OrchestratorOutcome::Aborted {
+            reason: "worker_protocol_error".to_string(),
+            summary: last_summary,
+        });
     }
 
     drop(stdin);
@@ -734,6 +748,14 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn scan_event_context() -> EventContext {
+        EventContext {
+            session_id: 43,
+            serial: None,
+        }
+    }
+
+    #[cfg(unix)]
     fn summary() -> SyncSummary {
         SyncSummary {
             add: 1,
@@ -851,6 +873,107 @@ mod tests {
                 summary: summary(),
                 db_restored: false,
             }
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scan_output_is_validated_before_legacy_broadcast() {
+        let command = scripted_command(
+            r#"
+                printf '%s\n' '{"type":"hello","protocol_version":"1.4.0","core_version":"0.0.1"}'
+                printf '%s\n' '{"type":"header","source":"/Music","ipod":"","manifest":"/state/library-index.json"}'
+                printf '%s\n' '{"type":"summary","add":1,"modify":0,"metadata_only":0,"remove":0,"unchanged":2,"total_planned":1}'
+                printf '%s\n' '{"type":"track_start","current":1,"total":1,"label":"One.flac"}'
+                printf '%s\n' '{"type":"track_done","result":"applied"}'
+                printf '%s\n' '{"type":"finish","success":true}'
+            "#,
+        );
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let (_pause_tx, pause_rx) = oneshot::channel();
+        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = broadcast::channel(8);
+
+        let outcome = drive_child_with_stall_grace(
+            PathBuf::from("/bin/sh"),
+            command,
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+            event_tx,
+            scan_event_context(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            OrchestratorOutcome::Completed {
+                summary: summary(),
+                db_restored: false,
+            }
+        );
+        let forwarded: Vec<String> = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .filter_map(|event| match event {
+                DaemonEvent::SyncEvent { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            forwarded
+                .iter()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned())
+                .collect::<Vec<_>>(),
+            [
+                "hello",
+                "header",
+                "summary",
+                "track_start",
+                "track_done",
+                "finish"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn device_sync_shape_on_scan_worker_is_not_broadcast() {
+        let command = scripted_command(
+            r#"
+                printf '%s\n' '{"type":"hello","protocol_version":"1.4.0","core_version":"0.0.1"}'
+                printf '%s\n' '{"type":"header","source":"/Music","ipod":"/Volumes/iPod","manifest":"/state/library-index.json"}'
+            "#,
+        );
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let (_pause_tx, pause_rx) = oneshot::channel();
+        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = broadcast::channel(8);
+
+        let outcome = drive_child_with_stall_grace(
+            PathBuf::from("/bin/sh"),
+            command,
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+            event_tx,
+            scan_event_context(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            OrchestratorOutcome::Aborted { reason, .. } if reason == "worker_protocol_error"
+        ));
+        assert_eq!(
+            std::iter::from_fn(|| event_rx.try_recv().ok()).count(),
+            1,
+            "only the admitted hello may cross"
         );
     }
 

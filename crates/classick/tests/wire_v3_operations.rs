@@ -141,7 +141,12 @@ fn operation_vectors_cover_every_new_discriminator() {
 #[test]
 fn playlist_create_contract_returns_and_replays_the_canonical_slug() {
     let contract = serde_json::from_str::<Value>(OPERATION_CONTRACT).unwrap();
-    for key in ["request_replay", "save_playlist", "playlist_broadcast"] {
+    for key in [
+        "request_replay",
+        "save_playlist",
+        "playlist_broadcast",
+        "scan_correlation",
+    ] {
         assert!(!contract[key].as_str().unwrap().is_empty());
     }
     let create_request = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8817";
@@ -158,6 +163,22 @@ fn playlist_create_contract_returns_and_replays_the_canonical_slug() {
         .find(|value| value["type"] == "playlist_saved" && value["request_id"] == create_request)
         .unwrap();
     assert_eq!(saved["playlist"]["slug"], "recent-pop");
+}
+
+#[test]
+fn unsolicited_scan_events_omit_request_authority() {
+    for json in [
+        r#"{"type":"library_scan_started","session_id":43}"#,
+        r#"{"type":"library_scan_progress","session_id":43,"files_scanned":5,"tracks_indexed":2}"#,
+        r#"{"type":"library_scan_finished","session_id":43,"success":true}"#,
+    ] {
+        let decoded =
+            decode_admitted_message(json, &AdmittedStream::DesktopReceivingDaemonEvents).unwrap();
+        let DecodedWireMessage::Known(message) = decoded else {
+            panic!("scan event must be known");
+        };
+        assert_eq!(serde_json::to_string(&*message).unwrap(), json);
+    }
 }
 
 #[test]

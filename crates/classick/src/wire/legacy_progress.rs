@@ -106,22 +106,26 @@ impl LegacyWorkerDecoder {
 }
 
 pub struct LegacyScanDecoder {
-    request_id: RequestId,
+    request_id: Option<RequestId>,
     session_id: SessionId,
     phase: WorkerPhase,
     header_seen: bool,
+    planned_probes: Option<u64>,
+    probe_in_progress: bool,
     files_scanned: u64,
     tracks_indexed: u64,
     failure_message: Option<String>,
 }
 
 impl LegacyScanDecoder {
-    pub fn new(request_id: RequestId, session_id: SessionId) -> Self {
+    pub fn new(request_id: Option<RequestId>, session_id: SessionId) -> Self {
         Self {
             request_id,
             session_id,
             phase: WorkerPhase::AwaitingHello,
             header_seen: false,
+            planned_probes: None,
+            probe_in_progress: false,
             files_scanned: 0,
             tracks_indexed: 0,
             failure_message: None,
@@ -167,24 +171,49 @@ impl LegacyScanDecoder {
                 total_planned,
             } => {
                 require_scan_header(self.header_seen)?;
-                if modify != 0 || metadata_only != 0 || remove != 0 || add != total_planned {
+                if self.planned_probes.is_some()
+                    || modify != 0
+                    || metadata_only != 0
+                    || remove != 0
+                    || add != total_planned
+                {
                     bail!("legacy scan sent an invalid plan summary");
                 }
+                self.planned_probes = Some(u64::try_from(total_planned)?);
                 self.files_scanned = u64::try_from(add)?
                     .checked_add(u64::try_from(unchanged)?)
                     .context("legacy scan file count overflow")?;
                 self.progress_event()
             }
-            IpcEvent::TrackStart { .. } => {
+            IpcEvent::TrackStart { current, total, .. } => {
                 require_scan_header(self.header_seen)?;
+                let planned = self
+                    .planned_probes
+                    .context("legacy scan started a probe before its plan summary")?;
+                let expected_current = self
+                    .tracks_indexed
+                    .checked_add(1)
+                    .context("legacy scan probe count overflow")?;
+                if self.probe_in_progress
+                    || u64::try_from(current)? != expected_current
+                    || u64::try_from(total)? != planned
+                    || expected_current > planned
+                {
+                    bail!("legacy scan sent an invalid track start");
+                }
+                self.probe_in_progress = true;
                 None
             }
             IpcEvent::TrackDone { .. } => {
                 require_scan_header(self.header_seen)?;
-                self.tracks_indexed = self.tracks_indexed.saturating_add(1);
-                if self.tracks_indexed > self.files_scanned {
-                    bail!("legacy scan indexed more tracks than it scanned");
+                if !self.probe_in_progress {
+                    bail!("legacy scan completed a probe that was not started");
                 }
+                self.probe_in_progress = false;
+                self.tracks_indexed = self
+                    .tracks_indexed
+                    .checked_add(1)
+                    .context("legacy scan probe count overflow")?;
                 self.progress_event()
             }
             IpcEvent::Log { .. } => None,
@@ -199,6 +228,12 @@ impl LegacyScanDecoder {
             IpcEvent::Finish { success, .. } => {
                 if success {
                     require_scan_header(self.header_seen)?;
+                    let planned = self
+                        .planned_probes
+                        .context("legacy scan succeeded before its plan summary")?;
+                    if self.probe_in_progress || self.tracks_indexed != planned {
+                        bail!("legacy scan succeeded before completing its planned probes");
+                    }
                 }
                 if success && self.failure_message.is_some() {
                     bail!("legacy scan succeeded after reporting a fatal error");
