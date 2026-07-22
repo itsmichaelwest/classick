@@ -105,7 +105,7 @@ impl CapabilityProfile {
         })
     }
 
-    fn validate(&self) -> Result<(), CapabilityProfileError> {
+    pub(super) fn validate(&self) -> Result<(), CapabilityProfileError> {
         if self.schema_version != CAPABILITY_PROFILE_SCHEMA_VERSION {
             return Err(CapabilityProfileError::Invalid(format!(
                 "unsupported capability profile schema {}",
