@@ -111,6 +111,11 @@ incidents and completed gate reports are archived in
   subprocess `1.4.0` and daemon `2.0.0`. `hello` is always first.
 - Preserve socket-line order through one actor/reader path. Per-line detached
   tasks can let later events overtake an invalid handshake.
+- Validate owned worker output before broadcasting it: malformed JSON,
+  invalid UTF-8, contradictory terminal ordering, and EOF before `finish` are
+  protocol failures that must kill and reap the child. A library scan becomes
+  observable at its admitted `hello`, because source/config resolution can
+  fail before the scan emits its legacy header.
 - Every durable mutation keeps its request ID until canonical persisted state
   acknowledges that exact request. An echo, write completion, or uncorrelated
   broadcast is not an acknowledgement.
