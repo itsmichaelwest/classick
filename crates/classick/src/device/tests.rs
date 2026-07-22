@@ -32,8 +32,9 @@ fn serde_serialization_emits_canonical_value() {
 }
 
 #[test]
-fn serde_deserialization_normalizes_valid_input() {
-    let decoded: DeviceId = serde_json::from_str("\"0Xabcdef0123456789\"").unwrap();
+fn serde_deserialization_requires_canonical_input() {
+    assert!(serde_json::from_str::<DeviceId>("\"0Xabcdef0123456789\"").is_err());
+    let decoded: DeviceId = serde_json::from_str("\"ABCDEF0123456789\"").unwrap();
     assert_eq!(decoded.to_string(), "ABCDEF0123456789");
 }
 

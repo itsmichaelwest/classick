@@ -67,6 +67,12 @@ impl<'de> Deserialize<'de> for DeviceId {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Self::parse(&value).map_err(serde::de::Error::custom)
+        let device_id = Self::parse(&value).map_err(serde::de::Error::custom)?;
+        if value != device_id.as_str() {
+            return Err(serde::de::Error::custom(
+                "serialized device ID must use its canonical uppercase spelling",
+            ));
+        }
+        Ok(device_id)
     }
 }

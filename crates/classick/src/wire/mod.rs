@@ -1,9 +1,11 @@
 mod hello;
+mod routing;
 
 use anyhow::{bail, Context, Result};
 pub use hello::{
     validate_peer_hello, CapabilityName, EndpointRole, WireHello, WIRE_PROTOCOL_VERSION,
 };
+pub use routing::{PromptId, RequestId, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
