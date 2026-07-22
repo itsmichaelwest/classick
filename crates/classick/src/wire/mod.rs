@@ -1,15 +1,23 @@
 mod command;
+mod config;
 mod event;
 mod hello;
+mod inventory;
 mod routing;
 
 use anyhow::{bail, Context, Result};
 pub use command::WireCommand;
+pub use config::{ConfigDelivery, DeliveredComponent, DeviceConfigSnapshot};
 pub use event::{
-    ActionPlanSummary, ArtworkSummary, SkippedForSpace, StopReason, TrackResult, WireEvent,
+    ActionPlanSummary, ArtworkSummary, ConfigComponent, ConfigFailureStage, SkippedForSpace,
+    StopReason, TrackResult, WireEvent,
 };
 pub use hello::{
     validate_peer_hello, CapabilityName, EndpointRole, WireHello, WIRE_PROTOCOL_VERSION,
+};
+pub use inventory::{
+    DeviceInventorySnapshot, DevicePhase, IdentifiedDeviceSnapshot, ProfileStatus,
+    StorageFreshness, StorageSnapshot, UnidentifiedDeviceSnapshot,
 };
 pub use routing::{PromptId, RequestId, SessionId};
 use serde::{Deserialize, Serialize};
@@ -46,6 +54,15 @@ enum MessageClass {
 
 message_kinds!(
     (Hello, "hello", Hello),
+    (GetInventory, "get_inventory", Command),
+    (SubscribeInventory, "subscribe_inventory", Command),
+    (UnsubscribeInventory, "unsubscribe_inventory", Command),
+    (AdoptDevice, "adopt_device", Command),
+    (ForgetDevice, "forget_device", Command),
+    (GetDeviceConfig, "get_device_config", Command),
+    (SetSelection, "set_selection", Command),
+    (SetSettings, "set_settings", Command),
+    (SetSubscriptions, "set_subscriptions", Command),
     (ApplyReview, "apply_review", Command),
     (DryRunReview, "dry_run_review", Command),
     (QuitReview, "quit_review", Command),
@@ -53,6 +70,15 @@ message_kinds!(
     (FormDecision, "form_decision", Command),
     (CancelSync, "cancel_sync", Command),
     (PauseSync, "pause_sync", Command),
+    (DeviceInventory, "device_inventory", Event),
+    (
+        InventorySubscriptionChanged,
+        "inventory_subscription_changed",
+        Event
+    ),
+    (DeviceConfig, "device_config", Event),
+    (ConfigMutationFailed, "config_mutation_failed", Event),
+    (DeviceForgotten, "device_forgotten", Event),
     (RunHeader, "run_header", Event),
     (SyncSummary, "sync_summary", Event),
     (ReviewRequested, "review_requested", Event),
@@ -96,8 +122,14 @@ impl Serialize for WireMessage {
                 }
                 HelloEnvelope::Hello(hello).serialize(serializer)
             }
-            Self::Command(command) => command.serialize(serializer),
-            Self::Event(event) => event.serialize(serializer),
+            Self::Command(command) => {
+                command.validate().map_err(serde::ser::Error::custom)?;
+                command.serialize(serializer)
+            }
+            Self::Event(event) => {
+                event.validate().map_err(serde::ser::Error::custom)?;
+                event.serialize(serializer)
+            }
         }
     }
 }
@@ -181,6 +213,13 @@ pub fn decode_admitted_message(json: &str, stream: &AdmittedStream) -> Result<De
         }
         bail!("unknown {message_type} message");
     };
+    if kind.class() == MessageClass::Command
+        && value
+            .as_object()
+            .is_some_and(|object| object.contains_key("observation_id"))
+    {
+        bail!("observation ID is not accepted by wire commands");
+    }
     if kind == MessageKind::Hello {
         bail!("hello is only valid as the first wire message");
     }
@@ -260,6 +299,7 @@ fn decode_command(value: Value, kind: MessageKind) -> Result<WireMessage> {
     if command.kind() != kind {
         bail!("wire command discriminator mismatch");
     }
+    command.validate()?;
     Ok(WireMessage::Command(command))
 }
 
@@ -280,7 +320,10 @@ fn validate_worker_command(
     command: &WireCommand,
     admission: &WorkerCommandAdmission,
 ) -> Result<()> {
-    let (device_id, session_id) = command.route();
+    command.validate()?;
+    let Some((device_id, session_id)) = command.session_route() else {
+        bail!("non-session command is not valid on a worker command stream");
+    };
     if !admission.route.matches(device_id, session_id) {
         bail!("command does not match the owned worker session");
     }

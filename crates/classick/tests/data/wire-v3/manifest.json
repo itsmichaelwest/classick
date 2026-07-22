@@ -27,5 +27,30 @@
       {"path":"progress/negative/prompt-empty-options.json","expectation":"semantic_failure","stream":"worker_to_daemon_events","expected_device_id":"000A27002138B0A8","expected_session_id":42},
       {"path":"progress/negative/prompt-decision-out-of-range.json","expectation":"pending_interaction_mismatch","stream":"daemon_to_worker_commands","expected_device_id":"000A27002138B0A8","expected_session_id":42,"prompt_id":7,"option_count":3}
     ]
+  },
+  "device": {
+    "positive_collections": [
+      {"path":"device/commands.ndjson","stream":"desktop_to_daemon_commands"},
+      {"path":"device/events.ndjson","stream":"daemon_to_desktop_events"},
+      {"path":"device/state-matrix.ndjson","stream":"daemon_to_desktop_events"}
+    ],
+    "negative_vectors": [
+      {"path":"device/negative/inventory-duplicate-device.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/inventory-disconnected-storage.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/config-duplicate-mutation.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/config-empty-delivery-error.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/set-subscriptions-duplicate.json","expectation":"semantic_failure","stream":"desktop_to_daemon_commands"},
+      {"path":"device/negative/inventory-connected-disconnected-phase.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/inventory-unready-syncing.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/inventory-invalid-provenance.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/inventory-empty-hardware-string.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/inventory-zero-capacity.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/set-settings-with-observation.json","expectation":"forbidden_observation_id","stream":"desktop_to_daemon_commands"},
+      {"path":"device/negative/inventory-zero-observation.json","expectation":"decode_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/inventory-duplicate-observation.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/inventory-zero-revision.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/inventory-invalid-storage.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
+      {"path":"device/negative/inventory-identified-unavailable.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"}
+    ]
   }
 }

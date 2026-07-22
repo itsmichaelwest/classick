@@ -1,3 +1,4 @@
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +47,16 @@ impl<T> Fact<T> {
             confidence: FactConfidence::Heuristic,
         }
     }
+
+    fn has_valid_provenance(&self) -> bool {
+        matches!(
+            (self.source, self.confidence),
+            (
+                FactSource::Reported | FactSource::Decoded,
+                FactConfidence::Certain
+            ) | (FactSource::Inferred, FactConfidence::Heuristic)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,4 +103,48 @@ pub struct HardwareFacts {
     pub firmware: Option<Fact<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_bytes: Option<Fact<u64>>,
+}
+
+impl HardwareFacts {
+    pub fn validate(&self) -> Result<()> {
+        for (name, valid) in [
+            (
+                "family",
+                self.family.as_ref().is_none_or(Fact::has_valid_provenance),
+            ),
+            (
+                "colour",
+                self.colour.as_ref().is_none_or(Fact::has_valid_provenance),
+            ),
+            (
+                "capacity",
+                self.capacity_bytes
+                    .as_ref()
+                    .is_none_or(Fact::has_valid_provenance),
+            ),
+        ] {
+            if !valid {
+                bail!("hardware {name} fact has inconsistent provenance");
+            }
+        }
+        for (name, fact) in [
+            ("generation", self.generation.as_ref()),
+            ("model code", self.model_code.as_ref()),
+            ("firmware", self.firmware.as_ref()),
+        ] {
+            if let Some(fact) = fact {
+                if !fact.has_valid_provenance() || fact.value.is_empty() {
+                    bail!("hardware {name} fact is empty or has inconsistent provenance");
+                }
+            }
+        }
+        if self
+            .capacity_bytes
+            .as_ref()
+            .is_some_and(|fact| fact.value == 0)
+        {
+            bail!("hardware capacity fact must be nonzero");
+        }
+        Ok(())
+    }
 }

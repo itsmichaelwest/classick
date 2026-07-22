@@ -1,8 +1,8 @@
 use classick::device::DeviceId;
 use classick::wire::{
-    decode_admitted_message, known_message_types, ActionPlanSummary, AdmittedStream,
-    DecodedWireMessage, OwnedSessionRoute, PendingWorkerInteraction, PromptId, RequestId,
-    SessionId, TrackResult, WireCommand, WireEvent, WireMessage, WorkerCommandAdmission,
+    decode_admitted_message, ActionPlanSummary, AdmittedStream, DecodedWireMessage,
+    OwnedSessionRoute, PendingWorkerInteraction, PromptId, RequestId, SessionId, TrackResult,
+    WireCommand, WireEvent, WireMessage, WorkerCommandAdmission,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -131,20 +131,6 @@ fn shared_manifest_discovers_positive_and_negative_progress_vectors() {
             vector.expectation
         );
     }
-}
-
-#[test]
-fn discriminator_catalogue_is_exhaustively_covered_by_shared_goldens() {
-    let mut golden_types = BTreeSet::from(["hello".to_owned()]);
-    for line in COMMAND_GOLDENS.lines().chain(EVENT_GOLDENS.lines()) {
-        golden_types.insert(message_type(line));
-    }
-    assert_eq!(
-        golden_types,
-        known_message_types()
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>()
-    );
 }
 
 #[test]

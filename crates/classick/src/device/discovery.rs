@@ -3,6 +3,7 @@ use super::{
     hardware_facts_from_reported_model_code, hardware_facts_from_usb, DeviceId, DeviceReadiness,
     Fact, HardwareFacts,
 };
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -17,7 +18,34 @@ pub struct ObservationId(u64);
 
 impl ObservationId {
     pub const fn new(value: u64) -> Self {
+        assert!(value != 0, "observation ID must be nonzero");
         Self(value)
+    }
+
+    pub const fn get(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Serialize for ObservationId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ObservationId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        if value == 0 {
+            return Err(serde::de::Error::custom("observation ID must be nonzero"));
+        }
+        Ok(Self(value))
     }
 }
 

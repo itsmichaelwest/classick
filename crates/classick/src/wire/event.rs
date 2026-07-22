@@ -1,5 +1,6 @@
 use super::{PromptId, RequestId, SessionId};
 use crate::device::DeviceId;
+use crate::portable::profile::MutationId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,9 +41,52 @@ pub struct ArtworkSummary {
     pub failed_sources: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigComponent {
+    Selection,
+    Settings,
+    Subscriptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigFailureStage {
+    HostAcceptance,
+    DeviceDelivery,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireEvent {
+    DeviceInventory {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<RequestId>,
+        #[serde(flatten)]
+        snapshot: super::DeviceInventorySnapshot,
+    },
+    InventorySubscriptionChanged {
+        request_id: RequestId,
+        subscribed: bool,
+    },
+    DeviceConfig {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<RequestId>,
+        #[serde(flatten)]
+        config: super::DeviceConfigSnapshot,
+    },
+    ConfigMutationFailed {
+        device_id: DeviceId,
+        request_id: RequestId,
+        mutation_id: MutationId,
+        component: ConfigComponent,
+        stage: ConfigFailureStage,
+        message: String,
+    },
+    DeviceForgotten {
+        device_id: DeviceId,
+        request_id: RequestId,
+    },
     RunHeader {
         device_id: DeviceId,
         session_id: SessionId,
@@ -137,6 +181,13 @@ pub enum WireEvent {
 impl WireEvent {
     pub(super) fn kind(&self) -> super::MessageKind {
         match self {
+            Self::DeviceInventory { .. } => super::MessageKind::DeviceInventory,
+            Self::InventorySubscriptionChanged { .. } => {
+                super::MessageKind::InventorySubscriptionChanged
+            }
+            Self::DeviceConfig { .. } => super::MessageKind::DeviceConfig,
+            Self::ConfigMutationFailed { .. } => super::MessageKind::ConfigMutationFailed,
+            Self::DeviceForgotten { .. } => super::MessageKind::DeviceForgotten,
             Self::RunHeader { .. } => super::MessageKind::RunHeader,
             Self::SyncSummary { .. } => super::MessageKind::SyncSummary,
             Self::ReviewRequested { .. } => super::MessageKind::ReviewRequested,
@@ -155,7 +206,15 @@ impl WireEvent {
     }
 
     pub(super) fn allowed_from_worker(&self) -> bool {
-        !matches!(self, Self::CommandFailed { .. })
+        !matches!(
+            self,
+            Self::DeviceInventory { .. }
+                | Self::InventorySubscriptionChanged { .. }
+                | Self::DeviceConfig { .. }
+                | Self::ConfigMutationFailed { .. }
+                | Self::DeviceForgotten { .. }
+                | Self::CommandFailed { .. }
+        )
     }
 
     pub(super) fn route(&self) -> Option<(&DeviceId, SessionId)> {
@@ -223,12 +282,22 @@ impl WireEvent {
                 session_id,
                 ..
             } => Some((device_id, *session_id)),
-            Self::CommandFailed { .. } => None,
+            Self::DeviceInventory { .. }
+            | Self::InventorySubscriptionChanged { .. }
+            | Self::DeviceConfig { .. }
+            | Self::ConfigMutationFailed { .. }
+            | Self::DeviceForgotten { .. }
+            | Self::CommandFailed { .. } => None,
         }
     }
 
     pub(super) fn validate(&self) -> Result<()> {
         match self {
+            Self::DeviceInventory { snapshot, .. } => snapshot.validate()?,
+            Self::DeviceConfig { config, .. } => config.validate()?,
+            Self::ConfigMutationFailed { message, .. } if message.is_empty() => {
+                bail!("configuration mutation failure requires a message")
+            }
             Self::RunHeader {
                 source,
                 ipod,

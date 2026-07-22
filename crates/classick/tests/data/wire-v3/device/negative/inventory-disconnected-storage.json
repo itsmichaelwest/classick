@@ -1,0 +1,1 @@
+{"type":"device_inventory","revision":1,"devices":[{"device_id":"000A27002138B0A8","readiness":"ready","hardware":{},"profile_status":"adopted","connected":false,"phase":"disconnected","storage":{"total_bytes":100,"free_bytes":90,"freshness":"live"},"synced_count":0}],"unidentified":[]}

@@ -109,28 +109,46 @@ impl PortableProfile {
                 self.schema_version
             );
         }
-        validate_component(
-            "selection",
-            &self.selection,
-            self.selection.value.schema_version,
-        )?;
-        validate_component(
-            "settings",
-            &self.settings,
-            self.settings.value.schema_version,
-        )?;
-        validate_component(
-            "subscriptions",
-            &self.subscriptions,
-            self.subscriptions.value.schema_version,
-        )?;
-        validate_unique_mutation_ids(self)?;
+        validate_profile_components(&self.selection, &self.settings, &self.subscriptions)?;
         if self.generated_sysinfo_extended_hash.is_some() && self.capability_profile_id.is_none() {
             bail!("owned generated SysInfoExtended requires a capability profile");
         }
-        validate_subscriptions(self)?;
         validate_ownership_and_authorities(self)
     }
+}
+
+pub(crate) fn validate_profile_components(
+    selection: &ProfileComponent<SelectionValue>,
+    settings: &ProfileComponent<SettingsValue>,
+    subscriptions: &ProfileComponent<SubscriptionsValue>,
+) -> Result<()> {
+    validate_component("selection", selection, selection.value.schema_version)?;
+    validate_component("settings", settings, settings.value.schema_version)?;
+    validate_component(
+        "subscriptions",
+        subscriptions,
+        subscriptions.value.schema_version,
+    )?;
+    let mut mutation_ids = HashSet::new();
+    for mutation_id in [
+        &selection.mutation_id,
+        &settings.mutation_id,
+        &subscriptions.mutation_id,
+    ] {
+        if !mutation_ids.insert(mutation_id) {
+            bail!("duplicate profile mutation ID {mutation_id}");
+        }
+    }
+    let mut slugs = HashSet::new();
+    if subscriptions
+        .value
+        .playlists
+        .iter()
+        .any(|slug| !slugs.insert(slug))
+    {
+        bail!("duplicate subscribed playlist slug");
+    }
+    Ok(())
 }
 
 fn deserialize_canonical_device_id<'de, D>(
@@ -159,31 +177,6 @@ fn validate_component<T>(
     }
     if schema_version != COMPONENT_SCHEMA_VERSION {
         bail!("unsupported {name} schema {schema_version}");
-    }
-    Ok(())
-}
-
-fn validate_unique_mutation_ids(profile: &PortableProfile) -> Result<()> {
-    let ids: [&MutationId; 3] = [
-        &profile.selection.mutation_id,
-        &profile.settings.mutation_id,
-        &profile.subscriptions.mutation_id,
-    ];
-    let mut unique = HashSet::new();
-    for id in ids {
-        if !unique.insert(id) {
-            bail!("duplicate profile mutation ID {id}");
-        }
-    }
-    Ok(())
-}
-
-fn validate_subscriptions(profile: &PortableProfile) -> Result<()> {
-    let mut subscriptions = HashSet::new();
-    for slug in &profile.subscriptions.value.playlists {
-        if !subscriptions.insert(slug) {
-            bail!("duplicate subscribed playlist slug {slug}");
-        }
     }
     Ok(())
 }
