@@ -5,6 +5,7 @@
 pub mod command_handler;
 pub(crate) mod device_config_transaction;
 pub mod device_registry;
+pub mod device_registry_v2;
 pub mod device_snapshot;
 pub mod device_storage;
 pub mod device_watcher;

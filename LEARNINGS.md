@@ -50,6 +50,10 @@ incidents and completed gate reports are archived in
 - Treat database, artwork, playlists, ownership, and manifests as one
   coordinated publication. Rollback must restore the exact recorded
   bytes-or-absence for every authority before becoming terminal.
+- Registry-v2 migration is all-or-nothing: reject duplicate or noncanonical
+  device keys and unknown metadata at every nested boundary. Legacy revisions
+  remain `pending_legacy_import`; they are not imported portable-profile
+  authority until the cache and outbox are durably published.
 - Recover pending journals before planning a new diff. Require exact schema,
   mount, raw serial, session identity, hashes, and owned paths; ambiguous or
   escaping journals stay untouched and block mutation.
