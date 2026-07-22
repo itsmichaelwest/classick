@@ -148,7 +148,7 @@ fn typed_progress_is_flat_and_round_trips_on_both_event_streams() {
     for stream in [desktop_events(), worker_events()] {
         assert_eq!(
             decode_admitted_message(&json, &stream).unwrap(),
-            DecodedWireMessage::Known(message.clone())
+            DecodedWireMessage::Known(Box::new(message.clone()))
         );
     }
 }
@@ -173,7 +173,7 @@ fn decisions_are_flat_and_valid_on_desktop_and_worker_command_streams() {
     ] {
         assert_eq!(
             decode_admitted_message(&json, &stream).unwrap(),
-            DecodedWireMessage::Known(message.clone())
+            DecodedWireMessage::Known(Box::new(message.clone()))
         );
     }
 }

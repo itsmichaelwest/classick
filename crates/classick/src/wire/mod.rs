@@ -1,8 +1,14 @@
 mod command;
 mod config;
 mod event;
+mod event_validation;
+mod global;
 mod hello;
+mod history;
 mod inventory;
+mod library;
+mod operations;
+mod playlist;
 mod routing;
 
 use anyhow::{bail, Context, Result};
@@ -12,12 +18,27 @@ pub use event::{
     ActionPlanSummary, ArtworkSummary, ConfigComponent, ConfigFailureStage, SkippedForSpace,
     StopReason, TrackResult, WireEvent,
 };
+pub use global::{
+    DropSyncBehavior, GlobalSettings, NotifyLevel, SourceAvailabilityState, SourceRoot, SyncMode,
+};
 pub use hello::{
     validate_peer_hello, CapabilityName, EndpointRole, WireHello, WIRE_PROTOCOL_VERSION,
 };
+pub use history::{HistoryEntry, HistorySummary, SyncOutcome};
 pub use inventory::{
     DeviceInventorySnapshot, DevicePhase, IdentifiedDeviceSnapshot, ProfileStatus,
     StorageFreshness, StorageSnapshot, UnidentifiedDeviceSnapshot,
+};
+pub use library::{
+    DevicePreview, LibraryAlbum, LibraryArtist, LibraryGenre, LibrarySnapshot, SelectionPreview,
+};
+pub use operations::{
+    DropSyncDisposition, HistoryTrigger, SyncOperation, SyncRejectReason, SyncTrigger,
+};
+pub use playlist::{
+    LibraryMutationTarget, PlaylistDetailResult, PlaylistDraft, PlaylistKind, PlaylistSummary,
+    SmartField, SmartLimit, SmartMatch, SmartOperator, SmartOrder, SmartRule, SmartRules,
+    StoredPlaylist,
 };
 pub use routing::{PromptId, RequestId, SessionId};
 use serde::{Deserialize, Serialize};
@@ -54,6 +75,9 @@ enum MessageClass {
 
 message_kinds!(
     (Hello, "hello", Hello),
+    (GetGlobalConfig, "get_global_config", Command),
+    (SetSourceLocation, "set_source_location", Command),
+    (SetGlobalSettings, "set_global_settings", Command),
     (GetInventory, "get_inventory", Command),
     (SubscribeInventory, "subscribe_inventory", Command),
     (UnsubscribeInventory, "unsubscribe_inventory", Command),
@@ -63,6 +87,27 @@ message_kinds!(
     (SetSelection, "set_selection", Command),
     (SetSettings, "set_settings", Command),
     (SetSubscriptions, "set_subscriptions", Command),
+    (TriggerSync, "trigger_sync", Command),
+    (BackfillRockbox, "backfill_rockbox", Command),
+    (ReplaceLibrary, "replace_library", Command),
+    (GetHistory, "get_history", Command),
+    (GetLibrary, "get_library", Command),
+    (ScanLibrary, "scan_library", Command),
+    (RetrySourceMount, "retry_source_mount", Command),
+    (PreviewSelection, "preview_selection", Command),
+    (PreviewDevice, "preview_device", Command),
+    (ResolveTracks, "resolve_tracks", Command),
+    (AddSelectionToDevice, "add_selection_to_device", Command),
+    (ListPlaylists, "list_playlists", Command),
+    (GetPlaylist, "get_playlist", Command),
+    (SavePlaylist, "save_playlist", Command),
+    (DeletePlaylist, "delete_playlist", Command),
+    (
+        AppendSelectionToPlaylist,
+        "append_selection_to_playlist",
+        Command
+    ),
+    (Shutdown, "shutdown", Command),
     (ApplyReview, "apply_review", Command),
     (DryRunReview, "dry_run_review", Command),
     (QuitReview, "quit_review", Command),
@@ -70,6 +115,8 @@ message_kinds!(
     (FormDecision, "form_decision", Command),
     (CancelSync, "cancel_sync", Command),
     (PauseSync, "pause_sync", Command),
+    (GlobalConfig, "global_config", Event),
+    (SourceAvailability, "source_availability", Event),
     (DeviceInventory, "device_inventory", Event),
     (
         InventorySubscriptionChanged,
@@ -79,6 +126,27 @@ message_kinds!(
     (DeviceConfig, "device_config", Event),
     (ConfigMutationFailed, "config_mutation_failed", Event),
     (DeviceForgotten, "device_forgotten", Event),
+    (SyncAccepted, "sync_accepted", Event),
+    (SyncRejected, "sync_rejected", Event),
+    (History, "history", Event),
+    (Library, "library", Event),
+    (LibraryScanStarted, "library_scan_started", Event),
+    (LibraryScanProgress, "library_scan_progress", Event),
+    (LibraryScanFinished, "library_scan_finished", Event),
+    (SelectionPreview, "selection_preview", Event),
+    (DevicePreview, "device_preview", Event),
+    (ResolvedTracks, "resolved_tracks", Event),
+    (Playlists, "playlists", Event),
+    (PlaylistDetail, "playlist_detail", Event),
+    (PlaylistSaved, "playlist_saved", Event),
+    (DeviceSelectionAdded, "device_selection_added", Event),
+    (
+        PlaylistSelectionAppended,
+        "playlist_selection_appended",
+        Event
+    ),
+    (LibraryMutationRejected, "library_mutation_rejected", Event),
+    (DaemonShutdownStarted, "daemon_shutdown_started", Event),
     (RunHeader, "run_header", Event),
     (SyncSummary, "sync_summary", Event),
     (ReviewRequested, "review_requested", Event),
@@ -191,7 +259,7 @@ impl WorkerCommandAdmission {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodedWireMessage {
-    Known(WireMessage),
+    Known(Box<WireMessage>),
     IgnoredUnknownEvent { message_type: String },
 }
 
@@ -228,13 +296,13 @@ pub fn decode_admitted_message(json: &str, stream: &AdmittedStream) -> Result<De
             if kind.class() == MessageClass::Command {
                 bail!("{message_type} command is not valid on a desktop event stream");
             }
-            decode_event(value, kind).map(DecodedWireMessage::Known)
+            decode_event(value, kind).map(|message| DecodedWireMessage::Known(Box::new(message)))
         }
         AdmittedStream::DaemonReceivingDesktopCommands => {
             if kind.class() != MessageClass::Command {
                 bail!("{message_type} event is not valid on a desktop command stream");
             }
-            decode_command(value, kind).map(DecodedWireMessage::Known)
+            decode_command(value, kind).map(|message| DecodedWireMessage::Known(Box::new(message)))
         }
         AdmittedStream::WorkerReceivingDaemonCommands(admission) => {
             if kind.class() != MessageClass::Command {
@@ -246,7 +314,9 @@ pub fn decode_admitted_message(json: &str, stream: &AdmittedStream) -> Result<De
                 bail!("wire command discriminator mismatch");
             }
             validate_worker_command(&command, admission)?;
-            Ok(DecodedWireMessage::Known(WireMessage::Command(command)))
+            Ok(DecodedWireMessage::Known(Box::new(WireMessage::Command(
+                command,
+            ))))
         }
         AdmittedStream::DaemonReceivingWorkerEvents(expected_route) => {
             if kind.class() != MessageClass::Event {
@@ -266,7 +336,9 @@ pub fn decode_admitted_message(json: &str, stream: &AdmittedStream) -> Result<De
             if !expected_route.matches(device_id, session_id) {
                 bail!("{message_type} does not match the owned worker session");
             }
-            Ok(DecodedWireMessage::Known(WireMessage::Event(event)))
+            Ok(DecodedWireMessage::Known(Box::new(WireMessage::Event(
+                event,
+            ))))
         }
     }
 }

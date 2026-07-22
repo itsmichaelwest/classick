@@ -1,0 +1,5 @@
+{
+  "request_replay": "Replaying identical encoded mutation bytes with the same request_id returns the original canonical result without applying the mutation again; reusing the request_id with a different payload fails.",
+  "save_playlist": "Success returns playlist_saved with the exact canonical stored playlist and allocated slug. A create replay returns that same slug and never allocates a second playlist.",
+  "playlist_broadcast": "After playlist_saved, playlists may broadcast the new global collection without request correlation. The broadcast is not the create acknowledgement."
+}

@@ -1,0 +1,99 @@
+{
+  "mapped": {
+    "v1_commands": {
+      "review_decision":"apply_review|dry_run_review|quit_review",
+      "prompt_decision":"prompt_decision",
+      "form_decision":"form_decision",
+      "cancel":"cancel_sync",
+      "pause":"pause_sync"
+    },
+    "v1_events": {
+      "hello":"hello",
+      "header":"run_header",
+      "summary":"sync_summary",
+      "review":"review_requested",
+      "prompt":"prompt",
+      "form":"form",
+      "track_start":"track_start",
+      "track_done":"track_done",
+      "finalizing":"finalizing",
+      "cancelled":"sync_cancelled",
+      "log":"sync_log",
+      "error":"sync_error",
+      "finish":"sync_finished",
+      "paused":"sync_paused"
+    },
+    "v2_commands": {
+      "get_config":"get_global_config",
+      "forget_ipod":"forget_device",
+      "trigger_sync":"trigger_sync",
+      "get_history":"get_history",
+      "cancel_sync":"cancel_sync",
+      "pause":"pause_sync",
+      "decide_prompt":"prompt_decision",
+      "backfill_rockbox":"backfill_rockbox",
+      "replace_library":"replace_library",
+      "get_library":"get_library",
+      "scan_library":"scan_library",
+      "retry_source_mount":"retry_source_mount",
+      "preview_selection":"preview_selection",
+      "list_playlists":"list_playlists",
+      "get_playlist":"get_playlist",
+      "save_playlist":"save_playlist",
+      "delete_playlist":"delete_playlist",
+      "get_device_config":"get_device_config",
+      "save_device_config":"set_selection|set_settings|set_subscriptions",
+      "preview_device":"preview_device",
+      "resolve_tracks":"resolve_tracks",
+      "add_selection_to_device":"add_selection_to_device",
+      "append_selection_to_playlist":"append_selection_to_playlist",
+      "shutdown":"shutdown"
+    },
+    "v2_events": {
+      "config_update":"global_config",
+      "history_update":"history",
+      "sync_rejected":"sync_rejected",
+      "command_failed":"command_failed",
+      "device_selection_added":"device_selection_added",
+      "playlist_selection_appended":"playlist_selection_appended",
+      "library_mutation_rejected":"library_mutation_rejected",
+      "device_inventory_snapshot":"device_inventory",
+      "library_update":"library",
+      "selection_preview":"selection_preview",
+      "playlists_update":"playlists",
+      "playlist_detail":"playlist_detail",
+      "device_config_update":"device_config",
+      "device_preview":"device_preview",
+      "resolved_tracks":"resolved_tracks",
+      "source_availability":"source_availability"
+    }
+  },
+  "removed": {
+    "v1_commands": {
+      "start":"reserved no-op; workers start from their invocation context"
+    },
+    "v2_commands": {
+      "get_status":"singleton status is replaced by device inventory plus global and library snapshots",
+      "save_config":"split into set_source_location and set_global_settings; persisted iPod identity is replaced by adoption and inventory",
+      "subscribe_device_events":"transition subscription is replaced by subscribe_inventory snapshots",
+      "unsubscribe_device_events":"transition subscription is replaced by unsubscribe_inventory snapshots"
+    },
+    "v2_events": {
+      "status_update":"singleton status is replaced by device inventory plus global and library snapshots",
+      "device_connected":"transition events are replaced by authoritative device inventory snapshots",
+      "device_disconnected":"transition events are replaced by authoritative device inventory snapshots",
+      "sync_event":"nested raw JSON is replaced by typed progress events",
+      "selection_update":"singleton selection is replaced by device_config",
+      "hello":"the v2 hello shape is replaced by the role and capability aware v3 hello"
+    },
+    "v2_fields": {
+      "daemon_settings.autostart_with_windows":"platform-local UI preference, not a core wire setting",
+      "daemon_settings.enabled":"legacy migration seed only; device settings auto_sync is the sole ongoing authority",
+      "daemon_settings.rockbox_compat":"device-specific setting in device_config",
+      "config.ipod":"host singleton identity is replaced by adopted device inventory",
+      "history.empty_serial":"unscoped legacy entries are retained on disk but omitted from v3 history because they cannot be assigned safely",
+      "history.raw_serial":"validated legacy 0x IDs are canonicalized to DeviceId when projected onto v3",
+      "history.missing_operation":"legacy entries default to operation sync when projected onto v3"
+    }
+  }
+}

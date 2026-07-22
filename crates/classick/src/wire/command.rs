@@ -8,6 +8,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireCommand {
+    GetGlobalConfig {
+        request_id: RequestId,
+    },
+    SetSourceLocation {
+        request_id: RequestId,
+        source_root: Option<super::SourceRoot>,
+    },
+    SetGlobalSettings {
+        request_id: RequestId,
+        settings: super::GlobalSettings,
+    },
     GetInventory {
         request_id: RequestId,
     },
@@ -52,6 +63,75 @@ pub enum WireCommand {
         request_id: RequestId,
         mutation_id: MutationId,
         subscriptions: SubscriptionsValue,
+    },
+    TriggerSync {
+        device_id: DeviceId,
+        request_id: RequestId,
+        trigger: super::SyncTrigger,
+    },
+    BackfillRockbox {
+        device_id: DeviceId,
+        request_id: RequestId,
+    },
+    ReplaceLibrary {
+        device_id: DeviceId,
+        request_id: RequestId,
+    },
+    GetHistory {
+        request_id: RequestId,
+        limit: u32,
+    },
+    GetLibrary {
+        request_id: RequestId,
+    },
+    ScanLibrary {
+        request_id: RequestId,
+    },
+    RetrySourceMount {
+        request_id: RequestId,
+        allow_ui: bool,
+    },
+    PreviewSelection {
+        device_id: DeviceId,
+        request_id: RequestId,
+        selection: SelectionValue,
+    },
+    PreviewDevice {
+        device_id: DeviceId,
+        request_id: RequestId,
+    },
+    ResolveTracks {
+        request_id: RequestId,
+        rules: Vec<crate::portable::profile::SelectionRule>,
+    },
+    AddSelectionToDevice {
+        device_id: DeviceId,
+        request_id: RequestId,
+        mutation_id: MutationId,
+        rules: Vec<crate::portable::profile::SelectionRule>,
+    },
+    ListPlaylists {
+        request_id: RequestId,
+    },
+    GetPlaylist {
+        request_id: RequestId,
+        slug: crate::portable::profile::PlaylistSlug,
+    },
+    SavePlaylist {
+        request_id: RequestId,
+        playlist: super::PlaylistDraft,
+    },
+    DeletePlaylist {
+        request_id: RequestId,
+        slug: crate::portable::profile::PlaylistSlug,
+    },
+    AppendSelectionToPlaylist {
+        request_id: RequestId,
+        slug: crate::portable::profile::PlaylistSlug,
+        rules: Vec<crate::portable::profile::SelectionRule>,
+    },
+    Shutdown {
+        request_id: RequestId,
     },
     ApplyReview {
         device_id: DeviceId,
@@ -98,6 +178,9 @@ pub enum WireCommand {
 impl WireCommand {
     pub(super) fn kind(&self) -> super::MessageKind {
         match self {
+            Self::GetGlobalConfig { .. } => super::MessageKind::GetGlobalConfig,
+            Self::SetSourceLocation { .. } => super::MessageKind::SetSourceLocation,
+            Self::SetGlobalSettings { .. } => super::MessageKind::SetGlobalSettings,
             Self::GetInventory { .. } => super::MessageKind::GetInventory,
             Self::SubscribeInventory { .. } => super::MessageKind::SubscribeInventory,
             Self::UnsubscribeInventory { .. } => super::MessageKind::UnsubscribeInventory,
@@ -107,6 +190,23 @@ impl WireCommand {
             Self::SetSelection { .. } => super::MessageKind::SetSelection,
             Self::SetSettings { .. } => super::MessageKind::SetSettings,
             Self::SetSubscriptions { .. } => super::MessageKind::SetSubscriptions,
+            Self::TriggerSync { .. } => super::MessageKind::TriggerSync,
+            Self::BackfillRockbox { .. } => super::MessageKind::BackfillRockbox,
+            Self::ReplaceLibrary { .. } => super::MessageKind::ReplaceLibrary,
+            Self::GetHistory { .. } => super::MessageKind::GetHistory,
+            Self::GetLibrary { .. } => super::MessageKind::GetLibrary,
+            Self::ScanLibrary { .. } => super::MessageKind::ScanLibrary,
+            Self::RetrySourceMount { .. } => super::MessageKind::RetrySourceMount,
+            Self::PreviewSelection { .. } => super::MessageKind::PreviewSelection,
+            Self::PreviewDevice { .. } => super::MessageKind::PreviewDevice,
+            Self::ResolveTracks { .. } => super::MessageKind::ResolveTracks,
+            Self::AddSelectionToDevice { .. } => super::MessageKind::AddSelectionToDevice,
+            Self::ListPlaylists { .. } => super::MessageKind::ListPlaylists,
+            Self::GetPlaylist { .. } => super::MessageKind::GetPlaylist,
+            Self::SavePlaylist { .. } => super::MessageKind::SavePlaylist,
+            Self::DeletePlaylist { .. } => super::MessageKind::DeletePlaylist,
+            Self::AppendSelectionToPlaylist { .. } => super::MessageKind::AppendSelectionToPlaylist,
+            Self::Shutdown { .. } => super::MessageKind::Shutdown,
             Self::ApplyReview { .. } => super::MessageKind::ApplyReview,
             Self::DryRunReview { .. } => super::MessageKind::DryRunReview,
             Self::QuitReview { .. } => super::MessageKind::QuitReview,
@@ -234,6 +334,26 @@ impl WireCommand {
                     0,
                 )?;
             }
+            Self::GetHistory { limit, .. } if !(1..=50).contains(limit) => {
+                bail!("history limit must be between 1 and 50")
+            }
+            Self::PreviewSelection { selection, .. } => {
+                if selection.schema_version != 1 {
+                    bail!("unsupported selection schema");
+                }
+                super::library::validate_selection_rules(&selection.rules)?;
+            }
+            Self::ResolveTracks { rules, .. } => {
+                super::library::validate_selection_rules(rules)?;
+            }
+            Self::AddSelectionToDevice { rules, .. }
+            | Self::AppendSelectionToPlaylist { rules, .. } => {
+                if rules.is_empty() {
+                    bail!("library mutation requires at least one selection rule");
+                }
+                super::library::validate_selection_rules(rules)?;
+            }
+            Self::SavePlaylist { playlist, .. } => playlist.validate()?,
             _ => {}
         }
         Ok(())

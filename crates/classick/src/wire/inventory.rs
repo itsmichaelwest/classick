@@ -158,7 +158,7 @@ impl DeviceInventorySnapshot {
     }
 }
 
-fn is_absolute_native_path(path: &str) -> bool {
+pub(super) fn is_absolute_native_path(path: &str) -> bool {
     if path.is_empty() || path.contains('\0') {
         return false;
     }

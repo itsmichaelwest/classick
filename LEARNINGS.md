@@ -114,6 +114,10 @@ incidents and completed gate reports are archived in
 - Every durable mutation keeps its request ID until canonical persisted state
   acknowledges that exact request. An echo, write completion, or uncorrelated
   broadcast is not an acknowledgement.
+- Protocol 3 keeps `schedule_minutes = 0` as the disabled scheduler value and
+  removes legacy global `enabled`; per-device `settings.auto_sync` is the sole
+  ongoing auto-sync authority. History has a separate trigger enum so stored
+  `coalesced` runs cannot become a client-spoofable sync command.
 - Host cache/outbox roots are trusted user-owned directories; loader checks
   detect accidental or corrupt path substitution but are not no-follow/TOCTOU
   security. Do not expose host-state load-modify-save or acknowledgement APIs

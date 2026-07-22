@@ -59,6 +59,21 @@ pub enum ConfigFailureStage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireEvent {
+    GlobalConfig {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<RequestId>,
+        revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_root: Option<super::SourceRoot>,
+        settings: super::GlobalSettings,
+    },
+    SourceAvailability {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<RequestId>,
+        state: super::SourceAvailabilityState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_root: Option<super::SourceRoot>,
+    },
     DeviceInventory {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<RequestId>,
@@ -85,6 +100,107 @@ pub enum WireEvent {
     },
     DeviceForgotten {
         device_id: DeviceId,
+        request_id: RequestId,
+    },
+    SyncAccepted {
+        device_id: DeviceId,
+        session_id: SessionId,
+        request_id: RequestId,
+        operation: super::SyncOperation,
+    },
+    SyncRejected {
+        device_id: DeviceId,
+        request_id: RequestId,
+        operation: super::SyncOperation,
+        reason: super::SyncRejectReason,
+        message: String,
+    },
+    History {
+        request_id: RequestId,
+        entries: Vec<super::HistoryEntry>,
+    },
+    Library {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<RequestId>,
+        #[serde(flatten)]
+        snapshot: super::LibrarySnapshot,
+    },
+    LibraryScanStarted {
+        request_id: RequestId,
+        session_id: SessionId,
+    },
+    LibraryScanProgress {
+        request_id: RequestId,
+        session_id: SessionId,
+        files_scanned: u64,
+        tracks_indexed: u64,
+    },
+    LibraryScanFinished {
+        request_id: RequestId,
+        session_id: SessionId,
+        success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    SelectionPreview {
+        device_id: DeviceId,
+        request_id: RequestId,
+        #[serde(flatten)]
+        preview: super::SelectionPreview,
+    },
+    DevicePreview {
+        device_id: DeviceId,
+        request_id: RequestId,
+        #[serde(flatten)]
+        preview: super::DevicePreview,
+    },
+    ResolvedTracks {
+        request_id: RequestId,
+        tracks: Vec<crate::portable::profile::ProfilePath>,
+    },
+    Playlists {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<RequestId>,
+        revision: u64,
+        playlists: Vec<super::PlaylistSummary>,
+    },
+    PlaylistDetail {
+        request_id: RequestId,
+        revision: u64,
+        slug: crate::portable::profile::PlaylistSlug,
+        result: super::PlaylistDetailResult,
+    },
+    PlaylistSaved {
+        request_id: RequestId,
+        revision: u64,
+        playlist: super::StoredPlaylist,
+    },
+    DeviceSelectionAdded {
+        device_id: DeviceId,
+        request_id: RequestId,
+        mutation_id: MutationId,
+        matched_tracks: u64,
+        missing_tracks: u64,
+        selection_changed: bool,
+        selection_revision: u64,
+        selection: crate::portable::profile::SelectionValue,
+        delivery: super::ConfigDelivery,
+        sync: super::DropSyncDisposition,
+    },
+    PlaylistSelectionAppended {
+        request_id: RequestId,
+        slug: crate::portable::profile::PlaylistSlug,
+        appended_tracks: u64,
+        revision: u64,
+        playlist: super::StoredPlaylist,
+    },
+    LibraryMutationRejected {
+        request_id: RequestId,
+        target: super::LibraryMutationTarget,
+        code: String,
+        message: String,
+    },
+    DaemonShutdownStarted {
         request_id: RequestId,
     },
     RunHeader {
@@ -181,6 +297,8 @@ pub enum WireEvent {
 impl WireEvent {
     pub(super) fn kind(&self) -> super::MessageKind {
         match self {
+            Self::GlobalConfig { .. } => super::MessageKind::GlobalConfig,
+            Self::SourceAvailability { .. } => super::MessageKind::SourceAvailability,
             Self::DeviceInventory { .. } => super::MessageKind::DeviceInventory,
             Self::InventorySubscriptionChanged { .. } => {
                 super::MessageKind::InventorySubscriptionChanged
@@ -188,6 +306,23 @@ impl WireEvent {
             Self::DeviceConfig { .. } => super::MessageKind::DeviceConfig,
             Self::ConfigMutationFailed { .. } => super::MessageKind::ConfigMutationFailed,
             Self::DeviceForgotten { .. } => super::MessageKind::DeviceForgotten,
+            Self::SyncAccepted { .. } => super::MessageKind::SyncAccepted,
+            Self::SyncRejected { .. } => super::MessageKind::SyncRejected,
+            Self::History { .. } => super::MessageKind::History,
+            Self::Library { .. } => super::MessageKind::Library,
+            Self::LibraryScanStarted { .. } => super::MessageKind::LibraryScanStarted,
+            Self::LibraryScanProgress { .. } => super::MessageKind::LibraryScanProgress,
+            Self::LibraryScanFinished { .. } => super::MessageKind::LibraryScanFinished,
+            Self::SelectionPreview { .. } => super::MessageKind::SelectionPreview,
+            Self::DevicePreview { .. } => super::MessageKind::DevicePreview,
+            Self::ResolvedTracks { .. } => super::MessageKind::ResolvedTracks,
+            Self::Playlists { .. } => super::MessageKind::Playlists,
+            Self::PlaylistDetail { .. } => super::MessageKind::PlaylistDetail,
+            Self::PlaylistSaved { .. } => super::MessageKind::PlaylistSaved,
+            Self::DeviceSelectionAdded { .. } => super::MessageKind::DeviceSelectionAdded,
+            Self::PlaylistSelectionAppended { .. } => super::MessageKind::PlaylistSelectionAppended,
+            Self::LibraryMutationRejected { .. } => super::MessageKind::LibraryMutationRejected,
+            Self::DaemonShutdownStarted { .. } => super::MessageKind::DaemonShutdownStarted,
             Self::RunHeader { .. } => super::MessageKind::RunHeader,
             Self::SyncSummary { .. } => super::MessageKind::SyncSummary,
             Self::ReviewRequested { .. } => super::MessageKind::ReviewRequested,
@@ -208,11 +343,30 @@ impl WireEvent {
     pub(super) fn allowed_from_worker(&self) -> bool {
         !matches!(
             self,
-            Self::DeviceInventory { .. }
+            Self::GlobalConfig { .. }
+                | Self::SourceAvailability { .. }
+                | Self::DeviceInventory { .. }
                 | Self::InventorySubscriptionChanged { .. }
                 | Self::DeviceConfig { .. }
                 | Self::ConfigMutationFailed { .. }
                 | Self::DeviceForgotten { .. }
+                | Self::SyncAccepted { .. }
+                | Self::SyncRejected { .. }
+                | Self::History { .. }
+                | Self::Library { .. }
+                | Self::LibraryScanStarted { .. }
+                | Self::LibraryScanProgress { .. }
+                | Self::LibraryScanFinished { .. }
+                | Self::SelectionPreview { .. }
+                | Self::DevicePreview { .. }
+                | Self::ResolvedTracks { .. }
+                | Self::Playlists { .. }
+                | Self::PlaylistDetail { .. }
+                | Self::PlaylistSaved { .. }
+                | Self::DeviceSelectionAdded { .. }
+                | Self::PlaylistSelectionAppended { .. }
+                | Self::LibraryMutationRejected { .. }
+                | Self::DaemonShutdownStarted { .. }
                 | Self::CommandFailed { .. }
         )
     }
@@ -282,95 +436,31 @@ impl WireEvent {
                 session_id,
                 ..
             } => Some((device_id, *session_id)),
-            Self::DeviceInventory { .. }
+            Self::GlobalConfig { .. }
+            | Self::SourceAvailability { .. }
+            | Self::DeviceInventory { .. }
             | Self::InventorySubscriptionChanged { .. }
             | Self::DeviceConfig { .. }
             | Self::ConfigMutationFailed { .. }
             | Self::DeviceForgotten { .. }
+            | Self::SyncAccepted { .. }
+            | Self::SyncRejected { .. }
+            | Self::History { .. }
+            | Self::Library { .. }
+            | Self::LibraryScanStarted { .. }
+            | Self::LibraryScanProgress { .. }
+            | Self::LibraryScanFinished { .. }
+            | Self::SelectionPreview { .. }
+            | Self::DevicePreview { .. }
+            | Self::ResolvedTracks { .. }
+            | Self::Playlists { .. }
+            | Self::PlaylistDetail { .. }
+            | Self::PlaylistSaved { .. }
+            | Self::DeviceSelectionAdded { .. }
+            | Self::PlaylistSelectionAppended { .. }
+            | Self::LibraryMutationRejected { .. }
+            | Self::DaemonShutdownStarted { .. }
             | Self::CommandFailed { .. } => None,
         }
     }
-
-    pub(super) fn validate(&self) -> Result<()> {
-        match self {
-            Self::DeviceInventory { snapshot, .. } => snapshot.validate()?,
-            Self::DeviceConfig { config, .. } => config.validate()?,
-            Self::ConfigMutationFailed { message, .. } if message.is_empty() => {
-                bail!("configuration mutation failure requires a message")
-            }
-            Self::RunHeader {
-                source,
-                ipod,
-                manifest,
-                ..
-            } if source.is_empty() || ipod.is_empty() || manifest.is_empty() => {
-                bail!("run header paths must not be empty")
-            }
-            Self::SyncSummary { summary, .. } | Self::ReviewRequested { summary, .. } => {
-                summary.validate()?
-            }
-            Self::Prompt {
-                message, options, ..
-            } if message.is_empty()
-                || options.is_empty()
-                || options.iter().any(String::is_empty) =>
-            {
-                bail!("prompt requires a message and non-empty options")
-            }
-            Self::Form { label, .. } if label.is_empty() => bail!("form label must not be empty"),
-            Self::TrackStart {
-                current,
-                total,
-                label,
-                ..
-            } if *total == 0 || *current == 0 || current > total || label.is_empty() => {
-                bail!("track start requires a 1-based position within a non-empty total")
-            }
-            Self::SyncLog { message, .. }
-            | Self::SyncError { message, .. }
-            | Self::CommandFailed { message, .. }
-                if message.is_empty() =>
-            {
-                bail!("wire diagnostic message must not be empty")
-            }
-            Self::SyncFinished {
-                skipped_for_space: Some(skipped),
-                ..
-            } if skipped.albums == 0 || skipped.tracks == 0 || skipped.bytes == 0 => {
-                bail!("skipped-for-space summary must describe nonzero skipped content")
-            }
-            Self::SyncFinished {
-                artwork: Some(artwork),
-                ..
-            } if artwork.embedded > artwork.eligible
-                || artwork.failed_sources > artwork.eligible
-                || artwork
-                    .embedded
-                    .checked_add(artwork.failed_sources)
-                    .is_none_or(|processed| processed > artwork.eligible) =>
-            {
-                bail!("artwork summary counts are inconsistent")
-            }
-            _ => {}
-        }
-        Ok(())
-    }
 }
-
-impl ActionPlanSummary {
-    fn validate(&self) -> Result<()> {
-        let without_removals = self
-            .add
-            .checked_add(self.modify)
-            .and_then(|value| value.checked_add(self.metadata_only))
-            .ok_or_else(|| anyhow::anyhow!("action-plan count overflow"))?;
-        let with_removals = without_removals
-            .checked_add(self.remove)
-            .ok_or_else(|| anyhow::anyhow!("action-plan count overflow"))?;
-        if self.total_planned != without_removals && self.total_planned != with_removals {
-            bail!("action-plan total does not match its component counts");
-        }
-        Ok(())
-    }
-}
-use anyhow::{bail, Result};

@@ -13,6 +13,12 @@ const DEVICE_EVENTS: &str = include_str!("data/wire-v3/device/events.ndjson");
 const DEVICE_STATE_MATRIX: &str = include_str!("data/wire-v3/device/state-matrix.ndjson");
 const PROGRESS_COMMANDS: &str = include_str!("data/wire-v3/progress/commands.ndjson");
 const PROGRESS_EVENTS: &str = include_str!("data/wire-v3/progress/events.ndjson");
+const OPERATION_COMMANDS: &str = include_str!("data/wire-v3/operations/commands.ndjson");
+const OPERATION_EVENTS: &str = include_str!("data/wire-v3/operations/events.ndjson");
+const OPERATION_STATE_MATRIX_COMMANDS: &str =
+    include_str!("data/wire-v3/operations/state-matrix-commands.ndjson");
+const OPERATION_STATE_MATRIX_EVENTS: &str =
+    include_str!("data/wire-v3/operations/state-matrix-events.ndjson");
 
 #[derive(Deserialize)]
 struct Manifest {
@@ -194,6 +200,10 @@ fn every_current_discriminator_has_a_shared_positive_vector() {
         .chain(DEVICE_COMMANDS.lines())
         .chain(DEVICE_EVENTS.lines())
         .chain(DEVICE_STATE_MATRIX.lines())
+        .chain(OPERATION_COMMANDS.lines())
+        .chain(OPERATION_EVENTS.lines())
+        .chain(OPERATION_STATE_MATRIX_COMMANDS.lines())
+        .chain(OPERATION_STATE_MATRIX_EVENTS.lines())
     {
         golden_types.insert(message_type(line));
     }

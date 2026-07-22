@@ -12,6 +12,8 @@
     {"path":"canonicalize/hello-unsorted-capabilities.json","expectation":"canonicalize_hello"},
     {"path":"compatibility/unknown-daemon-event.json","expectation":"ignored_desktop_event"}
   ],
+  "legacy_decisions": "legacy-decisions.json",
+  "operation_contract": "operations/contract.json",
   "progress": {
     "positive_collections": [
       {"path":"progress/commands.ndjson","stream":"desktop_to_daemon_commands"},
@@ -54,6 +56,28 @@
       {"path":"device/negative/inventory-zero-revision.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
       {"path":"device/negative/inventory-invalid-storage.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
       {"path":"device/negative/inventory-identified-unavailable.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"}
+    ]
+  },
+  "operations": {
+    "positive_collections": [
+      {"path":"operations/commands.ndjson","stream":"desktop_to_daemon_commands"},
+      {"path":"operations/events.ndjson","stream":"daemon_to_desktop_events"},
+      {"path":"operations/state-matrix-commands.ndjson","stream":"desktop_to_daemon_commands"},
+      {"path":"operations/state-matrix-events.ndjson","stream":"daemon_to_desktop_events"}
+    ],
+    "negative_vectors": [
+      {"path":"operations/negative/source-credentials.json","stream":"desktop_to_daemon_commands"},
+      {"path":"operations/negative/source-relative.json","stream":"desktop_to_daemon_commands"},
+      {"path":"operations/negative/history-zero-limit.json","stream":"desktop_to_daemon_commands"},
+      {"path":"operations/negative/source-available-without-root.json","stream":"daemon_to_desktop_events"},
+      {"path":"operations/negative/scan-failure-without-message.json","stream":"daemon_to_desktop_events"},
+      {"path":"operations/negative/history-success-with-error.json","stream":"daemon_to_desktop_events"},
+      {"path":"operations/negative/library-unconfigured-with-content.json","stream":"daemon_to_desktop_events"},
+      {"path":"operations/negative/resolved-tracks-unsorted.json","stream":"daemon_to_desktop_events"},
+      {"path":"operations/negative/playlist-detail-slug-mismatch.json","stream":"daemon_to_desktop_events"},
+      {"path":"operations/negative/playlist-zero-limit.json","stream":"desktop_to_daemon_commands"},
+      {"path":"operations/negative/mutation-empty-rules.json","stream":"desktop_to_daemon_commands"},
+      {"path":"operations/negative/shutdown-missing-request.json","stream":"desktop_to_daemon_commands"}
     ]
   }
 }

@@ -1,0 +1,21 @@
+{"type":"get_global_config","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8800"}
+{"type":"set_source_location","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8801","source_root":"/Volumes/Music/FLAC"}
+{"type":"set_global_settings","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8802","settings":{"first_sync_mode":"review","subsequent_sync_mode":"auto_apply","schedule_minutes":30,"notify_on":"all","drop_sync_behavior":"immediate"}}
+{"type":"trigger_sync","device_id":"000A27002138B0A8","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8803","trigger":"manual"}
+{"type":"backfill_rockbox","device_id":"000A27002138B0A8","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8804"}
+{"type":"replace_library","device_id":"000A27002138B0A8","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8805"}
+{"type":"get_history","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8806","limit":10}
+{"type":"get_library","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8807"}
+{"type":"scan_library","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8808"}
+{"type":"retry_source_mount","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8809","allow_ui":true}
+{"type":"preview_selection","device_id":"000A27002138B0A8","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8810","selection":{"schema_version":1,"mode":"include","rules":[{"kind":"artist","name":"Birdy"}]}}
+{"type":"preview_device","device_id":"000A27002138B0A8","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8811"}
+{"type":"resolve_tracks","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8812","rules":[{"kind":"album","artist":"Birdy","album":"Fire Within"}]}
+{"type":"add_selection_to_device","device_id":"000A27002138B0A8","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8813","mutation_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8830","rules":[{"kind":"genre","name":"Pop"}]}
+{"type":"list_playlists","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8814"}
+{"type":"get_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8815","slug":"favourites"}
+{"type":"save_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8816","playlist":{"kind":"manual","slug":"favourites","name":"Favourites","tracks":["Birdy/Fire Within/01.flac"]}}
+{"type":"save_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8817","playlist":{"kind":"smart","name":"Recent Pop","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"Pop"}],"limit":null,"order":"recently_modified","seed":0}}}
+{"type":"delete_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8818","slug":"favourites"}
+{"type":"append_selection_to_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8819","slug":"favourites","rules":[{"kind":"artist","name":"Birdy"}]}
+{"type":"shutdown","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8820"}
