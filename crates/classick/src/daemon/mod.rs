@@ -1,6 +1,6 @@
 //! Long-lived daemon mode (`classick --daemon`): device watching,
 //! scheduling, sync orchestration, history persistence, and IPC server.
-//! See `docs/architecture.md` and `docs/ipc/daemon.md`.
+//! See `docs/architecture.md` and `docs/ipc-protocol.md`.
 
 pub mod command_handler;
 pub(crate) mod device_config_transaction;
@@ -23,6 +23,7 @@ pub mod lifecycle;
 pub mod macos_netfs;
 pub(crate) mod mutation_ledger;
 pub(crate) mod playlist_commands;
+pub(crate) mod protocol_v3;
 pub mod runtime;
 pub mod runtime_state;
 pub mod scheduler;

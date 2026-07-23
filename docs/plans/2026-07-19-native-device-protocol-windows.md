@@ -1,6 +1,7 @@
 # Native device protocol — Windows UI plan
 
-**Status:** implementation-ready draft after protocol 3 freeze
+**Status:** implemented; native Windows build remains a platform verification
+gate
 
 **Depends on:** [Rust core plan](2026-07-19-native-device-protocol-rust.md),
 protocol 3 golden vectors

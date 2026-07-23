@@ -24,6 +24,7 @@ const SERIAL: &str = "RAW-INTEGRITY-SERIAL";
 const DOOMED: u64 = 101;
 const RETAINED: u64 = 202;
 const ADDED: u64 = 303;
+const FIXTURE_PLAYLIST_TIMESTAMP: i64 = 1_700_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaylistPayload {
@@ -89,7 +90,7 @@ impl FullIntegrityFixture {
 
             let managed = add_playlist(&db, "Old Mix", 8, false);
             add_members(managed, &[doomed, retained]);
-            zero_playlist_timestamps(&db);
+            set_fixture_playlist_timestamps(&db);
         }
 
         db.write().unwrap();
@@ -166,7 +167,7 @@ impl FullIntegrityFixture {
     }
 
     pub fn publish(&mut self, publication: PlaylistReconcileOutcome) -> anyhow::Result<()> {
-        unsafe { zero_playlist_timestamps(self.db.as_ref().unwrap()) };
+        unsafe { set_fixture_playlist_timestamps(self.db.as_ref().unwrap()) };
         self.db.as_ref().unwrap().write()?;
         drop(self.db.take());
         let reopened = OwnedDb::open(&self.mount)?;
@@ -328,13 +329,13 @@ unsafe fn add_playlist(db: &OwnedDb, name: &str, id: u64, smart: bool) -> *mut f
     }
 }
 
-unsafe fn zero_playlist_timestamps(db: &OwnedDb) {
+unsafe fn set_fixture_playlist_timestamps(db: &OwnedDb) {
     unsafe {
         let mut node = (*db.as_ptr()).playlists;
         while !node.is_null() {
             let playlist = (*node).data as *mut ffi::Itdb_Playlist;
             if !playlist.is_null() {
-                (*playlist).timestamp = 0;
+                (*playlist).timestamp = FIXTURE_PLAYLIST_TIMESTAMP as _;
             }
             node = (*node).next;
         }

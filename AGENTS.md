@@ -86,8 +86,8 @@ Key modules — read these to understand a given concern:
 | `tags.rs` | Tag normalization from ffprobe output |
 | `ipod/` | libgpod wrappers: `OwnedDb`, device + layout helpers |
 | `ffi.rs` | Raw bindgen-generated libgpod bindings |
-| `progress.rs` | ratatui TUI + Plain + IPC progress backends, decision channel |
-| `ipc.rs`, `ipc_daemon.rs` | Serde mirrors for the wire format (events, commands) |
+| `progress.rs`, `worker_wire.rs` | ratatui/plain progress plus protocol-3 worker transport |
+| `wire/` | Shared protocol-3 messages, routing, validation, and golden-vector authority |
 | `daemon/` | Long-lived daemon mode: runtime, IPC server, device watcher, scheduler, sync orchestrator, history |
 | `config.rs`, `config_file.rs` | CLI → resolved Config; TOML persistence at `%APPDATA%\classick\config.toml` |
 | `wizard.rs` | Interactive TUI first-run wizard (CLI side; UI has its own) |
@@ -189,10 +189,11 @@ to the `gh-pages` branch — see `LEARNINGS.md` for the appcast-URL gotcha.
 
 `docs/ipc-protocol.md` is the source of truth. Implementations on each side:
 
-- Rust: `crates/classick/src/ipc.rs` (event/command records) +
-  `crates/classick/src/progress.rs::run_ipc` (channel-to-wire backend)
-- C#: `ui/windows/Classick.UI.Core/Ipc/IpcEvent.cs` and `IpcCommand.cs`
-  (subprocess wire), `DaemonEvent.cs` / `DaemonCommand.cs` (daemon-pipe wire)
+- Rust: `crates/classick/src/wire/` (shared records and validation),
+  `crates/classick/src/daemon/ipc_server.rs` (desktop transport), and
+  `crates/classick/src/worker_wire.rs` (worker transport)
+- C#: `ui/windows/Classick.UI.Core/Ipc/WireCodec.cs`,
+  `WireDeviceModels.cs`, and `WireOperationModels.cs`
 - Swift: `ui/macos/Sources/Classick/Ipc/WireModels.swift` (event/command
   Codables) + `DaemonClient.swift` (Unix-socket transport)
 
@@ -245,6 +246,10 @@ These hit hard in practice — see `LEARNINGS.md` for the full incident reports:
   (`SYNC_CHECKPOINT_EVERY` in `crates/classick/src/lib.rs`) the apply loop
   flushes the in-memory DB + manifest so a crash leaves at most N orphans,
   not the whole library.
+- **Mounted database parsing is artwork-aware.** `OwnedDb::open` must use
+  libgpod's mount-aware `itdb_parse`, because `itdb_parse_file` does not load
+  the companion `ArtworkDB`. The pinned libgpod also double-frees a parsed
+  Genius CUID unless the compatibility drop path takes and nulls it first.
 - **ffmpeg needs `-nostdin` + `.stdin(Stdio::null())`.** Inherited piped
   stdin from a daemon-spawned subprocess wedges ffmpeg at ~97% of a track
   during stream finalization. Both layers stay.

@@ -289,6 +289,25 @@ pub struct RejectedPendingSession {
     pub reason: String,
 }
 
+pub fn has_sync_transaction_material(mount: &Path) -> Result<bool> {
+    let root = crate::device_state::pending_sessions_dir(mount);
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read pending-session dir {}", root.display()));
+        }
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| format!("read entry in {}", root.display()))?;
+        if entry.file_name() != "portable-config" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl PendingSessionStore {
     pub fn new(mount: impl AsRef<Path>) -> Self {
         let mount = mount.as_ref().to_path_buf();
@@ -305,6 +324,10 @@ impl PendingSessionStore {
 
     pub fn snapshot_dir(&self, session_id: SessionId) -> PathBuf {
         self.root.join(format!("{session_id}.snapshot"))
+    }
+
+    pub fn staged_dir(&self, session_id: SessionId) -> PathBuf {
+        self.root.join(format!("{session_id}.staged"))
     }
 
     pub fn save(&self, session: &PendingSession) -> Result<()> {

@@ -30,6 +30,7 @@ use crate::ipc_daemon::{
     DaemonCommand, DaemonEvent, DaemonStateLabel, ManualPlaylistPayload, PlaylistKind,
     SelectionPayload, SourceAvailabilityState, TriggerSource,
 };
+use crate::wire::WireEvent;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -345,6 +346,8 @@ struct PendingSync {
     trigger: SyncTrigger,
     serial: String,
     drive: String,
+    request_id: Option<crate::wire::RequestId>,
+    operation: crate::wire::SyncOperation,
 }
 
 #[derive(Debug, Default)]
@@ -574,6 +577,8 @@ fn start_available_source_actions(
             sync.trigger,
             sync.serial,
             sync.drive,
+            sync.request_id,
+            sync.operation,
             state,
             event_tx,
             spawn_sync,
@@ -1106,6 +1111,8 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
                                 trigger: SyncTrigger::Scheduled,
                                 serial: device.serial.clone(),
                                 drive: device.drive.clone(),
+                                request_id: None,
+                                operation: crate::wire::SyncOperation::Sync,
                             }),
                             &mut source_recovery,
                             &source_availability,
@@ -1447,6 +1454,15 @@ fn handle_internal_event(
 /// still holds under per-device settings: `enabled` is only the seed value
 /// the first time a device is seen (see `DeviceSettings::load_or_migrate`).
 fn auto_sync_enabled(config_path: &std::path::Path, serial: &str) -> bool {
+    if let Ok(device_id) = crate::device::DeviceId::parse(serial) {
+        let store =
+            crate::portable::state_store::PortableStateStore::new(device_state_root(config_path));
+        if let Ok(state) = store.load(&device_id) {
+            if let Ok(snapshot) = crate::portable::coordinator::config_snapshot(&state, None) {
+                return snapshot.settings.value.auto_sync;
+            }
+        }
+    }
     let global = config_file::load(config_path)
         .ok()
         .flatten()
@@ -1463,6 +1479,152 @@ fn auto_sync_enabled(config_path: &std::path::Path, serial: &str) -> bool {
 /// tested without touching the filesystem.
 pub(crate) fn should_auto_sync(settings: &crate::device_config::DeviceSettings) -> bool {
     settings.auto_sync
+}
+
+fn optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read legacy state {}", path.display())),
+    }
+}
+
+fn legacy_mutation_id(
+    device_id: &crate::device::DeviceId,
+    component: &str,
+) -> crate::portable::profile::MutationId {
+    let digest = blake3::hash(format!("classick:legacy-v1:{device_id}:{component}").as_bytes());
+    let hex = digest.to_hex();
+    let value = format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    );
+    crate::portable::profile::MutationId::parse(&value)
+        .expect("BLAKE3-derived mutation ID is a lowercase UUID")
+}
+
+fn initialize_portable_from_legacy(
+    config_path: &Path,
+    session: &crate::device_coordination::DeviceMutationSession,
+) -> Result<()> {
+    use crate::portable::device_store::OwnedDeviceProfile;
+    use crate::portable::legacy_import::{
+        plan_legacy_host_import, LegacyHostFallbacks, LegacyHostFiles, LegacyHostImportPlan,
+        LegacyMutationIds, PortableProfileObservation, ResolvedLegacySelection,
+        ResolvedLegacySettings,
+    };
+
+    let root = device_state_root(config_path);
+    let store = crate::portable::state_store::PortableStateStore::new(root);
+    if store.is_initialized(session.device_id()) {
+        return Ok(());
+    }
+
+    let profile = crate::portable::device_store::read_profile(session.mount())?;
+    if matches!(profile, OwnedDeviceProfile::Valid(_)) {
+        return Ok(());
+    }
+
+    let device_dir = root.join("devices").join(session.device_id().as_str());
+    let selection = optional_file(&device_dir.join("selection.json"))?;
+    let settings = optional_file(&device_dir.join("settings.json"))?;
+    let subscriptions = optional_file(&device_dir.join("subscriptions.json"))?;
+    let managed_playlists = optional_file(&device_dir.join("managed_playlists.json"))?;
+    let shared_selection = optional_file(&root.join("selection.json"))?;
+    let global_bytes = optional_file(config_path)?.unwrap_or_default();
+    let global = config_file::load(config_path)?.unwrap_or_default();
+    let daemon = global.daemon.unwrap_or_default();
+    let eligibility = crate::daemon::device_registry_v2::LegacyImportEligibility::configured_device(
+        session.device_id().clone(),
+    );
+    let observation = match &profile {
+        OwnedDeviceProfile::Absent => PortableProfileObservation::Absent,
+        OwnedDeviceProfile::Valid(profile) => PortableProfileObservation::Valid(profile),
+        OwnedDeviceProfile::Invalid(diagnostic) => PortableProfileObservation::Invalid(diagnostic),
+    };
+    let fallbacks = LegacyHostFallbacks {
+        selection: shared_selection
+            .as_deref()
+            .map(ResolvedLegacySelection::SharedFile)
+            .unwrap_or(ResolvedLegacySelection::All),
+        settings: ResolvedLegacySettings::GlobalConfig {
+            auto_sync: daemon.enabled,
+            rockbox_compat: daemon.rockbox_compat,
+            source_bytes: &global_bytes,
+        },
+    };
+    let plan = plan_legacy_host_import(
+        &eligibility,
+        observation,
+        LegacyHostFiles {
+            selection: selection.as_deref(),
+            settings: settings.as_deref(),
+            subscriptions: subscriptions.as_deref(),
+            managed_playlists: managed_playlists.as_deref(),
+        },
+        fallbacks,
+        LegacyMutationIds {
+            selection: legacy_mutation_id(session.device_id(), "selection"),
+            settings: legacy_mutation_id(session.device_id(), "settings"),
+            subscriptions: legacy_mutation_id(session.device_id(), "subscriptions"),
+        },
+    );
+    match plan {
+        LegacyHostImportPlan::Ready { cache, outbox, .. } => {
+            store.initialize(&cache, &outbox)?;
+            Ok(())
+        }
+        LegacyHostImportPlan::Blocked { diagnostics, .. } => {
+            anyhow::bail!("{}", diagnostics.join("; "))
+        }
+    }
+}
+
+fn reconcile_before_sync_admission(
+    config_path: &Path,
+    ipod: &crate::ipod::device::DetectedIpod,
+) -> Result<()> {
+    reconcile_before_sync_worker_at(config_path, &ipod.serial, Path::new(&ipod.drive))
+}
+
+fn reconcile_before_sync_worker_at(config_path: &Path, serial: &str, drive: &Path) -> Result<()> {
+    if crate::pending_session::has_sync_transaction_material(drive)? {
+        return Ok(());
+    }
+    reconcile_before_sync_admission_at(config_path, serial, drive)
+}
+
+fn reconcile_before_sync_admission_at(
+    config_path: &Path,
+    serial: &str,
+    drive: &Path,
+) -> Result<()> {
+    let device_id = crate::device::DeviceId::parse(serial)
+        .context("connected device has no canonical portable identity")?;
+    let session = crate::device_coordination::DeviceMutationSession::acquire(drive, device_id)
+        .context("acquire pre-admission device mutation session")?;
+    initialize_portable_from_legacy(config_path, &session)
+        .context("initialize portable host state from retained legacy settings")?;
+    let readiness = crate::device::classify_device_readiness(drive)
+        .context("classify connected device readiness")?;
+    let identity = crate::ipod::device::resolve_libgpod_identity(drive)
+        .context("resolve connected device capability")?;
+    match crate::portable::coordinator::reconcile_connected(
+        device_state_root(config_path),
+        &session,
+        readiness,
+        Some(&identity.model_num_str),
+    )? {
+        crate::portable::coordinator::ConnectedReconciliation::Imported(_)
+        | crate::portable::coordinator::ConnectedReconciliation::DeviceCommitted(_) => Ok(()),
+        crate::portable::coordinator::ConnectedReconciliation::Blocked(diagnostic) => {
+            anyhow::bail!("{diagnostic}")
+        }
+    }
 }
 
 fn handle_device_event(
@@ -1545,16 +1707,40 @@ fn handle_device_event(
                 .record(&ipod.serial)
                 .filter(|record| record.configured)
                 .map(|record| record.serial.clone());
-            if configured_serial
-                .as_deref()
-                .is_some_and(|serial| state.is_idle() && auto_sync_enabled(config_path, serial))
-            {
+            let portable_ready = configured_serial.as_ref().is_none_or(|_| {
+                if !Path::new(&ipod.drive).is_dir() {
+                    return true;
+                }
+                match reconcile_before_sync_admission(config_path, &ipod) {
+                    Ok(()) => {
+                        if let Err(error) = registry.refresh_portable_state() {
+                            tracing::warn!(
+                                "daemon: could not refresh portable registry state for {}: {error:#}",
+                                ipod.serial
+                            );
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            "daemon: portable reconciliation blocked sync admission for {}: {error:#}",
+                            ipod.serial
+                        );
+                        false
+                    }
+                }
+            });
+            if configured_serial.as_deref().is_some_and(|serial| {
+                portable_ready && state.is_idle() && auto_sync_enabled(config_path, serial)
+            }) {
                 let serial = configured_serial.expect("configured serial checked above");
                 request_source_action(
                     SourceActionRequest::Sync(PendingSync {
                         trigger: SyncTrigger::PlugIn,
                         serial,
                         drive: ipod.drive.clone(),
+                        request_id: None,
+                        operation: crate::wire::SyncOperation::Sync,
                     }),
                     source_recovery,
                     source_availability,
@@ -1611,6 +1797,8 @@ fn start_sync_session(
     trigger: SyncTrigger,
     serial: String,
     drive: String,
+    request_id: Option<crate::wire::RequestId>,
+    operation: crate::wire::SyncOperation,
     state: &mut RuntimeState,
     event_tx: &broadcast::Sender<DaemonEvent>,
     spawn_sync: &SpawnFn,
@@ -1623,6 +1811,14 @@ fn start_sync_session(
             tracing::warn!(
                 "daemon: blocked {trigger:?} device session for {serial:?} while {pending:?} recovery is pending"
             );
+            emit_sync_rejected(
+                event_tx,
+                &serial,
+                request_id,
+                operation,
+                crate::wire::SyncRejectReason::RecoveryRequired,
+                "host recovery must complete before sync",
+            );
             return;
         }
         Ok(None) => {}
@@ -1630,12 +1826,57 @@ fn start_sync_session(
             tracing::error!(
                 "daemon: blocked {trigger:?} device session for {serial:?}; cannot inspect pending host mutations: {error:#}"
             );
+            emit_sync_rejected(
+                event_tx,
+                &serial,
+                request_id,
+                operation,
+                crate::wire::SyncRejectReason::RecoveryRequired,
+                "host recovery state could not be verified",
+            );
+            return;
+        }
+    }
+    if crate::device::DeviceId::parse(&serial).is_ok() && Path::new(&drive).is_dir() {
+        if let Err(error) = reconcile_before_sync_worker_at(config_path, &serial, Path::new(&drive))
+        {
+            tracing::error!(
+                "daemon: blocked {trigger:?} device session for {serial:?}; portable reconciliation failed: {error:#}"
+            );
+            emit_sync_rejected(
+                event_tx,
+                &serial,
+                request_id,
+                operation,
+                crate::wire::SyncRejectReason::RecoveryRequired,
+                "portable device state could not be reconciled",
+            );
             return;
         }
     }
     let Ok(session) = state.try_admit_device(trigger, &serial, std::path::Path::new(&drive)) else {
+        emit_sync_rejected(
+            event_tx,
+            &serial,
+            request_id,
+            operation,
+            crate::wire::SyncRejectReason::AlreadyRunning,
+            "another Classick operation is already running",
+        );
         return;
     };
+    if let (Ok(device_id), Some(request_id), Ok(session_id)) = (
+        crate::device::DeviceId::parse(&serial),
+        request_id,
+        crate::wire::SessionId::new(session.id),
+    ) {
+        let _ = event_tx.send(DaemonEvent::Protocol3(WireEvent::SyncAccepted {
+            device_id,
+            session_id,
+            request_id,
+            operation,
+        }));
+    }
     launch_admitted_sync_session(
         session,
         serial,
@@ -1647,6 +1888,27 @@ fn start_sync_session(
         config_path,
         library_count_cache,
     );
+}
+
+fn emit_sync_rejected(
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    serial: &str,
+    request_id: Option<crate::wire::RequestId>,
+    operation: crate::wire::SyncOperation,
+    reason: crate::wire::SyncRejectReason,
+    message: &str,
+) {
+    let (Ok(device_id), Some(request_id)) = (crate::device::DeviceId::parse(serial), request_id)
+    else {
+        return;
+    };
+    let _ = event_tx.send(DaemonEvent::Protocol3(WireEvent::SyncRejected {
+        device_id,
+        request_id,
+        operation,
+        reason,
+        message: message.to_string(),
+    }));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2177,6 +2439,28 @@ fn handle_client_command(
     source_availability: &SourceAvailabilityService,
 ) -> bool {
     tracing::info!("daemon: client {client_id} command: {command:?}");
+    if let DaemonCommand::Protocol3(command) = command {
+        return handle_protocol3_command(
+            client_id,
+            *command,
+            reply,
+            history,
+            config_path,
+            state,
+            event_tx,
+            registry,
+            spawn_sync,
+            spawn_backfill,
+            spawn_replace_library,
+            internal_tx,
+            scheduler,
+            library_count_cache,
+            config_revision,
+            playlist_revision,
+            source_recovery,
+            source_availability,
+        );
+    }
     if let Some(reason) = target_rejection(&command, registry, state) {
         let serial = command
             .target_serial()
@@ -2254,6 +2538,7 @@ fn handle_client_command(
             .clone()
     });
     match command {
+        DaemonCommand::Protocol3(_) => unreachable!("protocol 3 commands are dispatched above"),
         DaemonCommand::GetStatus { request_id } => {
             let _ = reply.send(build_status_update(
                 state,
@@ -2449,7 +2734,7 @@ fn handle_client_command(
         DaemonCommand::TriggerSync {
             source: trigger_source,
             serial: _,
-            request_id: _,
+            request_id,
         } => {
             let raw_serial = target_serial
                 .as_deref()
@@ -2469,6 +2754,8 @@ fn handle_client_command(
                     trigger,
                     serial: raw_serial.to_string(),
                     drive: device.drive.clone(),
+                    request_id: crate::wire::RequestId::parse(&request_id).ok(),
+                    operation: crate::wire::SyncOperation::Sync,
                 }),
                 source_recovery,
                 source_availability,
@@ -2477,7 +2764,10 @@ fn handle_client_command(
                 config_path,
             );
         }
-        DaemonCommand::BackfillRockbox { serial: _, .. } => {
+        DaemonCommand::BackfillRockbox {
+            serial: _,
+            request_id,
+        } => {
             // Mirrors TriggerSync's guard + spawn + relay path exactly,
             // just pointed at `spawn_backfill` (a `--backfill-rockbox`
             // subprocess) instead of `spawn_sync` (`--apply`).
@@ -2500,6 +2790,8 @@ fn handle_client_command(
                 SyncTrigger::Manual,
                 raw_serial.to_string(),
                 device.drive.clone(),
+                crate::wire::RequestId::parse(&request_id).ok(),
+                crate::wire::SyncOperation::BackfillRockbox,
                 state,
                 event_tx,
                 spawn_backfill,
@@ -2510,7 +2802,7 @@ fn handle_client_command(
         }
         DaemonCommand::ReplaceLibrary {
             serial: _,
-            request_id: _,
+            request_id,
         } => {
             // Mirrors BackfillRockbox's arm exactly, just pointed at
             // `spawn_replace_library` (a `--replace-library --apply`
@@ -2540,6 +2832,8 @@ fn handle_client_command(
                 SyncTrigger::Manual,
                 raw_serial.to_string(),
                 device.drive.clone(),
+                crate::wire::RequestId::parse(&request_id).ok(),
+                crate::wire::SyncOperation::ReplaceLibrary,
                 state,
                 event_tx,
                 spawn_replace_library,
@@ -2783,6 +3077,22 @@ fn handle_client_command(
                 return false;
             }
             let persisted_revision = playlist_revision.record_persisted_mutation(true);
+            if let Ok(request_id) = crate::wire::RequestId::parse(&request_id) {
+                match wire_stored_playlist(&built) {
+                    Ok(playlist) => {
+                        let _ = reply.send(DaemonEvent::Protocol3(WireEvent::PlaylistSaved {
+                            request_id,
+                            revision: persisted_revision,
+                            playlist,
+                        }));
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            "daemon: persisted playlist could not be represented on protocol 3: {error:#}"
+                        );
+                    }
+                }
+            }
             let _ = event_tx.send(
                 build_playlists_update(config_path, persisted_revision)
                     .with_acknowledged_request_id(Some(request_id)),
@@ -3044,6 +3354,7 @@ fn handle_client_command(
             request_id,
             serial,
             rules,
+            mutation_id,
         } => {
             let index = load_cached_index(config_path);
             let mut service = match crate::daemon::library_mutations::LibraryMutationService::open(
@@ -3095,6 +3406,64 @@ fn handle_client_command(
                     let source_ready = configured_source_location_at(config_path)
                         .is_some_and(|location| location.resolved_path.is_dir());
                     let device = state.connected_device(&outcome.serial).cloned();
+                    let mut portable_delivery =
+                        crate::wire::ConfigDelivery::PendingDevice { last_failure: None };
+                    if let Some(mutation_id) = mutation_id.clone() {
+                        let request = crate::wire::RequestId::parse(&outcome.request_id)
+                            .expect("protocol-3 library mutation request remains canonical");
+                        let device_id = crate::device::DeviceId::parse(&outcome.serial)
+                            .expect("protocol-3 library mutation target remains canonical");
+                        let desired = selection_value_from_legacy(&outcome.selection);
+                        let mutation = crate::portable::outbox::PendingMutation::selection(
+                            mutation_id.clone(),
+                            device_id.clone(),
+                            desired,
+                            imported_revision(config_path, &device_id, ConfigPart::Selection),
+                        )
+                        .expect("persisted selection remains portable");
+                        let store = crate::portable::state_store::PortableStateStore::new(
+                            device_state_root(config_path),
+                        );
+                        match store.accept_mutation(&mutation) {
+                            Ok(_) => {
+                                if let Some(connected) = &device {
+                                    match reconcile_before_sync_admission(config_path, connected) {
+                                        Ok(()) => {
+                                            portable_delivery =
+                                                crate::wire::ConfigDelivery::DeviceCommitted;
+                                            let _ = registry.refresh_portable_state();
+                                        }
+                                        Err(error) => {
+                                            let _ = reply.send(DaemonEvent::Protocol3(
+                                                WireEvent::ConfigMutationFailed {
+                                                    device_id,
+                                                    request_id: request,
+                                                    mutation_id,
+                                                    component:
+                                                        crate::wire::ConfigComponent::Selection,
+                                                    stage: crate::wire::ConfigFailureStage::DeviceDelivery,
+                                                    message: format!("{error:#}"),
+                                                },
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                let _ = reply.send(DaemonEvent::Protocol3(
+                                    WireEvent::ConfigMutationFailed {
+                                        device_id,
+                                        request_id: request,
+                                        mutation_id,
+                                        component: crate::wire::ConfigComponent::Selection,
+                                        stage: crate::wire::ConfigFailureStage::HostAcceptance,
+                                        message: format!("{error:#}"),
+                                    },
+                                ));
+                                return false;
+                            }
+                        }
+                    }
                     let admission = crate::daemon::session_admission::admit_drop_device(
                         state,
                         behavior,
@@ -3105,20 +3474,51 @@ fn handle_client_command(
                             .filter(|_| source_ready)
                             .map(|device| Path::new(&device.drive)),
                     );
-                    let event = DaemonEvent::DeviceSelectionAdded {
-                        acknowledged_request_id: outcome.request_id,
-                        serial: outcome.serial.clone(),
-                        matched_tracks: outcome.matched_tracks,
-                        missing_tracks: outcome.missing_tracks,
-                        selection_changed: outcome.selection_changed,
-                        selection_revision: outcome.selection_revision,
-                        selection: SelectionPayload {
-                            mode: outcome.selection.mode,
-                            rules: outcome.selection.rules,
-                        },
-                        delivery: admission.delivery,
-                    };
-                    let _ = reply.send(event);
+                    if let Some(mutation_id) = mutation_id {
+                        let request_id = crate::wire::RequestId::parse(&outcome.request_id)
+                            .expect("protocol-3 selection reply request remains canonical");
+                        let device_id = crate::device::DeviceId::parse(&outcome.serial)
+                            .expect("protocol-3 selection reply device remains canonical");
+                        let sync = match admission.session.as_ref() {
+                            Some(session) => crate::wire::DropSyncDisposition::Started {
+                                session_id: crate::wire::SessionId::new(session.id)
+                                    .expect("admitted session ID is nonzero"),
+                            },
+                            None if outcome.missing_tracks == 0 => {
+                                crate::wire::DropSyncDisposition::AlreadyPresent
+                            }
+                            None => crate::wire::DropSyncDisposition::NextSync,
+                        };
+                        let _ =
+                            reply.send(DaemonEvent::Protocol3(WireEvent::DeviceSelectionAdded {
+                                device_id,
+                                request_id,
+                                mutation_id,
+                                matched_tracks: outcome.matched_tracks as u64,
+                                missing_tracks: outcome.missing_tracks as u64,
+                                selection_changed: outcome.selection_changed,
+                                selection_revision: outcome.selection_revision,
+                                selection: selection_value_from_legacy(&outcome.selection),
+                                delivery: portable_delivery,
+                                sync,
+                            }));
+                    } else {
+                        let _ = reply.send(DaemonEvent::DeviceSelectionAdded {
+                            acknowledged_request_id: outcome.request_id.clone(),
+                            mutation_id: None,
+                            session_id: admission.session.as_ref().map(|session| session.id),
+                            serial: outcome.serial.clone(),
+                            matched_tracks: outcome.matched_tracks,
+                            missing_tracks: outcome.missing_tracks,
+                            selection_changed: outcome.selection_changed,
+                            selection_revision: outcome.selection_revision,
+                            selection: SelectionPayload {
+                                mode: outcome.selection.mode,
+                                rules: outcome.selection.rules.clone(),
+                            },
+                            delivery: admission.delivery,
+                        });
+                    }
                     if let (Some(session), Some(device)) = (admission.session, device) {
                         launch_admitted_sync_session(
                             session,
@@ -3204,6 +3604,983 @@ fn mutation_failure_event(
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_else(|| "persistence_failed".to_string());
     library_mutation_rejected(failure.request_id, failure.target, &code, failure.message)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_protocol3_command(
+    client_id: u64,
+    command: crate::wire::WireCommand,
+    reply: mpsc::UnboundedSender<DaemonEvent>,
+    history: &HistoryService,
+    config_path: &Path,
+    state: &mut RuntimeState,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    registry: &mut DeviceRegistry,
+    spawn_sync: &SpawnFn,
+    spawn_backfill: &SpawnFn,
+    spawn_replace_library: &SpawnFn,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    scheduler: &mut SyncScheduler,
+    library_count_cache: &mut Option<usize>,
+    config_revision: &mut ConfigRevision,
+    playlist_revision: &mut PlaylistRevision,
+    source_recovery: &mut SourceRecoveryState,
+    source_availability: &SourceAvailabilityService,
+) -> bool {
+    use crate::wire::WireCommand;
+
+    let legacy = match command {
+        WireCommand::GetGlobalConfig { request_id } => DaemonCommand::GetConfig {
+            request_id: request_id.to_string(),
+        },
+        WireCommand::SetSourceLocation {
+            request_id,
+            source_root: Some(source_root),
+        } => DaemonCommand::SaveConfig {
+            source: Some(source_root.to_string()),
+            daemon: None,
+            ipod: None,
+            request_id: request_id.to_string(),
+        },
+        WireCommand::SetSourceLocation {
+            request_id,
+            source_root: None,
+        } => {
+            let mut config = config_file::load(config_path)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            config.source = None;
+            config.source_location = None;
+            if let Err(error) = config_file::save(config_path, &config) {
+                let _ = reply.send(DaemonEvent::Protocol3(WireEvent::CommandFailed {
+                    request_id,
+                    message: format!("could not clear source location: {error:#}"),
+                }));
+                return false;
+            }
+            let revision = config_revision.record_persisted_mutation(true);
+            let _ = reply.send(build_config_update(
+                Some(config),
+                registry,
+                revision,
+                Some(request_id.to_string()),
+            ));
+            return false;
+        }
+        WireCommand::SetGlobalSettings {
+            request_id,
+            settings,
+        } => {
+            let current = config_file::load(config_path)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let mut daemon = current.daemon.unwrap_or_default();
+            daemon.first_sync_mode = legacy_sync_mode(settings.first_sync_mode);
+            daemon.subsequent_sync_mode = legacy_sync_mode(settings.subsequent_sync_mode);
+            daemon.schedule_minutes = settings.schedule_minutes;
+            daemon.notify_on = legacy_notify(settings.notify_on);
+            daemon.drop_sync_behavior = legacy_drop_behavior(settings.drop_sync_behavior);
+            DaemonCommand::SaveConfig {
+                source: None,
+                daemon: Some(daemon),
+                ipod: None,
+                request_id: request_id.to_string(),
+            }
+        }
+        WireCommand::GetInventory { .. } => DaemonCommand::SubscribeDeviceEvents,
+        WireCommand::SubscribeInventory { request_id } => {
+            let _ = reply.send(DaemonEvent::Protocol3(
+                WireEvent::InventorySubscriptionChanged {
+                    request_id,
+                    subscribed: true,
+                },
+            ));
+            DaemonCommand::SubscribeDeviceEvents
+        }
+        WireCommand::UnsubscribeInventory { request_id } => {
+            let _ = reply.send(DaemonEvent::Protocol3(
+                WireEvent::InventorySubscriptionChanged {
+                    request_id,
+                    subscribed: false,
+                },
+            ));
+            DaemonCommand::UnsubscribeDeviceEvents
+        }
+        WireCommand::AdoptDevice {
+            device_id,
+            request_id,
+            selection_mutation_id,
+            selection,
+            settings_mutation_id,
+            settings,
+            subscriptions_mutation_id,
+            subscriptions,
+        } => {
+            return handle_protocol3_adoption(
+                client_id,
+                device_id.clone(),
+                request_id,
+                selection_mutation_id,
+                selection,
+                settings_mutation_id,
+                settings,
+                subscriptions_mutation_id,
+                subscriptions,
+                reply,
+                history,
+                config_path,
+                state,
+                event_tx,
+                registry,
+                spawn_sync,
+                spawn_backfill,
+                spawn_replace_library,
+                internal_tx,
+                scheduler,
+                library_count_cache,
+                config_revision,
+                playlist_revision,
+                source_recovery,
+                source_availability,
+            );
+        }
+        WireCommand::ForgetDevice {
+            device_id,
+            request_id,
+        } => DaemonCommand::ForgetIpod {
+            serial: device_id.to_string(),
+            request_id: request_id.to_string(),
+        },
+        WireCommand::GetDeviceConfig {
+            device_id,
+            request_id,
+        } => {
+            let store = crate::portable::state_store::PortableStateStore::new(device_state_root(
+                config_path,
+            ));
+            if let Ok(state) = store.load(&device_id) {
+                if let Ok(config) = crate::portable::coordinator::config_snapshot(&state, None) {
+                    let _ = reply.send(DaemonEvent::Protocol3(WireEvent::DeviceConfig {
+                        request_id: Some(request_id),
+                        config,
+                    }));
+                    return false;
+                }
+            }
+            DaemonCommand::GetDeviceConfig {
+                serial: device_id.to_string(),
+                request_id: request_id.to_string(),
+            }
+        }
+        WireCommand::SetSelection {
+            device_id,
+            request_id,
+            mutation_id,
+            selection,
+        } => {
+            return handle_protocol3_mutations(
+                client_id,
+                device_id.clone(),
+                request_id,
+                vec![crate::portable::outbox::PendingMutation::selection(
+                    mutation_id,
+                    device_id.clone(),
+                    selection,
+                    imported_revision(config_path, &device_id, ConfigPart::Selection),
+                )
+                .expect("validated wire selection remains valid")],
+                reply,
+                history,
+                config_path,
+                state,
+                event_tx,
+                registry,
+                spawn_sync,
+                spawn_backfill,
+                spawn_replace_library,
+                internal_tx,
+                scheduler,
+                library_count_cache,
+                config_revision,
+                playlist_revision,
+                source_recovery,
+                source_availability,
+            );
+        }
+        WireCommand::SetSettings {
+            device_id,
+            request_id,
+            mutation_id,
+            settings,
+        } => {
+            return handle_protocol3_mutations(
+                client_id,
+                device_id.clone(),
+                request_id,
+                vec![crate::portable::outbox::PendingMutation::settings(
+                    mutation_id,
+                    device_id.clone(),
+                    settings,
+                    imported_revision(config_path, &device_id, ConfigPart::Settings),
+                )
+                .expect("validated wire settings remain valid")],
+                reply,
+                history,
+                config_path,
+                state,
+                event_tx,
+                registry,
+                spawn_sync,
+                spawn_backfill,
+                spawn_replace_library,
+                internal_tx,
+                scheduler,
+                library_count_cache,
+                config_revision,
+                playlist_revision,
+                source_recovery,
+                source_availability,
+            );
+        }
+        WireCommand::SetSubscriptions {
+            device_id,
+            request_id,
+            mutation_id,
+            subscriptions,
+        } => {
+            return handle_protocol3_mutations(
+                client_id,
+                device_id.clone(),
+                request_id,
+                vec![crate::portable::outbox::PendingMutation::subscriptions(
+                    mutation_id,
+                    device_id.clone(),
+                    subscriptions,
+                    imported_revision(config_path, &device_id, ConfigPart::Subscriptions),
+                )
+                .expect("validated wire subscriptions remain valid")],
+                reply,
+                history,
+                config_path,
+                state,
+                event_tx,
+                registry,
+                spawn_sync,
+                spawn_backfill,
+                spawn_replace_library,
+                internal_tx,
+                scheduler,
+                library_count_cache,
+                config_revision,
+                playlist_revision,
+                source_recovery,
+                source_availability,
+            );
+        }
+        WireCommand::TriggerSync {
+            device_id,
+            request_id,
+            trigger,
+        } => DaemonCommand::TriggerSync {
+            source: legacy_trigger(trigger),
+            serial: device_id.to_string(),
+            request_id: request_id.to_string(),
+        },
+        WireCommand::BackfillRockbox {
+            device_id,
+            request_id,
+        } => DaemonCommand::BackfillRockbox {
+            serial: device_id.to_string(),
+            request_id: request_id.to_string(),
+        },
+        WireCommand::ReplaceLibrary {
+            device_id,
+            request_id,
+        } => DaemonCommand::ReplaceLibrary {
+            serial: device_id.to_string(),
+            request_id: request_id.to_string(),
+        },
+        WireCommand::GetHistory { request_id, limit } => DaemonCommand::GetHistory {
+            limit: limit as usize,
+            request_id: request_id.to_string(),
+        },
+        WireCommand::GetLibrary { request_id } => DaemonCommand::GetLibrary {
+            request_id: request_id.to_string(),
+        },
+        WireCommand::ScanLibrary { request_id } => DaemonCommand::ScanLibrary {
+            request_id: request_id.to_string(),
+        },
+        WireCommand::RetrySourceMount {
+            request_id,
+            allow_ui,
+        } => DaemonCommand::RetrySourceMount {
+            allow_ui,
+            request_id: request_id.to_string(),
+        },
+        WireCommand::PreviewSelection {
+            device_id,
+            request_id,
+            selection,
+        } => DaemonCommand::PreviewSelection {
+            mode: legacy_selection_mode(selection.mode),
+            rules: legacy_selection_rules(&selection.rules),
+            serial: device_id.to_string(),
+            request_id: request_id.to_string(),
+        },
+        WireCommand::PreviewDevice {
+            device_id,
+            request_id,
+        } => DaemonCommand::PreviewDevice {
+            serial: device_id.to_string(),
+            request_id: request_id.to_string(),
+        },
+        WireCommand::ResolveTracks { request_id, rules } => DaemonCommand::ResolveTracks {
+            rules: legacy_selection_rules(&rules),
+            request_id: request_id.to_string(),
+        },
+        WireCommand::AddSelectionToDevice {
+            device_id,
+            request_id,
+            mutation_id,
+            rules,
+        } => DaemonCommand::AddSelectionToDevice {
+            request_id: request_id.to_string(),
+            serial: device_id.to_string(),
+            rules: legacy_selection_rules(&rules),
+            mutation_id: Some(mutation_id),
+        },
+        WireCommand::ListPlaylists { request_id } => DaemonCommand::ListPlaylists {
+            request_id: request_id.to_string(),
+        },
+        WireCommand::GetPlaylist { request_id, slug } => DaemonCommand::GetPlaylist {
+            slug: slug.to_string(),
+            request_id: request_id.to_string(),
+        },
+        WireCommand::SavePlaylist {
+            request_id,
+            playlist,
+        } => DaemonCommand::SavePlaylist {
+            playlist: legacy_playlist_draft(playlist),
+            request_id: request_id.to_string(),
+        },
+        WireCommand::DeletePlaylist { request_id, slug } => DaemonCommand::DeletePlaylist {
+            slug: slug.to_string(),
+            request_id: request_id.to_string(),
+        },
+        WireCommand::AppendSelectionToPlaylist {
+            request_id,
+            slug,
+            rules,
+        } => DaemonCommand::AppendSelectionToPlaylist {
+            request_id: request_id.to_string(),
+            slug: slug.to_string(),
+            rules: legacy_selection_rules(&rules),
+        },
+        WireCommand::Shutdown { request_id } => {
+            let _ = reply.send(DaemonEvent::Protocol3(WireEvent::DaemonShutdownStarted {
+                request_id,
+            }));
+            DaemonCommand::Shutdown
+        }
+        WireCommand::PromptDecision {
+            device_id,
+            session_id,
+            request_id,
+            prompt_id,
+            choice,
+        } => {
+            if !active_route_matches(state, &device_id, session_id) {
+                let _ = reply.send(DaemonEvent::Protocol3(WireEvent::CommandFailed {
+                    request_id,
+                    message: "sync session is no longer active".to_string(),
+                }));
+                return false;
+            }
+            DaemonCommand::DecidePrompt {
+                id: prompt_id.get(),
+                choice: choice as i32,
+                serial: device_id.to_string(),
+                request_id: request_id.to_string(),
+            }
+        }
+        WireCommand::CancelSync {
+            device_id,
+            session_id,
+            request_id,
+        } => {
+            if !active_route_matches(state, &device_id, session_id) {
+                let _ = reply.send(DaemonEvent::Protocol3(WireEvent::CommandFailed {
+                    request_id,
+                    message: "sync session is no longer active".to_string(),
+                }));
+                return false;
+            }
+            DaemonCommand::CancelSync {
+                serial: device_id.to_string(),
+                request_id: request_id.to_string(),
+            }
+        }
+        WireCommand::PauseSync {
+            device_id,
+            session_id,
+            request_id,
+        } => {
+            if !active_route_matches(state, &device_id, session_id) {
+                let _ = reply.send(DaemonEvent::Protocol3(WireEvent::CommandFailed {
+                    request_id,
+                    message: "sync session is no longer active".to_string(),
+                }));
+                return false;
+            }
+            DaemonCommand::Pause {
+                serial: device_id.to_string(),
+                request_id: request_id.to_string(),
+            }
+        }
+        WireCommand::ApplyReview { request_id, .. }
+        | WireCommand::DryRunReview { request_id, .. }
+        | WireCommand::QuitReview { request_id, .. }
+        | WireCommand::FormDecision { request_id, .. } => {
+            let _ = reply.send(DaemonEvent::Protocol3(WireEvent::CommandFailed {
+                request_id,
+                message: "this daemon session does not expose that interaction".to_string(),
+            }));
+            return false;
+        }
+    };
+
+    handle_client_command(
+        ClientCommand {
+            client_id,
+            command: legacy,
+            reply,
+        },
+        history,
+        config_path,
+        state,
+        event_tx,
+        registry,
+        spawn_sync,
+        spawn_backfill,
+        spawn_replace_library,
+        internal_tx,
+        scheduler,
+        library_count_cache,
+        config_revision,
+        playlist_revision,
+        source_recovery,
+        source_availability,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ConfigPart {
+    Selection,
+    Settings,
+    Subscriptions,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_protocol3_adoption(
+    client_id: u64,
+    device_id: crate::device::DeviceId,
+    request_id: crate::wire::RequestId,
+    selection_mutation_id: crate::portable::profile::MutationId,
+    selection: crate::portable::profile::SelectionValue,
+    settings_mutation_id: crate::portable::profile::MutationId,
+    settings: crate::portable::profile::SettingsValue,
+    subscriptions_mutation_id: crate::portable::profile::MutationId,
+    subscriptions: crate::portable::profile::SubscriptionsValue,
+    reply: mpsc::UnboundedSender<DaemonEvent>,
+    history: &HistoryService,
+    config_path: &Path,
+    state: &mut RuntimeState,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    registry: &mut DeviceRegistry,
+    spawn_sync: &SpawnFn,
+    spawn_backfill: &SpawnFn,
+    spawn_replace_library: &SpawnFn,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    scheduler: &mut SyncScheduler,
+    library_count_cache: &mut Option<usize>,
+    config_revision: &mut ConfigRevision,
+    playlist_revision: &mut PlaylistRevision,
+    source_recovery: &mut SourceRecoveryState,
+    source_availability: &SourceAvailabilityService,
+) -> bool {
+    let Some(record) = registry.record(device_id.as_str()).cloned() else {
+        let _ = reply.send(DaemonEvent::Protocol3(WireEvent::CommandFailed {
+            request_id,
+            message: "device is not present in the inventory".to_string(),
+        }));
+        return false;
+    };
+    let connected = state.connected_device(device_id.as_str()).cloned();
+    let identity = crate::config_file::IpodIdentity {
+        serial: device_id.to_string(),
+        model_label: connected
+            .as_ref()
+            .map(|device| device.model_label.clone())
+            .unwrap_or(record.model_label),
+        name: connected
+            .as_ref()
+            .and_then(|device| device.name.clone())
+            .or(record.name),
+        custom_selection: true,
+    };
+    if let Err(error) = registry.configure_identity(&identity) {
+        let _ = reply.send(DaemonEvent::Protocol3(WireEvent::CommandFailed {
+            request_id,
+            message: format!("could not adopt device: {error:#}"),
+        }));
+        return false;
+    }
+    let mutations = vec![
+        crate::portable::outbox::PendingMutation::selection(
+            selection_mutation_id,
+            device_id.clone(),
+            selection,
+            0,
+        )
+        .expect("validated adoption selection remains valid"),
+        crate::portable::outbox::PendingMutation::settings(
+            settings_mutation_id,
+            device_id.clone(),
+            settings,
+            0,
+        )
+        .expect("validated adoption settings remain valid"),
+        crate::portable::outbox::PendingMutation::subscriptions(
+            subscriptions_mutation_id,
+            device_id.clone(),
+            subscriptions,
+            0,
+        )
+        .expect("validated adoption subscriptions remain valid"),
+    ];
+    handle_protocol3_mutations(
+        client_id,
+        device_id,
+        request_id,
+        mutations,
+        reply,
+        history,
+        config_path,
+        state,
+        event_tx,
+        registry,
+        spawn_sync,
+        spawn_backfill,
+        spawn_replace_library,
+        internal_tx,
+        scheduler,
+        library_count_cache,
+        config_revision,
+        playlist_revision,
+        source_recovery,
+        source_availability,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_protocol3_mutations(
+    client_id: u64,
+    device_id: crate::device::DeviceId,
+    request_id: crate::wire::RequestId,
+    mutations: Vec<crate::portable::outbox::PendingMutation>,
+    reply: mpsc::UnboundedSender<DaemonEvent>,
+    history: &HistoryService,
+    config_path: &Path,
+    state: &mut RuntimeState,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    registry: &mut DeviceRegistry,
+    spawn_sync: &SpawnFn,
+    spawn_backfill: &SpawnFn,
+    spawn_replace_library: &SpawnFn,
+    internal_tx: &mpsc::UnboundedSender<InternalEvent>,
+    scheduler: &mut SyncScheduler,
+    library_count_cache: &mut Option<usize>,
+    config_revision: &mut ConfigRevision,
+    playlist_revision: &mut PlaylistRevision,
+    source_recovery: &mut SourceRecoveryState,
+    source_availability: &SourceAvailabilityService,
+) -> bool {
+    if registry
+        .record(device_id.as_str())
+        .is_none_or(|record| !record.configured)
+    {
+        let _ = reply.send(DaemonEvent::Protocol3(WireEvent::CommandFailed {
+            request_id,
+            message: "device is not adopted".to_string(),
+        }));
+        return false;
+    }
+    let store =
+        crate::portable::state_store::PortableStateStore::new(device_state_root(config_path));
+    let accepted = match store.accept_mutations(&mutations) {
+        Ok(state) => state,
+        Err(error) => {
+            for mutation in &mutations {
+                let _ = reply.send(DaemonEvent::Protocol3(WireEvent::ConfigMutationFailed {
+                    device_id: device_id.clone(),
+                    request_id: request_id.clone(),
+                    mutation_id: mutation.mutation_id().clone(),
+                    component: wire_component(mutation),
+                    stage: crate::wire::ConfigFailureStage::HostAcceptance,
+                    message: format!("{error:#}"),
+                }));
+            }
+            return false;
+        }
+    };
+
+    let (selection, settings, subscriptions) = legacy_payloads(&mutations);
+    let internal = DaemonCommand::SaveDeviceConfig {
+        serial: device_id.to_string(),
+        selection,
+        subscriptions,
+        settings,
+        request_id: request_id.to_string(),
+    };
+    let should_exit = handle_client_command(
+        ClientCommand {
+            client_id,
+            command: internal,
+            reply: reply.clone(),
+        },
+        history,
+        config_path,
+        state,
+        event_tx,
+        registry,
+        spawn_sync,
+        spawn_backfill,
+        spawn_replace_library,
+        internal_tx,
+        scheduler,
+        library_count_cache,
+        config_revision,
+        playlist_revision,
+        source_recovery,
+        source_availability,
+    );
+    if should_exit {
+        return true;
+    }
+
+    let mut final_state = accepted;
+    let mut delivery_failure = None;
+    if let Some(device) = state.connected_device(device_id.as_str()).cloned() {
+        let delivery = (|| -> Result<crate::portable::state_store::PortableHostState> {
+            let session = crate::device_coordination::DeviceMutationSession::acquire(
+                Path::new(&device.drive),
+                device_id.clone(),
+            )
+            .context("acquire config-only device mutation session")?;
+            let readiness = crate::device::classify_device_readiness(Path::new(&device.drive))
+                .context("classify connected device readiness")?;
+            let identity = crate::ipod::device::resolve_libgpod_identity(Path::new(&device.drive))
+                .context("resolve connected device capability")?;
+            match crate::portable::coordinator::reconcile_connected(
+                device_state_root(config_path),
+                &session,
+                readiness,
+                Some(&identity.model_num_str),
+            )? {
+                crate::portable::coordinator::ConnectedReconciliation::Imported(state)
+                | crate::portable::coordinator::ConnectedReconciliation::DeviceCommitted(state) => {
+                    Ok(state)
+                }
+                crate::portable::coordinator::ConnectedReconciliation::Blocked(diagnostic) => {
+                    anyhow::bail!("{diagnostic}")
+                }
+            }
+        })();
+        match delivery {
+            Ok(state) => {
+                final_state = state;
+                if let Err(error) = registry.refresh_portable_state() {
+                    tracing::warn!(
+                        "daemon: could not refresh portable registry state for {device_id}: {error:#}"
+                    );
+                }
+            }
+            Err(error) => delivery_failure = Some(format!("{error:#}")),
+        }
+    }
+
+    let snapshot =
+        match crate::portable::coordinator::config_snapshot(&final_state, delivery_failure.clone())
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let _ = reply.send(DaemonEvent::Protocol3(WireEvent::CommandFailed {
+                    request_id,
+                    message: format!("portable configuration is incomplete: {error:#}"),
+                }));
+                return false;
+            }
+        };
+    let event = DaemonEvent::Protocol3(WireEvent::DeviceConfig {
+        request_id: Some(request_id.clone()),
+        config: snapshot,
+    });
+    let _ = reply.send(event.clone());
+    let _ = event_tx.send(event);
+    if let Some(message) = delivery_failure {
+        for mutation in &mutations {
+            let _ = reply.send(DaemonEvent::Protocol3(WireEvent::ConfigMutationFailed {
+                device_id: device_id.clone(),
+                request_id: request_id.clone(),
+                mutation_id: mutation.mutation_id().clone(),
+                component: wire_component(mutation),
+                stage: crate::wire::ConfigFailureStage::DeviceDelivery,
+                message: message.clone(),
+            }));
+        }
+    }
+    false
+}
+
+fn imported_revision(
+    config_path: &Path,
+    device_id: &crate::device::DeviceId,
+    part: ConfigPart,
+) -> u64 {
+    let store =
+        crate::portable::state_store::PortableStateStore::new(device_state_root(config_path));
+    let Ok(state) = store.load(device_id) else {
+        return 0;
+    };
+    let Some(profile) = state
+        .cache
+        .as_ref()
+        .and_then(|cache| cache.last_imported_profile.as_ref())
+    else {
+        return 0;
+    };
+    match part {
+        ConfigPart::Selection => profile.selection.revision,
+        ConfigPart::Settings => profile.settings.revision,
+        ConfigPart::Subscriptions => profile.subscriptions.revision,
+    }
+}
+
+fn wire_component(
+    mutation: &crate::portable::outbox::PendingMutation,
+) -> crate::wire::ConfigComponent {
+    match mutation {
+        crate::portable::outbox::PendingMutation::Selection { .. } => {
+            crate::wire::ConfigComponent::Selection
+        }
+        crate::portable::outbox::PendingMutation::Settings { .. } => {
+            crate::wire::ConfigComponent::Settings
+        }
+        crate::portable::outbox::PendingMutation::Subscriptions { .. } => {
+            crate::wire::ConfigComponent::Subscriptions
+        }
+    }
+}
+
+fn legacy_payloads(
+    mutations: &[crate::portable::outbox::PendingMutation],
+) -> (
+    Option<SelectionPayload>,
+    Option<crate::ipc_daemon::DeviceSettingsPayload>,
+    Option<crate::ipc_daemon::SubscriptionsPayload>,
+) {
+    let mut selection = None;
+    let mut settings = None;
+    let mut subscriptions = None;
+    for mutation in mutations {
+        match mutation {
+            crate::portable::outbox::PendingMutation::Selection { desired, .. } => {
+                selection = Some(SelectionPayload {
+                    mode: legacy_selection_mode(desired.mode),
+                    rules: legacy_selection_rules(&desired.rules),
+                });
+            }
+            crate::portable::outbox::PendingMutation::Settings { desired, .. } => {
+                settings = Some(crate::ipc_daemon::DeviceSettingsPayload {
+                    auto_sync: desired.auto_sync,
+                    rockbox_compat: desired.rockbox_compat,
+                });
+            }
+            crate::portable::outbox::PendingMutation::Subscriptions { desired, .. } => {
+                subscriptions = Some(crate::ipc_daemon::SubscriptionsPayload {
+                    playlists: desired.playlists.iter().map(ToString::to_string).collect(),
+                });
+            }
+        }
+    }
+    (selection, settings, subscriptions)
+}
+
+fn active_route_matches(
+    state: &RuntimeState,
+    device_id: &crate::device::DeviceId,
+    session_id: crate::wire::SessionId,
+) -> bool {
+    state.active_session().is_some_and(|session| {
+        session.id == session_id.get()
+            && session
+                .serial
+                .as_deref()
+                .is_some_and(|serial| same_serial(serial, device_id.as_str()))
+    })
+}
+
+fn legacy_selection_mode(
+    mode: crate::portable::profile::SelectionMode,
+) -> crate::selection::SelectionMode {
+    match mode {
+        crate::portable::profile::SelectionMode::All => crate::selection::SelectionMode::All,
+        crate::portable::profile::SelectionMode::Include => {
+            crate::selection::SelectionMode::Include
+        }
+        crate::portable::profile::SelectionMode::Exclude => {
+            crate::selection::SelectionMode::Exclude
+        }
+    }
+}
+
+fn legacy_selection_rules(
+    rules: &[crate::portable::profile::SelectionRule],
+) -> Vec<crate::selection::SelectionRule> {
+    rules
+        .iter()
+        .map(|rule| match rule {
+            crate::portable::profile::SelectionRule::Artist { name } => {
+                crate::selection::SelectionRule::Artist { name: name.clone() }
+            }
+            crate::portable::profile::SelectionRule::Album { artist, album } => {
+                crate::selection::SelectionRule::Album {
+                    artist: artist.clone(),
+                    album: album.clone(),
+                }
+            }
+            crate::portable::profile::SelectionRule::Genre { name } => {
+                crate::selection::SelectionRule::Genre { name: name.clone() }
+            }
+        })
+        .collect()
+}
+
+fn selection_value_from_legacy(
+    selection: &crate::selection::Selection,
+) -> crate::portable::profile::SelectionValue {
+    crate::portable::profile::SelectionValue {
+        schema_version: 1,
+        mode: match selection.mode {
+            crate::selection::SelectionMode::All => crate::portable::profile::SelectionMode::All,
+            crate::selection::SelectionMode::Include => {
+                crate::portable::profile::SelectionMode::Include
+            }
+            crate::selection::SelectionMode::Exclude => {
+                crate::portable::profile::SelectionMode::Exclude
+            }
+        },
+        rules: selection
+            .rules
+            .iter()
+            .map(|rule| match rule {
+                crate::selection::SelectionRule::Artist { name } => {
+                    crate::portable::profile::SelectionRule::Artist { name: name.clone() }
+                }
+                crate::selection::SelectionRule::Album { artist, album } => {
+                    crate::portable::profile::SelectionRule::Album {
+                        artist: artist.clone(),
+                        album: album.clone(),
+                    }
+                }
+                crate::selection::SelectionRule::Genre { name } => {
+                    crate::portable::profile::SelectionRule::Genre { name: name.clone() }
+                }
+            })
+            .collect(),
+    }
+}
+
+fn legacy_playlist_draft(draft: crate::wire::PlaylistDraft) -> crate::ipc_daemon::PlaylistPayload {
+    match draft {
+        crate::wire::PlaylistDraft::Manual { slug, name, tracks } => {
+            crate::ipc_daemon::PlaylistPayload::Manual {
+                slug: slug.map(|slug| slug.to_string()),
+                name,
+                tracks: tracks.into_iter().map(|path| path.to_string()).collect(),
+            }
+        }
+        crate::wire::PlaylistDraft::Smart { slug, name, rules } => {
+            crate::ipc_daemon::PlaylistPayload::Smart {
+                slug: slug.map(|slug| slug.to_string()),
+                name,
+                rules: serde_json::from_value(
+                    serde_json::to_value(rules).expect("wire smart rules serialize"),
+                )
+                .expect("validated wire smart rules translate"),
+            }
+        }
+    }
+}
+
+fn wire_stored_playlist(
+    playlist: &crate::playlist::Playlist,
+) -> Result<crate::wire::StoredPlaylist> {
+    match playlist {
+        crate::playlist::Playlist::Manual(manual) => Ok(crate::wire::StoredPlaylist::Manual {
+            slug: crate::portable::profile::PlaylistSlug::parse(&manual.slug)?,
+            name: manual.name.clone(),
+            tracks: manual
+                .tracks
+                .iter()
+                .map(|path| {
+                    crate::portable::profile::ProfilePath::parse(
+                        &path.to_string_lossy().replace('\\', "/"),
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+        }),
+        crate::playlist::Playlist::Smart(smart) => Ok(crate::wire::StoredPlaylist::Smart {
+            slug: crate::portable::profile::PlaylistSlug::parse(&smart.slug)?,
+            name: smart.name.clone(),
+            rules: serde_json::from_value(serde_json::to_value(&smart.rules)?)
+                .context("translate persisted smart-playlist rules")?,
+        }),
+    }
+}
+
+fn legacy_sync_mode(mode: crate::wire::SyncMode) -> crate::config_file::SyncMode {
+    match mode {
+        crate::wire::SyncMode::Review => crate::config_file::SyncMode::Review,
+        crate::wire::SyncMode::AutoApply => crate::config_file::SyncMode::AutoApply,
+    }
+}
+
+fn legacy_notify(level: crate::wire::NotifyLevel) -> crate::config_file::NotifyLevel {
+    match level {
+        crate::wire::NotifyLevel::All => crate::config_file::NotifyLevel::All,
+        crate::wire::NotifyLevel::ErrorsOnly => crate::config_file::NotifyLevel::ErrorsOnly,
+        crate::wire::NotifyLevel::None => crate::config_file::NotifyLevel::None,
+    }
+}
+
+fn legacy_drop_behavior(
+    behavior: crate::wire::DropSyncBehavior,
+) -> crate::config_file::DropSyncBehavior {
+    match behavior {
+        crate::wire::DropSyncBehavior::Immediate => crate::config_file::DropSyncBehavior::Immediate,
+        crate::wire::DropSyncBehavior::NextSync => crate::config_file::DropSyncBehavior::NextSync,
+    }
+}
+
+fn legacy_trigger(trigger: crate::wire::SyncTrigger) -> TriggerSource {
+    match trigger {
+        crate::wire::SyncTrigger::Manual => TriggerSource::Manual,
+        crate::wire::SyncTrigger::Scheduled => TriggerSource::Scheduled,
+        crate::wire::SyncTrigger::PlugIn => TriggerSource::PlugIn,
+    }
 }
 
 fn library_mutation_rejected(
@@ -4084,11 +5461,15 @@ mod tests {
             trigger: SyncTrigger::Manual,
             serial: "RAW-A".into(),
             drive: "/Volumes/IPOD-A".into(),
+            request_id: None,
+            operation: crate::wire::SyncOperation::Sync,
         };
         let second = PendingSync {
             trigger: SyncTrigger::Scheduled,
             serial: "RAW-B".into(),
             drive: "/Volumes/IPOD-B".into(),
+            request_id: None,
+            operation: crate::wire::SyncOperation::Sync,
         };
         let mut pending = PendingSourceAction::default();
 
@@ -4171,6 +5552,27 @@ mod tests {
         })
     }
 
+    #[test]
+    fn pending_sync_defers_portable_reconciliation_to_the_worker() {
+        let base = std::env::temp_dir().join(format!(
+            "classick-pending-worker-recovery-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let pending = base.join("iPod_Control/classick/pending");
+        std::fs::create_dir_all(&pending).unwrap();
+        std::fs::write(pending.join("77.json"), b"pending").unwrap();
+        let config_path = base.join("host/config.toml");
+
+        reconcile_before_sync_worker_at(&config_path, "000A27002138B0A8", &base).unwrap();
+
+        assert!(
+            reconcile_before_sync_admission_at(&config_path, "000A27002138B0A8", &base).is_err(),
+            "the worker wrapper must be the path that deliberately defers reconciliation"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[tokio::test]
     async fn pending_host_journals_block_every_device_session_trigger() {
         for mutation_dir in ["playlist-mutations", "config-mutations"] {
@@ -4197,6 +5599,8 @@ mod tests {
                     trigger.clone(),
                     "RAW-A".into(),
                     "/Volumes/IPOD".into(),
+                    None,
+                    crate::wire::SyncOperation::Sync,
                     &mut state,
                     &event_tx,
                     &completed_spawn(spawn_count.clone()),
@@ -4412,6 +5816,8 @@ mod tests {
                 trigger: SyncTrigger::Manual,
                 serial: "RAW-A".into(),
                 drive: "/Volumes/IPOD".into(),
+                request_id: None,
+                operation: crate::wire::SyncOperation::Sync,
             }),
             &mut recovery,
             &availability,
@@ -4499,6 +5905,8 @@ mod tests {
                 trigger: SyncTrigger::Manual,
                 serial: "RAW-A".into(),
                 drive: "/Volumes/IPOD".into(),
+                request_id: None,
+                operation: crate::wire::SyncOperation::Sync,
             }),
             &mut recovery,
             &availability,
@@ -4649,6 +6057,8 @@ mod tests {
             trigger: SyncTrigger::Manual,
             serial: "RAW-A".into(),
             drive: "/Volumes/IPOD".into(),
+            request_id: None,
+            operation: crate::wire::SyncOperation::Sync,
         });
         let (event_tx, _) = broadcast::channel(16);
         let (internal_tx, _internal_rx) = mpsc::unbounded_channel();

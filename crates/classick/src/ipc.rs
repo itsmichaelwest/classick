@@ -1,4 +1,5 @@
-//! IPC wire types for `--ipc-mode`. See `docs/ipc/subprocess.md`.
+//! Legacy subprocess records retained for persisted/test migration helpers.
+//! Production `--ipc-mode` uses `crate::worker_wire` and protocol 3.
 //!
 //! These are serde-serializable mirrors of internal `ProgressEvent` and
 //! `Decision` enums. Conversion happens at the channel boundary in the
@@ -9,13 +10,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Current wire-protocol semver. Bumped per the rules in
-/// `docs/ipc-protocol.md` and `docs/ipc/subprocess.md`.
+/// the archived protocol history.
 pub const PROTOCOL_VERSION: &str = "1.4.0";
 
 /// Events emitted from the core to the UI on stdout.
 ///
 /// Serialized as newline-delimited JSON with a `type` discriminator using
-/// `snake_case`. Field names are also `snake_case`. See `docs/ipc/subprocess.md`.
+/// `snake_case`. Field names are also `snake_case`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcEvent {
@@ -127,7 +128,7 @@ pub struct IpcActionPlanSummary {
 /// Fit-pass deferral rollup attached to `finish`. Whole-album
 /// granularity mirrors `fit::DeferredAlbum` — `albums`/`tracks`/`bytes` are
 /// sums across every album that still didn't fit after the end-of-run retry.
-/// See `docs/ipc/subprocess.md`.
+/// Retained for legacy fixture decoding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkippedForSpace {
     pub albums: usize,
@@ -165,7 +166,7 @@ pub(crate) fn format_bytes_human(bytes: u64) -> String {
 
 /// Artwork embed/refresh rollup attached to `finish`. Counted
 /// across a run's Add/Modify/MetadataOnly actions — see
-/// `apply_loop::ArtworkCounts`. See `docs/ipc/subprocess.md`.
+/// `apply_loop::ArtworkCounts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtworkSummary {
     pub embedded: usize,
@@ -176,14 +177,14 @@ pub struct ArtworkSummary {
 /// Commands the UI sends to the core over stdin.
 ///
 /// Serialized as newline-delimited JSON with a `type` discriminator using
-/// `snake_case`. See `docs/ipc/subprocess.md`.
+/// `snake_case`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcCommand {
     /// Reserved for an explicit start handshake; currently ignored.
     Start,
     /// Reply to a `review` event. Carries the choice as a nested typed
-    /// envelope; see `docs/ipc/subprocess.md`.
+    /// envelope.
     ReviewDecision { decision: ReviewDecisionPayload },
     /// Reply to a `prompt` event. `id` MUST echo the originating prompt's id.
     PromptDecision { id: u64, choice: usize },
@@ -395,7 +396,7 @@ mod tests {
 
     #[test]
     fn review_decision_nested_envelope_round_trips() {
-        // This is the critical nuance from docs/ipc/subprocess.md: the
+        // This is the critical nuance from the archived subprocess contract: the
         // `decision` field is a nested typed envelope, NOT a flat shape.
         let cmd_json = r#"{"type":"review_decision","decision":{"type":"apply","no_delete":true}}"#;
         let cmd: IpcCommand = serde_json::from_str(cmd_json).unwrap();

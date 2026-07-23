@@ -71,11 +71,17 @@ pub struct Tags {
 
 impl OwnedDb {
     /// Parse the iTunesDB at `<ipod_mount>\iPod_Control\iTunes\iTunesDB` and
-    /// wire the mountpoint into the DB so libgpod write helpers (itdb_cp_track_to_ipod,
-    /// itdb_filename_on_ipod, etc.) know where to put files on disk.
+    /// its companion ArtworkDB from the mount.
     pub fn open(ipod_mount: &Path) -> Result<Self> {
-        let db_path = crate::ipod::layout::itunes_db_path(ipod_mount);
-        Self::open_path_at_mount(&db_path, ipod_mount)
+        let mount_c = path_to_cstring(ipod_mount)?;
+        unsafe {
+            let mut err: *mut ffi::GError = ptr::null_mut();
+            let db = ffi::itdb_parse(mount_c.as_ptr(), &mut err);
+            if db.is_null() {
+                return Err(gerror_to_anyhow("itdb_parse", err));
+            }
+            Ok(OwnedDb(db))
+        }
     }
 
     #[cfg(unix)]
@@ -689,9 +695,41 @@ impl ReconcileReport {
 impl Drop for OwnedDb {
     fn drop(&mut self) {
         unsafe {
-            ffi::itdb_free(self.0);
+            free_itunesdb(self.0);
         }
     }
+}
+
+#[repr(C)]
+struct ItunesDbPrivateCompat {
+    _mhsd5_playlists: *mut std::ffi::c_void,
+    _platform: u16,
+    _unk_0x22: u16,
+    _id_0x24: u64,
+    _lang: u16,
+    _pid: u64,
+    _unk_0x50: i32,
+    _unk_0x54: i32,
+    _audio_language: i16,
+    _subtitle_language: i16,
+    _unk_0xa4: i16,
+    _unk_0xa6: i16,
+    _unk_0xa8: i16,
+    genius_cuid: *mut std::ffi::c_char,
+}
+
+unsafe fn free_itunesdb(db: *mut ffi::Itdb_iTunesDB) {
+    // Our pinned libgpod frees a parsed Genius CUID twice. Take ownership of
+    // that field first, then let itdb_free release the rest of the database.
+    if !db.is_null() {
+        let private = (*db).priv_ as *mut ItunesDbPrivateCompat;
+        if !private.is_null() {
+            let genius_cuid = (*private).genius_cuid;
+            (*private).genius_cuid = ptr::null_mut();
+            ffi::g_free(genius_cuid.cast());
+        }
+    }
+    ffi::itdb_free(db);
 }
 
 /// Remove every track from `db`: delete each track's on-disk file (best
@@ -1278,7 +1316,59 @@ unsafe fn gerror_to_anyhow(api: &str, err: *mut ffi::GError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn artwork_mount(label: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let mount = std::env::temp_dir().join(format!(
+            "classick-db-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(mount.join("iPod_Control/iTunes")).unwrap();
+        std::fs::create_dir_all(mount.join("iPod_Control/Music/F00")).unwrap();
+        std::fs::create_dir_all(mount.join("iPod_Control/Device")).unwrap();
+
+        let device_id = crate::device::DeviceId::parse("000A27002138B0A8").unwrap();
+        let profile_id = crate::ipod::CapabilityProfileId::parse("classic-late-2009-v1").unwrap();
+        let profile = crate::ipod::resolve_validated_capability_profile(&profile_id)
+            .unwrap()
+            .unwrap();
+        let projection = crate::ipod::project_sysinfo_extended(&device_id, &profile).unwrap();
+        std::fs::write(
+            mount.join("iPod_Control/Device/SysInfoExtended"),
+            projection.bytes(),
+        )
+        .unwrap();
+
+        unsafe {
+            let raw = ffi::itdb_new();
+            assert!(!raw.is_null());
+            let mount_c = path_to_cstring(&mount).unwrap();
+            ffi::itdb_set_mountpoint(raw, mount_c.as_ptr());
+            crate::ipod::device::set_firewire_guid((*raw).device, "0x000A27002138B0A8").unwrap();
+            crate::ipod::device::set_model_num((*raw).device, "MC293").unwrap();
+            let master = ffi::itdb_playlist_new(c"iPod".as_ptr(), 0);
+            assert!(!master.is_null());
+            ffi::itdb_playlist_set_mpl(master);
+            ffi::itdb_playlist_add(raw, master, -1);
+            let mut error = ptr::null_mut();
+            assert_ne!(ffi::itdb_write(raw, &mut error), 0);
+            free_itunesdb(raw);
+        }
+
+        mount
+    }
+
+    fn jpeg_fixture() -> Vec<u8> {
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(4, 4)
+            .write_to(&mut bytes, image::ImageFormat::Jpeg)
+            .unwrap();
+        bytes.into_inner()
+    }
 
     #[test]
     fn path_to_cstring_accepts_ascii() {
@@ -1300,5 +1390,44 @@ mod tests {
         assert!(t.title.is_none());
         assert!(t.artist.is_none());
         assert!(t.year.is_none());
+    }
+
+    #[test]
+    fn drop_frees_a_parsed_genius_identifier_exactly_once() {
+        unsafe {
+            let raw = ffi::itdb_new();
+            assert!(!raw.is_null());
+            let private = (*raw).priv_ as *mut ItunesDbPrivateCompat;
+            assert!(!private.is_null());
+            (*private).genius_cuid = ffi::g_strdup(c"0123456789ABCDEF0123456789ABCDEF".as_ptr());
+
+            drop(OwnedDb(raw));
+        }
+    }
+
+    #[test]
+    fn open_loads_persisted_track_artwork_from_the_mount() {
+        let mount = artwork_mount("persisted-artwork");
+        let media = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bare.m4a");
+        let art = jpeg_fixture();
+
+        let db = OwnedDb::open(&mount).unwrap();
+        unsafe {
+            crate::ipod::device::set_firewire_guid((*db.as_ptr()).device, "0x000A27002138B0A8")
+                .unwrap();
+            crate::ipod::device::set_model_num((*db.as_ptr()).device, "MC293").unwrap();
+        }
+        let handle = db
+            .add_track_with_file_strict(&media, &Tags::default(), Some(&art))
+            .unwrap();
+        db.write().unwrap();
+        drop(db);
+
+        let reopened = OwnedDb::open(&mount).unwrap();
+        let signals = reopened.track_artwork_signals(handle.dbid).unwrap();
+        assert!(signals.has_artwork);
+        assert!(signals.has_thumbnail);
+        assert!(signals.has_thumbnails);
+        assert!(signals.decoded_thumbnail);
     }
 }

@@ -19,11 +19,16 @@ pub struct EventContext {
 }
 
 impl EventContext {
-    pub(crate) fn wrap(&self, line: String) -> DaemonEvent {
+    pub(crate) fn wrap(
+        &self,
+        line: String,
+        wire_event: Option<crate::wire::WireEvent>,
+    ) -> DaemonEvent {
         DaemonEvent::SyncEvent {
             line,
             serial: self.serial.clone(),
             session_id: self.session_id,
+            wire_event,
         }
     }
 }
@@ -373,7 +378,7 @@ mod tests {
         assert_eq!(context.session_id, a.id);
         assert_eq!(context.serial.as_deref(), Some("RAW-A"));
         assert!(matches!(
-            context.wrap("{\"type\":\"track_done\"}".to_string()),
+            context.wrap("{\"type\":\"track_done\"}".to_string(), None),
             DaemonEvent::SyncEvent {
                 serial: Some(serial),
                 session_id,
@@ -392,7 +397,7 @@ mod tests {
         assert_eq!(scan.kind, SessionKind::Scan);
         assert_eq!(scan.trigger, SyncTrigger::Manual);
         assert!(matches!(
-            EventContext::from(&scan).wrap("{\"type\":\"log\"}".to_string()),
+            EventContext::from(&scan).wrap("{\"type\":\"log\"}".to_string(), None),
             DaemonEvent::SyncEvent {
                 serial: None,
                 session_id,

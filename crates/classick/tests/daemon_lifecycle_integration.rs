@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::sync::{mpsc, oneshot};
 
 static SERIAL_TESTS: Mutex<()> = Mutex::new(());
+const DEVICE_ID: &str = "000A27002138B0A8";
 
 struct ScriptedWatcher(mpsc::Receiver<DeviceEvent>);
 
@@ -62,7 +63,7 @@ impl TestClient {
     async fn next_snapshot_where(&mut self, predicate: impl Fn(&Value) -> bool) {
         loop {
             let value = self.next().await;
-            if value["type"] == "device_inventory_snapshot" && predicate(&value) {
+            if value["type"] == "device_inventory" && predicate(&value) {
                 return;
             }
         }
@@ -102,7 +103,7 @@ impl Sandbox {
                     ..Default::default()
                 }),
                 ipod_identity: Some(IpodIdentity {
-                    serial: "RAW-A".into(),
+                    serial: DEVICE_ID.into(),
                     model_label: "iPod Classic".into(),
                     name: None,
                     custom_selection: false,
@@ -144,7 +145,7 @@ impl Sandbox {
         });
         let pipe_name = unique_pipe_name(&base, n);
         let deps = DaemonDeps {
-            configured_serial: Some("RAW-A".into()),
+            configured_serial: Some(DEVICE_ID.into()),
             watcher: Box::new(ScriptedWatcher(device_rx)),
             spawn_sync: spawn_sync.clone(),
             spawn_backfill: spawn_sync.clone(),
@@ -175,7 +176,7 @@ impl Sandbox {
         let mut client = TestClient::connect(&self.pipe_name).await;
         self.device_tx
             .send(DeviceEvent::Connected(DetectedIpod {
-                serial: "RAW-A".into(),
+                serial: DEVICE_ID.into(),
                 model_label: "iPod Classic".into(),
                 drive: "/Volumes/FAKE".into(),
                 name: None,
@@ -189,9 +190,9 @@ impl Sandbox {
         client
             .send(json!({
                 "type": "trigger_sync",
-                "source": "manual",
-                "serial": "RAW-A",
-                "request_id": "lifecycle-sync"
+                "trigger": "manual",
+                "device_id": DEVICE_ID,
+                "request_id": "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8701"
             }))
             .await;
         (&mut self.sync_started_rx).await.expect("fake sync starts");
@@ -247,7 +248,12 @@ async fn client_shutdown_still_drains_the_active_sync_before_exit() {
     let mut sandbox = Sandbox::start().await;
     let mut client = sandbox.begin_fake_sync().await;
 
-    client.send(json!({"type": "shutdown"})).await;
+    client
+        .send(json!({
+            "type": "shutdown",
+            "request_id": "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8702"
+        }))
+        .await;
 
     sandbox.assert_drains_before_exit().await;
 }

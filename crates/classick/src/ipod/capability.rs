@@ -126,6 +126,11 @@ pub fn resolve_validated_capability_profile(
     validate_catalogue_asset(LATE_2009_PROFILE_ASSET).map(Some)
 }
 
+pub fn validated_capability_profile_id_for_model(model_code: &str) -> Option<CapabilityProfileId> {
+    matches!(model_code, "MC293" | "MC297")
+        .then(|| CapabilityProfileId::parse(LATE_2009_PROFILE_ID).expect("catalogue ID is valid"))
+}
+
 fn validate_catalogue_asset(
     asset: &[u8],
 ) -> Result<ValidatedCapabilityProfile, CapabilityProfileError> {

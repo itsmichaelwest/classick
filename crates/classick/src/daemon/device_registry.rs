@@ -10,9 +10,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::config_file::IpodIdentity;
+use crate::daemon::device_registry_v2::{
+    DeviceRegistryV2, ImportedProfileSummary, RegistryDeviceRecordV2, RegistryHardwareFacts,
+    RegistryMigrationStatus, RegistryPresentation,
+};
 use crate::ipod::device::DetectedIpod;
+use crate::portable::host_cache::{HostCacheLoad, HostCacheStore};
 
-const REGISTRY_VERSION: u32 = 1;
+const LEGACY_REGISTRY_VERSION: u32 = 1;
 
 /// Comparison-only form of a serial. Never use this on disk or on the wire.
 pub(crate) fn canonical_serial_key(serial: &str) -> String {
@@ -88,18 +93,57 @@ pub(crate) struct DeviceRegistry {
 impl DeviceRegistry {
     pub(crate) fn load_or_migrate(path: PathBuf, legacy: Option<&IpodIdentity>) -> Result<Self> {
         let mut should_persist = false;
-        let mut records = match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let file: RegistryFile = serde_json::from_str(&text)
+        let mut records = match std::fs::read(&path) {
+            Ok(bytes) => {
+                let value: serde_json::Value = serde_json::from_slice(&bytes)
                     .with_context(|| format!("parse device registry at {}", path.display()))?;
-                if file.version != REGISTRY_VERSION {
-                    return Err(anyhow!(
-                        "unsupported device registry version {} at {}",
-                        file.version,
-                        path.display()
-                    ));
+                if value.get("schema_version").is_some() {
+                    let registry = DeviceRegistryV2::from_json(
+                        std::str::from_utf8(&bytes).context("device registry is not UTF-8")?,
+                    )
+                    .with_context(|| format!("parse device registry v2 at {}", path.display()))?;
+                    Self::index_records(
+                        registry
+                            .records()
+                            .map(|(device_id, record)| DeviceRecord {
+                                serial: device_id.to_string(),
+                                model_label: record
+                                    .presentation
+                                    .model_label
+                                    .clone()
+                                    .unwrap_or_default(),
+                                name: record.presentation.name.clone(),
+                                configured: record.configured,
+                                last_seen_unix_secs: record.last_seen_unix_secs,
+                                selection_revision: imported_or_pending_revision(
+                                    record,
+                                    ConfigRevisionPart::Selection,
+                                ),
+                                settings_revision: imported_or_pending_revision(
+                                    record,
+                                    ConfigRevisionPart::Settings,
+                                ),
+                                subscriptions_revision: imported_or_pending_revision(
+                                    record,
+                                    ConfigRevisionPart::Subscriptions,
+                                ),
+                            })
+                            .collect(),
+                    )?
+                } else {
+                    let file: RegistryFile = serde_json::from_slice(&bytes).with_context(|| {
+                        format!("parse legacy device registry at {}", path.display())
+                    })?;
+                    if file.version != LEGACY_REGISTRY_VERSION {
+                        return Err(anyhow!(
+                            "unsupported legacy device registry version {} at {}",
+                            file.version,
+                            path.display()
+                        ));
+                    }
+                    should_persist = true;
+                    Self::index_records(file.records)?
                 }
-                Self::index_records(file.records)?
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 should_persist = true;
@@ -260,6 +304,10 @@ impl DeviceRegistry {
         self.replace_records(next)
     }
 
+    pub(crate) fn refresh_portable_state(&self) -> Result<()> {
+        self.persist(&self.records)
+    }
+
     fn required_key(serial: &str) -> Result<String> {
         let key = canonical_serial_key(serial);
         if key.is_empty() {
@@ -291,14 +339,108 @@ impl DeviceRegistry {
     }
 
     fn persist(&self, records: &BTreeMap<String, DeviceRecord>) -> Result<()> {
-        let file = RegistryFile {
-            version: REGISTRY_VERSION,
-            records: records.values().cloned().collect(),
-        };
-        let text = serde_json::to_string_pretty(&file).context("serialize device registry")?;
+        if records
+            .values()
+            .any(|record| crate::device::DeviceId::parse(&record.serial).is_err())
+        {
+            let retained = RegistryFile {
+                version: LEGACY_REGISTRY_VERSION,
+                records: records.values().cloned().collect(),
+            };
+            let text =
+                serde_json::to_string_pretty(&retained).context("retain ambiguous registry v1")?;
+            return crate::atomic_file::AtomicFileWriter::new()
+                .write(&self.path, text.as_bytes())
+                .context("rename/publish retained ambiguous device registry");
+        }
+        let config_root = self
+            .path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let cache_store = HostCacheStore::new(config_root);
+        let devices = records
+            .values()
+            .map(|record| {
+                let device_id = crate::device::DeviceId::parse(&record.serial)
+                    .with_context(|| format!("validate registry device ID {:?}", record.serial))?;
+                let imported = match cache_store.load(&device_id)? {
+                    HostCacheLoad::Loaded(cache) => {
+                        cache
+                            .last_imported_profile
+                            .map(|profile| ImportedProfileSummary {
+                                schema_version: profile.schema_version,
+                                selection_revision: profile.selection.revision,
+                                settings_revision: profile.settings.revision,
+                                subscriptions_revision: profile.subscriptions.revision,
+                            })
+                    }
+                    HostCacheLoad::Missing => None,
+                };
+                let migration_status = if record.configured && imported.is_none() {
+                    RegistryMigrationStatus::PendingLegacyImport {
+                        selection_revision: record.selection_revision,
+                        settings_revision: record.settings_revision,
+                        subscriptions_revision: record.subscriptions_revision,
+                    }
+                } else {
+                    RegistryMigrationStatus::Complete
+                };
+                Ok((
+                    device_id.to_string(),
+                    RegistryDeviceRecordV2 {
+                        configured: record.configured,
+                        presentation: RegistryPresentation {
+                            name: record.name.clone(),
+                            model_label: (!record.model_label.is_empty())
+                                .then(|| record.model_label.clone()),
+                            hardware_facts: RegistryHardwareFacts::default(),
+                        },
+                        last_seen_unix_secs: record.last_seen_unix_secs,
+                        last_storage: None,
+                        last_readiness: None,
+                        last_imported_profile: imported,
+                        migration_status,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let registry = DeviceRegistryV2::from_records(devices)?;
+        let text = registry
+            .to_json_pretty()
+            .context("serialize device registry v2")?;
         crate::atomic_file::AtomicFileWriter::new()
             .write(&self.path, text.as_bytes())
             .context("rename/publish device registry")
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ConfigRevisionPart {
+    Selection,
+    Settings,
+    Subscriptions,
+}
+
+fn imported_or_pending_revision(record: &RegistryDeviceRecordV2, part: ConfigRevisionPart) -> u64 {
+    if let Some(imported) = &record.last_imported_profile {
+        return match part {
+            ConfigRevisionPart::Selection => imported.selection_revision,
+            ConfigRevisionPart::Settings => imported.settings_revision,
+            ConfigRevisionPart::Subscriptions => imported.subscriptions_revision,
+        };
+    }
+    match &record.migration_status {
+        RegistryMigrationStatus::PendingLegacyImport {
+            selection_revision,
+            settings_revision,
+            subscriptions_revision,
+        } => match part {
+            ConfigRevisionPart::Selection => *selection_revision,
+            ConfigRevisionPart::Settings => *settings_revision,
+            ConfigRevisionPart::Subscriptions => *subscriptions_revision,
+        },
+        RegistryMigrationStatus::Complete => 0,
     }
 }
 
@@ -355,6 +497,30 @@ mod tests {
         assert_eq!(records[0].name.as_deref(), Some("Library A"));
         assert_eq!(records[0].last_seen_unix_secs, None);
         assert!(path.exists(), "migration must be durable");
+    }
+
+    #[test]
+    fn canonical_legacy_registry_is_atomically_upgraded_to_v2() {
+        let path = temp_path("canonical-v2");
+        let device_id = "000A27002138B0A8";
+
+        let registry =
+            DeviceRegistry::load_or_migrate(path.clone(), Some(&legacy(device_id))).unwrap();
+
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["schema_version"], 2);
+        assert!(persisted["devices"].get(device_id).is_some());
+        assert!(persisted.get("version").is_none());
+        assert_eq!(registry.record(device_id).unwrap().serial, device_id);
+        assert_eq!(
+            DeviceRegistry::load_or_migrate(path, None)
+                .unwrap()
+                .record(device_id)
+                .unwrap()
+                .serial,
+            device_id
+        );
     }
 
     #[test]

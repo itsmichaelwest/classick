@@ -1,59 +1,82 @@
-# Classick IPC protocols
+# Classick protocol 3
 
-Classick has two independent newline-delimited JSON protocols. This document is
-the normative entry point; the linked references define every current message.
+Protocol `3.0.0` is the single newline-delimited JSON contract used by desktop
+clients and by daemon-owned sync workers. Windows named pipes, Unix sockets,
+and worker stdin/stdout use the same message envelope and validation rules.
 
-| Channel | Current version | Transport | Schema |
-| --- | --- | --- | --- |
-| sync subprocess | `1.4.0` | child stdin/stdout | [Subprocess protocol](ipc/subprocess.md) |
-| desktop UI ↔ daemon | `2.0.0` | Windows named pipe or Unix socket | [Daemon protocol](ipc/daemon.md) |
+## Handshake and framing
 
-The version numbers are not a shared release train. A daemon `sync_event`
-contains one raw subprocess-protocol line and therefore carries both protocol
-contexts.
+- UTF-8 JSON, one object per line, terminated by `\n`; producers flush each
+  line.
+- `hello` is the first message. It carries `protocol_version`, `role`
+  (`desktop`, `daemon`, or `worker`), `software_version`, and a sorted
+  capability list.
+- Peers reject a wrong major, role, missing required capability, a second
+  hello, or a command/event not allowed on that admitted stream.
+- Same-major unknown event types are ignored. Unknown commands, malformed
+  known messages, invalid routing, and unknown fields in owned schemas are
+  rejected.
+- Current daemon capabilities are `device_inventory`, `portable_profile`, and
+  `typed_sync_progress`.
 
-## Common framing
+The shared Rust envelope is `wire::WireMessage`. Language-neutral positive and
+negative examples live under `crates/classick/tests/data/wire-v3/` and are
+consumed unchanged by Rust, Swift, and C# tests.
 
-- UTF-8 JSON, exactly one object per line, terminated by `\n`.
-- The top-level `type` discriminator and all field names use `snake_case`.
-- The producer flushes every line.
-- `hello` is the first message from the producer. No other event may overtake
-  it.
-- Protocol versions use semantic versioning. A major mismatch is incompatible;
-  minor and patch changes are backward-compatible additions or clarifications.
-- Consumers ignore unknown event types and unknown object fields after a valid
-  same-major handshake. Required fields on known messages remain required.
-- Malformed JSON is logged/rejected without being reflected back into the
-  stream. A consumer must not write diagnostics to the subprocess stdout
-  channel.
+## Routing and correlation
 
-## Correlation and ordering
+- Every query and mutation carries a lowercase non-nil UUID `request_id`.
+- Device commands carry a canonical 16-uppercase-hex `device_id`.
+- Active sync events and controls additionally carry a nonzero `session_id`.
+- Prompts carry a nonzero `prompt_id` scoped to that session.
+- Portable configuration mutations carry their own lowercase non-nil UUID
+  `mutation_id`.
 
-Subprocess prompts correlate by numeric `id`. Daemon mutations and queries
-correlate by string `request_id`; canonical replies expose it as
-`acknowledged_request_id`.
+An acknowledgement is the correlated canonical event for that exact request.
+Socket write completion, an echo, an uncorrelated inventory/config broadcast,
+or a locally predicted state is not an acknowledgement.
 
-An acknowledgement proves that the reply's canonical state was durably
-persisted for that exact request. An uncorrelated broadcast, socket write, echo,
-or locally predicted state is not an acknowledgement. A partial failure may
-broadcast the actual canonical state with no acknowledgement and then send a
-correlated failure.
+Configuration acceptance and device delivery are separate:
 
-Each connection preserves input-line order. Clients that persist unsent or
-unacknowledged intents replay the same encoded bytes and request ID after
-reconnection. Additive mutations are idempotent by request ID and payload
-fingerprint.
+1. the daemon persists the complete desired component to the host outbox;
+2. `device_config` reports `pending_device`;
+3. when connected, the daemon runs a config-only device transaction;
+4. exact readback changes delivery to `device_committed` and clears only the
+   matching mutation.
 
-## Compatibility sources
+`config_mutation_failed.stage` distinguishes host acceptance from device
+delivery. A delivery failure retains accepted host intent.
 
-The Rust serialized enums are the implementation authority:
+## Message families
 
-- `crates/classick/src/ipc.rs`
-- `crates/classick/src/ipc_daemon.rs`
+The exhaustive schemas are the serialized enums in:
 
-The macOS and Windows models must accept every valid current Rust message and
-must encode commands with the same field names and defaults. Wire codec tests
-contain representative doc-shaped payloads.
+- `crates/classick/src/wire/command.rs`
+- `crates/classick/src/wire/event.rs`
+- the remaining focused models under `crates/classick/src/wire/`
 
-The previous append-only protocol narrative is retained only as
-[history](archive/ipc-protocol-history.md). It is not a current contract.
+The public families are:
+
+- global source/settings and source availability;
+- device inventory, readiness, adoption, portable configuration, preview, and
+  forgetting;
+- sync, replace-library, Rockbox backfill, pause/cancel, prompts, typed
+  progress, and terminal results;
+- library scan/query, selection resolution, and drag/drop mutations;
+- playlist list/detail/save/delete/append;
+- history and daemon shutdown.
+
+Inventory uses `device_id` only when ordinary USB identity is available.
+Identity-unavailable observations carry an ephemeral `observation_id` and have
+no mutating commands. Mount paths are operational diagnostics, never identity.
+
+## Compatibility
+
+Protocol compatibility is major-version based and there is no production
+fallback from protocol 3 to the former daemon-2/subprocess-1 protocols. Both
+desktop clients and the daemon ship the same major. A mismatch is surfaced as
+an actionable incompatible-core error before a mutation command is sent.
+
+The prior append-only contracts are retained only in
+[protocol history](archive/ipc-protocol-history.md) and are not current
+authority.

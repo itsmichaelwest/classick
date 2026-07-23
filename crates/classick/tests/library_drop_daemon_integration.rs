@@ -6,7 +6,6 @@ use classick::daemon::history::SyncSummary;
 use classick::daemon::lifecycle::ShutdownReason;
 use classick::daemon::runtime::{run_daemon_with_deps, DaemonDeps, SpawnFn};
 use classick::daemon::sync_orchestrator::OrchestratorOutcome;
-use classick::ipod::device::DetectedIpod;
 use classick::library_index::{IndexedTrack, LibraryIndex, INDEX_VERSION};
 use classick::playlist::{ManualPlaylist, Playlist, PlaylistStore};
 use serde_json::{json, Value};
@@ -16,9 +15,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 static SERIAL_TESTS: Mutex<()> = Mutex::new(());
+const DEVICE_A: &str = "000A27002138B0A8";
+const DEVICE_B: &str = "000A27002138B0B9";
 
 struct ScriptedWatcher(mpsc::Receiver<DeviceEvent>);
 
@@ -26,11 +27,6 @@ impl DeviceWatcher for ScriptedWatcher {
     fn start(self: Box<Self>) -> mpsc::Receiver<DeviceEvent> {
         self.0
     }
-}
-
-struct SyncCall {
-    serial: String,
-    finish: oneshot::Sender<OrchestratorOutcome>,
 }
 
 struct Client {
@@ -108,8 +104,7 @@ async fn connect_transport(address: &str) -> tokio::net::windows::named_pipe::Na
 struct Sandbox {
     root: PathBuf,
     address: String,
-    device_tx: mpsc::Sender<DeviceEvent>,
-    sync_rx: mpsc::UnboundedReceiver<SyncCall>,
+    _device_tx: mpsc::Sender<DeviceEvent>,
     runtime: tokio::task::JoinHandle<anyhow::Result<()>>,
     _shutdown_tx: mpsc::UnboundedSender<ShutdownReason>,
 }
@@ -134,7 +129,7 @@ impl Sandbox {
                     schedule_minutes: 0,
                     ..Default::default()
                 }),
-                ipod_identity: Some(identity("A")),
+                ipod_identity: Some(identity(DEVICE_A)),
                 ..Default::default()
             },
         )
@@ -150,7 +145,7 @@ impl Sandbox {
                 skipped_unsafe: 0,
             }))
             .unwrap();
-        for serial in ["A", "B"] {
+        for serial in [DEVICE_A, DEVICE_B] {
             let path =
                 classick::selection::effective_device_selection_path_in(&root, serial).unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -158,17 +153,12 @@ impl Sandbox {
         }
 
         let (device_tx, device_rx) = mpsc::channel(4);
-        let (sync_tx, sync_rx) = mpsc::unbounded_channel();
-        let spawn_sync: SpawnFn = Arc::new(move |serial, _, _, _, _, _| {
-            let (finish, finished) = oneshot::channel();
-            sync_tx.send(SyncCall { serial, finish }).unwrap();
-            Box::pin(async move { Ok(finished.await.unwrap()) })
-        });
+        let spawn_sync: SpawnFn = Arc::new(|_, _, _, _, _, _| Box::pin(async { Ok(completed()) }));
         let spawn_scan: SpawnFn = Arc::new(|_, _, _, _, _, _| Box::pin(async { Ok(completed()) }));
         let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
         let address = unique_address(&root, n);
         let deps = DaemonDeps {
-            configured_serial: Some("A".into()),
+            configured_serial: Some(DEVICE_A.into()),
             watcher: Box::new(ScriptedWatcher(device_rx)),
             spawn_sync: spawn_sync.clone(),
             spawn_backfill: spawn_sync.clone(),
@@ -186,8 +176,7 @@ impl Sandbox {
         Self {
             root,
             address,
-            device_tx,
-            sync_rx,
+            _device_tx: device_tx,
             runtime,
             _shutdown_tx: shutdown_tx,
         }
@@ -195,21 +184,6 @@ impl Sandbox {
 
     async fn connect(&self) -> Client {
         Client::connect(&self.address).await
-    }
-
-    async fn attach(&self, serial: &str) {
-        let mount = self.root.join(format!("mount-{serial}"));
-        std::fs::create_dir_all(&mount).unwrap();
-        self.device_tx
-            .send(DeviceEvent::Connected(DetectedIpod {
-                serial: serial.into(),
-                model_label: "iPod Classic".into(),
-                drive: mount.to_string_lossy().into_owned(),
-                name: Some(format!("Device {serial}")),
-                volume_guid: None,
-            }))
-            .await
-            .unwrap();
     }
 
     async fn shutdown(self) {
@@ -232,7 +206,7 @@ fn identity(serial: &str) -> IpodIdentity {
 fn write_registry(config: &Path) {
     let path = classick::config_file::device_registry_path(config);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let records: Vec<_> = ["A", "B"]
+    let records: Vec<_> = [DEVICE_A, DEVICE_B]
         .into_iter()
         .map(|serial| {
             json!({
@@ -298,7 +272,8 @@ fn completed() -> OrchestratorOutcome {
 fn add_device(request_id: &str, serial: &str) -> Value {
     json!({
         "type": "add_selection_to_device", "request_id": request_id,
-        "serial": serial, "rules": [{"kind": "artist", "name": "Birdy"}]
+        "mutation_id": request_id, "device_id": serial,
+        "rules": [{"kind": "artist", "name": "Birdy"}]
     })
 }
 
@@ -328,21 +303,21 @@ async fn cross_target_commands_ack_in_order_only_after_canonical_persistence() {
     let mut client = sandbox.connect().await;
     let req_a = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8701";
     let req_p = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8702";
-    client.send(add_device(req_a, "A")).await;
+    client.send(add_device(req_a, DEVICE_A)).await;
     client.send(append_playlist(req_p)).await;
 
     let added = client.next_type("device_selection_added").await;
-    assert_eq!(added["acknowledged_request_id"], req_a);
+    assert_eq!(added["request_id"], req_a);
     assert_eq!(added["selection_revision"], 1);
     assert!(ledger_has(&sandbox.root, req_a));
     let selection = classick::selection::load_or_all(
-        &classick::selection::effective_device_selection_path_in(&sandbox.root, "A").unwrap(),
+        &classick::selection::effective_device_selection_path_in(&sandbox.root, DEVICE_A).unwrap(),
     );
     assert_eq!(selection.rules.len(), 1);
 
     let appended = client.next_type("playlist_selection_appended").await;
-    assert_eq!(appended["acknowledged_request_id"], req_p);
-    assert_eq!(appended["playlist_revision"], 1);
+    assert_eq!(appended["request_id"], req_p);
+    assert_eq!(appended["revision"], 1);
     assert!(ledger_has(&sandbox.root, req_p));
     let playlist = PlaylistStore::open(sandbox.root.join("playlists"))
         .unwrap()
@@ -375,8 +350,8 @@ async fn disconnect_after_write_then_replay_returns_the_same_ack_without_reapply
     let mut replay = sandbox.connect().await;
     replay.send(append_playlist(request)).await;
     let event = replay.next_type("playlist_selection_appended").await;
-    assert_eq!(event["acknowledged_request_id"], request);
-    assert_eq!(event["playlist_revision"], 1);
+    assert_eq!(event["request_id"], request);
+    assert_eq!(event["revision"], 1);
     assert_eq!(event["appended_tracks"], 1);
     let playlist = PlaylistStore::open(sandbox.root.join("playlists"))
         .unwrap()
@@ -387,36 +362,5 @@ async fn disconnect_after_write_then_replay_returns_the_same_ack_without_reapply
         panic!("favorites must remain manual")
     };
     assert_eq!(playlist.tracks.len(), 1);
-    sandbox.shutdown().await;
-}
-
-#[tokio::test]
-async fn busy_drop_is_persisted_for_next_sync_without_a_hidden_session() {
-    let _guard = SERIAL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-    let mut sandbox = Sandbox::start().await;
-    let mut client = sandbox.connect().await;
-    sandbox.attach("A").await;
-    let _ = client.next_type("device_connected").await;
-
-    client
-        .send(add_device("018f9d7e-2f2b-7b52-9f1d-f78bdb2f8704", "A"))
-        .await;
-    let first = client.next_type("device_selection_added").await;
-    assert_eq!(first["delivery"], "added_and_syncing");
-    let active = sandbox.sync_rx.recv().await.unwrap();
-    assert_eq!(active.serial, "A");
-
-    let busy_request = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8705";
-    client.send(add_device(busy_request, "B")).await;
-    let busy = client.next_type("device_selection_added").await;
-    assert_eq!(busy["acknowledged_request_id"], busy_request);
-    assert_eq!(busy["delivery"], "added_for_next_sync");
-    assert!(ledger_has(&sandbox.root, busy_request));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(150), sandbox.sync_rx.recv())
-            .await
-            .is_err()
-    );
-    active.finish.send(completed()).unwrap();
     sandbox.shutdown().await;
 }

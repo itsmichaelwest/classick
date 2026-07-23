@@ -3,7 +3,8 @@
 Classick is a cross-platform iPod Classic synchronization system. A Rust core
 owns device discovery, library indexing, selection, transcoding, iTunesDB
 publication, recovery, and daemon state. Native Windows and macOS applications
-own the daemon process and present the same serial-keyed model over JSON IPC.
+own the daemon process and present the same `DeviceId`-keyed model over
+protocol 3.
 
 ## Components
 
@@ -13,13 +14,14 @@ The `classick` binary has three entry modes:
 
 - `--daemon`: long-lived device watcher, scheduler, state authority, and IPC
   server.
-- `--ipc-mode`: one sync subprocess controlled over stdin/stdout.
+- `--ipc-mode`: one sync worker controlled over stdin/stdout.
 - interactive/default: CLI/TUI execution without a desktop owner.
 
 The library index and host configuration live below the platform config/data
-directory. Device-specific state is keyed by the raw iPod serial. The daemon
-never treats a display name, mount path, or currently configured legacy identity
-as a substitute for that serial.
+directory. Device-specific authority is keyed by a canonical 16-hex
+`DeviceId`, obtained from ordinary USB identity. The daemon never treats a
+display name, mount path, volume identifier, or legacy configuration key as a
+substitute.
 
 ### Windows application
 
@@ -44,40 +46,42 @@ socket. macOS uses the system `afconvert`; it never bundles or requires ffmpeg.
 
 | Concern | Authority |
 | --- | --- |
-| configured/remembered devices | `devices/registry.json` |
-| per-device selection | `devices/<serial>/selection.json` |
-| per-device settings/subscriptions | serial-keyed device files plus registry revisions |
+| configured/remembered devices | version-2 `devices/registry.json`, keyed by canonical `DeviceId` |
+| portable per-device configuration | `iPod_Control/classick/profile.json` when committed |
+| disconnected configuration and pending edits | `devices/<DeviceId>/cache.json` plus `outbox.json` |
 | source library contents | `library-index.json`, refreshed by the scan subprocess |
 | manual/smart playlists | host playlist store |
 | synced track state | device manifest when connected; serial-keyed host cache only for disconnected display |
 | managed Apple playlists | device ownership record keyed by libgpod playlist ID |
 | managed Rockbox projections | device ownership record keyed by filename and content hash |
-| active session | daemon runtime state keyed by serial and session ID |
+| active session | daemon runtime state keyed by `DeviceId` and session ID |
 | durable UI intent | client outbox until canonical correlated acknowledgement |
 
-`config.toml`'s legacy `ipod_identity` is migration input, not the live
-multi-device authority.
+`config.toml`'s legacy `ipod_identity` and the old per-device selection,
+settings, subscriptions, and managed-playlist files are retained migration
+inputs. A one-time import writes the complete host outbox before the cache and
+does not delete the legacy bytes.
 
-The approved portable-state target adds an on-device profile under
-`iPod_Control/classick/`, with the host registry/cache and durable mutation
-outbox supporting disconnected display and edits. Pending explicit host intent
-wins until published; otherwise the connected device profile refreshes the
-host cache. This is not shipped yet; see the linked design and plan in the
-[documentation index](README.md).
+Pending explicit host intent wins when the device reconnects. With no pending
+intent, another host imports the portable profile. The source-library location
+remains global and host-owned; portable library identity is deferred.
 
 ## Sync flow
 
-1. The daemon observes a device or receives a serial-targeted command.
-2. Source availability is resolved without changing the configured logical
+1. The daemon observes a device and classifies identity/readiness without
+   writing it.
+2. For an adopted device, pending portable recovery and reconciliation run
+   under the device lease before auto-sync admission.
+3. Source availability is resolved without changing the configured logical
    source identity.
-3. Pending host and device journals recover before a new diff is planned.
-4. The library walk and selection/playlist union produce the effective sync
+4. Pending host and device journals recover before a new diff is planned.
+5. The library walk and selection/playlist union produce the effective sync
    set.
-5. The apply loop stages album-bounded work and checkpoints periodically.
-6. A coordinated transaction publishes database, artwork, playlists, device
+6. The apply loop stages album-bounded work and checkpoints periodically.
+7. A coordinated transaction publishes database, artwork, playlists, device
    manifest, ownership records, and warning-only host mirrors in their required
    order.
-7. The daemon retains admission through finalization, terminal history, and
+8. The daemon retains admission through finalization, terminal history, and
    subprocess EOF.
 
 Cancellation and pause stop admission at an album boundary. They do not kill a
@@ -113,7 +117,7 @@ never serialized to config, logs, IPC errors, or manifests.
 - Windows subprocesses that can display a console use
   `windows_proc::NoConsoleWindow`.
 - macOS transcoding uses `afconvert`; Windows uses ffmpeg or optional refalac.
-- Named-pipe and Unix-socket transports carry the same daemon protocol.
+- Named-pipe, Unix-socket, and worker transports use protocol 3 typed messages.
 - FAT/exFAT and host filesystems do not provide identical rename/unlink
   primitives, so publication uses journals, validation, no-replace creation,
   directory synchronization, and a documented single-writer finalization

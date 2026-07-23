@@ -15,8 +15,8 @@ pub mod sysinfo_projection;
 pub mod sysinfo_provision;
 
 pub use capability::{
-    resolve_validated_capability_profile, CapabilityProfile, CapabilityProfileId, ImageFormat,
-    ValidatedCapabilityProfile,
+    resolve_validated_capability_profile, validated_capability_profile_id_for_model,
+    CapabilityProfile, CapabilityProfileId, ImageFormat, ValidatedCapabilityProfile,
 };
 pub use db::{OwnedDb, Tags};
 pub use device::{detect_ipod_mount, read_firewire_guid, set_firewire_guid};

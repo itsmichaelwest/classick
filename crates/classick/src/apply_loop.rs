@@ -93,6 +93,41 @@ pub(crate) fn effective_rockbox(
     cli_flag || device.rockbox_compat
 }
 
+fn selection_from_portable(
+    selection: &crate::portable::profile::SelectionValue,
+) -> crate::selection::Selection {
+    crate::selection::Selection {
+        version: crate::selection::SELECTION_VERSION,
+        mode: match selection.mode {
+            crate::portable::profile::SelectionMode::All => crate::selection::SelectionMode::All,
+            crate::portable::profile::SelectionMode::Include => {
+                crate::selection::SelectionMode::Include
+            }
+            crate::portable::profile::SelectionMode::Exclude => {
+                crate::selection::SelectionMode::Exclude
+            }
+        },
+        rules: selection
+            .rules
+            .iter()
+            .map(|rule| match rule {
+                crate::portable::profile::SelectionRule::Artist { name } => {
+                    crate::selection::SelectionRule::Artist { name: name.clone() }
+                }
+                crate::portable::profile::SelectionRule::Album { artist, album } => {
+                    crate::selection::SelectionRule::Album {
+                        artist: artist.clone(),
+                        album: album.clone(),
+                    }
+                }
+                crate::portable::profile::SelectionRule::Genre { name } => {
+                    crate::selection::SelectionRule::Genre { name: name.clone() }
+                }
+            })
+            .collect(),
+    }
+}
+
 /// Outcome of a run after any required coordinated publication has finished.
 /// Hard failures remain in the outer `anyhow::Result` and therefore cannot be
 /// mistaken for a clean cancelled or paused outcome.
@@ -176,22 +211,6 @@ pub(crate) fn manifest_store(config: &Config, mount: &Path, serial: &str) -> Res
     ))
 }
 
-fn publish_manifest(
-    store: &ManifestStore,
-    manifest: &Manifest,
-    source: &SourceLocation,
-    progress: &Progress,
-) -> Result<()> {
-    let outcome = store.publish(manifest, source)?;
-    if let Some(warning) = outcome.host_cache_warning {
-        tracing::warn!("manifest host cache refresh failed after device publish: {warning}");
-        progress.log(format!(
-            "Warning: iPod manifest was saved, but the host cache could not be refreshed: {warning}"
-        ));
-    }
-    Ok(())
-}
-
 fn persisted_config_for_sync(
     config: &Config,
     source_location: &SourceLocation,
@@ -259,6 +278,13 @@ pub fn run(
     )
 }
 
+fn should_rebuild_manifest_before_recovery(
+    rebuild_manifest: bool,
+    pending_sync_at_entry: bool,
+) -> bool {
+    rebuild_manifest && !pending_sync_at_entry
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_connected(
     config: &mut Config,
@@ -270,6 +296,51 @@ fn run_connected(
     mutation_session: &crate::device_coordination::DeviceMutationSession,
     refalac_version: Option<String>,
 ) -> Result<RunOutcome> {
+    let config_path = config_file::default_path()?;
+    let host_root = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let portable_store = crate::portable::state_store::PortableStateStore::new(host_root);
+    let device_profile = crate::portable::device_store::read_profile(Path::new(&mount))?;
+    let pending_sync_at_entry =
+        crate::pending_session::has_sync_transaction_material(Path::new(&mount))?;
+    let portable_snapshot = if pending_sync_at_entry {
+        match &device_profile {
+            crate::portable::device_store::OwnedDeviceProfile::Valid(profile) => Some(
+                crate::portable::coordinator::committed_config_snapshot(profile),
+            ),
+            crate::portable::device_store::OwnedDeviceProfile::Absent => None,
+            crate::portable::device_store::OwnedDeviceProfile::Invalid(diagnostic) => {
+                anyhow::bail!(
+                    "portable device configuration blocks pending-sync recovery: {diagnostic}"
+                )
+            }
+        }
+    } else if portable_store.is_initialized(mutation_session.device_id())
+        || matches!(
+            device_profile,
+            crate::portable::device_store::OwnedDeviceProfile::Valid(_)
+        )
+    {
+        let readiness = crate::device::classify_device_readiness(Path::new(&mount))
+            .context("classify connected device readiness")?;
+        let state = match crate::portable::coordinator::reconcile_connected(
+            host_root,
+            mutation_session,
+            readiness,
+            Some(&identity.model_num_str),
+        )? {
+            crate::portable::coordinator::ConnectedReconciliation::Imported(state)
+            | crate::portable::coordinator::ConnectedReconciliation::DeviceCommitted(state) => {
+                state
+            }
+            crate::portable::coordinator::ConnectedReconciliation::Blocked(diagnostic) => {
+                anyhow::bail!("portable device configuration blocks sync: {diagnostic}")
+            }
+        };
+        Some(crate::portable::coordinator::config_snapshot(&state, None)?)
+    } else {
+        None
+    };
+
     // Rockbox-compat is per-device (trust package): `config.rockbox_compat`
     // as merged by `config::resolve` only reflects the CLI flag OR the
     // *global* daemon setting, resolved before the device's serial was even
@@ -277,12 +348,15 @@ fn run_connected(
     // settings.json (seeded once from the global value — see
     // `device_config::DeviceSettings::load_or_migrate`); the raw CLI flag
     // still force-enables for this one run regardless of what's persisted.
-    let global_for_device_settings = config_file::load(&config_file::default_path()?)
+    let global_for_device_settings = config_file::load(&config_path)
         .ok()
         .flatten()
         .unwrap_or_default();
-    let device_settings =
+    let mut device_settings =
         crate::device_config::DeviceSettings::load_or_migrate(&serial, &global_for_device_settings);
+    if let Some(snapshot) = &portable_snapshot {
+        device_settings.rockbox_compat = snapshot.settings.value.rockbox_compat;
+    }
     config.rockbox_compat = effective_rockbox(config.rockbox_compat_cli_flag, &device_settings);
 
     // Task 6: resolve the on-device playlist-mirror paths once, up front —
@@ -322,13 +396,32 @@ fn run_connected(
     // `custom_selection`-gated shared/per-device split. This must match
     // every daemon read/write site (daemon/runtime.rs, daemon/library.rs),
     // which already use `effective_device_selection_path`.
-    let selection = crate::selection::effective_device_selection_path(&serial)
-        .map(|p| crate::selection::load_or_all(&p))
-        .unwrap_or_else(|_| crate::selection::Selection::all());
-    let subscriptions = device_subscriptions_file
+    let selection = portable_snapshot
         .as_ref()
-        .map(|p| crate::device_config::Subscriptions::load_or_default(p))
-        .unwrap_or_default();
+        .map(|snapshot| selection_from_portable(&snapshot.selection.value))
+        .unwrap_or_else(|| {
+            crate::selection::effective_device_selection_path(&serial)
+                .map(|p| crate::selection::load_or_all(&p))
+                .unwrap_or_else(|_| crate::selection::Selection::all())
+        });
+    let subscriptions = portable_snapshot
+        .as_ref()
+        .map(|snapshot| crate::device_config::Subscriptions {
+            version: 1,
+            playlists: snapshot
+                .subscriptions
+                .value
+                .playlists
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        })
+        .unwrap_or_else(|| {
+            device_subscriptions_file
+                .as_ref()
+                .map(|p| crate::device_config::Subscriptions::load_or_default(p))
+                .unwrap_or_default()
+        });
     let mut effective_set: Option<crate::sync_set::EffectiveSet> = None;
     // Task 6 / Fix 2: desired on-device playlists as `(slug, display name,
     // resolved source paths)`. `slug` is the managed-identity join key
@@ -390,7 +483,10 @@ fn run_connected(
     let manifest_path = device_state::portable_manifest_path(Path::new(&mount));
 
     // 3. Load (or rebuild) manifest.
-    let mut loaded = if config.rebuild_manifest {
+    let mut loaded = if should_rebuild_manifest_before_recovery(
+        config.rebuild_manifest,
+        pending_sync_at_entry,
+    ) {
         let db = open_with_auto_restore(Path::new(&mount), || {
             progress.log("Restored iPod database from backup after detecting corruption");
             progress.note_db_restored();
@@ -427,7 +523,22 @@ fn run_connected(
         },
     )?;
     if !recovery.is_empty() {
-        loaded = manifest_store.load(&source_location)?;
+        if crate::pending_session::has_sync_transaction_material(Path::new(&mount))? {
+            anyhow::bail!("pending sync recovery left unresolved transaction material");
+        }
+        return run_connected(
+            config,
+            progress,
+            decision_rx,
+            mount,
+            identity,
+            serial,
+            mutation_session,
+            refalac_version,
+        );
+    }
+    if pending_sync_at_entry {
+        anyhow::bail!("pending sync transaction material could not be recovered");
     }
     let needs_device_publish = loaded.needs_device_publish;
     let source_changed = source_change_requires_confirmation(&loaded, &source_location);
@@ -1252,36 +1363,16 @@ fn clear_legacy_marker(marker: Option<&Path>) -> Result<()> {
     }
 }
 
-/// `--replace-library`: erase EVERY track on the iPod, then fall through to
-/// a normal `run()` sync of the current selection. Unlike `run`'s diff-driven
-/// Remove (which only touches tracks the source no longer has), this wipes
-/// the device unconditionally before applying — for the "I want the device
-/// to exactly mirror the selection, full stop" case.
+/// `--replace-library`: publish an empty-library checkpoint, then sync the
+/// current selection. The checkpoint snapshots the database, artwork, and
+/// manifest under the device mutation session; removes every prior DB entry;
+/// publishes the empty database and authoritative manifest; and deletes the
+/// obsolete media only after those publications verify. Recovery can resume
+/// or roll back the checkpoint without exposing a half-erased library.
 ///
-/// Sequence: resolve mount + identity (mirrors `run`'s early steps) →
-/// session backup of the pre-wipe iTunesDB (same helper + ordering as `run`)
-/// → open the DB (auto-restore) to learn the live track count → confirm
-/// (skipped under `--apply`) → `wipe_all_tracks` → `db.write()` → reset the
-/// per-device manifest to `Manifest::empty()` with the serial stamped →
-/// fall through to `run(config, progress, decision_rx)` for the sync itself.
-///
-/// Note on ordering vs. the task brief: the brief's high-level sequence
-/// lists confirmation before "open DB", but the confirmation message must
-/// name the live track count, which only the opened DB can supply — so this
-/// opens the DB first (also needed to wire the FirewireGuid/ModelNumStr for
-/// write-signing before the wipe's `db.write()`) and confirms right after.
-/// Backup-before-wipe and wipe/write-before-manifest-reset — the orderings
-/// that actually matter for data safety — are unchanged.
-///
-/// `run()` re-resolves the mount/identity/manifest from scratch (its own
-/// preflight + `backup_itunesdb` + `open_with_auto_restore` run again) —
-/// deliberately simplest per the brief rather than threading state through.
-/// The only user-visible side effect of that double resolution: `run`'s own
-/// session backup overwrites the pre-wipe backup this function just made
-/// with a backup of the now-empty DB. That's consistent with the
-/// operation's advertised "cannot be undone" semantics — the pre-wipe
-/// backup exists only as a narrow window to recover from an accidental
-/// confirm, not as a permanent undo path once the sync proceeds.
+/// The live track count is read before confirmation so the prompt can name
+/// the exact scope. Once the empty checkpoint is terminal, normal sync
+/// continues under the same mutation session.
 /// Preflight for `--replace-library`: walks the source library and applies
 /// the same `guard_nonempty_walk` check `run()` uses, so an empty or
 /// unreachable source is caught BEFORE `replace_library` wipes anything.
@@ -1322,7 +1413,6 @@ pub fn replace_library(
     mutation_session
         .verify_expected_generation()
         .context("replace-library generation fence")?;
-    let source_location = configured_source_location(config)?;
     let manifest_store = manifest_store(config, Path::new(&mount), &serial)?;
 
     // Validate the source BEFORE wiping anything: an empty/unreachable
@@ -1346,7 +1436,8 @@ pub fn replace_library(
         device::set_model_num(device_ptr, &identity.model_num_str)?;
     }
 
-    let track_count = db.track_count();
+    let tracks = db.list_tracks_for_rebuild();
+    let track_count = tracks.len();
     if !should_skip_replace_confirmation(config.apply) {
         let outcome = await_prompt(
             progress,
@@ -1361,21 +1452,41 @@ pub fn replace_library(
     }
 
     progress.log(format!("Erasing {track_count} track(s) from the iPod…"));
-    let wiped = mutation_session.publish_verified(|| {
-        let wiped = crate::ipod::db::wipe_all_tracks(&db)?;
-        write_replace_library_database(&db)?;
-        Ok(wiped)
-    })?;
     drop(db);
-    progress.log(format!("Erased {wiped} track(s)."));
-
     let mut manifest = Manifest::empty();
     manifest.ipod_serial = Some(serial.clone());
     manifest.last_source_root = Some(config.source.clone());
-    mutation_session.publish_verified(|| {
-        publish_manifest(&manifest_store, &manifest, &source_location, progress)
-            .context("publish reset manifest after wipe")
-    })?;
+    let mut journal = build_replace_journal(
+        Path::new(&mount),
+        &identity.firewire_guid,
+        fresh_session_id(),
+        tracks,
+    );
+    let artwork_cache = crate::artwork_cache::ArtworkCache::new(
+        config
+            .manifest_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("artwork-cache"),
+    );
+    crate::sync_transaction::CheckpointCoordinator {
+        mount: Path::new(&mount),
+        serial: &identity.firewire_guid,
+        mutation_session: &mutation_session,
+        manifest_store: &manifest_store,
+        artwork_cache,
+    }
+    .publish_with_options(
+        &mut journal,
+        &mut manifest,
+        progress,
+        crate::sync_transaction::PublishOptions {
+            device_identity: Some(&identity),
+            ..crate::sync_transaction::PublishOptions::default()
+        },
+    )
+    .context("publish recoverable empty-library checkpoint")?;
+    progress.log(format!("Erased {track_count} track(s)."));
 
     progress.log("Library erased; syncing the current selection…".to_string());
     run_connected(
@@ -1399,6 +1510,23 @@ pub(crate) fn should_skip_replace_confirmation(apply: bool) -> bool {
 
 pub fn write_replace_library_database(db: &OwnedDb) -> Result<()> {
     crate::sync_transaction::write_coordinated_database(db).context("write iPod DB after wipe")
+}
+
+pub fn build_replace_journal(
+    mount: &Path,
+    serial: &str,
+    session_id: crate::ipc_device::SessionId,
+    tracks: Vec<crate::ipod::db::TrackHandle>,
+) -> crate::pending_session::PendingSession {
+    let mut journal = crate::pending_session::PendingSession::new(session_id, serial, Vec::new());
+    journal.obsolete_files = tracks
+        .into_iter()
+        .map(|track| crate::pending_session::ObsoleteFile {
+            path: device_file_path(mount, &track.ipod_relpath),
+            prior_dbid: track.dbid,
+        })
+        .collect();
+    journal
 }
 
 /// Message shown by `replace_library`'s confirmation prompt. Pure so its
@@ -2909,6 +3037,13 @@ mod tests {
     fn replace_confirmation_is_skipped_under_apply() {
         assert!(should_skip_replace_confirmation(true));
         assert!(!should_skip_replace_confirmation(false));
+    }
+
+    #[test]
+    fn rebuild_manifest_waits_until_pending_sync_recovery_is_terminal() {
+        assert!(!should_rebuild_manifest_before_recovery(true, true));
+        assert!(should_rebuild_manifest_before_recovery(true, false));
+        assert!(!should_rebuild_manifest_before_recovery(false, false));
     }
 
     #[test]

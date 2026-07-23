@@ -12,29 +12,29 @@ implementation.
   protocols.
 - [Device safety](device-safety.md) — invariants for iTunesDB, artwork,
   manifests, playlists, recovery, and source-library access.
-- [Device coordination architecture](device-coordination.md) — proposed
-  standard-user locking, external-writer fencing, recovery, and per-family
-  synchronization profiles for future implementation.
+- [Device coordination architecture](device-coordination.md) — implemented
+  standard-user locking, external-writer fencing, recovery, and the boundary
+  for later device-family synchronization profiles.
 - [Code-size audit](code-size-audit.md) — current large-file hotspots and
   recommended refactor order.
 - [Project learnings](../LEARNINGS.md) — concise operational gotchas that save
   time during implementation and debugging.
 
-## Approved designs and active plans
+## Implemented design and delivery record
 
 - [Native device protocol and identity](design/2026-07-19-native-device-protocol.md)
-  — approved target for wire unification, portable device identity/state,
+  — implemented design for wire unification, portable device identity/state,
   initialization boundaries, and stable `SysInfoExtended` generation.
 - [Native device protocol implementation plan](plans/2026-07-19-native-device-protocol.md)
   — staged code, test, review, and physical-device work needed to reach that
-  target, with implementation-ready component plans for the
+  target, with completed component plans for the
   [Rust core](plans/2026-07-19-native-device-protocol-rust.md),
   [Windows UI](plans/2026-07-19-native-device-protocol-windows.md), and
   [macOS UI](plans/2026-07-19-native-device-protocol-macos.md).
 
-The documents in this section describe approved future behavior. The current
-references above continue to describe shipped behavior until an implementation
-slice updates them.
+These documents record the decisions and delivery sequence behind the current
+native device protocol. Deferred initialization, library identity, additional
+device families, and physical-fixture expansion remain called out explicitly.
 
 ## Authority
 
@@ -45,8 +45,9 @@ rather than silently documenting one implementation's divergence.
 
 Current wire implementations:
 
-- subprocess: `crates/classick/src/ipc.rs`
-- daemon: `crates/classick/src/ipc_daemon.rs`
+- shared protocol: `crates/classick/src/wire/`
+- daemon transport: `crates/classick/src/daemon/ipc_server.rs`
+- worker transport: `crates/classick/src/worker_wire.rs`
 - Windows: `ui/windows/Classick.UI.Core/Ipc/`
 - macOS: `ui/macos/Sources/Classick/Ipc/`
 

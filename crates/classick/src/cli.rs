@@ -99,7 +99,7 @@ pub struct Cli {
     /// Run as a long-lived background daemon. Listens on a named pipe for
     /// UI clients, handles device events + scheduling, spawns sync
     /// subprocesses on demand. See
-    /// docs/architecture.md and docs/ipc/daemon.md.
+    /// docs/architecture.md and docs/ipc-protocol.md.
     /// Mutually exclusive with --ipc-mode and --no-tui.
     #[arg(long, conflicts_with_all = ["ipc_mode", "no_tui"])]
     pub daemon: bool,

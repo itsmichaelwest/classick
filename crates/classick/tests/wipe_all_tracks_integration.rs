@@ -10,9 +10,10 @@
 //! post-wipe track count, that the on-disk audio files are gone, and that a
 //! fresh reparse from disk also shows zero tracks.
 
-use classick::apply_loop::{retry_deferred, ArtworkCounts};
+use classick::apply_loop::{build_replace_journal, retry_deferred, ArtworkCounts};
 use classick::cli::EncoderChoice;
 use classick::config::Config;
+use classick::device_coordination::DeviceMutationSession;
 use classick::ffi;
 use classick::fit::DeferredAlbum;
 use classick::ipod::db::{wipe_all_tracks, OwnedDb};
@@ -21,6 +22,7 @@ use classick::manifest_store::ManifestStore;
 use classick::progress::Progress;
 use classick::source::SourceEntry;
 use classick::source_location::{SourceIdentity, SourceLocation};
+use classick::sync_transaction::{CheckpointCoordinator, PlaylistFailurePoint, PublishOptions};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -291,32 +293,76 @@ fn replace_commit_writes_empty_db_before_empty_authoritative_manifest() {
     let db = OwnedDb::open(&mount).unwrap();
     let source_root = scratch_dir("replace-source");
     seed_tracks(&db, &source_root, 2);
+    db.write().unwrap();
     let source = SourceLocation {
         resolved_path: source_root,
         identity: SourceIdentity::Local {
             library_id: "replace-library".into(),
         },
     };
+    let serial = "000A27002138B0A8";
     let store = ManifestStore::new(
         mount.clone(),
-        "SERIAL-REPLACE".into(),
+        serial.into(),
         scratch_dir("replace-cache").join("manifest.json"),
         scratch_dir("replace-legacy").join("manifest.json"),
         classick::atomic_file::AtomicFileWriter::new(),
     );
-
-    wipe_all_tracks(&db).unwrap();
-    db.write().unwrap();
-    let mut empty = Manifest::empty();
-    empty.ipod_serial = Some("SERIAL-REPLACE".into());
-    store.publish(&empty, &source).unwrap();
+    let handles = db.list_tracks_for_rebuild();
     drop(db);
+    let device_id = classick::device::DeviceId::parse(serial).unwrap();
+    let mutation_session = DeviceMutationSession::acquire(&mount, device_id).unwrap();
+    let cache = classick::artwork_cache::ArtworkCache::new(scratch_dir("replace-artwork"));
+    let coordinator = CheckpointCoordinator {
+        mount: &mount,
+        serial,
+        mutation_session: &mutation_session,
+        manifest_store: &store,
+        artwork_cache: cache,
+    };
+    let mut journal = build_replace_journal(&mount, serial, 77, handles);
+    let mut empty = Manifest::empty();
+    empty.ipod_serial = Some(serial.into());
+    empty.last_source_root = Some(source.resolved_path.clone());
+    let (progress, _decisions) = Progress::start(false, false).unwrap();
+
+    coordinator
+        .publish_with_options(
+            &mut journal,
+            &mut empty,
+            &progress,
+            PublishOptions {
+                playlist_failure_point: Some(PlaylistFailurePoint::BeforeDatabaseWrite),
+                ..PublishOptions::default()
+            },
+        )
+        .unwrap_err();
+
+    assert_eq!(OwnedDb::open(&mount).unwrap().track_count(), 2);
+    assert_eq!(
+        std::fs::read_dir(mount.join("iPod_Control/Music/F00"))
+            .unwrap()
+            .count(),
+        2
+    );
+    assert!(classick::pending_session::PendingSessionStore::new(&mount)
+        .path(77)
+        .exists());
+
+    coordinator
+        .recover_pending_with_options(&mut empty, &progress, PublishOptions::default())
+        .unwrap();
+    progress.finish(true).unwrap();
 
     assert_eq!(OwnedDb::open(&mount).unwrap().track_count(), 0);
+    assert_eq!(
+        std::fs::read_dir(mount.join("iPod_Control/Music/F00"))
+            .unwrap()
+            .count(),
+        0
+    );
     let loaded = store.load(&source).unwrap();
     assert!(loaded.manifest.tracks.is_empty());
-    assert_eq!(
-        loaded.manifest.ipod_serial.as_deref(),
-        Some("SERIAL-REPLACE")
-    );
+    assert_eq!(loaded.manifest.ipod_serial.as_deref(), Some(serial));
+    assert!(!classick::pending_session::has_sync_transaction_material(&mount).unwrap());
 }

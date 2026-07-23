@@ -9,8 +9,13 @@ use crate::daemon::session_admission::{EventContext, SessionPhase};
 use crate::device::DeviceId;
 use crate::ipc_daemon::DaemonEvent;
 use crate::progress::StopReason;
-use crate::wire::{LegacyScanDecoder, LegacyWorkerDecoder, SessionId as WireSessionId, WireEvent};
+use crate::wire::{
+    decode_admitted_message, decode_initial_hello, validate_peer_hello, AdmittedStream,
+    CapabilityName, DecodedWireMessage, EndpointRole, OwnedSessionRoute,
+    SessionId as WireSessionId, WireEvent, WireMessage,
+};
 use anyhow::{Context, Result};
+#[cfg(test)]
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -50,24 +55,135 @@ pub enum OrchestratorOutcome {
     },
 }
 
-enum LegacySubprocessDecoder {
-    Device(LegacyWorkerDecoder),
-    Scan(LegacyScanDecoder),
+struct WorkerStreamDecoder {
+    stream: AdmittedStream,
+    hello_seen: bool,
+    lifecycle: WorkerLifecycle,
 }
 
-impl LegacySubprocessDecoder {
-    fn decode(&mut self, line: &str) -> Result<Option<WireEvent>> {
-        match self {
-            Self::Device(decoder) => decoder.decode(line),
-            Self::Scan(decoder) => decoder.decode(line),
+#[derive(Clone, Copy)]
+enum WorkerLifecycle {
+    DeviceRunning {
+        saw_error: bool,
+    },
+    DeviceFinalizing {
+        reason: crate::wire::StopReason,
+        saw_error: bool,
+    },
+    DeviceGraceful(crate::wire::StopReason),
+    ScanAwaitingStart,
+    ScanRunning,
+    Finished,
+}
+
+impl WorkerStreamDecoder {
+    fn new(route: OwnedSessionRoute, scan: bool) -> Self {
+        Self {
+            stream: AdmittedStream::DaemonReceivingWorkerEvents(route),
+            hello_seen: false,
+            lifecycle: if scan {
+                WorkerLifecycle::ScanAwaitingStart
+            } else {
+                WorkerLifecycle::DeviceRunning { saw_error: false }
+            },
         }
     }
 
-    fn on_eof(&self) -> Result<()> {
-        match self {
-            Self::Device(decoder) => decoder.on_eof(),
-            Self::Scan(decoder) => decoder.on_eof(),
+    fn decode(&mut self, line: &str) -> Result<Option<WireEvent>> {
+        if !self.hello_seen {
+            let hello = decode_initial_hello(line)?;
+            validate_peer_hello(
+                &hello,
+                EndpointRole::Worker,
+                &[CapabilityName::parse("typed_sync_progress")?],
+            )?;
+            self.hello_seen = true;
+            return Ok(None);
         }
+        if matches!(self.lifecycle, WorkerLifecycle::Finished) {
+            anyhow::bail!("worker sent an event after its terminal event");
+        }
+        let decoded = decode_admitted_message(line, &self.stream)?;
+        let DecodedWireMessage::Known(message) = decoded else {
+            anyhow::bail!("worker output cannot contain unknown events");
+        };
+        let WireMessage::Event(event) = *message else {
+            anyhow::bail!("worker output must contain an event");
+        };
+        self.advance(&event)?;
+        Ok(Some(event))
+    }
+
+    fn on_eof(&self) -> Result<()> {
+        if !self.hello_seen {
+            anyhow::bail!("worker closed before hello");
+        }
+        if !matches!(self.lifecycle, WorkerLifecycle::Finished) {
+            anyhow::bail!("worker closed before its terminal event");
+        }
+        Ok(())
+    }
+
+    fn advance(&mut self, event: &WireEvent) -> Result<()> {
+        use WorkerLifecycle as Lifecycle;
+        self.lifecycle = match self.lifecycle {
+            Lifecycle::Finished => anyhow::bail!("worker sent an event after finish"),
+            Lifecycle::ScanAwaitingStart => match event {
+                WireEvent::LibraryScanStarted { .. } => Lifecycle::ScanRunning,
+                _ => anyhow::bail!("library scan worker must emit scan_started first"),
+            },
+            Lifecycle::ScanRunning => match event {
+                WireEvent::LibraryScanProgress { .. } => Lifecycle::ScanRunning,
+                WireEvent::LibraryScanFinished { .. } => Lifecycle::Finished,
+                _ => anyhow::bail!("library scan worker emitted a device event"),
+            },
+            Lifecycle::DeviceRunning { saw_error } => match event {
+                WireEvent::SyncError { .. } => Lifecycle::DeviceRunning { saw_error: true },
+                WireEvent::Finalizing { reason, .. } => Lifecycle::DeviceFinalizing {
+                    reason: *reason,
+                    saw_error,
+                },
+                WireEvent::SyncCancelled { .. } | WireEvent::SyncPaused { .. } => {
+                    anyhow::bail!("worker emitted graceful outcome before finalizing")
+                }
+                WireEvent::SyncFinished { success: false, .. } if !saw_error => {
+                    anyhow::bail!("worker failed without a preceding error")
+                }
+                WireEvent::SyncFinished { .. } => Lifecycle::Finished,
+                _ => Lifecycle::DeviceRunning { saw_error },
+            },
+            Lifecycle::DeviceFinalizing { reason, saw_error } => match event {
+                WireEvent::SyncCancelled { .. } if reason == crate::wire::StopReason::Cancelled => {
+                    Lifecycle::DeviceGraceful(reason)
+                }
+                WireEvent::SyncPaused { .. } if reason == crate::wire::StopReason::Paused => {
+                    Lifecycle::DeviceGraceful(reason)
+                }
+                WireEvent::TrackStart { .. }
+                | WireEvent::TrackDone { .. }
+                | WireEvent::SyncLog { .. } => Lifecycle::DeviceFinalizing { reason, saw_error },
+                WireEvent::SyncError { .. } => Lifecycle::DeviceFinalizing {
+                    reason,
+                    saw_error: true,
+                },
+                WireEvent::SyncFinished { success: false, .. } if saw_error => Lifecycle::Finished,
+                WireEvent::SyncCancelled { .. } | WireEvent::SyncPaused { .. } => {
+                    anyhow::bail!("worker graceful outcome contradicts finalizing reason")
+                }
+                WireEvent::SyncFinished { .. } => {
+                    anyhow::bail!("worker finished before its graceful outcome")
+                }
+                _ => anyhow::bail!("worker emitted an invalid event while finalizing"),
+            },
+            Lifecycle::DeviceGraceful(reason) => match event {
+                WireEvent::SyncFinished { success: true, .. } => Lifecycle::Finished,
+                WireEvent::SyncFinished { success: false, .. } => {
+                    anyhow::bail!("worker failed after graceful {reason:?}")
+                }
+                _ => anyhow::bail!("worker emitted an event after its graceful outcome"),
+            },
+        };
+        Ok(())
     }
 }
 
@@ -319,13 +435,24 @@ async fn drive_child_with_stall_grace(
 ) -> Result<OrchestratorOutcome> {
     let wire_session_id = WireSessionId::new(event_context.session_id)
         .context("validate admitted worker session ID")?;
-    let mut worker_decoder = match event_context.serial.as_deref() {
-        Some(serial) => LegacySubprocessDecoder::Device(LegacyWorkerDecoder::new(
-            DeviceId::parse(serial).context("validate admitted worker device ID")?,
-            wire_session_id,
-        )),
-        None => LegacySubprocessDecoder::Scan(LegacyScanDecoder::new(None, wire_session_id)),
+    cmd.env(
+        crate::worker_wire::SESSION_ID_ENV,
+        event_context.session_id.to_string(),
+    );
+    let is_scan = event_context.serial.is_none();
+    let route = match event_context.serial.as_deref() {
+        Some(serial) => {
+            let device_id =
+                DeviceId::parse(serial).context("validate admitted worker device ID")?;
+            cmd.env(crate::worker_wire::DEVICE_ID_ENV, device_id.as_str());
+            OwnedSessionRoute::new(device_id, wire_session_id)
+        }
+        None => {
+            cmd.env_remove(crate::worker_wire::DEVICE_ID_ENV);
+            OwnedSessionRoute::library_scan(wire_session_id)
+        }
     };
+    let mut worker_decoder = WorkerStreamDecoder::new(route, is_scan);
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn {}", exe.display()))?;
@@ -368,72 +495,77 @@ async fn drive_child_with_stall_grace(
                     }
                 };
 
-                // Validate the legacy worker stream against the typed protocol
-                // before it can cross the daemon boundary. The v2 envelope stays
-                // temporarily for client compatibility; the coordinated v3 switch
-                // forwards the already-decoded event directly.
-                if let Err(error) = worker_decoder.decode(&line) {
-                    tracing::warn!(
-                        session_id = event_context.session_id,
-                        "orchestrator: rejected malformed worker output: {error:#}"
-                    );
-                    force_kill(&mut child).await;
-                    return Ok(OrchestratorOutcome::Aborted {
-                        reason: "worker_protocol_error".to_string(),
-                        summary: last_summary,
-                    });
-                }
-                let _ = event_tx.send(event_context.wrap(line.clone()));
-                let Some(value) = serde_json::from_str::<Value>(&line).ok() else { continue };
-                watchdog.record_progress();
-                let ty = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                match ty {
-                    "summary" => {
-                        tracker.total_planned = value.get("total_planned")
-                            .and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        last_summary = Some(summary_from_value(&value));
+                let wire_event = match worker_decoder.decode(&line) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = event_context.session_id,
+                            "orchestrator: rejected malformed worker output: {error:#}"
+                        );
+                        force_kill(&mut child).await;
+                        return Ok(OrchestratorOutcome::Aborted {
+                            reason: "worker_protocol_error".to_string(),
+                            summary: last_summary,
+                        });
                     }
-                    "track_done" => { tracker.tracks_completed += 1; }
-                    "error" => {
+                };
+                let Some(wire_event) = wire_event else {
+                    continue;
+                };
+                let _ = event_tx.send(event_context.wrap(line.clone(), Some(wire_event.clone())));
+                watchdog.record_progress();
+                match &wire_event {
+                    WireEvent::SyncSummary { summary, .. } => {
+                        tracker.total_planned = summary.total_planned as usize;
+                        last_summary = Some(summary_from_wire(summary));
+                    }
+                    WireEvent::TrackDone { .. } => { tracker.tracks_completed += 1; }
+                    WireEvent::SyncError { .. } => {
                         tracker.tracks_errored += 1;
                         if tracker.should_bail() && stop_disposition.is_none() {
-                            write_stop_command(&mut stdin, StopReason::Cancelled).await;
+                            write_stop_command(&mut stdin, StopReason::Cancelled, &event_context).await;
                             stop_disposition = Some(StopDisposition::Aborted(format!(
-                                    "too_many_failures: {} of {} tracks failed",
-                                    tracker.tracks_errored, tracker.total_planned
+                                "too_many_failures: {} of {} tracks failed",
+                                tracker.tracks_errored, tracker.total_planned
                                 )));
                             watchdog.begin(StopReason::Cancelled);
                         }
                     }
-                    "finalizing" => {
-                        if let Some(reason) = stop_reason_from_value(&value) {
-                            watchdog.begin(reason);
-                            stop_disposition.get_or_insert(match reason {
-                                StopReason::Cancelled => StopDisposition::Cancelled,
-                                StopReason::Paused => StopDisposition::Paused,
-                            });
-                        }
+                    WireEvent::Finalizing { reason, .. } => {
+                        let reason = progress_stop_reason(*reason);
+                        watchdog.begin(reason);
+                        stop_disposition.get_or_insert(match reason {
+                            StopReason::Cancelled => StopDisposition::Cancelled,
+                            StopReason::Paused => StopDisposition::Paused,
+                        });
                     }
-                    "cancelled" => cancelled = true,
-                    "finish" => {
-                        finish_success = value.get("success").and_then(|v| v.as_bool());
-                        finish_db_restored = db_restored_from_finish_value(&value);
-                        // The "summary" event (parsed above, into
-                        // `last_summary`) always precedes "finish" in the
-                        // wire stream, but the skipped-for-space/artwork
-                        // fields only ride the *finish* event (Task 8), so
-                        // merge them into the already-captured summary here.
-                        // If a summary event was somehow never seen, fall
-                        // back to a zeroed one rather than silently dropping
-                        // the fit-pass/artwork rollup.
+                    WireEvent::SyncCancelled { .. } => cancelled = true,
+                    WireEvent::SyncFinished {
+                        success,
+                        db_restored,
+                        skipped_for_space,
+                        artwork,
+                        ..
+                    } => {
+                        finish_success = Some(*success);
+                        finish_db_restored = *db_restored;
                         let summary = last_summary.get_or_insert(SyncSummary {
                             add: 0, modify: 0, remove: 0, unchanged: 0, skipped: 0,
                             metadata_only: 0, skipped_for_space_tracks: 0,
                             skipped_for_space_bytes: 0, artwork_failed_sources: 0,
                         });
-                        merge_finish_fields_into_summary(summary, &value);
+                        summary.skipped_for_space_tracks = skipped_for_space
+                            .as_ref()
+                            .map_or(0, |value| value.tracks as usize);
+                        summary.skipped_for_space_bytes =
+                            skipped_for_space.as_ref().map_or(0, |value| value.bytes);
+                        summary.artwork_failed_sources =
+                            artwork.as_ref().map_or(0, |value| value.failed_sources as usize);
                     }
-                    "paused" => paused = true,
+                    WireEvent::LibraryScanFinished { success, .. } => {
+                        finish_success = Some(*success);
+                    }
+                    WireEvent::SyncPaused { .. } => paused = true,
                     _ => {}
                 }
             }
@@ -442,7 +574,13 @@ async fn drive_child_with_stall_grace(
                 match classify_control_signal(cancel_result) {
                     ControlSignal::Requested => {
                         if stop_disposition.is_none() {
-                            write_stop_command(&mut stdin, StopReason::Cancelled).await;
+                            if event_context.serial.is_none() {
+                                force_kill(&mut child).await;
+                                return Ok(OrchestratorOutcome::Cancelled {
+                                    summary: last_summary,
+                                });
+                            }
+                            write_stop_command(&mut stdin, StopReason::Cancelled, &event_context).await;
                             stop_disposition = Some(StopDisposition::Cancelled);
                             watchdog.begin(StopReason::Cancelled);
                         }
@@ -455,7 +593,13 @@ async fn drive_child_with_stall_grace(
                 if classify_control_signal(pause_result) == ControlSignal::Requested
                     && stop_disposition.is_none()
                 {
-                    write_stop_command(&mut stdin, StopReason::Paused).await;
+                    if event_context.serial.is_none() {
+                        force_kill(&mut child).await;
+                        return Ok(OrchestratorOutcome::Paused {
+                            summary: last_summary,
+                        });
+                    }
+                    write_stop_command(&mut stdin, StopReason::Paused, &event_context).await;
                     stop_disposition = Some(StopDisposition::Paused);
                     watchdog.begin(StopReason::Paused);
                 }
@@ -476,26 +620,20 @@ async fn drive_child_with_stall_grace(
                     prompt_channel_open = false;
                     continue;
                 };
-                // User replied to a daemon-relayed prompt. Forward the
-                // decision to the subprocess via stdin so its
-                // apply_loop's await_prompt call returns. Errors
-                // writing to stdin are non-fatal here — if the
-                // subprocess died between the prompt emit and the
-                // user's click, the SyncCompleted event from the
-                // exited child will handle teardown normally.
-                //
-                // INVARIANT (wire audit 2026-07-18): `prompt_decision` is
-                // the ONLY reply this relay can carry. The subprocess's
-                // `form` and `review` events have no decision path through
-                // the daemon (no form_decision/review_decision relay
-                // exists, and the UIs can't answer them) — that's sound
-                // only because a daemon-spawned subprocess gets full
-                // config (the wizard that emits `form` never runs) and is
-                // always spawned auto-apply (`review` is never emitted).
-                // If either ever appears on a daemon-driven sync, the
-                // subprocess will block forever awaiting a reply that
-                // cannot arrive — add the relay before adding the emitter.
-                let line = format!("{{\"type\":\"prompt_decision\",\"id\":{id},\"choice\":{choice}}}\n");
+                let Some(device_id) = event_context.serial.as_deref()
+                    .and_then(|value| DeviceId::parse(value).ok()) else { continue };
+                let Ok(session_id) = WireSessionId::new(event_context.session_id) else { continue };
+                let Ok(prompt_id) = crate::wire::PromptId::new(id) else { continue };
+                let Ok(request_id) = synthetic_request_id(event_context.session_id, id) else { continue };
+                let command = crate::wire::WireCommand::PromptDecision {
+                    device_id,
+                    session_id,
+                    request_id,
+                    prompt_id,
+                    choice: choice.max(0) as u32,
+                };
+                let line = serde_json::to_string(&WireMessage::Command(command))
+                    .expect("valid prompt decision") + "\n";
                 if let Err(e) = stdin.write_all(line.as_bytes()).await {
                     tracing::warn!("orchestrator: failed to forward prompt_decision to subprocess: {e}");
                 }
@@ -634,20 +772,47 @@ impl FinalizationWatchdog {
     }
 }
 
-fn stop_reason_from_value(value: &Value) -> Option<StopReason> {
-    match value.get("reason").and_then(Value::as_str) {
-        Some("cancelled") => Some(StopReason::Cancelled),
-        Some("paused") => Some(StopReason::Paused),
-        _ => None,
-    }
-}
-
-async fn write_stop_command(stdin: &mut tokio::process::ChildStdin, reason: StopReason) {
-    let command = match reason {
-        StopReason::Cancelled => b"{\"type\":\"cancel\"}\n".as_slice(),
-        StopReason::Paused => b"{\"type\":\"pause\"}\n".as_slice(),
+async fn write_stop_command(
+    stdin: &mut tokio::process::ChildStdin,
+    reason: StopReason,
+    context: &EventContext,
+) {
+    let Some(device_id) = context
+        .serial
+        .as_deref()
+        .and_then(|value| DeviceId::parse(value).ok())
+    else {
+        return;
     };
-    if let Err(error) = stdin.write_all(command).await {
+    let Ok(session_id) = WireSessionId::new(context.session_id) else {
+        return;
+    };
+    let Ok(request_id) = synthetic_request_id(
+        context.session_id,
+        if reason == StopReason::Cancelled {
+            1
+        } else {
+            2
+        },
+    ) else {
+        return;
+    };
+    let command = match reason {
+        StopReason::Cancelled => crate::wire::WireCommand::CancelSync {
+            device_id,
+            session_id,
+            request_id,
+        },
+        StopReason::Paused => crate::wire::WireCommand::PauseSync {
+            device_id,
+            session_id,
+            request_id,
+        },
+    };
+    let mut command =
+        serde_json::to_vec(&WireMessage::Command(command)).expect("valid stop command");
+    command.push(b'\n');
+    if let Err(error) = stdin.write_all(&command).await {
         tracing::warn!("orchestrator: failed to write stop command: {error}");
         return;
     }
@@ -656,6 +821,36 @@ async fn write_stop_command(stdin: &mut tokio::process::ChildStdin, reason: Stop
     }
 }
 
+fn synthetic_request_id(session_id: u64, discriminator: u64) -> Result<crate::wire::RequestId> {
+    crate::wire::RequestId::parse(&format!(
+        "00000000-0000-0001-{:04x}-{:012x}",
+        session_id & 0xffff,
+        discriminator & 0xffff_ffff_ffff
+    ))
+}
+
+fn progress_stop_reason(reason: crate::wire::StopReason) -> StopReason {
+    match reason {
+        crate::wire::StopReason::Cancelled => StopReason::Cancelled,
+        crate::wire::StopReason::Paused => StopReason::Paused,
+    }
+}
+
+fn summary_from_wire(v: &crate::wire::ActionPlanSummary) -> SyncSummary {
+    SyncSummary {
+        add: v.add as usize,
+        modify: v.modify as usize,
+        remove: v.remove as usize,
+        unchanged: v.unchanged as usize,
+        skipped: 0,
+        metadata_only: v.metadata_only as usize,
+        skipped_for_space_tracks: 0,
+        skipped_for_space_bytes: 0,
+        artwork_failed_sources: 0,
+    }
+}
+
+#[cfg(test)]
 fn summary_from_value(v: &Value) -> SyncSummary {
     SyncSummary {
         add: v.get("add").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
@@ -682,6 +877,7 @@ fn summary_from_value(v: &Value) -> SyncSummary {
 /// Extracts `db_restored` from a raw `finish` event `Value`. `false` when
 /// absent, matching the wire's old-client-compat convention (the field is
 /// omitted rather than sent as `false`).
+#[cfg(test)]
 fn db_restored_from_finish_value(v: &Value) -> bool {
     v.get("db_restored")
         .and_then(|x| x.as_bool())
@@ -693,6 +889,7 @@ fn db_restored_from_finish_value(v: &Value) -> bool {
 /// preceding `summary` event). Note `skipped_for_space.albums` is
 /// deliberately NOT persisted — only `tracks`/`bytes` map onto
 /// `SyncSummary`, per plan.
+#[cfg(test)]
 fn merge_finish_fields_into_summary(summary: &mut SyncSummary, v: &Value) {
     let skipped_for_space = v.get("skipped_for_space");
     summary.skipped_for_space_tracks = skipped_for_space
@@ -725,6 +922,7 @@ async fn force_kill(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[cfg(unix)]
     fn scripted_command(script: &str) -> Command {
@@ -780,13 +978,13 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&record);
         let script = r#"
-            printf '%s\n' '{"type":"hello","protocol_version":"1.4.0","core_version":"0.0.1"}'
-            printf '%s\n' '{"type":"summary","add":1,"modify":0,"metadata_only":0,"remove":0,"unchanged":2,"total_planned":1}'
+            printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
+            printf '%s\n' '{"type":"sync_summary","device_id":"000A27002138B0A8","session_id":41,"summary":{"add":1,"modify":0,"metadata_only":0,"remove":0,"unchanged":2,"total_planned":1}}'
             IFS= read -r line
             printf '%s\n' "$line" > "$RECORD_PATH"
-            printf '%s\n' '{"type":"finalizing","reason":"cancelled","staged_albums":1,"staged_tracks":1}'
-            printf '%s\n' '{"type":"cancelled"}'
-            printf '%s\n' '{"type":"finish","success":true}'
+            printf '%s\n' '{"type":"finalizing","device_id":"000A27002138B0A8","session_id":41,"reason":"cancelled","staged_albums":1,"staged_tracks":1}'
+            printf '%s\n' '{"type":"sync_cancelled","device_id":"000A27002138B0A8","session_id":41}'
+            printf '%s\n' '{"type":"sync_finished","device_id":"000A27002138B0A8","session_id":41,"success":true}'
         "#;
         let mut command = scripted_command(script);
         command.env("RECORD_PATH", &record);
@@ -816,7 +1014,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(&record).unwrap(),
-            "{\"type\":\"cancel\"}\n",
+            "{\"type\":\"cancel_sync\",\"device_id\":\"000A27002138B0A8\",\"session_id\":41,\"request_id\":\"00000000-0000-0001-0029-000000000001\"}\n",
             "cancel must be written exactly once"
         );
         let forwarded: Vec<String> = std::iter::from_fn(|| event_rx.try_recv().ok())
@@ -834,7 +1032,12 @@ mod tests {
                         .and_then(|value| value["type"].as_str().map(str::to_string))
                 })
                 .collect::<Vec<_>>(),
-            ["hello", "summary", "finalizing", "cancelled", "finish"]
+            [
+                "sync_summary",
+                "finalizing",
+                "sync_cancelled",
+                "sync_finished"
+            ]
         );
         let _ = std::fs::remove_file(record);
     }
@@ -844,9 +1047,9 @@ mod tests {
     async fn ordinary_successful_finish_and_eof_are_completed() {
         let command = scripted_command(
             r#"
-                printf '%s\n' '{"type":"hello","protocol_version":"1.4.0","core_version":"0.0.1"}'
-                printf '%s\n' '{"type":"summary","add":1,"modify":0,"metadata_only":0,"remove":0,"unchanged":2,"total_planned":1}'
-                printf '%s\n' '{"type":"finish","success":true}'
+                printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
+                printf '%s\n' '{"type":"sync_summary","device_id":"000A27002138B0A8","session_id":41,"summary":{"add":1,"modify":0,"metadata_only":0,"remove":0,"unchanged":2,"total_planned":1}}'
+                printf '%s\n' '{"type":"sync_finished","device_id":"000A27002138B0A8","session_id":41,"success":true}'
             "#,
         );
         let (_cancel_tx, cancel_rx) = oneshot::channel();
@@ -881,12 +1084,11 @@ mod tests {
     async fn scan_output_is_validated_before_legacy_broadcast() {
         let command = scripted_command(
             r#"
-                printf '%s\n' '{"type":"hello","protocol_version":"1.4.0","core_version":"0.0.1"}'
-                printf '%s\n' '{"type":"header","source":"/Music","ipod":"","manifest":"/state/library-index.json"}'
-                printf '%s\n' '{"type":"summary","add":1,"modify":0,"metadata_only":0,"remove":0,"unchanged":2,"total_planned":1}'
-                printf '%s\n' '{"type":"track_start","current":1,"total":1,"label":"One.flac"}'
-                printf '%s\n' '{"type":"track_done","result":"applied"}'
-                printf '%s\n' '{"type":"finish","success":true}'
+                printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
+                printf '%s\n' '{"type":"library_scan_started","session_id":43}'
+                printf '%s\n' '{"type":"library_scan_progress","session_id":43,"files_scanned":3,"tracks_indexed":0}'
+                printf '%s\n' '{"type":"library_scan_progress","session_id":43,"files_scanned":3,"tracks_indexed":1}'
+                printf '%s\n' '{"type":"library_scan_finished","session_id":43,"success":true}'
             "#,
         );
         let (_cancel_tx, cancel_rx) = oneshot::channel();
@@ -910,7 +1112,7 @@ mod tests {
         assert_eq!(
             outcome,
             OrchestratorOutcome::Completed {
-                summary: summary(),
+                summary: SyncSummary::default(),
                 db_restored: false,
             }
         );
@@ -929,12 +1131,10 @@ mod tests {
                     .to_owned())
                 .collect::<Vec<_>>(),
             [
-                "hello",
-                "header",
-                "summary",
-                "track_start",
-                "track_done",
-                "finish"
+                "library_scan_started",
+                "library_scan_progress",
+                "library_scan_progress",
+                "library_scan_finished"
             ]
         );
     }
@@ -944,8 +1144,8 @@ mod tests {
     async fn device_sync_shape_on_scan_worker_is_not_broadcast() {
         let command = scripted_command(
             r#"
-                printf '%s\n' '{"type":"hello","protocol_version":"1.4.0","core_version":"0.0.1"}'
-                printf '%s\n' '{"type":"header","source":"/Music","ipod":"/Volumes/iPod","manifest":"/state/library-index.json"}'
+                printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
+                printf '%s\n' '{"type":"run_header","device_id":"000A27002138B0A8","session_id":43,"source":"/Music","ipod":"/Volumes/iPod","manifest":"/state/library-index.json"}'
             "#,
         );
         let (_cancel_tx, cancel_rx) = oneshot::channel();
@@ -972,8 +1172,8 @@ mod tests {
         ));
         assert_eq!(
             std::iter::from_fn(|| event_rx.try_recv().ok()).count(),
-            1,
-            "only the admitted hello may cross"
+            0,
+            "misrouted worker output must not cross"
         );
     }
 
@@ -982,9 +1182,9 @@ mod tests {
     async fn stalled_finalization_is_killed_and_aborted() {
         let command = scripted_command(
             r#"
-                printf '%s\n' '{"type":"hello","protocol_version":"1.4.0","core_version":"0.0.1"}'
+                printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
                 IFS= read -r line
-                printf '%s\n' '{"type":"finalizing","reason":"cancelled","staged_albums":1,"staged_tracks":1}'
+                printf '%s\n' '{"type":"finalizing","device_id":"000A27002138B0A8","session_id":41,"reason":"cancelled","staged_albums":1,"staged_tracks":1}'
                 sleep 10
             "#,
         );
@@ -1021,9 +1221,9 @@ mod tests {
     async fn eof_before_cancelled_is_interrupted_not_cancelled() {
         let command = scripted_command(
             r#"
-                printf '%s\n' '{"type":"hello","protocol_version":"1.4.0","core_version":"0.0.1"}'
+                printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
                 IFS= read -r line
-                printf '%s\n' '{"type":"finalizing","reason":"cancelled","staged_albums":1,"staged_tracks":1}'
+                printf '%s\n' '{"type":"finalizing","device_id":"000A27002138B0A8","session_id":41,"reason":"cancelled","staged_albums":1,"staged_tracks":1}'
             "#,
         );
         let (cancel_tx, cancel_rx) = oneshot::channel();
@@ -1054,8 +1254,8 @@ mod tests {
     async fn malformed_worker_output_is_not_broadcast() {
         let command = scripted_command(
             r#"
-                printf '%s\n' '{"type":"hello","protocol_version":"1.4.0","core_version":"0.0.1"}'
-                printf '%s\n' '{"type":"finish","success":false}'
+                printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
+                printf '%s\n' '{"type":"sync_finished","device_id":"000A27002138B0A8","session_id":42,"success":false}'
             "#,
         );
         let (_cancel_tx, cancel_rx) = oneshot::channel();
@@ -1086,8 +1286,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(forwarded.len(), 1, "only the admitted hello may cross");
-        assert!(forwarded[0].contains(r#""type":"hello""#));
+        assert!(forwarded.is_empty(), "invalid worker output must not cross");
     }
 
     #[cfg(unix)]
@@ -1095,7 +1294,7 @@ mod tests {
     async fn non_utf8_worker_output_is_killed_and_not_broadcast() {
         let command = scripted_command(
             r#"
-                printf '%s\n' '{"type":"hello","protocol_version":"1.4.0","core_version":"0.0.1"}'
+                printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
                 printf '\377\n'
                 sleep 10
             "#,
@@ -1132,8 +1331,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(forwarded.len(), 1, "only the admitted hello may cross");
-        assert!(forwarded[0].contains(r#""type":"hello""#));
+        assert!(
+            forwarded.is_empty(),
+            "unreadable worker output must not cross"
+        );
     }
 
     #[tokio::test(start_paused = true)]

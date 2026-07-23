@@ -216,20 +216,36 @@ pub enum AdmittedStream {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedSessionRoute {
-    device_id: crate::device::DeviceId,
+    device_id: Option<crate::device::DeviceId>,
     session_id: SessionId,
+}
+
+pub(super) enum WorkerEventRoute<'a> {
+    Device(&'a crate::device::DeviceId, SessionId),
+    LibraryScan(SessionId),
 }
 
 impl OwnedSessionRoute {
     pub fn new(device_id: crate::device::DeviceId, session_id: SessionId) -> Self {
         Self {
-            device_id,
+            device_id: Some(device_id),
             session_id,
         }
     }
 
-    fn matches(&self, device_id: &crate::device::DeviceId, session_id: SessionId) -> bool {
-        self.device_id == *device_id && self.session_id == session_id
+    pub fn library_scan(session_id: SessionId) -> Self {
+        Self {
+            device_id: None,
+            session_id,
+        }
+    }
+
+    fn matches_device(&self, device_id: &crate::device::DeviceId, session_id: SessionId) -> bool {
+        self.device_id.as_ref() == Some(device_id) && self.session_id == session_id
+    }
+
+    fn matches_scan(&self, session_id: SessionId) -> bool {
+        self.device_id.is_none() && self.session_id == session_id
     }
 }
 
@@ -334,10 +350,18 @@ pub fn decode_admitted_message(json: &str, stream: &AdmittedStream) -> Result<De
                 bail!("{message_type} is not valid worker output");
             }
             event.validate()?;
-            let Some((device_id, session_id)) = event.route() else {
+            let Some(route) = event.worker_route() else {
                 bail!("{message_type} worker event has no owned-session route");
             };
-            if !expected_route.matches(device_id, session_id) {
+            let matches = match route {
+                WorkerEventRoute::Device(device_id, session_id) => {
+                    expected_route.matches_device(device_id, session_id)
+                }
+                WorkerEventRoute::LibraryScan(session_id) => {
+                    expected_route.matches_scan(session_id)
+                }
+            };
+            if !matches {
                 bail!("{message_type} does not match the owned worker session");
             }
             Ok(DecodedWireMessage::Known(Box::new(WireMessage::Event(
@@ -400,7 +424,7 @@ fn validate_worker_command(
     let Some((device_id, session_id)) = command.session_route() else {
         bail!("non-session command is not valid on a worker command stream");
     };
-    if !admission.route.matches(device_id, session_id) {
+    if !admission.route.matches_device(device_id, session_id) {
         bail!("command does not match the owned worker session");
     }
     match (command, &admission.pending_interaction) {

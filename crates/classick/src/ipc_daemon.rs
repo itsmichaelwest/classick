@@ -7,7 +7,8 @@
 //! `protocol_version = "2.0.0"`. Version 2 makes command correlation and
 //! device targeting explicit, adds serial-keyed inventory snapshots, and
 //! removes the deprecated singleton selection commands. See
-//! `docs/ipc/daemon.md`.
+//! Protocol-3 serialization lives under `crate::wire`; these types are the
+//! daemon's internal runtime adapter.
 
 use crate::config_file::{DaemonSettings, IpodIdentity};
 use crate::daemon::device_storage::StorageInfo;
@@ -24,6 +25,8 @@ pub const DAEMON_PROTOCOL_VERSION: &str = "2.0.0";
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonEvent {
+    #[serde(skip)]
+    Protocol3(crate::wire::WireEvent),
     Hello {
         protocol_version: String,
         core_version: String,
@@ -93,6 +96,10 @@ pub enum DaemonEvent {
     },
     DeviceSelectionAdded {
         acknowledged_request_id: String,
+        #[serde(skip)]
+        mutation_id: Option<crate::portable::profile::MutationId>,
+        #[serde(skip)]
+        session_id: Option<u64>,
         serial: String,
         matched_tracks: usize,
         missing_tracks: usize,
@@ -125,6 +132,8 @@ pub enum DaemonEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         serial: Option<String>,
         session_id: crate::ipc_device::SessionId,
+        #[serde(skip)]
+        wire_event: Option<crate::wire::WireEvent>,
     },
     #[serde(rename = "device_inventory_snapshot")]
     DeviceInventorySnapshot(DeviceInventorySnapshot),
@@ -444,6 +453,8 @@ pub enum SyncRejectReason {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonCommand {
+    #[serde(skip)]
+    Protocol3(Box<crate::wire::WireCommand>),
     GetStatus {
         request_id: String,
     },
@@ -642,6 +653,8 @@ pub enum DaemonCommand {
         request_id: String,
         serial: String,
         rules: Vec<crate::selection::SelectionRule>,
+        #[serde(skip)]
+        mutation_id: Option<crate::portable::profile::MutationId>,
     },
     AppendSelectionToPlaylist {
         request_id: String,
@@ -654,6 +667,7 @@ pub enum DaemonCommand {
 impl DaemonCommand {
     pub fn target_serial(&self) -> Option<&str> {
         match self {
+            Self::Protocol3(_) => None,
             Self::ForgetIpod { serial, .. }
             | Self::TriggerSync { serial, .. }
             | Self::CancelSync { serial, .. }
@@ -672,6 +686,7 @@ impl DaemonCommand {
 
     pub fn request_id(&self) -> Option<&str> {
         match self {
+            Self::Protocol3(_) => None,
             Self::GetStatus { request_id }
             | Self::GetConfig { request_id }
             | Self::SaveConfig { request_id, .. }
@@ -1007,6 +1022,7 @@ mod tests {
             line: r#"{"type":"track_done"}"#.to_string(),
             serial: None,
             session_id: 1,
+            wire_event: None,
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(json.contains(r#""type":"sync_event""#));
@@ -1428,7 +1444,7 @@ mod tests {
 
     #[test]
     fn resolve_tracks_command_deserializes_reusing_selection_rule_shape() {
-        // Doc-shaped payload from docs/ipc/daemon.md —
+        // Historical daemon-adapter payload retained as a migration fixture —
         // `rules` reuses the exact same wire shape as
         // `save_device_config`'s `selection.rules`.
         let json = r#"{"type":"resolve_tracks","rules":[
@@ -1633,6 +1649,7 @@ mod tests {
             line: r#"{"type":"track_done"}"#.into(),
             serial: Some("RAW-A".into()),
             session_id: 42,
+            wire_event: None,
         };
         assert_eq!(
             serde_json::to_string(&sync).unwrap(),
@@ -1707,6 +1724,8 @@ mod tests {
     fn device_selection_added_serializes_doc_literal_shape() {
         let event = DaemonEvent::DeviceSelectionAdded {
             acknowledged_request_id: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8740".into(),
+            mutation_id: None,
+            session_id: None,
             serial: "A".into(),
             matched_tracks: 12,
             missing_tracks: 4,

@@ -1,6 +1,7 @@
 # Native device protocol and identity
 
-**Status:** approved direction; implementation pending
+**Status:** implemented; Apple initialization, library identity, and additional
+device-family validation remain deferred
 
 **Date:** 2026-07-19
 

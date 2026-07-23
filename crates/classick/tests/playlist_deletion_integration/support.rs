@@ -38,8 +38,7 @@ impl TestClient {
             writer: Box::new(writer),
         };
         assert_eq!(client.next().await["type"], "hello");
-        assert_eq!(client.next().await["type"], "status_update");
-        assert_eq!(client.next().await["type"], "device_inventory_snapshot");
+        while client.next().await["type"] != "device_inventory" {}
         client
     }
 
@@ -69,10 +68,7 @@ impl TestClient {
         let result = tokio::time::timeout(Duration::from_millis(300), async {
             loop {
                 let event = read_json(&mut self.reader).await;
-                if matches!(
-                    event["type"].as_str(),
-                    Some("playlists_update" | "device_config_update")
-                ) {
+                if matches!(event["type"].as_str(), Some("playlists" | "device_config")) {
                     break event;
                 }
             }
@@ -290,14 +286,20 @@ pub(super) fn load_subscriptions(root: &Path, serial: &str) -> Subscriptions {
 
 pub(super) fn subscriptions_revision(registry_path: &Path, serial: &str) -> u64 {
     let registry: Value = serde_json::from_slice(&std::fs::read(registry_path).unwrap()).unwrap();
-    registry["records"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|record| record["serial"] == serial)
-        .unwrap()["subscriptions_revision"]
-        .as_u64()
-        .unwrap()
+    if registry["schema_version"] == 2 {
+        registry["devices"][serial]["migration_status"]["subscriptions_revision"]
+            .as_u64()
+            .unwrap()
+    } else {
+        registry["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["serial"] == serial)
+            .unwrap()["subscriptions_revision"]
+            .as_u64()
+            .unwrap()
+    }
 }
 
 pub(super) struct JournalSubscription<'a> {

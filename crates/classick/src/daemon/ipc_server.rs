@@ -9,7 +9,11 @@
 //! generic over `AsyncRead`/`AsyncWrite`, so the only platform-specific
 //! code is the accept loop.
 
-use crate::ipc_daemon::{DaemonCommand, DaemonEvent, DAEMON_PROTOCOL_VERSION};
+use crate::ipc_daemon::{DaemonCommand, DaemonEvent};
+use crate::wire::{
+    decode_admitted_message, AdmittedStream, CapabilityName, DecodedWireMessage, EndpointRole,
+    WireHello, WireMessage,
+};
 use crate::PROJECT_DIR;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -263,12 +267,24 @@ async fn handle_client<R, W>(
 
     let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<DaemonEvent>();
 
-    // Send the Hello event first.
-    let hello = DaemonEvent::Hello {
-        protocol_version: DAEMON_PROTOCOL_VERSION.to_string(),
-        core_version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    if write_event(&mut writer_half, &hello).await.is_err() {
+    let hello = WireHello::new(
+        EndpointRole::Daemon,
+        env!("CARGO_PKG_VERSION"),
+        [
+            "device_inventory",
+            "portable_profile",
+            "typed_sync_progress",
+        ]
+        .into_iter()
+        .map(CapabilityName::parse)
+        .collect::<Result<Vec<_>>>()
+        .expect("daemon capability names are valid"),
+    )
+    .expect("daemon hello is valid");
+    if write_message(&mut writer_half, &WireMessage::Hello(hello))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -302,14 +318,21 @@ async fn handle_client<R, W>(
                     Ok(_) => {
                         let trimmed = line_buf.trim();
                         if !trimmed.is_empty() {
-                            match serde_json::from_str::<DaemonCommand>(trimmed) {
-                                Ok(cmd) => {
+                            match decode_admitted_message(
+                                trimmed,
+                                &AdmittedStream::DaemonReceivingDesktopCommands,
+                            ) {
+                                Ok(DecodedWireMessage::Known(message)) => {
+                                    let WireMessage::Command(command) = *message else {
+                                        unreachable!("desktop command admission returned a non-command");
+                                    };
                                     let _ = cmd_tx.send(ClientCommand {
                                         client_id,
-                                        command: cmd,
+                                        command: DaemonCommand::Protocol3(Box::new(command)),
                                         reply: reply_tx.clone(),
                                     });
                                 }
+                                Ok(DecodedWireMessage::IgnoredUnknownEvent { .. }) => unreachable!(),
                                 Err(e) => {
                                     tracing::warn!(
                                         "ipc-server: client {client_id} sent unparseable command {trimmed:?}: {e}"
@@ -352,7 +375,17 @@ async fn write_event<W>(writer: &mut W, event: &DaemonEvent) -> Result<()>
 where
     W: AsyncWriteExt + Unpin,
 {
-    let json = serde_json::to_string(event).context("serialize event")?;
+    let Some(event) = crate::daemon::protocol_v3::event_to_wire(event)? else {
+        return Ok(());
+    };
+    write_message(writer, &WireMessage::Event(event)).await
+}
+
+async fn write_message<W>(writer: &mut W, message: &WireMessage) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let json = serde_json::to_string(message).context("serialize wire message")?;
     writer.write_all(json.as_bytes()).await?;
     writer.write_all(b"\n").await?;
     writer.flush().await?;

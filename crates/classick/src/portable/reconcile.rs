@@ -20,6 +20,7 @@ pub enum DeviceProfileObservation<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProfilePublicationContext {
     pub capability_profile_id: Option<CapabilityProfileId>,
+    pub generated_sysinfo_extended_hash: Option<ContentHash>,
     pub companion_authorities: Vec<CompanionAuthority>,
 }
 
@@ -150,6 +151,8 @@ fn apply_pending(
     publication: &ProfilePublicationContext,
 ) -> Result<PortableProfile> {
     let mut candidate = current.clone();
+    candidate.capability_profile_id = publication.capability_profile_id.clone();
+    candidate.generated_sysinfo_extended_hash = publication.generated_sysinfo_extended_hash.clone();
     let mut subscriptions_changed = false;
     for mutation in &outbox.mutations {
         match mutation {
@@ -266,7 +269,7 @@ fn build_initial_profile(
             .context("initial adoption requires a subscriptions mutation")?,
         owned_playlists: Vec::new(),
         companion_authorities: publication.companion_authorities.clone(),
-        generated_sysinfo_extended_hash: None,
+        generated_sysinfo_extended_hash: publication.generated_sysinfo_extended_hash.clone(),
     };
     profile
         .validate()

@@ -1,6 +1,6 @@
 # Native device protocol — Rust core plan
 
-**Status:** implementation-ready draft
+**Status:** implemented; bounded macOS/HFS+ mounted-core gate passed
 
 **Depends on:** [approved design](../design/2026-07-19-native-device-protocol.md)
 

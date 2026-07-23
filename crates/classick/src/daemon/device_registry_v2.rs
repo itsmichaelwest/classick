@@ -30,6 +30,10 @@ impl LegacyImportEligibility {
     pub fn device_id(&self) -> &DeviceId {
         &self.device_id
     }
+
+    pub(crate) fn configured_device(device_id: DeviceId) -> Self {
+        Self { device_id }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +147,21 @@ pub struct DeviceRegistryV2 {
 }
 
 impl DeviceRegistryV2 {
+    pub(crate) fn from_records(devices: BTreeMap<String, RegistryDeviceRecordV2>) -> Result<Self> {
+        let registry = Self {
+            schema_version: REGISTRY_V2_SCHEMA_VERSION,
+            devices,
+        };
+        registry.validate()?;
+        Ok(registry)
+    }
+
+    pub(crate) fn records(&self) -> impl Iterator<Item = (&str, &RegistryDeviceRecordV2)> {
+        self.devices
+            .iter()
+            .map(|(device_id, record)| (device_id.as_str(), record))
+    }
+
     pub fn from_json(json: &str) -> Result<Self> {
         let registry: Self = serde_json::from_str(json)?;
         registry.validate()?;

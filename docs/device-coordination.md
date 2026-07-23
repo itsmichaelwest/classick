@@ -1,7 +1,7 @@
 # Device coordination architecture
 
-Status: proposed for future implementation. This document defines the target
-architecture; it does not describe behavior that Classick ships today.
+Status: implemented for mounted iPod Classic mutations. Later device-family
+profiles and the Apple mobile-device transport remain deferred.
 
 ## Purpose
 
@@ -81,8 +81,8 @@ Apple software is compelled to honor Classick's lease.
 
 ## Core model
 
-The Rust core should introduce explicit capability types rather than adding
-more preflight calls to individual modes.
+The Rust core uses explicit capability types rather than adding more preflight
+calls to individual modes.
 
 ```rust
 struct DeviceSyncProfile {
@@ -120,9 +120,8 @@ Normal sync, replace-library, Rockbox backfill, database restore, and future
 mutating maintenance commands must share this gateway. Read-only scan, audit,
 and verification commands do not require an exclusive mutation session.
 
-`replace_library` currently calls normal sync recursively. The implementation
-must instead pass one existing `DeviceMutationSession` through wipe and rebuild;
-nested acquisition is forbidden.
+Replace-library passes one existing `DeviceMutationSession` through wipe and
+rebuild; nested acquisition is forbidden.
 
 ## Mounted-device lease
 
@@ -328,19 +327,17 @@ will inherently reject every libgpod-managed database.
 
 ## Implementation boundaries
 
-The first implementation slice covers mounted Classic devices only while
-establishing reusable profile and session abstractions. It must place every
-existing mutation path behind the guard before changing the user-facing
-preflight behavior.
+The implemented slice covers mounted Classic devices and places every existing
+device mutation path behind the reusable session guard.
 
 Suggested later slices are:
 
-1. mounted-device lease and generation fence for the current Classic profile;
-2. structured IPC failures and Windows/macOS UI changes;
-3. original, Mini, Photo, Video, Nano 1G-4G, and Shuffle profiles with physical
+1. structured coordination-specific failure presentation beyond the current
+   typed protocol errors;
+2. original, Mini, Photo, Video, Nano 1G-4G, and Shuffle profiles with physical
    verification for every claimed family;
-4. Nano 5G/6G dependency, identity, checksum, and database-bundle research;
-5. a separately scoped libimobiledevice/AFC backend for historical iPod touch.
+3. Nano 5G/6G dependency, identity, checksum, and database-bundle research;
+4. a separately scoped libimobiledevice/AFC backend for historical iPod touch.
 
 Later-family support must not weaken the initial Classic guarantees or turn
 unverified model detection into a claim of write support.
@@ -365,11 +362,15 @@ Automated verification must include:
   database bundles for later Nano profiles; and
 - exhaustive Rust, Swift, and C# decoding of any new structured failure reason.
 
-The final combined physical pass must verify the lock and publication behavior
-on a FAT-formatted Classic and, when hardware is available, an HFS+-formatted
-device. Additional families are advertised only after their own read, write,
-Apple interoperability, interruption, and clean-eject tests pass. The music
-share remains read-only throughout.
+The bounded HFS+ mounted-core publication gate passed on 23 July 2026,
+including generation-fenced stale-session abandonment, five-track
+publication, persisted artwork reopen, transaction cleanup, source
+byte-stability, and graceful daemon shutdown without unmounting. The remaining
+combined physical pass must verify firmware playback and visible artwork,
+Finder/Apple Music management, clean eject, and the same lock/publication
+behavior on a FAT-formatted Classic. Additional families are advertised only
+after their own read, write, Apple interoperability, interruption, and
+clean-eject tests pass. The music share remains read-only throughout.
 
 ## Rejected alternatives
 
@@ -386,7 +387,7 @@ share remains read-only throughout.
 
 ## Decision summary
 
-Classick will use a capability-based mutation session. Mounted iPods receive a
+Classick uses a capability-based mutation session. Mounted iPods receive a
 crash-safe cooperative Classick lease plus optimistic generation fencing and
 coordinated publication. Historical iPod touch support, if restored, uses
 libgpod's Apple mobile-device handshake and AFC lock behind the same session

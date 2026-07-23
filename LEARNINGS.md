@@ -63,9 +63,18 @@ incidents and completed gate reports are archived in
   escaping journals stay untouched and block mutation.
 - A checkpoint that reopens a candidate DB must restore FirewireGuid and
   ModelNumStr and resolve playlists against post-staging DBIDs.
+- On the pinned libgpod build, parsing a Finder-created database with a Genius
+  CUID requires taking, nulling, and freeing the private CUID once before
+  `itdb_free`; otherwise libgpod frees the allocation twice. Opening a mounted
+  device must use `itdb_parse(mount)`, not `itdb_parse_file(iTunesDB)`, because
+  only the mount-aware parser loads companion `ArtworkDB` thumbnails.
 - libgpod may drop loaded artwork thumbnails when rewriting a parsed DB. A
   writing path must preserve the artwork snapshot or re-thumbnail every track
   and force the fresh artwork-build path.
+- Successful or terminal transaction cleanup removes the empty session staging
+  directory and rollback snapshot before removing the journal. Keeping the
+  journal last makes a cleanup failure retryable and avoids orphaned
+  `<session>.staged` directories after a successful sync.
 - Unlink a track from every playlist before freeing it. Reconcile filesystem
   orphans and dangling DB references together.
 - Apple playlists are owned only by recorded libgpod ID and structural kind;
@@ -103,12 +112,10 @@ incidents and completed gate reports are archived in
 
 ## Daemon and IPC
 
-- The approved target is one protocol 3.x schema across desktop-daemon and
-  daemon-worker transports; typed progress replaces the nested JSON
-  `sync_event.line`. Until implemented, the shipped protocols remain daemon
-  2.0.0 and subprocess 1.4.0.
-- There are two independently versioned newline-delimited JSON protocols:
-  subprocess `1.4.0` and daemon `2.0.0`. `hello` is always first.
+- Protocol 3 is the single production schema across desktop-daemon and
+  daemon-worker transports. Worker progress is decoded, role/routing/lifecycle
+  validated, and forwarded as typed events; never reintroduce nested JSON
+  `sync_event.line` or a production fallback to daemon 2/subprocess 1.
 - Preserve socket-line order through one actor/reader path. Per-line detached
   tasks can let later events overtake an invalid handshake.
 - Validate owned worker output before broadcasting it: malformed JSON,

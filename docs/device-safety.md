@@ -70,7 +70,7 @@ portable Classick profile.
 - Publish or replace an owned file atomically inside the coordinated device
   transaction.
 
-The detailed target contract is in
+The detailed rationale and field contract is in
 [Native device protocol and identity](design/2026-07-19-native-device-protocol.md).
 
 ## Source library is read-only
@@ -88,15 +88,18 @@ preflight is a conservative attempt to avoid concurrent mutation, not a
 workaround for permanent format incompatibility.
 
 Classick and Apple software must not write the same device state concurrently.
-Until the proposed [device coordination architecture](device-coordination.md)
-is implemented, users should close active Apple device-sync interfaces and
-disable automatic syncing before Classick mutates an iPod. Apple Mobile Device
-Service merely running is not proof that a write is in progress.
+Classick holds a crash-released per-device advisory lease for the complete
+mutation session and generation-fences publication. The lease excludes
+cooperating Classick writers only; Finder/iTunes/Apple Music do not honor it.
+The Apple-process preflight remains a conservative additional guard, not the
+correctness boundary. Apple Mobile Device Service merely running is not proof
+that a write is in progress.
 
 ## Publication is coordinated
 
-Database, artwork, playlists, ownership, and manifests are not independent
-files. A successful checkpoint must represent one coherent device state.
+Database, artwork, playlists, ownership, manifests, the portable profile, and
+an owned generated `SysInfoExtended` are not independent files. A successful
+checkpoint must represent one coherent device state.
 
 - Snapshot `iTunesDB`, `ArtworkDB`, every managed `.ithmb`, the device
   manifest, and playlist ownership needed for rollback.
@@ -105,9 +108,28 @@ files. A successful checkpoint must represent one coherent device state.
 - Resolve playlist membership against the post-staging DBIDs.
 - Publish device authority before refreshing warning-only host caches.
 - Remove only files explicitly owned by the active journal.
+- Publish `profile.json` and a newly generated `SysInfoExtended` through one
+  recoverable portable-config journal. The profile must never claim a hash
+  that was not durably published.
 
 Periodic checkpoints bound orphan exposure, but they do not weaken the
 transaction ordering.
+
+### Verified mounted-Classic boundary
+
+On 23 July 2026, the release daemon completed a bounded physical publication
+to an initialized HFS+-formatted Late-2009 Classic: it generation-fenced and
+abandoned a proven-lost pre-publication journal, transcoded and published five
+tracks, reopened the persisted database, and verified all five artwork records
+and decoded thumbnails. The device manifest contained five entries, the device
+contained exactly five published media files, transaction directories were
+cleaned, source hashes were unchanged, and the device remained mounted through
+graceful daemon shutdown.
+
+This verifies the mounted core publication and reopen path. It does not prove
+firmware playback, visible artwork on the iPod, Finder/Apple Music management,
+FAT-formatted behavior, Windows behavior, or clean eject; those remain separate
+physical gates.
 
 ## Recovery precedes new work
 
@@ -120,8 +142,8 @@ A verified mismatch rollback is terminal. It restores the exact database,
 artwork, manifest bytes-or-absence, and other recorded authorities, then records
 `RollbackComplete`. It must not demote the transaction into a replayable phase.
 Rollback is permitted only when the live bytes match a generation the journal
-proves Classick owns. An unknown external generation must be preserved and
-block destructive recovery, as specified by the proposed
+proves Classick owns. An unknown external generation is preserved and blocks
+destructive recovery, as specified by the implemented
 [device coordination architecture](device-coordination.md).
 
 ## Cancellation drains finalization

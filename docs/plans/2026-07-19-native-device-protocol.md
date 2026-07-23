@@ -1,6 +1,7 @@
 # Native device protocol implementation plan
 
-**Status:** ready for implementation after review
+**Status:** implemented; remaining platform and user-observable physical gates
+are listed below
 
 **Design:** [Native device protocol and identity](../design/2026-07-19-native-device-protocol.md)
 
@@ -135,6 +136,12 @@ Also require Linux Rust build/tests, deterministic XcodeGen regeneration after
 Swift source changes, Windows x64 and ARM64 builds, and physical-device checks
 for Finder/Apple Music, Windows Apple software/iTunes, firmware playback and
 artwork, reconnect reconciliation, and Rockbox when enabled.
+
+The bounded macOS/HFS+ mounted-core gate passed on 23 July 2026 with five
+tracks, persisted artwork reopen, transaction cleanup, source byte-stability,
+and graceful daemon shutdown. Firmware playback, visible device artwork,
+Finder/Apple Music management, clean eject, FAT-formatted behavior, Windows
+native builds, and Windows physical behavior remain unverified here.
 
 Each persistence checkpoint receives separate specification/safety and
 code-quality review. Each client checkpoint receives one combined protocol,

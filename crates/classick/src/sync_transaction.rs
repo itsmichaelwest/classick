@@ -34,6 +34,12 @@ pub struct CheckpointCoordinator<'a> {
     pub artwork_cache: crate::artwork_cache::ArtworkCache,
 }
 
+#[derive(Clone, Copy)]
+enum RollbackCleanup {
+    PreservePending,
+    RemovePending,
+}
+
 impl CheckpointCoordinator<'_> {
     pub fn publish(
         &self,
@@ -52,6 +58,15 @@ impl CheckpointCoordinator<'_> {
     ) -> Result<Vec<CheckpointResult>> {
         let store = crate::pending_session::PendingSessionStore::new(self.mount);
         let discovery = store.discover(self.serial)?;
+        if !discovery.rejected.is_empty() {
+            let details = discovery
+                .rejected
+                .iter()
+                .map(|rejected| format!("{}: {}", rejected.path.display(), rejected.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            bail!("unsafe pending-session journal(s) must be resolved before recovery: {details}");
+        }
         let mut recovered = Vec::with_capacity(discovery.sessions.len());
         for mut journal in discovery.sessions {
             progress.log(format!(
@@ -60,21 +75,14 @@ impl CheckpointCoordinator<'_> {
             ));
             let result = if journal.phase == crate::pending_session::PendingPhase::Staging {
                 self.abandon_interrupted_staging(&mut journal, &store)?
+            } else if let Some(result) =
+                self.abandon_lost_prepublication_inputs(&journal, &store)?
+            {
+                result
             } else {
                 self.publish_with_options(&mut journal, manifest, progress, options)?
             };
             recovered.push(result);
-        }
-        if !discovery.rejected.is_empty() {
-            let details = discovery
-                .rejected
-                .iter()
-                .map(|rejected| format!("{}: {}", rejected.path.display(), rejected.reason))
-                .collect::<Vec<_>>()
-                .join("; ");
-            bail!(
-                "unsafe pending-session journal(s) must be resolved before a fresh sync: {details}"
-            );
         }
         Ok(recovered)
     }
@@ -136,20 +144,24 @@ impl CheckpointCoordinator<'_> {
         if journal.phase > PendingPhase::DatabaseVerified {
             let reopened = crate::ipod::db::OwnedDb::open(self.mount)
                 .context("reopen finalized iTunesDB for recovery verification")?;
-            let verification = self.verify_candidate(&reopened, &candidate).and_then(|()| {
-                let Some(ownership) = journal.candidate_playlist_ownership.as_ref() else {
-                    return Ok(());
-                };
-                let verified = playlist_publication::verify_managed_playlists(
-                    &reopened,
-                    ownership,
-                    &journal.desired_playlist_memberships,
-                )?;
-                if verified != journal.verified_playlist_memberships {
-                    bail!("reopened managed playlist verification differs from pending journal");
-                }
-                Ok(())
-            });
+            let verification = self
+                .verify_candidate(&reopened, &candidate, journal)
+                .and_then(|()| {
+                    let Some(ownership) = journal.candidate_playlist_ownership.as_ref() else {
+                        return Ok(());
+                    };
+                    let verified = playlist_publication::verify_managed_playlists(
+                        &reopened,
+                        ownership,
+                        &journal.desired_playlist_memberships,
+                    )?;
+                    if verified != journal.verified_playlist_memberships {
+                        bail!(
+                            "reopened managed playlist verification differs from pending journal"
+                        );
+                    }
+                    Ok(())
+                });
             if let Err(error) = verification {
                 let message = format!("{error:#}");
                 drop(reopened);
@@ -160,7 +172,7 @@ impl CheckpointCoordinator<'_> {
         if journal.phase == PendingPhase::DatabaseVerified {
             let reopened =
                 crate::ipod::db::OwnedDb::open(self.mount).context("reopen verified iTunesDB")?;
-            if let Err(error) = self.verify_candidate(&reopened, &candidate) {
+            if let Err(error) = self.verify_candidate(&reopened, &candidate, journal) {
                 let message = format!("{error:#}");
                 drop(reopened);
                 self.rollback_after_verified_mismatch(journal, &store, &snapshot, error)?;
@@ -198,6 +210,7 @@ impl CheckpointCoordinator<'_> {
             journal.phase = PendingPhase::DeviceManifestPublished;
             self.record_verified_generation(journal, &store)?;
             if journal.candidate_playlist_ownership.is_none() {
+                self.publish_manifest_authority(journal, &store)?;
                 return self.finish_cleanup(journal, &store, manifest_cache_warning, progress);
             }
         }
@@ -216,7 +229,7 @@ impl CheckpointCoordinator<'_> {
                 self.verify_generation_fence()
                     .context("Rockbox plan pre-publication generation fence")?;
                 let settled = ownership.load_device_read_only()?;
-                if let Err(error) = rockbox_publication::prepare_playlist_projection(
+                rockbox_publication::prepare_playlist_projection(
                     journal,
                     &store,
                     &settled,
@@ -226,10 +239,7 @@ impl CheckpointCoordinator<'_> {
                         self.mount.to_path_buf(),
                     ),
                     options.playlist_failure_point,
-                ) {
-                    self.record_interrupted_generation(journal, &store)?;
-                    return Err(error);
-                }
+                )?;
                 self.record_verified_generation(journal, &store)?;
             }
             if journal.phase == PendingPhase::RockboxProjectionsPrepared {
@@ -270,6 +280,7 @@ impl CheckpointCoordinator<'_> {
                 self.record_verified_generation(journal, &store)?;
             }
             if journal.phase == PendingPhase::RockboxProjectionsPublished {
+                self.publish_manifest_authority(journal, &store)?;
                 let warning = playlist_publication::refresh_host_cache(
                     journal,
                     &ownership,
@@ -287,11 +298,24 @@ impl CheckpointCoordinator<'_> {
         }
 
         if journal.phase == PendingPhase::CleanupComplete {
+            remove_empty_dir_if_present(&store.staged_dir(journal.session_id))?;
+            remove_validated_snapshot_if_present(&store.snapshot_dir(journal.session_id))?;
             store.remove(journal.session_id)?;
-            remove_dir_if_present(&store.snapshot_dir(journal.session_id))?;
             return Ok(self.result(journal, None));
         }
         bail!("unsupported pending phase {:?}", journal.phase)
+    }
+
+    fn publish_manifest_authority(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+    ) -> Result<()> {
+        self.verify_generation_fence()
+            .context("portable manifest authority pre-publication generation fence")?;
+        crate::portable::coordinator::publish_manifest_authority(self.mutation_session)
+            .context("publish portable manifest authority")?;
+        self.record_verified_generation(journal, store)
     }
 
     fn verify_generation_fence(&self) -> Result<()> {
@@ -426,9 +450,127 @@ impl CheckpointCoordinator<'_> {
         journal.phase = crate::pending_session::PendingPhase::CleanupComplete;
         store.save(journal)?;
         let result = self.result(journal, None);
+        remove_empty_dir_if_present(&store.staged_dir(journal.session_id))?;
+        remove_validated_snapshot_if_present(&store.snapshot_dir(journal.session_id))?;
         store.remove(journal.session_id)?;
-        remove_dir_if_present(&store.snapshot_dir(journal.session_id))?;
         Ok(result)
+    }
+
+    fn abandon_lost_prepublication_inputs(
+        &self,
+        journal: &crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+    ) -> Result<Option<CheckpointResult>> {
+        use crate::pending_session::PendingPhase;
+
+        if journal.phase != PendingPhase::ReadyToPublish || journal.staged_files.is_empty() {
+            return Ok(None);
+        }
+        let (staged_dir, snapshot_dir, journal_path) =
+            self.validate_abandonment_owned_paths(journal, store)?;
+
+        let mut missing = 0;
+        for staged in &journal.staged_files {
+            match std::fs::symlink_metadata(&staged.pending_path) {
+                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => {
+                    bail!(
+                        "recovery_required: pending staged input is not a regular file: {}",
+                        staged.pending_path.display()
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing += 1,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "inspect pending staged input {}",
+                            staged.pending_path.display()
+                        )
+                    });
+                }
+            }
+        }
+        if missing == 0 {
+            return Ok(None);
+        }
+        if missing != journal.staged_files.len() {
+            bail!("recovery_required: pending publication has only some staged inputs remaining");
+        }
+
+        self.validate_journal(journal)?;
+        // Retry rollback deletes candidate files before clearing these fields and
+        // saving ReadyToPublish, so the cleared journal is the durable proof that
+        // no candidate publication remains.
+        let publication_is_cleared = journal.published_generation.is_none()
+            && journal.verified_generation.is_none()
+            && journal
+                .staged_files
+                .iter()
+                .all(|staged| staged.dbid == 0 && staged.final_ipod_path.is_none())
+            && journal.candidate_manifest.is_none()
+            && journal.managed_playlist_record_snapshot.is_none()
+            && journal.candidate_playlist_ownership.is_none()
+            && journal.desired_playlist_memberships.is_empty()
+            && journal.verified_playlist_memberships.is_empty()
+            && journal.pending_rockbox_ops.is_empty()
+            && journal.rockbox_projection_plan_version.is_none();
+        if !publication_is_cleared {
+            bail!("recovery_required: missing staged inputs retain ambiguous publication evidence");
+        }
+
+        self.verify_generation_fence()?;
+        let predecessor = journal
+            .generation_before
+            .as_ref()
+            .context("recovery_required: lost staged inputs have no recorded predecessor")?;
+        let live = self.mutation_session.capture_current_generation()?;
+        if &live != predecessor {
+            bail!(
+                "external_generation_changed: refusing to abandon over an unknown device generation"
+            );
+        }
+
+        require_empty_owned_directory(&staged_dir, "staged transaction")?;
+        let snapshot = require_owned_directory_if_present(&snapshot_dir, "rollback snapshot")?
+            .then(|| {
+                RollbackSnapshot::open_for_deletion(&snapshot_dir)
+                    .context("validate rollback snapshot before abandoning lost staged inputs")
+            })
+            .transpose()?;
+
+        let result = CheckpointResult::default();
+        self.validate_abandonment_owned_paths(journal, store)?;
+        require_empty_owned_directory(&staged_dir, "staged transaction")?;
+        remove_empty_dir_if_present(&staged_dir)?;
+        if let Some(snapshot) = snapshot {
+            self.validate_abandonment_owned_paths(journal, store)?;
+            snapshot.remove_for_deletion()?;
+        }
+        self.validate_abandonment_owned_paths(journal, store)?;
+        remove_file_if_present(&journal_path)?;
+        Ok(Some(result))
+    }
+
+    fn validate_abandonment_owned_paths(
+        &self,
+        journal: &crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+    ) -> Result<(PathBuf, PathBuf, PathBuf)> {
+        let mount = self.mutation_session.mount();
+        let pending_root = crate::device_state::pending_sessions_dir(mount);
+        require_real_directory_chain(mount, &pending_root, "pending-session root")?;
+
+        let journal_path = pending_root.join(format!("{}.json", journal.session_id));
+        if store.path(journal.session_id) != journal_path {
+            bail!("recovery_required: unsafe pending-session store path");
+        }
+        require_regular_file(&journal_path, "pending-session journal")?;
+
+        Ok((
+            pending_root.join(format!("{}.staged", journal.session_id)),
+            pending_root.join(format!("{}.snapshot", journal.session_id)),
+            journal_path,
+        ))
     }
 
     fn prepare_all_artwork(
@@ -514,14 +656,14 @@ impl CheckpointCoordinator<'_> {
         if let Some(candidate) = journal.candidate_manifest.as_ref() {
             let live = crate::ipod::db::OwnedDb::open(self.mount)
                 .context("inspect ambiguous live iTunesDB")?;
-            if self.verify_candidate(&live, candidate).is_ok() {
+            if self.verify_candidate(&live, candidate, journal).is_ok() {
                 journal.phase = PendingPhase::DatabaseVerified;
                 self.record_verified_generation(journal, store)?;
                 return Ok(());
             }
             drop(live);
             snapshot.restore(self.mount)?;
-            self.cleanup_after_rollback(journal)?;
+            self.cleanup_after_rollback(journal, RollbackCleanup::PreservePending)?;
             reset_staged_publication(journal);
             store.save(journal)?;
         }
@@ -635,10 +777,11 @@ impl CheckpointCoordinator<'_> {
                     bail!("database verification failed; database and artwork restored");
                 }
             };
-        if let Err(error) = self.verify_candidate(&reopened, &candidate) {
+        if let Err(error) = self.verify_candidate(&reopened, &candidate, journal) {
+            let message = format!("{error:#}");
             drop(reopened);
             self.rollback_to_ready(journal, store, snapshot, error)?;
-            bail!("database verification failed; database and artwork restored");
+            bail!("database verification failed; database and artwork restored: {message}");
         }
         if let Some(ownership) = journal.candidate_playlist_ownership.as_ref() {
             match playlist_publication::verify_managed_playlists(
@@ -667,6 +810,7 @@ impl CheckpointCoordinator<'_> {
         &self,
         db: &crate::ipod::db::OwnedDb,
         candidate: &crate::manifest::Manifest,
+        journal: &crate::pending_session::PendingSession,
     ) -> Result<()> {
         for entry in &candidate.tracks {
             let expects_artwork = entry.source_known
@@ -675,6 +819,26 @@ impl CheckpointCoordinator<'_> {
                     .load_for_source(&entry.source_path)?
                     .is_some();
             db.verify_track(entry.ipod_dbid, &entry.ipod_relpath, expects_artwork)?;
+        }
+        let candidate_dbids: std::collections::HashSet<_> = candidate
+            .tracks
+            .iter()
+            .map(|entry| entry.ipod_dbid)
+            .collect();
+        let live_dbids: std::collections::HashSet<_> = db
+            .list_tracks_for_rebuild()
+            .into_iter()
+            .map(|track| track.dbid)
+            .collect();
+        for obsolete in &journal.obsolete_files {
+            if !candidate_dbids.contains(&obsolete.prior_dbid)
+                && live_dbids.contains(&obsolete.prior_dbid)
+            {
+                bail!(
+                    "obsolete track {} remains in the candidate database",
+                    obsolete.prior_dbid
+                );
+            }
         }
         Ok(())
     }
@@ -690,7 +854,7 @@ impl CheckpointCoordinator<'_> {
         snapshot
             .restore(self.mount)
             .with_context(|| format!("restore rollback after {cause:#}"))?;
-        self.cleanup_after_rollback(journal)?;
+        self.cleanup_after_rollback(journal, RollbackCleanup::PreservePending)?;
         self.restore_device_manifest_preimage(journal)?;
         reset_staged_publication(journal);
         journal.phase = crate::pending_session::PendingPhase::ReadyToPublish;
@@ -708,7 +872,7 @@ impl CheckpointCoordinator<'_> {
         snapshot
             .restore(self.mount)
             .with_context(|| format!("restore rollback after {cause:#}"))?;
-        self.cleanup_after_rollback(journal)?;
+        self.cleanup_after_rollback(journal, RollbackCleanup::RemovePending)?;
         self.restore_device_manifest_preimage(journal)?;
         journal.phase = crate::pending_session::PendingPhase::RollbackComplete;
         self.finish_verified_rollback(journal, store)
@@ -779,6 +943,7 @@ impl CheckpointCoordinator<'_> {
     fn cleanup_after_rollback(
         &self,
         journal: &crate::pending_session::PendingSession,
+        cleanup: RollbackCleanup,
     ) -> Result<()> {
         let restored =
             crate::ipod::db::OwnedDb::open(self.mount).context("open restored iTunesDB")?;
@@ -786,7 +951,21 @@ impl CheckpointCoordinator<'_> {
             .referenced_paths(self.mount)
             .into_iter()
             .collect::<crate::pending_session::ReferencedPaths>();
-        crate::pending_session::cleanup_unreferenced_staged_files(journal, &referenced)
+        match cleanup {
+            RollbackCleanup::PreservePending => {
+                for staged in &journal.staged_files {
+                    if let Some(path) = &staged.final_ipod_path {
+                        if !referenced.contains(path) {
+                            remove_file_if_present(path)?;
+                        }
+                    }
+                }
+            }
+            RollbackCleanup::RemovePending => {
+                crate::pending_session::cleanup_unreferenced_staged_files(journal, &referenced)?;
+            }
+        }
+        Ok(())
     }
 
     fn finish_cleanup(
@@ -812,8 +991,9 @@ impl CheckpointCoordinator<'_> {
         journal.phase = crate::pending_session::PendingPhase::CleanupComplete;
         store.save(journal)?;
         let result = self.result(journal, host_cache_warning);
+        remove_empty_dir_if_present(&store.staged_dir(journal.session_id))?;
+        remove_validated_snapshot_if_present(&store.snapshot_dir(journal.session_id))?;
         store.remove(journal.session_id)?;
-        remove_dir_if_present(&store.snapshot_dir(journal.session_id))?;
         Ok(result)
     }
 
@@ -885,11 +1065,92 @@ fn remove_file_if_present(path: &Path) -> Result<()> {
     }
 }
 
-fn remove_dir_if_present(path: &Path) -> Result<()> {
-    match std::fs::remove_dir_all(path) {
+fn remove_validated_snapshot_if_present(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => RollbackSnapshot::open_for_deletion(path)?.remove_for_deletion(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect rollback snapshot {}", path.display()))
+        }
+    }
+}
+
+fn remove_empty_dir_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_dir(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+        Err(error) => Err(error).with_context(|| format!("remove empty {}", path.display())),
+    }
+}
+
+fn require_empty_owned_directory(path: &Path, label: &str) -> Result<()> {
+    if !require_owned_directory_if_present(path, label)? {
+        return Ok(());
+    }
+    let mut entries =
+        std::fs::read_dir(path).with_context(|| format!("inspect {label} {}", path.display()))?;
+    if entries.next().transpose()?.is_some() {
+        bail!(
+            "recovery_required: {label} is not empty: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn require_owned_directory_if_present(path: &Path, label: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => bail!(
+            "recovery_required: {label} is not a real directory: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect {label} {}", path.display())),
+    }
+}
+
+fn require_real_directory_chain(root: &Path, target: &Path, label: &str) -> Result<()> {
+    let relative = target.strip_prefix(root).with_context(|| {
+        format!(
+            "recovery_required: unsafe {label} path {}",
+            target.display()
+        )
+    })?;
+    require_real_directory(root, "device mount")?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            bail!(
+                "recovery_required: unsafe {label} path component in {}",
+                target.display()
+            );
+        };
+        current.push(component);
+        require_real_directory(&current, label)?;
+    }
+    Ok(())
+}
+
+fn require_real_directory(path: &Path, label: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => bail!(
+            "recovery_required: unsafe {label} is not a real directory: {}",
+            path.display()
+        ),
+        Err(error) => Err(error).with_context(|| format!("inspect {label} {}", path.display())),
+    }
+}
+
+fn require_regular_file(path: &Path, label: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => bail!(
+            "recovery_required: unsafe {label} is not a regular file: {}",
+            path.display()
+        ),
+        Err(error) => Err(error).with_context(|| format!("inspect {label} {}", path.display())),
     }
 }
 
@@ -1081,6 +1342,8 @@ mod tests {
         let (mount, _host, store, cache, mut manifest) = coordinator_fixture("publish");
         let mut journal = PendingSession::new(11, TEST_DEVICE_ID, Vec::new());
         let journal_store = PendingSessionStore::new(&mount);
+        let staged_dir = crate::device_state::pending_sessions_dir(&mount).join("11.staged");
+        std::fs::create_dir_all(&staged_dir).unwrap();
         let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
         let mutation_session = mutation_session(&mount);
         let coordinator = CheckpointCoordinator {
@@ -1101,6 +1364,7 @@ mod tests {
         assert!(crate::device_state::portable_manifest_path(&mount).exists());
         assert!(!journal_store.path(11).exists());
         assert!(!journal_store.snapshot_dir(11).exists());
+        assert!(!staged_dir.exists());
     }
 
     #[test]
@@ -1147,6 +1411,222 @@ mod tests {
             original_db
         );
         snapshot.validate().unwrap();
+    }
+
+    #[test]
+    fn verified_rollback_preserves_pending_transcode_and_resets_publication() {
+        let (mount, _host, manifest_store, cache, _manifest) =
+            coordinator_fixture("rollback-preserves-pending");
+        let journal_store = PendingSessionStore::new(&mount);
+        let snapshot = RollbackSnapshot::create(&mount, &journal_store.snapshot_dir(18)).unwrap();
+        let pending = journal_store
+            .path(18)
+            .with_file_name("18.staged")
+            .join("track.m4a");
+        let published = mount.join("iPod_Control/Music/F00/published.m4a");
+        std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+        std::fs::write(&pending, b"pending transcode").unwrap();
+        std::fs::write(&published, b"published copy").unwrap();
+
+        let mutation_session = mutation_session(&mount);
+        let generation = mutation_session.current_generation().unwrap();
+        let mut album = PendingAlbum::new("album", 0);
+        album.staged_file_indices.push(0);
+        let mut journal = PendingSession::new(18, TEST_DEVICE_ID, vec![album]);
+        journal.phase = PendingPhase::DatabaseVerified;
+        journal.generation_before = Some(generation.clone());
+        journal.verified_generation = Some(generation);
+        journal.staged_files.push(StagedFile::minimal(
+            PathBuf::from("source.flac"),
+            pending.clone(),
+            Some(published.clone()),
+            41,
+        ));
+        journal.candidate_manifest = Some(Manifest::empty());
+        journal.candidate_playlist_ownership =
+            Some(crate::ipod::playlist_ownership::ManagedPlaylistOwnership {
+                schema_version: crate::ipod::playlist_ownership::MANAGED_PLAYLIST_OWNERSHIP_VERSION,
+                device_serial: TEST_DEVICE_ID.into(),
+                playlists: std::collections::BTreeMap::from([(
+                    "mix".into(),
+                    crate::ipod::playlist_ownership::ManagedPlaylistEntry {
+                        apple_playlist_id: 71,
+                        expected_kind: crate::ipod::playlist_ownership::ManagedPlaylistKind::Normal,
+                        rockbox: None,
+                    },
+                )]),
+            });
+        journal
+            .desired_playlist_memberships
+            .insert("mix".into(), vec![41]);
+        journal.verified_playlist_memberships.push(
+            crate::ipod::device_playlists::VerifiedPlaylistMembership {
+                slug: "mix".into(),
+                apple_playlist_id: 71,
+                ordered_dbids: vec![41],
+                ordered_ipod_paths: vec!["/iPod_Control/Music/F00/published.m4a".into()],
+            },
+        );
+        journal.pending_rockbox_ops.insert(
+            "mix".into(),
+            crate::pending_session::PendingRockboxOp {
+                previous: None,
+                desired: None,
+            },
+        );
+        journal.rockbox_projection_plan_version =
+            Some(crate::pending_session::ROCKBOX_PROJECTION_PLAN_VERSION);
+        journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
+            manifest_store: &manifest_store,
+            artwork_cache: cache,
+        };
+
+        coordinator
+            .rollback_to_ready(
+                &mut journal,
+                &journal_store,
+                &snapshot,
+                anyhow::anyhow!("injected verification failure"),
+            )
+            .unwrap();
+
+        assert_eq!(std::fs::read(&pending).unwrap(), b"pending transcode");
+        assert!(!published.exists());
+        assert_eq!(journal.phase, PendingPhase::ReadyToPublish);
+        assert_eq!(journal.staged_files[0].dbid, 0);
+        assert!(journal.staged_files[0].final_ipod_path.is_none());
+        assert!(journal.candidate_manifest.is_none());
+        assert!(journal.candidate_playlist_ownership.is_none());
+        assert!(journal.desired_playlist_memberships.is_empty());
+        assert!(journal.verified_playlist_memberships.is_empty());
+        assert!(journal.pending_rockbox_ops.is_empty());
+        assert!(journal.rockbox_projection_plan_version.is_none());
+        assert_eq!(journal_store.load(18).unwrap(), journal);
+    }
+
+    #[test]
+    fn retryable_rollback_preserves_a_published_file_referenced_by_restored_database() {
+        let (mount, _host, manifest_store, cache, _manifest) =
+            coordinator_fixture("rollback-preserves-referenced-final");
+        let retained = mount.join("iPod_Control/Music/F00/retained.m4a");
+        std::fs::write(&retained, b"referenced published copy").unwrap();
+        let db = crate::ipod::db::OwnedDb::open(&mount).unwrap();
+        unsafe {
+            let track = crate::ffi::itdb_track_new();
+            assert!(!track.is_null());
+            (*track).dbid = 72;
+            (*track).ipod_path =
+                crate::ffi::g_strdup(c":iPod_Control:Music:F00:retained.m4a".as_ptr());
+            crate::ffi::itdb_track_add(db.as_ptr(), track, -1);
+        }
+        db.write().unwrap();
+        drop(db);
+
+        let journal_store = PendingSessionStore::new(&mount);
+        let snapshot = RollbackSnapshot::create(&mount, &journal_store.snapshot_dir(20)).unwrap();
+        let pending = journal_store
+            .path(20)
+            .with_file_name("20.staged")
+            .join("track.m4a");
+        std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+        std::fs::write(&pending, b"pending transcode").unwrap();
+        let mutation_session = mutation_session(&mount);
+        let generation = mutation_session.current_generation().unwrap();
+        let mut album = PendingAlbum::new("album", 0);
+        album.staged_file_indices.push(0);
+        let mut journal = PendingSession::new(20, TEST_DEVICE_ID, vec![album]);
+        journal.phase = PendingPhase::DatabaseVerified;
+        journal.generation_before = Some(generation.clone());
+        journal.verified_generation = Some(generation);
+        journal.staged_files.push(StagedFile::minimal(
+            PathBuf::from("source.flac"),
+            pending.clone(),
+            Some(retained.clone()),
+            72,
+        ));
+        journal.candidate_manifest = Some(Manifest::empty());
+        journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
+            manifest_store: &manifest_store,
+            artwork_cache: cache,
+        };
+
+        coordinator
+            .rollback_to_ready(
+                &mut journal,
+                &journal_store,
+                &snapshot,
+                anyhow::anyhow!("injected verification failure"),
+            )
+            .unwrap();
+
+        assert_eq!(std::fs::read(pending).unwrap(), b"pending transcode");
+        assert_eq!(
+            std::fs::read(retained).unwrap(),
+            b"referenced published copy"
+        );
+        assert_eq!(journal.phase, PendingPhase::ReadyToPublish);
+    }
+
+    #[test]
+    fn terminal_verified_mismatch_rollback_removes_all_staged_artifacts() {
+        let (mount, _host, manifest_store, cache, _manifest) =
+            coordinator_fixture("terminal-rollback-cleans-staged");
+        let journal_store = PendingSessionStore::new(&mount);
+        let snapshot = RollbackSnapshot::create(&mount, &journal_store.snapshot_dir(19)).unwrap();
+        let pending = journal_store
+            .path(19)
+            .with_file_name("19.staged")
+            .join("track.m4a");
+        let published = mount.join("iPod_Control/Music/F00/published.m4a");
+        std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+        std::fs::write(&pending, b"pending transcode").unwrap();
+        std::fs::write(&published, b"published copy").unwrap();
+
+        let mutation_session = mutation_session(&mount);
+        let generation = mutation_session.current_generation().unwrap();
+        let mut album = PendingAlbum::new("album", 0);
+        album.staged_file_indices.push(0);
+        let mut journal = PendingSession::new(19, TEST_DEVICE_ID, vec![album]);
+        journal.phase = PendingPhase::DatabaseVerified;
+        journal.generation_before = Some(generation.clone());
+        journal.verified_generation = Some(generation);
+        journal.staged_files.push(StagedFile::minimal(
+            PathBuf::from("source.flac"),
+            pending.clone(),
+            Some(published.clone()),
+            41,
+        ));
+        journal.candidate_manifest = Some(Manifest::empty());
+        journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
+            manifest_store: &manifest_store,
+            artwork_cache: cache,
+        };
+
+        coordinator
+            .rollback_after_verified_mismatch(
+                &mut journal,
+                &journal_store,
+                &snapshot,
+                anyhow::anyhow!("injected terminal verification mismatch"),
+            )
+            .unwrap();
+
+        assert!(!pending.exists());
+        assert!(!published.exists());
+        assert_eq!(journal.phase, PendingPhase::RollbackComplete);
+        assert_eq!(journal_store.load(19).unwrap(), journal);
     }
 
     #[test]

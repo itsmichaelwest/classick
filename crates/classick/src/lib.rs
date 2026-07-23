@@ -103,3 +103,4 @@ pub mod try_with_prompt;
 pub mod windows_proc;
 pub mod wire;
 pub mod wizard;
+mod worker_wire;

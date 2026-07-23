@@ -6,7 +6,7 @@ iPod-sync experience: see the iPod's state, sync manually or automatically on
 plug-in, and stay out of the way.
 
 Talks to the daemon over the same **v2.0.0 IPC** as the Windows app; see
-`../../docs/ipc-protocol.md` and `../../docs/ipc/daemon.md`.
+`../../docs/ipc-protocol.md`.
 
 ## Requirements
 

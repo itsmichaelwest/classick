@@ -120,6 +120,7 @@ fn subscription_confirmation_verifies_definition_and_preserved_manifest_bytes() 
     };
     let context = ProfilePublicationContext {
         capability_profile_id: None,
+        generated_sysinfo_extended_hash: None,
         companion_authorities: vec![definition.clone()],
     };
     let PortableReconciliationPlan::PublishPending { publication } = plan_portable_reconciliation(

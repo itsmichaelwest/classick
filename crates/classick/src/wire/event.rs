@@ -357,9 +357,6 @@ impl WireEvent {
                 | Self::SyncRejected { .. }
                 | Self::History { .. }
                 | Self::Library { .. }
-                | Self::LibraryScanStarted { .. }
-                | Self::LibraryScanProgress { .. }
-                | Self::LibraryScanFinished { .. }
                 | Self::SelectionPreview { .. }
                 | Self::DevicePreview { .. }
                 | Self::ResolvedTracks { .. }
@@ -374,7 +371,7 @@ impl WireEvent {
         )
     }
 
-    pub(super) fn route(&self) -> Option<(&DeviceId, SessionId)> {
+    pub(super) fn worker_route(&self) -> Option<super::WorkerEventRoute<'_>> {
         match self {
             Self::RunHeader {
                 device_id,
@@ -438,7 +435,12 @@ impl WireEvent {
                 device_id,
                 session_id,
                 ..
-            } => Some((device_id, *session_id)),
+            } => Some(super::WorkerEventRoute::Device(device_id, *session_id)),
+            Self::LibraryScanStarted { session_id, .. }
+            | Self::LibraryScanProgress { session_id, .. }
+            | Self::LibraryScanFinished { session_id, .. } => {
+                Some(super::WorkerEventRoute::LibraryScan(*session_id))
+            }
             Self::GlobalConfig { .. }
             | Self::SourceAvailability { .. }
             | Self::DeviceInventory { .. }
@@ -450,9 +452,6 @@ impl WireEvent {
             | Self::SyncRejected { .. }
             | Self::History { .. }
             | Self::Library { .. }
-            | Self::LibraryScanStarted { .. }
-            | Self::LibraryScanProgress { .. }
-            | Self::LibraryScanFinished { .. }
             | Self::SelectionPreview { .. }
             | Self::DevicePreview { .. }
             | Self::ResolvedTracks { .. }
