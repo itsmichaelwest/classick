@@ -136,7 +136,7 @@ struct WireV3HistoryEntry: Decodable, Equatable, Sendable {
 }
 
 struct WireV3HistoryEvent: Decodable, Equatable, Sendable {
-  let requestID: UUID
+  let requestID: UUID?
   let entries: [WireV3HistoryEntry]
 
   enum CodingKeys: String, CodingKey {

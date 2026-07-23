@@ -1,1 +1,1 @@
-{"type":"set_settings","device_id":"000A27002138B0A8","observation_id":7,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8767","mutation_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8774","settings":{"schema_version":1,"auto_sync":false,"rockbox_compat":false}}
+{"type":"set_settings","device_id":"000A27002138B0A8","observation_id":7,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8767","mutation_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8774","settings":{"schema_version":1,"auto_sync":false,"rockbox_compat":false,"transcode_profile":"alac"}}

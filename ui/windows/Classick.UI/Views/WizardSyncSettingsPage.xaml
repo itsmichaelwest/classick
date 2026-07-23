@@ -29,6 +29,22 @@
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </StackPanel>
 
+        <StackPanel Spacing="6" Margin="0,8,0,0">
+            <TextBlock Text="Music format"
+                       Style="{ThemeResource BodyStrongTextBlockStyle}" />
+            <ComboBox ItemsSource="{Binding TranscodeProfiles}"
+                      DisplayMemberPath="Label"
+                      SelectedValuePath="Value"
+                      SelectedValue="{Binding TranscodeProfile, Mode=TwoWay}"
+                      HorizontalAlignment="Left"
+                      MinWidth="220" />
+            <TextBlock Text="Lossless uses the most space. Lower AAC bitrates fit more music."
+                       TextWrapping="Wrap"
+                       MaxWidth="420"
+                       HorizontalAlignment="Left"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+
         <TextBlock Text="{Binding ScanError}"
                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
                    TextWrapping="Wrap"

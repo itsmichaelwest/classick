@@ -237,7 +237,9 @@ final class AppModel {
   }
 
   func canControlSync(to serial: DeviceID) -> Bool {
-    canSendDeviceCommand(to: serial) && devices[serial]?.finalization == nil
+    canSendDeviceCommand(to: serial)
+      && devices[serial]?.connected == true
+      && devices[serial]?.finalization == nil
   }
 
   func captureMountAction(for serial: DeviceID) -> DeviceMountAction? {
@@ -254,6 +256,23 @@ final class AppModel {
       let state = devices[action.deviceID]
     else { return false }
     return state.connected && state.mountPath == action.mountPath
+  }
+
+  @discardableResult
+  func completeMountAction(_ action: DeviceMountAction) -> Bool {
+    guard isCurrentMountAction(action), var state = devices[action.deviceID] else {
+      return false
+    }
+    state.connected = false
+    state.mountPath = nil
+    state.phase = .disconnected
+    state.sessionID = nil
+    state.storage = nil
+    state.syncProgress = nil
+    state.finalization = nil
+    devices[action.deviceID] = state
+    refreshFocusedDeviceProjection()
+    return true
   }
 
   func editableDeviceConfig(for serial: DeviceID) -> DeviceConfigState? {
@@ -474,8 +493,8 @@ final class AppModel {
       history = update.entries.map(\.appValue)
       for (deviceID, var state) in devices {
         let entries = update.entries.filter { $0.deviceID == deviceID }
-        state.latestAttempt = entries.first?.appValue
-        state.latestSuccessfulSync = entries.first(where: { $0.outcome == "ok" })?.appValue
+        state.latestAttempt = entries.last?.appValue
+        state.latestSuccessfulSync = entries.last(where: { $0.outcome == "ok" })?.appValue
         devices[deviceID] = state
       }
     case .library(let update):

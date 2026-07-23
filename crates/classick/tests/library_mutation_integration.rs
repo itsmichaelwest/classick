@@ -80,6 +80,7 @@ fn manifest(root: &Path, serial: &str, tracks: &[&str]) -> Manifest {
                 encoder: "test".into(),
                 encoder_version: "1".into(),
                 source_format: "flac".into(),
+                transcode_profile: None,
             })
             .collect(),
     }

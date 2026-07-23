@@ -1065,6 +1065,7 @@ mod tests {
                 encoder: "unknown".into(),
                 encoder_version: String::new(),
                 source_format: "flac".into(),
+                transcode_profile: None,
             }],
         };
         let sel = Selection {
@@ -1087,6 +1088,7 @@ mod tests {
             |_| unreachable!(),
             |_| unreachable!(),
             "ffmpeg",
+            crate::portable::profile::TranscodeProfile::Alac,
             false,
         )
         .unwrap();

@@ -186,6 +186,19 @@ mod tests {
     }
 
     #[test]
+    fn preserves_full_unicode_source_relative_paths() {
+        let value = "Björk/日本語 🎵/03 – I’m So Free.flac";
+
+        let path = PortablePath::parse(value).unwrap();
+
+        assert_eq!(path.as_str(), value);
+        assert_eq!(
+            path.resolve(Path::new("/Volumes/Music")),
+            PathBuf::from("/Volumes/Music/Björk/日本語 🎵/03 – I’m So Free.flac")
+        );
+    }
+
+    #[test]
     fn rebases_on_macos_and_windows_roots() {
         let relative = PortablePath::parse("Birdy/Beautiful Lies/01.flac").unwrap();
 

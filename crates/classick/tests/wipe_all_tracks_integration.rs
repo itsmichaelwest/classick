@@ -125,6 +125,7 @@ fn test_config() -> Config {
         manifest_path: PathBuf::from("/nonexistent-manifest.json"),
         save_config: false,
         encoder: EncoderChoice::Ffmpeg,
+        transcode_profile: classick::portable::profile::TranscodeProfile::Alac,
         refalac_path: PathBuf::from("refalac64"),
         passthrough_wav: false,
         force_reencode: false,

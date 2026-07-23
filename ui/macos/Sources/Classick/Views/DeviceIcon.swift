@@ -3,10 +3,24 @@ import SwiftUI
 struct DeviceIcon: View {
   var hardware: WireV3Hardware
   var size: CGFloat
+  var serial: DeviceID?
+  private var cache: DeviceArtworkCache
+
+  init(
+    hardware: WireV3Hardware,
+    size: CGFloat,
+    serial: DeviceID? = nil,
+    cache: DeviceArtworkCache = DeviceArtworkCache()
+  ) {
+    self.hardware = hardware
+    self.size = size
+    self.serial = serial
+    self.cache = cache
+  }
 
   var body: some View {
     Group {
-      if case .exact(let resourceName) = DeviceIconLogic.artwork(for: hardware),
+      if case .exact(let resourceName) = resolvedArtwork,
         let icon = NSImage(
           contentsOfFile: "\(DeviceIconLogic.ampResourcesDir)/\(resourceName).icns")
       {
@@ -14,26 +28,51 @@ struct DeviceIcon: View {
           .resizable()
           .interpolation(.high)
           .scaledToFit()
-      } else if case .generic(let token) = DeviceIconLogic.artwork(for: hardware) {
-        genericArtwork(token)
       }
     }
     .frame(width: size, height: size)
     .accessibilityHidden(true)
+    .onAppear(perform: rememberExactArtwork)
+    .onChange(of: hardware) { _, _ in rememberExactArtwork() }
   }
 
-  private func genericArtwork(_ token: GenericDeviceArtwork) -> some View {
-    ZStack(alignment: .bottomTrailing) {
-      Image(systemName: token.baseSystemImage)
-        .font(.system(size: size * 0.8))
-      if let badge = token.badgeSystemImage {
-        Image(systemName: badge)
-          .font(.system(size: max(8, size * 0.3), weight: .semibold))
-          .symbolRenderingMode(.palette)
-          .foregroundStyle(Color.primary, Color(nsColor: .windowBackgroundColor))
-      }
-    }
-    .foregroundStyle(.secondary)
+  private var resolvedArtwork: DeviceArtwork {
+    DeviceIconLogic.resolvedArtwork(for: hardware, serial: serial, cache: cache)
+  }
+
+  private func rememberExactArtwork() {
+    guard let serial else { return }
+    cache.rememberExactArtwork(for: hardware, serial: serial)
+  }
+
+}
+
+struct DeviceArtworkCache {
+  private static let storageKey = "deviceArtworkResources.v1"
+  private let defaults: UserDefaults
+
+  init(defaults: UserDefaults = .standard) {
+    self.defaults = defaults
+  }
+
+  func resourceName(for serial: DeviceID) -> String? {
+    guard
+      let resourceName =
+        (defaults.dictionary(forKey: Self.storageKey) as? [String: String])?[serial.rawValue],
+      DeviceIconLogic.allExactResourceNames.contains(resourceName)
+    else { return nil }
+    return resourceName
+  }
+
+  func rememberExactArtwork(for hardware: WireV3Hardware, serial: DeviceID) {
+    guard case .exact(let resourceName) = DeviceIconLogic.artwork(for: hardware),
+      DeviceIconLogic.allExactResourceNames.contains(resourceName)
+    else { return }
+    var resources =
+      defaults.dictionary(forKey: Self.storageKey) as? [String: String] ?? [:]
+    guard resources[serial.rawValue] != resourceName else { return }
+    resources[serial.rawValue] = resourceName
+    defaults.set(resources, forKey: Self.storageKey)
   }
 }
 
@@ -52,30 +91,6 @@ enum GenericDeviceArtwork: Equatable, Sendable {
   case touch
   case ipod
   case unknown
-
-  var baseSystemImage: String {
-    switch self {
-    case .shuffle(let generation):
-      generation.map { "ipodshuffle.gen\($0)" } ?? "square.roundedrectangle"
-    case .touch:
-      "ipodtouch"
-    default:
-      "ipod"
-    }
-  }
-
-  var badgeSystemImage: String? {
-    switch self {
-    case .classic: "circle.circle.fill"
-    case .nano: "n.circle.fill"
-    case .mini: "m.circle.fill"
-    case .shuffle(nil): "shuffle.circle.fill"
-    case .video: "play.circle.fill"
-    case .photo: "photo.circle.fill"
-    case .unknown: "questionmark.circle.fill"
-    default: nil
-    }
-  }
 }
 
 enum DeviceIconLogic {
@@ -111,6 +126,21 @@ enum DeviceIconLogic {
     }
   }
 
+  nonisolated static func resolvedArtwork(
+    for hardware: WireV3Hardware,
+    serial: DeviceID?,
+    cache: DeviceArtworkCache
+  ) -> DeviceArtwork {
+    let observed = artwork(for: hardware)
+    if case .exact = observed {
+      return observed
+    }
+    if let serial, let resourceName = cache.resourceName(for: serial) {
+      return .exact(resourceName: resourceName)
+    }
+    return .exact(resourceName: genericResourceName)
+  }
+
   nonisolated static func genericArtwork(for hardware: WireV3Hardware) -> GenericDeviceArtwork {
     guard let family = hardware.family,
       family.confidence == "certain",
@@ -144,6 +174,7 @@ enum DeviceIconLogic {
   nonisolated static let allExactResourceNames: Set<String> = [
     "iPod11-Silver", "iPod11-Black", "iPod11B-Black",
   ]
+  nonisolated static let genericResourceName = "iPodGeneric"
 }
 
 #if DEBUG

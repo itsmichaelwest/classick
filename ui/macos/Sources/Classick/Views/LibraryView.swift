@@ -18,6 +18,7 @@ struct LibraryView: View {
   var onConnectSource: () -> Void
 
   @State private var facet: LibraryBrowser.Facet = .artists
+  @State private var expandedDisclosures: Set<LibraryBrowser.DisclosureKey> = []
 
   var body: some View {
     VStack(spacing: 0) {
@@ -82,7 +83,8 @@ struct LibraryView: View {
       if let library = model.library {
         LibraryBrowser(
           library: library, facet: facet, mode: .browse, search: "",
-          launchNonce: model.libraryDragLaunchNonce)
+          launchNonce: model.libraryDragLaunchNonce,
+          expandedDisclosures: $expandedDisclosures)
       }
     }
   }

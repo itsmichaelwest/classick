@@ -34,6 +34,7 @@ fn settings(device_id: &DeviceId, mutation_id: MutationId, auto_sync: bool) -> P
             schema_version: 1,
             auto_sync,
             rockbox_compat: false,
+            transcode_profile: super::super::profile::TranscodeProfile::Alac,
         },
         7,
     )

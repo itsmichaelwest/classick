@@ -394,6 +394,7 @@ fn write_database_and_tracks(mount: &Path, sources: &[PathBuf]) -> Manifest {
                 encoder: "unknown".into(),
                 encoder_version: String::new(),
                 source_format: "flac".into(),
+                transcode_profile: None,
             });
         }
         let mut error = ptr::null_mut();

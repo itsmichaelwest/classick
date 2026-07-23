@@ -111,6 +111,7 @@ fn test_config() -> Config {
         manifest_path: PathBuf::from("/nonexistent-manifest.json"),
         save_config: false,
         encoder: EncoderChoice::Ffmpeg,
+        transcode_profile: classick::portable::profile::TranscodeProfile::Alac,
         refalac_path: PathBuf::from("refalac64"),
         passthrough_wav: false,
         force_reencode: false,
@@ -187,6 +188,7 @@ fn source_safeguard_uses_logical_smb_identity_across_mount_roots() {
                 encoder: "unknown".into(),
                 encoder_version: String::new(),
                 source_format: "flac".into(),
+                transcode_profile: None,
             }],
         },
         origin: ManifestOrigin::DeviceV2,
@@ -711,6 +713,7 @@ fn unsubscribe_drops_device_playlist_and_diff_plans_track_removal() {
             panic!("fast path should cover both entries; audio_fingerprint should not be needed")
         },
         "ffmpeg",
+        classick::portable::profile::TranscodeProfile::Alac,
         false,
     )
     .expect("diff should succeed");

@@ -61,7 +61,7 @@ private struct GeneralTab: View {
 
     var body: some View {
         Form {
-            LabeledContent("Music Library") {
+            LabeledContent("Music Folder") {
                 HStack {
                     Text(sourcePath ?? "Not set")
                         .foregroundStyle(sourcePath == nil ? .secondary : .primary)
@@ -71,7 +71,7 @@ private struct GeneralTab: View {
                 }
             }
 
-            Text("Classick backs up your iPod's database before every sync.")
+            Text("Classick creates a recovery snapshot before changing an iPod.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 

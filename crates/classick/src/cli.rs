@@ -3,6 +3,8 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+use crate::portable::profile::TranscodeProfile;
+
 /// Encoder choice for the transcode pipeline. Passthrough sources never see
 /// this (no encoding happens). See docs/architecture.md.
 /// Change 1 for why ffmpeg is the default (was: auto in the original spec).
@@ -41,7 +43,7 @@ impl Default for EncoderChoice {
 #[command(
     name = "classick",
     version,
-    about = "Sync a FLAC library to an iPod Classic via libgpod with on-the-fly ALAC transcoding."
+    about = "Sync a music library to an iPod via libgpod with on-the-fly transcoding."
 )]
 pub struct Cli {
     /// Source library root. If omitted, falls back to the CLASSICK_SOURCE
@@ -113,6 +115,11 @@ pub struct Cli {
     /// Passthrough source codecs (mp3, aac, alac) are unaffected.
     #[arg(long, value_enum)]
     pub encoder: Option<EncoderChoice>,
+
+    /// Output profile for newly transcoded tracks. The daemon supplies this
+    /// from the connected device's settings.
+    #[arg(long, value_enum)]
+    pub transcode_profile: Option<TranscodeProfile>,
 
     /// Path to refalac64.exe. Defaults to "refalac64" (PATH lookup or vendored
     /// copy alongside the binary). Only consulted when --encoder refalac.
@@ -240,6 +247,16 @@ mod tests {
     fn parses_explicit_encoder_ffmpeg() {
         let cli = Cli::try_parse_from(["classick", "--encoder", "ffmpeg"]).unwrap();
         assert_eq!(cli.encoder, Some(EncoderChoice::Ffmpeg));
+    }
+
+    #[test]
+    fn parses_transcode_profile() {
+        let cli = Cli::try_parse_from(["classick", "--transcode-profile", "aac_192"]).unwrap();
+
+        assert_eq!(
+            cli.transcode_profile,
+            Some(crate::portable::profile::TranscodeProfile::Aac192)
+        );
     }
 
     #[test]

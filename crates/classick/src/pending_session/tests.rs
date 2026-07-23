@@ -23,6 +23,24 @@ fn save_load_is_atomic_and_rejects_corruption() {
 }
 
 #[test]
+fn discovery_ignores_macos_appledouble_sidecars() {
+    let mount = tempdir("appledouble");
+    let store = PendingSessionStore::new(&mount);
+    let journal = PendingSession::new(41, "SERIAL", Vec::new());
+    store.save(&journal).unwrap();
+    std::fs::write(
+        store.path(41).with_file_name("._41.json"),
+        b"AppleDouble metadata",
+    )
+    .unwrap();
+
+    let discovery = store.discover("SERIAL").unwrap();
+
+    assert_eq!(discovery.sessions, vec![journal]);
+    assert!(discovery.rejected.is_empty());
+}
+
+#[test]
 fn recovery_deletes_only_unreferenced_journal_files() {
     let mount = tempdir("foreign");
     let pending = mount.join("pending.m4a");
@@ -31,6 +49,8 @@ fn recovery_deletes_only_unreferenced_journal_files() {
     for path in [&pending, &published, &foreign] {
         std::fs::write(path, b"audio").unwrap();
     }
+    let pending_appledouble = mount.join("._pending.m4a");
+    std::fs::write(&pending_appledouble, b"AppleDouble metadata").unwrap();
     let mut journal = PendingSession::new(42, "SERIAL", Vec::new());
     journal.staged_files.push(StagedFile::minimal(
         PathBuf::from("source.flac"),
@@ -41,6 +61,7 @@ fn recovery_deletes_only_unreferenced_journal_files() {
     cleanup_unreferenced_staged_files(&journal, &ReferencedPaths::from([published.clone()]))
         .unwrap();
     assert!(!pending.exists());
+    assert!(!pending_appledouble.exists());
     assert!(published.exists());
     assert!(foreign.exists());
 }

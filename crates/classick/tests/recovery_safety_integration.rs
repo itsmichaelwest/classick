@@ -175,6 +175,7 @@ fn database_verified_mismatch_blocks_reconcile_on_every_restart() {
         encoder: "unknown".into(),
         encoder_version: String::new(),
         source_format: "flac".into(),
+        transcode_profile: None,
     });
     let original_candidate_id = 41;
     let mut journal = PendingSession::new(2, SERIAL, Vec::new());

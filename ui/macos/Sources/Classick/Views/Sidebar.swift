@@ -186,15 +186,9 @@ struct Sidebar: View {
       // Button as a real, non-nested, top-level control.
       HStack {
         HStack(spacing: 8) {
-          DeviceIcon(hardware: device.hardware, size: 22)
-          VStack(alignment: .leading, spacing: 1) {
-            Text(device.name)
-              .lineLimit(1)
-            Text(device.detail)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-              .lineLimit(1)
-          }
+          DeviceIcon(hardware: device.hardware, size: 22, serial: device.serial)
+          Text(device.name)
+            .lineLimit(1)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(device.accessibilityLabel)
@@ -258,16 +252,8 @@ struct SidebarDeviceRow: Identifiable, Equatable {
   var connected: Bool
   var configured: Bool
   var phase: DevicePhase
-  var readiness: String
   var hardware: WireV3Hardware
   var accessibilityLabel: String
-
-  var detail: String {
-    if let guidance = DeviceReadinessLogic.guidance(for: readiness) {
-      return guidance.title
-    }
-    return connected ? (DeviceIdentityLogic.hardwareDescription(hardware) ?? "Connected") : "Not connected"
-  }
 
   var id: DeviceID { serial }
 }
@@ -282,7 +268,6 @@ enum SidebarInventory {
           connected: device.connected,
           configured: device.configured,
           phase: device.phase,
-          readiness: device.readiness,
           hardware: device.hardware,
           accessibilityLabel: DeviceIdentityLogic.accessibilityLabel(
             identity: device.identity, hardware: device.hardware))

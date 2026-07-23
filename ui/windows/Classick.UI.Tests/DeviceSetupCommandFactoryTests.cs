@@ -19,7 +19,8 @@ public sealed class DeviceSetupCommandFactoryTests
         });
         var deviceId = DeviceId.Parse("000A27002138B0A8");
         var commands = DeviceSetupCommandFactory.Create(
-            new DeviceSetupIntent("D:\\Music", deviceId, false),
+            new DeviceSetupIntent(
+                "D:\\Music", deviceId, false, TranscodeProfile.Aac128),
             ids.Dequeue);
 
         Assert.Collection(
@@ -30,6 +31,7 @@ public sealed class DeviceSetupCommandFactoryTests
                 var adopt = Assert.IsType<AdoptDeviceCommand>(command);
                 Assert.Equal(deviceId, adopt.DeviceId);
                 Assert.False(adopt.Settings.AutoSync);
+                Assert.Equal(TranscodeProfile.Aac128, adopt.Settings.TranscodeProfile);
                 var json = WireCodec.Encode(adopt);
                 Assert.DoesNotContain("colour", json, StringComparison.Ordinal);
                 Assert.DoesNotContain("model", json, StringComparison.Ordinal);

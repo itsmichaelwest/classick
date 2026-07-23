@@ -248,6 +248,7 @@ fn restart_abandons_ready_to_publish_when_rollback_lost_all_staged_inputs() {
         encoder: "afconvert".into(),
         encoder_version: String::new(),
         source_format: "flac".into(),
+        transcode_profile: None,
     });
     journal.staged_files.push(staged);
     store.save(&journal).unwrap();

@@ -13,6 +13,16 @@ public sealed class WizardViewModelTests
         new(send ?? (_ => Task.CompletedTask));
 
     [Fact]
+    public void SetupOffersTheCompleteDeviceIndependentTranscodeProfileList()
+    {
+        var viewModel = NewVm();
+
+        Assert.Equal(
+            [TranscodeProfile.Alac, TranscodeProfile.Aac256, TranscodeProfile.Aac192, TranscodeProfile.Aac128],
+            viewModel.TranscodeProfiles.Select(option => option.Value));
+    }
+
+    [Fact]
     public async Task FolderStepRequiresExistingDirectory()
     {
         var viewModel = NewVm();
@@ -98,12 +108,14 @@ public sealed class WizardViewModelTests
         viewModel.SelectedDevice = viewModel.Candidates[0];
         await viewModel.NextCommand.ExecuteAsync(null);
         viewModel.IsAutomatic = false;
+        viewModel.TranscodeProfile = TranscodeProfile.Aac192;
 
         await viewModel.NextCommand.ExecuteAsync(null);
 
         Assert.Equal(5, viewModel.CurrentStep);
         Assert.Equal(First, sent?.DeviceId);
         Assert.False(sent?.AutoSync);
+        Assert.Equal(TranscodeProfile.Aac192, sent?.TranscodeProfile);
     }
 
     [Fact]

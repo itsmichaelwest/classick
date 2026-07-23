@@ -346,6 +346,34 @@ fn production_polling_cache_cold_scans_when_the_database_changes() {
 }
 
 #[test]
+fn production_polling_cache_retains_a_mounted_device_during_a_transient_empty_cold_scan() {
+    let mount = ready_mount("polling-cache-transient-empty");
+    let detected = detected_at(&mount, None);
+    let mut cache = LegacyV2PollingCache::default();
+
+    cache.scan_with(
+        vec![mount.clone()],
+        || vec![detected.clone()],
+        |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
+    );
+    fs::write(
+        mount.join("iPod_Control/iTunes/iTunesDB"),
+        b"changed database bytes",
+    )
+    .unwrap();
+    let current = cache.scan_with(
+        vec![mount.clone()],
+        Vec::new,
+        |_| None,
+        |_| Some(usb_facts("000A27002138B0A8")),
+    );
+
+    assert_eq!(current, vec![detected]);
+    let _ = fs::remove_dir_all(mount);
+}
+
+#[test]
 fn production_polling_cache_cold_scans_when_candidate_inventory_changes() {
     let first_mount = ready_mount("polling-cache-first-candidate");
     let second_mount = ready_mount("polling-cache-second-candidate");

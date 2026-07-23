@@ -438,7 +438,7 @@ fn portable_profile() -> PortableProfile {
           "settings": {
             "revision": 1,
             "mutation_id": "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8761",
-            "value": {"schema_version":1,"auto_sync":false,"rockbox_compat":false}
+            "value": {"schema_version":1,"auto_sync":false,"rockbox_compat":false,"transcode_profile":"alac"}
           },
           "subscriptions": {
             "revision": 1,

@@ -191,6 +191,7 @@ mod tests {
             encoder: "unknown".to_string(),
             encoder_version: String::new(),
             source_format: "flac".to_string(),
+            transcode_profile: None,
         }
     }
 

@@ -64,7 +64,7 @@ internal static partial class WireValidation
         switch (playlist)
         {
             case ManualPlaylist manual:
-                foreach (var track in manual.Tracks) ValidateProfilePath(track);
+                foreach (var track in manual.Tracks) ValidateLibraryPath(track);
                 break;
             case SmartPlaylist smart:
                 ValidateSmartRules(smart.Rules);

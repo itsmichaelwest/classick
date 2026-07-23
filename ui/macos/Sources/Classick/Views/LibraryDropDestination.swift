@@ -13,25 +13,19 @@ struct LibraryDropDestination: ViewModifier {
     content
       .contentShape(Rectangle())
       .background {
-        ZStack(alignment: .trailing) {
-          if isTargeted {
+        if isTargeted {
+          ZStack {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
               .fill(.selection.opacity(0.22))
             RoundedRectangle(cornerRadius: 7, style: .continuous)
               .stroke(.tint, lineWidth: 1)
           }
-          if let feedback {
-            Text(feedback)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-              .padding(.trailing, 8)
-              .allowsHitTesting(false)
-          }
         }
       }
-      .accessibilityLabel(
+      .accessibilityHint(
         LibraryDropFeedback.accessibilityLabel(
           summary: accessibilitySummary, target: target))
+      .accessibilityValue(feedback ?? "")
       .dropDestination(for: LibraryDragPayload.self) { items, _ in
         guard
           let rules = try? LibraryDropAcceptance.rules(

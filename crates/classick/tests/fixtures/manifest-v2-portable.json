@@ -18,7 +18,8 @@
       "audio_fingerprint": "blake3:audio",
       "encoder": "ffmpeg",
       "encoder_version": "ffmpeg 7.0",
-      "source_format": "flac"
+      "source_format": "flac",
+      "transcode_profile": "alac"
     }
   ]
 }

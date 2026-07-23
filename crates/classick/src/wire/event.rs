@@ -116,7 +116,8 @@ pub enum WireEvent {
         message: String,
     },
     History {
-        request_id: RequestId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<RequestId>,
         entries: Vec<super::HistoryEntry>,
     },
     Library {
@@ -159,7 +160,7 @@ pub enum WireEvent {
     },
     ResolvedTracks {
         request_id: RequestId,
-        tracks: Vec<crate::portable::profile::ProfilePath>,
+        tracks: Vec<crate::portable_path::PortablePath>,
     },
     Playlists {
         #[serde(default, skip_serializing_if = "Option::is_none")]

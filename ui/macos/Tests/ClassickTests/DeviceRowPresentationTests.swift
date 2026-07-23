@@ -52,7 +52,7 @@ final class DeviceRowPresentationTests: XCTestCase {
     let presentation = DeviceRowPresentation.make(device: device, libraryCount: 91)
 
     XCTAssertEqual(presentation.title, "Michael's iPod")
-    XCTAssertEqual(presentation.subtitle, "Adding 91 tracks")
+    XCTAssertEqual(presentation.subtitle, "Syncing 91 changes")
     XCTAssertEqual(
       presentation.meter,
       .progress(current: 14, total: 91, label: label, etaSeconds: 125))
@@ -125,9 +125,10 @@ final class DeviceRowPresentationTests: XCTestCase {
       device: makeDevice(phase: .error(message)), libraryCount: 91)
 
     XCTAssertEqual(disconnected.title, "Michael's iPod")
-    XCTAssertEqual(disconnected.subtitle, "Not connected")
-    XCTAssertEqual(disconnected.caption, "Plug it in to sync")
+    XCTAssertEqual(disconnected.subtitle, "Connect to sync")
+    XCTAssertNil(disconnected.caption)
     XCTAssertEqual(disconnected.meter, .unavailable)
+    XCTAssertFalse(disconnected.showsMeter)
     XCTAssertNil(disconnected.primaryAction)
 
     XCTAssertEqual(failed.title, "Michael's iPod")

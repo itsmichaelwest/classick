@@ -9,6 +9,16 @@ public sealed class SettingsGeneralViewModelTests
     private static readonly DeviceId Second = DeviceId.Parse("000A27002138B0A9");
 
     [Fact]
+    public void EveryDeviceGetsTheSameCompleteTranscodeProfileList()
+    {
+        var viewModel = new SettingsGeneralViewModel(Global(), StoreWithDevices());
+
+        Assert.Equal(
+            [TranscodeProfile.Alac, TranscodeProfile.Aac256, TranscodeProfile.Aac192, TranscodeProfile.Aac128],
+            viewModel.TranscodeProfiles.Select(option => option.Value));
+    }
+
+    [Fact]
     public void SwitchingToUnloadedDeviceClearsAndDisablesPriorDeviceValues()
     {
         var store = StoreWithDevices();
@@ -30,7 +40,8 @@ public sealed class SettingsGeneralViewModelTests
     public void DisconnectedCanonicalConfigRemainsEditableAndDeviceSpecific()
     {
         var store = StoreWithDevices();
-        store.Reduce(Config(Second, new SettingsValue(1, false, true)));
+        store.Reduce(Config(Second, new SettingsValue(
+            1, false, true, TranscodeProfile.Aac256)));
         var viewModel = new SettingsGeneralViewModel(Global(), store);
 
         viewModel.SelectDevice(Second);
@@ -38,6 +49,7 @@ public sealed class SettingsGeneralViewModelTests
         Assert.True(viewModel.CanEditDeviceSettings);
         Assert.False(viewModel.AutoSync);
         Assert.True(viewModel.RockboxCompat);
+        Assert.Equal(TranscodeProfile.Aac256, viewModel.TranscodeProfile);
     }
 
     [Fact]

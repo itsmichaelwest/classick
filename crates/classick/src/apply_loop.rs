@@ -24,6 +24,7 @@ use crate::library_index;
 use crate::manifest::{self, Action, Manifest, ManifestEntry};
 use crate::manifest_store::{LoadedManifest, ManifestStore};
 use crate::pipeline::OrderedTranscoder;
+use crate::portable::profile::TranscodeProfile;
 use crate::preflight;
 use crate::progress::{ActionPlanSummary, Decision, Progress, ReviewDecision};
 use crate::source::{self, SourceEntry};
@@ -40,6 +41,16 @@ pub(crate) fn encoder_str(choice: EncoderChoice) -> &'static str {
     match choice {
         EncoderChoice::Ffmpeg => "ffmpeg",
         EncoderChoice::Refalac => "refalac",
+    }
+}
+
+fn output_encoder_str(config: &Config) -> &'static str {
+    match config.transcode_profile {
+        TranscodeProfile::Alac => encoder_str(config.encoder),
+        #[cfg(target_os = "macos")]
+        _ => "afconvert",
+        #[cfg(not(target_os = "macos"))]
+        _ => "ffmpeg",
     }
 }
 
@@ -66,7 +77,7 @@ pub(crate) fn source_format_from_probe(probe: &ProbeOutput) -> String {
 
 /// Probe `<ffmpeg> -version` and return the first line (e.g. "ffmpeg version
 /// n7.0 ..."). Forensic-only: recorded in `ManifestEntry.encoder_version`
-/// so a future audit can correlate an iPod-side ALAC file with the exact
+/// so a future audit can correlate an iPod-side output file with the exact
 /// encoder that wrote it. Returns Err if ffmpeg isn't spawnable. `ffmpeg_path`
 /// is the configured ffmpeg binary (F-21 / F-16).
 pub(crate) fn ffmpeg_version(ffmpeg_path: &std::path::Path) -> Result<String> {
@@ -245,7 +256,9 @@ pub fn run(
     // for it (per Phase 3 addendum Change 4). The resolved version string is
     // threaded into apply_loop so Wave 3 Task 6 can record it on each new
     // ManifestEntry; for Wave 2 it's parked behind a TODO.
-    let refalac_version: Option<String> = if matches!(config.encoder, EncoderChoice::Refalac) {
+    let refalac_version: Option<String> = if config.transcode_profile == TranscodeProfile::Alac
+        && matches!(config.encoder, EncoderChoice::Refalac)
+    {
         Some(preflight::verify_refalac(config, progress, decision_rx)?)
     } else {
         None
@@ -540,7 +553,7 @@ fn run_connected(
     if pending_sync_at_entry {
         anyhow::bail!("pending sync transaction material could not be recovered");
     }
-    let needs_device_publish = loaded.needs_device_publish;
+    let mut needs_device_publish = loaded.needs_device_publish;
     let source_changed = source_change_requires_confirmation(&loaded, &source_location);
     let mut manifest = loaded.manifest;
 
@@ -550,17 +563,33 @@ fn run_connected(
     //    The target_encoder + force_reencode pair drives the encoder-mismatch
     //    branch (manifest::is_encoder_mismatch) so an existing entry whose
     //    body was written by a different encoder gets promoted to Modify.
-    let target_encoder = encoder_str(config.encoder);
+    let target_encoder = output_encoder_str(config);
     let live_db =
         OwnedDb::open(Path::new(&mount)).context("inspect live tracks before sync planning")?;
     let live_tracks = LiveTrackIndex::from_handles(live_db.list_tracks_for_rebuild())?;
     drop(live_db);
+    let discarded_missing_entries =
+        manifest::reconcile_with_device_presence(&mut manifest, |entry| {
+            manifest_entry_present_on_device(Path::new(&mount), &live_tracks, entry)
+        })?;
+    if discarded_missing_entries > 0 {
+        needs_device_publish = true;
+        progress.log(format!(
+            "Discarded {discarded_missing_entries} stale manifest entr{} absent from the live iPod.",
+            if discarded_missing_entries == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        ));
+    }
     let actions = manifest::diff_with_device_presence(
         &manifest,
         &sources,
         source::fingerprint,
         source::audio_fingerprint,
         target_encoder,
+        config.transcode_profile,
         config.force_reencode,
         |entry| manifest_entry_present_on_device(Path::new(&mount), &live_tracks, entry),
     )?;
@@ -953,17 +982,7 @@ fn run_staged_sync(
                 batch.key,
                 album_ordinal,
             ));
-        let jobs = batch
-            .actions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, action)| match action {
-                Action::Add(source) => Some((index, source.clone())),
-                Action::Modify(source, _) if !no_delete => Some((index, source.clone())),
-                Action::MetadataOnly { source, .. } => Some((index, source.clone())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let jobs = transcode_jobs(&batch.actions, no_delete);
         let worker_config = config.clone();
         let worker_version = refalac_version.clone();
         let transcoder = OrderedTranscoder::start(
@@ -1021,7 +1040,7 @@ fn run_staged_sync(
                         progress.track_skipped();
                     }
                 }
-                Action::Modify(source, old) | Action::MetadataOnly { source, entry: old } => {
+                Action::Modify(source, old) => {
                     completed += 1;
                     progress.track_start(
                         completed,
@@ -1038,6 +1057,30 @@ fn run_staged_sync(
                         album_ordinal,
                         &artwork_cache,
                         &mut bytes_written,
+                        &mut artwork_counts,
+                        progress,
+                    )?;
+                    checkpoint.record_track();
+                    if applied {
+                        progress.track_done();
+                    } else {
+                        progress.track_skipped();
+                    }
+                }
+                Action::MetadataOnly { source, entry } => {
+                    completed += 1;
+                    progress.track_start(
+                        completed,
+                        total_planned,
+                        format!("METADATA {}", display_path(&source.path)),
+                    );
+                    let applied = stage_metadata_update(
+                        source,
+                        entry,
+                        mount,
+                        &mut journal,
+                        &config.ffmpeg,
+                        &artwork_cache,
                         &mut artwork_counts,
                         progress,
                     )?;
@@ -1078,7 +1121,11 @@ fn run_staged_sync(
         stop_reason = poll_stop(decision_rx);
     }
     if let Some(reason) = stop_reason {
-        progress.finalizing(reason, journal.albums.len(), journal.staged_files.len());
+        progress.finalizing(
+            reason,
+            journal.albums.len(),
+            journal.staged_files.len() + journal.metadata_updates.len(),
+        );
     }
 
     let legacy_migration = legacy_dirty_marker.is_some_and(Path::exists);
@@ -1116,6 +1163,18 @@ fn run_staged_sync(
         None => "Done. Eject the iPod before unplugging.",
     });
     Ok(outcome_for_stop(stop_reason))
+}
+
+fn transcode_jobs(actions: &[Action], no_delete: bool) -> Vec<(usize, SourceEntry)> {
+    actions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, action)| match action {
+            Action::Add(source) => Some((index, source.clone())),
+            Action::Modify(source, _) if !no_delete => Some((index, source.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 fn group_actions_by_album(
@@ -1193,9 +1252,7 @@ fn prepare_retained_artwork(
     let obsolete = actions
         .iter()
         .filter_map(|action| match action {
-            Action::Remove(entry)
-            | Action::Modify(_, entry)
-            | Action::MetadataOnly { entry, .. } => Some(entry.ipod_dbid),
+            Action::Remove(entry) | Action::Modify(_, entry) => Some(entry.ipod_dbid),
             _ => None,
         })
         .collect::<std::collections::HashSet<_>>();
@@ -1203,8 +1260,7 @@ fn prepare_retained_artwork(
         if let Some(reason) = poll_stop(decision_rx) {
             return Ok(Some(reason));
         }
-        if obsolete.contains(&entry.ipod_dbid) && !entry.source_path.exists() {
-            cache.record_no_art(&entry.source_path)?;
+        if obsolete.contains(&entry.ipod_dbid) {
             continue;
         }
         let (_, art) = source_tags_and_art(&entry.source_path, ffmpeg)
@@ -1273,6 +1329,7 @@ fn stage_transcoded_result(
         encoder: transcoded.encoder,
         encoder_version: transcoded.encoder_version,
         source_format: transcoded.source_format,
+        transcode_profile: transcoded.transcode_profile,
     };
     if let Some(old) = old {
         journal
@@ -1315,6 +1372,69 @@ fn stage_transcoded_result(
     let _ = std::fs::remove_file(&transcoded.temp);
     *bytes_written += size;
     artwork_counts.record(transcoded.art_outcome);
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_metadata_update(
+    source: SourceEntry,
+    entry: ManifestEntry,
+    mount: &Path,
+    journal: &mut crate::pending_session::PendingSession,
+    ffmpeg: &Path,
+    artwork_cache: &crate::artwork_cache::ArtworkCache,
+    artwork_counts: &mut ArtworkCounts,
+    progress: &Progress,
+) -> Result<bool> {
+    let (tags, art, art_outcome) = match source_tags_art_and_outcome(&source.path, ffmpeg) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            progress.error(format!(
+                "Metadata read failed for {}: {error:#}",
+                source.path.display()
+            ));
+            return Ok(false);
+        }
+    };
+    let fingerprint = match source::fingerprint(&source.path) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            progress.error(format!(
+                "Fingerprint failed for {}: {error:#}",
+                source.path.display()
+            ));
+            return Ok(false);
+        }
+    };
+    let artwork_hash = match art.as_deref() {
+        Some(bytes) => Some(artwork_cache.store_normalized(&source.path, bytes)?),
+        None => {
+            artwork_cache.record_no_art(&source.path)?;
+            None
+        }
+    };
+    journal
+        .metadata_updates
+        .push(crate::pending_session::PendingMetadataUpdate {
+            tags,
+            artwork_hash,
+            candidate_entry: ManifestEntry {
+                source_path: source.path,
+                source_mtime: source.mtime,
+                source_size: source.size,
+                source_fingerprint: fingerprint,
+                ipod_dbid: entry.ipod_dbid,
+                ipod_relpath: entry.ipod_relpath,
+                source_known: true,
+                audio_fingerprint: entry.audio_fingerprint,
+                encoder: entry.encoder,
+                encoder_version: entry.encoder_version,
+                source_format: entry.source_format,
+                transcode_profile: entry.transcode_profile,
+            },
+        });
+    crate::pending_session::PendingSessionStore::new(mount).save(journal)?;
+    artwork_counts.record(art_outcome);
     Ok(true)
 }
 
@@ -1485,7 +1605,9 @@ pub fn replace_library(
 ) -> Result<RunOutcome> {
     preflight::verify_itunes_not_running(progress, decision_rx)?;
     preflight::verify_ffmpeg(config, progress, decision_rx)?;
-    let refalac_version = if matches!(config.encoder, EncoderChoice::Refalac) {
+    let refalac_version = if config.transcode_profile == TranscodeProfile::Alac
+        && matches!(config.encoder, EncoderChoice::Refalac)
+    {
         Some(preflight::verify_refalac(config, progress, decision_rx)?)
     } else {
         None
@@ -1807,13 +1929,17 @@ pub(crate) struct Transcoded {
     pub temp: std::path::PathBuf,
     pub tags: crate::ipod::db::Tags,
     pub art: Option<Vec<u8>>,
-    /// "ffmpeg" | "refalac" | "passthrough" — matches the manifest field.
+    /// "ffmpeg" | "refalac" | "afconvert" | "passthrough" — matches the
+    /// manifest field.
     pub encoder: String,
     /// Forensic version string (e.g. "ffmpeg version n7.0 ..." or
     /// "refalac 1.85"). Empty for passthrough.
     pub encoder_version: String,
     /// ffprobe codec_name of the source (e.g. "flac", "mp3", "aac").
     pub source_format: String,
+    /// The output profile used for a transcode. Passthrough tracks carry
+    /// `None` because Classick did not choose their codec or bitrate.
+    pub transcode_profile: Option<TranscodeProfile>,
     pub fingerprint: String,
     pub audio_fingerprint: String,
     /// Task 13: this source's cover-art extraction outcome, for
@@ -1831,13 +1957,12 @@ pub(crate) struct Transcoded {
 /// future runs detect tag-only edits and take the MetadataOnly fast path.
 ///
 /// The encoder branch:
-/// - Passthrough: byte-for-byte copy of the source (mp3 / aac / alac /
-///   optionally wav). Encoder recorded as "passthrough" so the
-///   encoder-mismatch heuristic can carve it out from future re-encodes.
-/// - Transcode + Ffmpeg: existing `transcode_to_alac` (single-step ffmpeg
-///   FLAC→ALAC, art passthrough).
-/// - Transcode + Refalac: 2-step `transcode_via_refalac` (ffmpeg-decode to
-///   WAV, then refalac to ALAC, with optional --artwork from a temp jpg).
+/// - Passthrough: byte-for-byte copy of compatible source audio. ALAC is
+///   passthrough only for the ALAC profile; lossy sources remain passthrough
+///   for every profile.
+/// - AAC profile: system afconvert on macOS or ffmpeg elsewhere.
+/// - ALAC + Ffmpeg: `transcode_to_alac`.
+/// - ALAC + Refalac: 2-step `transcode_via_refalac`.
 pub(crate) fn transcode_one(
     src: &SourceEntry,
     config: &Config,
@@ -1850,6 +1975,7 @@ pub(crate) fn transcode_one(
 
     let classify_cfg = transcode::ClassifyConfig {
         passthrough_wav: config.passthrough_wav,
+        transcode_profile: config.transcode_profile,
     };
     let action = transcode::classify(&probe, &classify_cfg)
         .with_context(|| format!("classify {}", src.path.display()))?;
@@ -1857,16 +1983,38 @@ pub(crate) fn transcode_one(
 
     // Resolve the on-disk file we'll feed into libgpod, plus the
     // encoder identity to record in the manifest.
-    let (encoder, encoder_version, temp): (String, String, std::path::PathBuf) = match action {
+    let (encoder, encoder_version, temp, transcode_profile): (
+        String,
+        String,
+        std::path::PathBuf,
+        Option<TranscodeProfile>,
+    ) = match action {
         SourceAction::Passthrough => {
             let dst = transcode::temp_passthrough_path(&src.path);
             transcode::passthrough(&src.path, &dst)
                 .with_context(|| format!("passthrough copy for {}", src.path.display()))?;
-            ("passthrough".to_string(), String::new(), dst)
+            ("passthrough".to_string(), String::new(), dst, None)
+        }
+        SourceAction::Transcode if config.transcode_profile != TranscodeProfile::Alac => {
+            let dst = transcode::temp_m4a_path();
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            transcode::transcode_to_aac(&src.path, &dst, &config.ffmpeg, config.transcode_profile)
+                .with_context(|| format!("AAC transcode {}", src.path.display()))?;
+            #[cfg(target_os = "macos")]
+            let identity = ("afconvert".to_string(), "afconvert (system)".to_string());
+            #[cfg(not(target_os = "macos"))]
+            let identity = (
+                "ffmpeg".to_string(),
+                ffmpeg_version(&config.ffmpeg)
+                    .unwrap_or_else(|_| "ffmpeg (version unknown)".to_string()),
+            );
+            (identity.0, identity.1, dst, Some(config.transcode_profile))
         }
         SourceAction::Transcode => match config.encoder {
             EncoderChoice::Ffmpeg => {
-                let dst = transcode::temp_alac_path();
+                let dst = transcode::temp_m4a_path();
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
@@ -1874,10 +2022,10 @@ pub(crate) fn transcode_one(
                     .with_context(|| format!("transcode {}", src.path.display()))?;
                 let ver = ffmpeg_version(&config.ffmpeg)
                     .unwrap_or_else(|_| "ffmpeg (version unknown)".to_string());
-                ("ffmpeg".to_string(), ver, dst)
+                ("ffmpeg".to_string(), ver, dst, Some(TranscodeProfile::Alac))
             }
             EncoderChoice::Refalac => {
-                let dst = transcode::temp_alac_path();
+                let dst = transcode::temp_m4a_path();
                 if let Some(parent) = dst.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
@@ -1893,7 +2041,12 @@ pub(crate) fn transcode_one(
                 let ver = refalac_version
                     .clone()
                     .unwrap_or_else(|| "refalac (version unknown)".to_string());
-                ("refalac".to_string(), ver, dst)
+                (
+                    "refalac".to_string(),
+                    ver,
+                    dst,
+                    Some(TranscodeProfile::Alac),
+                )
             }
         },
     };
@@ -1951,6 +2104,7 @@ pub(crate) fn transcode_one(
         encoder,
         encoder_version,
         source_format,
+        transcode_profile,
         fingerprint,
         audio_fingerprint,
         art_outcome,
@@ -1989,6 +2143,7 @@ fn commit_transcoded(
         &t.encoder,
         &t.encoder_version,
         &t.source_format,
+        t.transcode_profile,
     ));
     Ok(())
 }
@@ -2133,6 +2288,7 @@ pub(crate) fn entry_from(
     encoder: &str,
     encoder_version: &str,
     source_format: &str,
+    transcode_profile: Option<TranscodeProfile>,
 ) -> ManifestEntry {
     ManifestEntry {
         source_path: src.path.clone(),
@@ -2149,12 +2305,10 @@ pub(crate) fn entry_from(
         encoder: encoder.to_string(),
         encoder_version: encoder_version.to_string(),
         source_format: source_format.to_string(),
+        transcode_profile,
     }
 }
 
-/// Embed tags + normalized art from `source` into the on-device `.m4a` at
-/// `device_file`, in place (no re-transcode). Returns the new file size.
-/// Non-fatal caller decides skip vs abort. Public(crate) for unit tests.
 /// Probe a source file and return `(tags, normalized_cover_art)`. Shared by the
 /// Rockbox `.m4a` embed and the Apple ArtworkDB rebuild. Art is normalized to a
 /// small baseline JPEG (`artwork::normalize`); `None` when the source has no
@@ -2163,20 +2317,35 @@ pub(crate) fn source_tags_and_art(
     source: &Path,
     ffmpeg: &Path,
 ) -> Result<(crate::ipod::db::Tags, Option<Vec<u8>>)> {
+    let (tags, art, _) = source_tags_art_and_outcome(source, ffmpeg)?;
+    Ok((tags, art))
+}
+
+fn source_tags_art_and_outcome(
+    source: &Path,
+    ffmpeg: &Path,
+) -> Result<(crate::ipod::db::Tags, Option<Vec<u8>>, ArtOutcome)> {
     let probe =
         transcode::probe(source, ffmpeg).with_context(|| format!("probe {}", source.display()))?;
     let tags = tags_from_probe(&probe);
-    let art: Option<Vec<u8>> = if has_embedded_art(&probe) {
+    let has_art = has_embedded_art(&probe);
+    let art: Option<Vec<u8>> = if has_art {
         let art_path = transcode::temp_art_path();
         let raw = transcode::extract_cover_art(source, &art_path, ffmpeg)
             .and_then(|()| std::fs::read(&art_path).map_err(Into::into));
         let _ = std::fs::remove_file(&art_path);
-        raw.ok()
-            .and_then(|b| crate::artwork::normalize(&b).ok().or(Some(b)))
+        match raw {
+            Ok(bytes) => Some(crate::artwork::normalize(&bytes).unwrap_or(bytes)),
+            Err(error) => {
+                tracing::warn!("art extract failed for {}: {error:#}", source.display());
+                None
+            }
+        }
     } else {
         None
     };
-    Ok((tags, art))
+    let outcome = ArtOutcome::from_probe(has_art, art.is_some());
+    Ok((tags, art, outcome))
 }
 
 // (A `backfill_one_file` wrapper over `source_tags_and_art` +
@@ -2191,7 +2360,7 @@ pub(crate) fn source_tags_and_art(
 /// Two phases, no re-transcode:
 ///  1. **Rockbox** — embed each track's tags + normalized cover art into its
 ///     on-device `.m4a` (Rockbox reads tags/art straight from the file). Only
-///     for transcoded ALAC output; passthrough files (mp3/aac/…) already carry
+///     for transcoded M4A output; passthrough files (mp3/aac/…) already carry
 ///     their own tags/art, so their file is left alone.
 ///  2. **Apple** — rebuild the ArtworkDB fresh for ALL managed tracks:
 ///     re-thumbnail each from source art, DELETE the stale ithmb/ArtworkDB,
@@ -2261,7 +2430,7 @@ pub fn backfill_rockbox(
         }
         match source_tags_and_art(&entry.source_path, &config.ffmpeg) {
             Ok((tags, art)) => {
-                // Rockbox: embed into the .m4a — transcoded ALAC only.
+                // Rockbox: embed into the transcoded .m4a.
                 // Passthrough files already carry their own tags/art.
                 if entry.encoder != "passthrough" {
                     if let Err(e) =
@@ -2388,6 +2557,7 @@ pub(crate) fn build_rebuild_manifest_from_handles(
             encoder: "unknown".to_string(),
             encoder_version: String::new(),
             source_format: "flac".to_string(),
+            transcode_profile: None,
         })
         .collect();
     // last_source_root is intentionally None: the iPod's DB doesn't carry
@@ -2611,6 +2781,7 @@ mod tests {
             encoder: "ffmpeg".into(),
             encoder_version: String::new(),
             source_format: "flac".into(),
+            transcode_profile: None,
         };
         let mut live_tracks = LiveTrackIndex::default();
 
@@ -2667,6 +2838,7 @@ mod tests {
                     encoder: "unknown".into(),
                     encoder_version: String::new(),
                     source_format: "flac".into(),
+                    transcode_profile: None,
                 }],
             },
             origin: crate::manifest_store::ManifestOrigin::DeviceV2,
@@ -2835,6 +3007,146 @@ mod tests {
         }
     }
 
+    #[test]
+    fn metadata_only_actions_never_enter_the_transcode_pipeline() {
+        let source = guard_test_entry("/m/music/a.flac");
+        let entry = ManifestEntry {
+            source_path: source.path.clone(),
+            source_mtime: 0,
+            source_size: 1,
+            source_fingerprint: "old".into(),
+            ipod_dbid: 42,
+            ipod_relpath: "iPod_Control/Music/F00/track.m4a".into(),
+            source_known: true,
+            audio_fingerprint: "audio".into(),
+            encoder: "afconvert".into(),
+            encoder_version: String::new(),
+            source_format: "flac".into(),
+            transcode_profile: Some(TranscodeProfile::Alac),
+        };
+
+        let jobs = transcode_jobs(&[Action::MetadataOnly { source, entry }], false);
+
+        assert!(jobs.is_empty());
+    }
+
+    #[test]
+    fn retained_artwork_preparation_skips_entries_removed_from_the_candidate() {
+        let temp = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-tmp")
+            .join(format!(
+                "obsolete-artwork-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let source_path = temp.join("obsolete.flac");
+        std::fs::write(&source_path, b"not audio").unwrap();
+        let entry = ManifestEntry {
+            source_path,
+            source_mtime: 1,
+            source_size: 9,
+            source_fingerprint: "old".into(),
+            ipod_dbid: 42,
+            ipod_relpath: "iPod_Control/Music/F00/track.m4a".into(),
+            source_known: true,
+            audio_fingerprint: "audio".into(),
+            encoder: "afconvert".into(),
+            encoder_version: "system".into(),
+            source_format: "flac".into(),
+            transcode_profile: Some(TranscodeProfile::Alac),
+        };
+        let manifest = Manifest {
+            version: 1,
+            ipod_serial: Some("000A27002138B0A8".into()),
+            last_source_root: None,
+            tracks: vec![entry.clone()],
+        };
+        let cache = crate::artwork_cache::ArtworkCache::new(temp.join("artwork"));
+        let (progress, decisions) = Progress::start(false, false).unwrap();
+
+        let result = prepare_retained_artwork(
+            &cache,
+            &manifest,
+            &[Action::Remove(entry)],
+            Path::new("ffmpeg"),
+            &decisions,
+        );
+        progress.finish(result.is_ok()).unwrap();
+
+        assert!(matches!(result, Ok(None)));
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn metadata_only_stage_journals_no_audio_file() {
+        let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac");
+        let source = SourceEntry {
+            path: source_path.clone(),
+            mtime: 2,
+            size: std::fs::metadata(&source_path).unwrap().len(),
+        };
+        let entry = ManifestEntry {
+            source_path: source_path.clone(),
+            source_mtime: 1,
+            source_size: source.size,
+            source_fingerprint: "old".into(),
+            ipod_dbid: 42,
+            ipod_relpath: "iPod_Control/Music/F00/track.m4a".into(),
+            source_known: true,
+            audio_fingerprint: "audio".into(),
+            encoder: "afconvert".into(),
+            encoder_version: "system".into(),
+            source_format: "flac".into(),
+            transcode_profile: Some(TranscodeProfile::Alac),
+        };
+        let temp = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-tmp")
+            .join(format!(
+                "metadata-stage-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let mut journal = crate::pending_session::PendingSession::new(
+            99,
+            "000A27002138B0A8",
+            vec![crate::pending_session::PendingAlbum::new("album", 0)],
+        );
+        let cache = crate::artwork_cache::ArtworkCache::new(temp.join("artwork"));
+        let mut artwork_counts = ArtworkCounts::default();
+        let (progress, _decisions) = Progress::start(false, false).unwrap();
+
+        let applied = stage_metadata_update(
+            source,
+            entry,
+            &temp,
+            &mut journal,
+            Path::new("ffmpeg"),
+            &cache,
+            &mut artwork_counts,
+            &progress,
+        )
+        .unwrap();
+        progress.finish(applied).unwrap();
+
+        assert!(applied);
+        assert!(journal.staged_files.is_empty());
+        assert_eq!(journal.metadata_updates.len(), 1);
+        assert_eq!(journal.metadata_updates[0].candidate_entry.ipod_dbid, 42);
+        assert_eq!(
+            journal.metadata_updates[0].candidate_entry.ipod_relpath,
+            "iPod_Control/Music/F00/track.m4a"
+        );
+        assert_eq!(artwork_counts.embedded, 1);
+        std::fs::remove_dir_all(temp).ok();
+    }
+
     /// A raw walk that found zero audio files must never be treated as "the
     /// user wants an empty iPod" — that's a removal plan in disguise (e.g. a
     /// disconnected NAS share, a typo'd source path). It's a hard error.
@@ -2969,6 +3281,7 @@ mod tests {
             manifest_path: std::path::PathBuf::from("/nonexistent-manifest.json"),
             save_config: false,
             encoder: EncoderChoice::Ffmpeg,
+            transcode_profile: crate::portable::profile::TranscodeProfile::Alac,
             refalac_path: std::path::PathBuf::from("refalac64"),
             passthrough_wav: false,
             force_reencode: false,
@@ -3312,6 +3625,7 @@ mod split_tests {
             encoder: "ffmpeg".into(),
             encoder_version: "v".into(),
             source_format: "flac".into(),
+            transcode_profile: Some(crate::portable::profile::TranscodeProfile::Alac),
             fingerprint: "fp".into(),
             audio_fingerprint: "afp".into(),
             art_outcome: super::ArtOutcome::NoArt,

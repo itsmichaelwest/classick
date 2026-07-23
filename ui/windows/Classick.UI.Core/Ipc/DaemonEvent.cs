@@ -112,7 +112,8 @@ public sealed record WireSyncRejectedEvent(
     [property: JsonRequired, JsonPropertyName("message")] string Message) : WireEvent;
 
 public sealed record HistoryEvent(
-    [property: JsonRequired, JsonPropertyName("request_id")] string RequestId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("request_id")]
+    string? RequestId,
     [property: JsonRequired, JsonPropertyName("entries")] IReadOnlyList<WireHistoryEntry> Entries) : WireEvent;
 
 public sealed record LibraryEvent(

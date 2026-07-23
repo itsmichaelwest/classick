@@ -32,6 +32,7 @@ fn profile() -> PortableProfile {
                 schema_version: 1,
                 auto_sync: false,
                 rockbox_compat: false,
+                transcode_profile: classick::portable::profile::TranscodeProfile::Alac,
             },
         },
         subscriptions: ProfileComponent {

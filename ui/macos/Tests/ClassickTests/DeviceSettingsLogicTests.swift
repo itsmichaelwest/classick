@@ -9,12 +9,17 @@ import XCTest
 /// subscription rules are the device Music page's job (Task 5) and must
 /// never be disturbed by a Settings-page edit.
 final class DeviceSettingsLogicTests: XCTestCase {
+  func testEveryDeviceGetsTheSameCompleteTranscodeProfileList() {
+    XCTAssertEqual(TranscodeProfile.allCases, [.alac, .aac256, .aac192, .aac128])
+  }
+
   // MARK: - saveSettingsCommand: settings-only save-device-config
 
   func testSaveSettingsCommandTouchesOnlySettings() throws {
     let cmd = DeviceSettingsLogic.saveSettingsCommand(
       deviceID: DeviceID("0000000000000ABC"),
-      settings: DeviceSettingsWire(autoSync: false, rockboxCompat: true),
+      settings: DeviceSettingsWire(
+        autoSync: false, rockboxCompat: true, transcodeProfile: .aac192),
       requestID: UUID(), mutationID: UUID())
     let data = try JSONEncoder().encode(cmd)
     let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
@@ -26,6 +31,7 @@ final class DeviceSettingsLogicTests: XCTestCase {
     let settings = obj["settings"] as! [String: Any]
     XCTAssertEqual(settings["auto_sync"] as? Bool, false)
     XCTAssertEqual(settings["rockbox_compat"] as? Bool, true)
+    XCTAssertEqual(settings["transcode_profile"] as? String, "aac_192")
   }
 
   func testSaveSettingsCommandRoundTripsBothFlagsIndependently() throws {
@@ -40,8 +46,11 @@ final class DeviceSettingsLogicTests: XCTestCase {
     XCTAssertEqual(settings["rockbox_compat"] as? Bool, false)
   }
 
-  func testAcceptedSettingWaitingForDeviceUsesCompactStatus() {
-    XCTAssertEqual(DeviceConfigComponentStatus.waitingForDevice.message, "Waiting for iPod")
+  func testRoutineSaveStatesStayOutOfThePageChrome() {
+    XCTAssertNil(DeviceConfigComponentStatus.saved.message)
+    XCTAssertNil(DeviceConfigComponentStatus.localDraft.message)
+    XCTAssertNil(DeviceConfigComponentStatus.savingOnHost.message)
+    XCTAssertNil(DeviceConfigComponentStatus.waitingForDevice.message)
   }
 
   func testDeviceDeliveryFailureStillDescribesHostValueAsSaved() {

@@ -61,19 +61,10 @@ pub fn verify_ffmpeg(
     }
 }
 
-/// Refuse to sync if iTunes (or its mobile-device helper) is running.
-/// Background: libgpod's signed iTunesDB writes are byte-compatible with
-/// what the iPod firmware accepts, but iTunes itself uses a stricter
-/// signature check and will (a) reject the iPod with a "cannot read
-/// contents — please Restore" dialog if it polls the device while
-/// libgpod has been touching it, and (b) race us for exclusive access
-/// to the iPod's pipe/file handles during a sync, producing partial
-/// writes. Both failure modes have bitten the user; both are eliminated
-/// by simply not letting the two coexist on the same machine while a
-/// sync is in flight. We don't kill iTunes — we tell the user, give
-/// them a Retry, and let them choose to close it. Windows-only because
-/// iTunes is Windows/macOS, and macOS handling is left to the
-/// macOS-port-someday work.
+/// Refuse to sync if iTunes is running. A Classick-managed database remains
+/// manageable by Apple software; this is only a conservative concurrent-writer
+/// guard while Classick mutates device state. We do not kill iTunes: the user
+/// can quit it and retry.
 ///
 /// Side note on Apple's services: `AppleMobileDeviceService` is the
 /// long-running device daemon iTunes installs. It owns the iPod's
@@ -118,9 +109,8 @@ pub fn verify_itunes_not_running(
         let msg = format!(
             "Cannot sync while iTunes is running.\n\n\
              Detected: {names}.\n\n\
-             iTunes and Classick both want exclusive access to the iPod.\n\
-             If iTunes auto-launched on plug-in, close it (do NOT click\n\
-             Restore if it asks — your iPod is fine).{advisory}\n\n\
+             iTunes and Classick can both change files on the iPod.\n\
+             Quit iTunes before continuing.{advisory}\n\n\
              Choose:"
         );
         let outcome = await_prompt(
@@ -147,9 +137,8 @@ fn is_blocking_music_process(name: &str) -> bool {
     n.eq_ignore_ascii_case("Music") || n.eq_ignore_ascii_case("iTunes")
 }
 
-/// macOS: refuse to sync while Music.app (or legacy iTunes) is running —
-/// both want exclusive iPod access, and Music.app's "cannot read, please
-/// Restore" dialog is the trap we keep users out of.
+/// macOS: refuse to sync while Music.app (or legacy iTunes) is running so
+/// Apple software and Classick cannot mutate the iPod concurrently.
 #[cfg(target_os = "macos")]
 pub fn verify_itunes_not_running(
     progress: &Progress,
@@ -164,8 +153,8 @@ pub fn verify_itunes_not_running(
         let msg = format!(
             "Cannot sync while Music.app is running.\n\n\
              Detected: {names}.\n\n\
-             Music and Classick both want exclusive access to the iPod.\n\
-             Quit Music (do NOT click Restore if it asks — your iPod is fine).\n\n\
+             Music and Classick can both change files on the iPod.\n\
+             Quit Music, then retry.\n\n\
              Choose:"
         );
         let outcome = await_prompt(

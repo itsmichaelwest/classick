@@ -15,6 +15,9 @@ implementation.
 - [Device coordination architecture](device-coordination.md) — implemented
   standard-user locking, external-writer fencing, recovery, and the boundary
   for later device-family synchronization profiles.
+- [Device transcode profile research](research/2026-07-23-device-transcode-presets.md)
+  — Apple format support, historical iTunes controls, community evidence, and
+  the rationale for the V1 ALAC/AAC profile set.
 - [Code-size audit](code-size-audit.md) — current large-file hotspots and
   recommended refactor order.
 - [Project learnings](../LEARNINGS.md) — concise operational gotchas that save

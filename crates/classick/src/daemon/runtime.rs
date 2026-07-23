@@ -62,30 +62,25 @@ pub async fn run_daemon(parent_pid: Option<u32>) -> Result<()> {
         broadcast::channel::<DaemonEvent>(crate::daemon::BROADCAST_CHANNEL_CAPACITY);
     let exe = std::env::current_exe()?;
     let event_tx_for_spawn = event_tx.clone();
-    // The spawn closure re-reads the persisted (global) config AND the
-    // syncing device's own settings at spawn time (same re-read-at-spawn
-    // pattern as the GetConfig/SaveConfig command arms) rather than
-    // capturing a snapshot at daemon startup — so a Settings change to
-    // `rockbox_compat` takes effect on the very next sync without a daemon
-    // restart. The device settings win over the global value once seeded;
-    // see `device_config::DeviceSettings::load_or_migrate`.
+    // The spawn closure re-reads the syncing device's portable settings at
+    // spawn time rather than capturing a startup snapshot, so Rockbox and
+    // transcode-profile edits take effect on the next sync. Legacy settings
+    // are only the fallback for a device not yet represented in portable
+    // state.
     let config_path_for_spawn = config_path.clone();
     let spawn_sync: SpawnFn = Arc::new(
         move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx, event_context| {
             let exe = exe.clone();
             let event_tx = event_tx_for_spawn.clone();
-            let global = config_file::load(&config_path_for_spawn)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let rockbox_compat =
-                crate::device_config::DeviceSettings::load_or_migrate(&serial, &global)
-                    .rockbox_compat;
+            let device_settings = effective_device_settings(&config_path_for_spawn, &serial);
+            let rockbox_compat = device_settings.rockbox_compat;
+            let transcode_profile = device_settings.transcode_profile;
             Box::pin(async move {
                 sync_orchestrator::run(
                     exe,
                     drive,
                     rockbox_compat,
+                    transcode_profile,
                     cancel_rx,
                     pause_rx,
                     prompt_rx,
@@ -120,14 +115,18 @@ pub async fn run_daemon(parent_pid: Option<u32>) -> Result<()> {
 
     let exe_for_replace = std::env::current_exe()?;
     let event_tx_for_replace = event_tx.clone();
+    let config_path_for_replace = config_path.clone();
     let spawn_replace_library: SpawnFn = Arc::new(
-        move |_serial: String, drive: String, cancel_rx, pause_rx, prompt_rx, event_context| {
+        move |serial: String, drive: String, cancel_rx, pause_rx, prompt_rx, event_context| {
             let exe = exe_for_replace.clone();
             let event_tx = event_tx_for_replace.clone();
+            let transcode_profile =
+                effective_device_settings(&config_path_for_replace, &serial).transcode_profile;
             Box::pin(async move {
                 sync_orchestrator::run_replace_library(
                     exe,
                     drive,
+                    transcode_profile,
                     cancel_rx,
                     pause_rx,
                     prompt_rx,
@@ -814,6 +813,24 @@ pub async fn run_daemon_with_deps(deps: DaemonDeps) -> Result<()> {
         registry =
             DeviceRegistry::load_or_migrate(config_file::device_registry_path(&config_path), None)?;
     }
+    match open_playlist_store(&config_path).and_then(|store| {
+        crate::daemon::playlist_commands::reconcile_missing_subscriptions(
+            &store,
+            &mut registry,
+            device_state_root(&config_path),
+        )
+    }) {
+        Ok(changed) if !changed.is_empty() => {
+            tracing::info!(
+                changed_devices = changed.len(),
+                "daemon: reconciled missing playlist subscriptions"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!("daemon: could not reconcile missing playlist subscriptions: {error:#}");
+        }
+    }
     if let Some(serial) = unique_configured_serial(&registry) {
         history.migrate_legacy_entries(&serial)?;
     }
@@ -1400,7 +1417,12 @@ fn handle_internal_event(
                 session.started_at_unix_secs,
                 db_restored,
             );
-            persist_terminal_entry(state, history, entry);
+            if persist_terminal_entry(state, history, entry) {
+                let _ = event_tx.send(DaemonEvent::HistoryUpdate {
+                    entries: history.read_for_v2_wire(),
+                    acknowledged_request_id: None,
+                });
+            }
             broadcast_status(
                 event_tx,
                 state,
@@ -1454,12 +1476,24 @@ fn handle_internal_event(
 /// still holds under per-device settings: `enabled` is only the seed value
 /// the first time a device is seen (see `DeviceSettings::load_or_migrate`).
 fn auto_sync_enabled(config_path: &std::path::Path, serial: &str) -> bool {
+    should_auto_sync(&effective_device_settings(config_path, serial))
+}
+
+fn effective_device_settings(
+    config_path: &std::path::Path,
+    serial: &str,
+) -> crate::device_config::DeviceSettings {
     if let Ok(device_id) = crate::device::DeviceId::parse(serial) {
         let store =
             crate::portable::state_store::PortableStateStore::new(device_state_root(config_path));
         if let Ok(state) = store.load(&device_id) {
             if let Ok(snapshot) = crate::portable::coordinator::config_snapshot(&state, None) {
-                return snapshot.settings.value.auto_sync;
+                return crate::device_config::DeviceSettings {
+                    version: crate::device_config::DEVICE_SETTINGS_VERSION,
+                    auto_sync: snapshot.settings.value.auto_sync,
+                    rockbox_compat: snapshot.settings.value.rockbox_compat,
+                    transcode_profile: snapshot.settings.value.transcode_profile,
+                };
             }
         }
     }
@@ -1472,7 +1506,7 @@ fn auto_sync_enabled(config_path: &std::path::Path, serial: &str) -> bool {
         serial,
         &global,
     );
-    should_auto_sync(&device)
+    device
 }
 
 /// Pure decision core of [`auto_sync_enabled`], split out so it can be
@@ -2701,6 +2735,15 @@ fn handle_client_command(
             }
             let persisted_revision = config_revision.record_persisted_mutation(true);
             tracing::info!("daemon: client {client_id} forgot device {raw_serial}");
+            if let (Ok(device_id), Ok(request_id)) = (
+                crate::device::DeviceId::parse(&raw_serial),
+                crate::wire::RequestId::parse(&request_id),
+            ) {
+                let _ = event_tx.send(DaemonEvent::Protocol3(WireEvent::DeviceForgotten {
+                    device_id,
+                    request_id,
+                }));
+            }
             let _ = event_tx.send(build_config_update(
                 Some(current),
                 registry,
@@ -2728,7 +2771,7 @@ fn handle_client_command(
             entries.drain(..start);
             let _ = reply.send(DaemonEvent::HistoryUpdate {
                 entries,
-                acknowledged_request_id: request_id,
+                acknowledged_request_id: Some(request_id),
             });
         }
         DaemonCommand::TriggerSync {
@@ -3251,6 +3294,7 @@ fn handle_client_command(
                             version: crate::device_config::DEVICE_SETTINGS_VERSION,
                             auto_sync: set.auto_sync,
                             rockbox_compat: set.rockbox_compat,
+                            transcode_profile: set.transcode_profile,
                         };
                         let changed =
                             crate::device_config::DeviceSettings::load_or_default(&path) != full;
@@ -4406,6 +4450,7 @@ fn legacy_payloads(
                 settings = Some(crate::ipc_daemon::DeviceSettingsPayload {
                     auto_sync: desired.auto_sync,
                     rockbox_compat: desired.rockbox_compat,
+                    transcode_profile: desired.transcode_profile,
                 });
             }
             crate::portable::outbox::PendingMutation::Subscriptions { desired, .. } => {
@@ -4509,7 +4554,10 @@ fn legacy_playlist_draft(draft: crate::wire::PlaylistDraft) -> crate::ipc_daemon
             crate::ipc_daemon::PlaylistPayload::Manual {
                 slug: slug.map(|slug| slug.to_string()),
                 name,
-                tracks: tracks.into_iter().map(|path| path.to_string()).collect(),
+                tracks: tracks
+                    .into_iter()
+                    .map(|path| path.as_str().to_string())
+                    .collect(),
             }
         }
         crate::wire::PlaylistDraft::Smart { slug, name, rules } => {
@@ -4536,7 +4584,7 @@ fn wire_stored_playlist(
                 .tracks
                 .iter()
                 .map(|path| {
-                    crate::portable::profile::ProfilePath::parse(
+                    crate::portable_path::PortablePath::parse(
                         &path.to_string_lossy().replace('\\', "/"),
                     )
                 })
@@ -4800,6 +4848,7 @@ fn build_device_config_update(
         settings: crate::ipc_daemon::DeviceSettingsPayload {
             auto_sync: settings.auto_sync,
             rockbox_compat: settings.rockbox_compat,
+            transcode_profile: settings.transcode_profile,
         },
         selection_revision: record.selection_revision,
         settings_revision: record.settings_revision,
@@ -5244,7 +5293,7 @@ mod tests {
             )
             .unwrap();
         let mut registry = registry(&["RAW-A"]);
-        let (event_tx, _) = broadcast::channel(8);
+        let (event_tx, mut event_rx) = broadcast::channel(8);
         let mut library_count = None;
         let mut revision = ConfigRevision::default();
 
@@ -5266,6 +5315,13 @@ mod tests {
             history.latest_attempt("RAW-A").unwrap().outcome,
             SyncOutcome::Cancelled
         );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(DaemonEvent::HistoryUpdate {
+                acknowledged_request_id: None,
+                ..
+            })
+        ));
         assert!(state.is_idle());
         let _ = std::fs::remove_dir_all(base);
     }
@@ -5300,6 +5356,7 @@ mod tests {
                 encoder: "unknown".to_string(),
                 encoder_version: String::new(),
                 source_format: "flac".to_string(),
+                transcode_profile: None,
             })
             .collect();
         crate::manifest::Manifest {
@@ -5665,6 +5722,47 @@ mod tests {
         );
 
         (event_rx, reply_rx)
+    }
+
+    #[test]
+    fn successful_forget_emits_canonical_device_forgotten_acknowledgement() {
+        let base = std::env::temp_dir().join(format!("classick-forget-ack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let config_path = base.join("config.toml");
+        let mut registry = registry(&["000A27002138B0A8"]);
+        let mut config_revision = ConfigRevision::default();
+        let mut playlist_revision = PlaylistRevision::default();
+        let request_id = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8764";
+
+        let (mut events, _) = handle_persistence_test_command(
+            DaemonCommand::ForgetIpod {
+                serial: "000A27002138B0A8".into(),
+                request_id: request_id.into(),
+            },
+            &config_path,
+            &mut registry,
+            &mut config_revision,
+            &mut playlist_revision,
+        );
+
+        let mut acknowledged = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(
+                event,
+                DaemonEvent::Protocol3(WireEvent::DeviceForgotten {
+                    ref device_id,
+                    ref request_id,
+                }) if device_id.as_str() == "000A27002138B0A8"
+                    && request_id.as_str() == "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8764"
+            ) {
+                acknowledged = true;
+            }
+        }
+
+        assert!(acknowledged);
+        assert!(!registry.record("000A27002138B0A8").unwrap().configured);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[tokio::test]

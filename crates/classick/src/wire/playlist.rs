@@ -1,5 +1,5 @@
 use crate::portable::profile::PlaylistSlug;
-use crate::portable::profile::ProfilePath;
+use crate::portable_path::PortablePath;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
@@ -76,7 +76,7 @@ pub enum PlaylistDraft {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         slug: Option<PlaylistSlug>,
         name: String,
-        tracks: Vec<ProfilePath>,
+        tracks: Vec<PortablePath>,
     },
     Smart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,7 +92,7 @@ pub enum StoredPlaylist {
     Manual {
         slug: PlaylistSlug,
         name: String,
-        tracks: Vec<ProfilePath>,
+        tracks: Vec<PortablePath>,
     },
     Smart {
         slug: PlaylistSlug,

@@ -1,6 +1,7 @@
 //! Runtime sync state plus conversion to the portable v2 device manifest.
 //! Runtime paths stay native and absolute; v2 persistence is strictly relative.
 
+use crate::portable::profile::TranscodeProfile;
 use crate::portable_path::PortablePath;
 use crate::source::SourceEntry;
 use crate::source_location::{SourceIdentity, SourceLocation};
@@ -83,6 +84,7 @@ struct ManifestEntryV2 {
     encoder_version: String,
     #[serde(default = "default_source_format")]
     source_format: String,
+    transcode_profile: Option<TranscodeProfile>,
 }
 
 impl ManifestEntryV2 {
@@ -119,6 +121,7 @@ impl ManifestEntryV2 {
             encoder: entry.encoder.clone(),
             encoder_version: entry.encoder_version.clone(),
             source_format: entry.source_format.clone(),
+            transcode_profile: entry.transcode_profile,
         })
     }
 
@@ -142,6 +145,7 @@ impl ManifestEntryV2 {
             encoder: self.encoder,
             encoder_version: self.encoder_version,
             source_format: self.source_format,
+            transcode_profile: self.transcode_profile,
         }
     }
 }
@@ -210,10 +214,10 @@ pub struct ManifestEntry {
     /// orchestrator populates this field on the resulting re-write.
     #[serde(default)]
     pub audio_fingerprint: String,
-    /// One of: "ffmpeg" | "refalac" | "passthrough" | "unknown". Identifies
-    /// which encoder produced the on-iPod file (or that it was a passthrough
-    /// copy with no encoder involved). Used by diff's encoder-mismatch
-    /// heuristic to trigger Modify when the user changes --encoder.
+    /// One of: "ffmpeg" | "refalac" | "afconvert" | "passthrough" |
+    /// "unknown". Identifies which encoder produced the on-iPod file (or that
+    /// it was a passthrough copy with no encoder involved). Used by diff's
+    /// output-mismatch heuristic to trigger Modify when the target changes.
     /// Phase 2 manifests deserialize as "unknown" so the upgrade run doesn't
     /// trigger a thundering re-encode.
     #[serde(default = "default_encoder")]
@@ -226,6 +230,9 @@ pub struct ManifestEntry {
     /// Phase 2 entries (FLAC-only era) default to "flac".
     #[serde(default = "default_source_format")]
     pub source_format: String,
+    /// Profile that produced a transcoded output, or `None` for passthrough
+    /// and reconstructed legacy entries.
+    pub transcode_profile: Option<TranscodeProfile>,
 }
 
 fn default_source_known() -> bool {
@@ -277,6 +284,7 @@ pub fn diff(
     compute_fingerprint: impl FnMut(&Path) -> Result<String>,
     compute_audio_fingerprint: impl FnMut(&Path) -> Result<String>,
     target_encoder: &str,
+    target_profile: TranscodeProfile,
     force_reencode: bool,
 ) -> Result<Vec<Action>> {
     diff_with_device_presence(
@@ -285,6 +293,7 @@ pub fn diff(
         compute_fingerprint,
         compute_audio_fingerprint,
         target_encoder,
+        target_profile,
         force_reencode,
         |_| Ok(true),
     )
@@ -296,6 +305,7 @@ pub fn diff_with_device_presence(
     mut compute_fingerprint: impl FnMut(&Path) -> Result<String>,
     mut compute_audio_fingerprint: impl FnMut(&Path) -> Result<String>,
     target_encoder: &str,
+    target_profile: TranscodeProfile,
     force_reencode: bool,
     mut device_entry_present: impl FnMut(&ManifestEntry) -> Result<bool>,
 ) -> Result<Vec<Action>> {
@@ -325,7 +335,7 @@ pub fn diff_with_device_presence(
                     // from what we'd use now, the file body on iPod is the
                     // wrong encoder's output and needs re-encoding even
                     // though the source is unchanged.
-                    if is_encoder_mismatch(entry, target_encoder, force_reencode) {
+                    if is_output_mismatch(entry, target_encoder, target_profile, force_reencode) {
                         actions.push(Action::Modify(src.clone(), (*entry).clone()));
                     } else {
                         actions.push(Action::Unchanged((*entry).clone()));
@@ -338,7 +348,8 @@ pub fn diff_with_device_presence(
                     if content_unchanged {
                         // mtime was touched but content is identical.
                         // Same encoder-mismatch check as the fast path.
-                        if is_encoder_mismatch(entry, target_encoder, force_reencode) {
+                        if is_output_mismatch(entry, target_encoder, target_profile, force_reencode)
+                        {
                             actions.push(Action::Modify(src.clone(), (*entry).clone()));
                         } else {
                             actions.push(Action::Unchanged((*entry).clone()));
@@ -381,6 +392,21 @@ pub fn diff_with_device_presence(
     Ok(actions)
 }
 
+pub fn reconcile_with_device_presence(
+    manifest: &mut Manifest,
+    mut device_entry_present: impl FnMut(&ManifestEntry) -> Result<bool>,
+) -> Result<usize> {
+    let mut retained = Vec::with_capacity(manifest.tracks.len());
+    for entry in &manifest.tracks {
+        if device_entry_present(entry)? {
+            retained.push(entry.clone());
+        }
+    }
+    let discarded = manifest.tracks.len() - retained.len();
+    manifest.tracks = retained;
+    Ok(discarded)
+}
+
 /// True iff this manifest entry's stored encoder differs from the target
 /// encoder in a way that means we should re-encode.
 ///
@@ -389,9 +415,15 @@ pub fn diff_with_device_presence(
 /// - `encoder == "unknown"`: Phase 2 manifest entry (no encoder field on disk).
 ///   Don't trigger spurious re-encodes on first Phase 3 run — let the entry
 ///   get populated naturally on its next normal Modify.
-/// - `encoder == "passthrough"`: there's no encoder for a copied file; the
-///   on-iPod bytes are the source bytes regardless of what's set globally.
-fn is_encoder_mismatch(entry: &ManifestEntry, target: &str, force: bool) -> bool {
+/// - `encoder == "passthrough"`: compatible lossy inputs and explicitly
+///   permitted WAV files remain byte-for-byte copies. ALAC passthrough is
+///   replaced when the target profile changes to AAC.
+fn is_output_mismatch(
+    entry: &ManifestEntry,
+    target_encoder: &str,
+    target_profile: TranscodeProfile,
+    force: bool,
+) -> bool {
     if force {
         return true;
     }
@@ -399,9 +431,9 @@ fn is_encoder_mismatch(entry: &ManifestEntry, target: &str, force: bool) -> bool
         return false;
     }
     if entry.encoder == "passthrough" {
-        return false;
+        return entry.source_format == "alac" && target_profile != TranscodeProfile::Alac;
     }
-    entry.encoder != target
+    entry.encoder != target_encoder || entry.transcode_profile != Some(target_profile)
 }
 
 /// Read the manifest from disk; return an empty manifest if the file doesn't exist.
@@ -441,6 +473,7 @@ pub fn save_atomic(path: &Path, manifest: &Manifest) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portable::profile::TranscodeProfile;
     use crate::source::SourceEntry;
     use std::path::PathBuf;
 
@@ -459,6 +492,7 @@ mod tests {
             encoder: "unknown".to_string(),
             encoder_version: String::new(),
             source_format: "flac".to_string(),
+            transcode_profile: Some(TranscodeProfile::Alac),
         }
     }
 
@@ -486,6 +520,7 @@ mod tests {
             |_| panic!("matching stats must not hash the source"),
             |_| panic!("matching stats must not hash audio"),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
             |_| Ok(false),
         )
@@ -494,6 +529,39 @@ mod tests {
         assert!(
             matches!(actions.as_slice(), [Action::Modify(_, _)]),
             "a source-selected track missing from the live device must be repaired: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn reconciliation_discards_host_entries_missing_from_a_reformatted_device() {
+        let mut selected = sample_entry("/music/selected.flac", "same", 1_000);
+        selected.ipod_dbid = 1;
+        let mut unselected = sample_entry("/music/old.flac", "old", 2_000);
+        unselected.ipod_dbid = 2;
+        let mut manifest = Manifest {
+            version: 2,
+            ipod_serial: Some("SERIAL-1".into()),
+            last_source_root: Some(PathBuf::from("/music")),
+            tracks: vec![selected, unselected],
+        };
+
+        let discarded = reconcile_with_device_presence(&mut manifest, |_| Ok(false)).unwrap();
+        let actions = diff(
+            &manifest,
+            &[sample_source("/music/selected.flac", "same", 1_000)],
+            |_| panic!("a reformatted device must plan the selected track as a fresh add"),
+            |_| panic!("a reformatted device must plan the selected track as a fresh add"),
+            "ffmpeg",
+            TranscodeProfile::Alac,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(discarded, 2);
+        assert!(manifest.tracks.is_empty());
+        assert!(
+            matches!(actions.as_slice(), [Action::Add(_)]),
+            "stale host entries must not become removals or replacements: {actions:?}"
         );
     }
 
@@ -656,6 +724,7 @@ mod tests {
             never_called(),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -679,6 +748,7 @@ mod tests {
             never_called(),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -707,6 +777,7 @@ mod tests {
             returns("blake3:bb"),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -733,6 +804,7 @@ mod tests {
             returns("blake3:aa"),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -756,6 +828,7 @@ mod tests {
             never_called(),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -780,6 +853,7 @@ mod tests {
             never_called(),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -809,6 +883,7 @@ mod tests {
             returns("blake3:aa"),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -838,6 +913,7 @@ mod tests {
             returns("blake3:bb"),
             returns_audio("blake3-audio:zz"),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -872,6 +948,7 @@ mod tests {
             returns("blake3:bb"),
             never_called_audio(), // audio callback MUST NOT fire — nothing to compare to
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -903,6 +980,7 @@ mod tests {
             returns("blake3:bb"),
             returns_audio("blake3-audio:different"),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -929,6 +1007,7 @@ mod tests {
             never_called(),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -1060,6 +1139,7 @@ mod tests {
             never_called(),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -1090,6 +1170,7 @@ mod tests {
             never_called(),
             never_called_audio(),
             "refalac",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -1098,6 +1179,36 @@ mod tests {
             matches!(actions[0], Action::Modify(_, _)),
             "encoder mismatch on otherwise-Unchanged entry must trigger Modify; got {:?}",
             actions[0]
+        );
+    }
+
+    #[test]
+    fn diff_transcode_profile_mismatch_emits_modify() {
+        let mut entry = sample_entry(r"C:\a.flac", "blake3:aa", 100);
+        entry.encoder = "ffmpeg".to_string();
+        entry.transcode_profile = Some(TranscodeProfile::Alac);
+        let manifest = Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![entry],
+        };
+        let sources = vec![sample_source(r"C:\a.flac", "blake3:aa", 100)];
+
+        let actions = diff(
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "ffmpeg",
+            TranscodeProfile::Aac128,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(actions.as_slice(), [Action::Modify(_, _)]),
+            "profile mismatch on otherwise unchanged output must trigger Modify: {actions:?}"
         );
     }
 
@@ -1119,6 +1230,7 @@ mod tests {
             never_called(),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             true,
         )
         .unwrap();
@@ -1149,6 +1261,7 @@ mod tests {
             never_called(),
             never_called_audio(),
             "ffmpeg",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -1180,6 +1293,7 @@ mod tests {
             never_called(),
             never_called_audio(),
             "refalac",
+            TranscodeProfile::Alac,
             false,
         )
         .unwrap();
@@ -1187,6 +1301,36 @@ mod tests {
         assert!(
             matches!(actions[0], Action::Unchanged(_)),
             "passthrough entries must be immune to encoder-mismatch; got {:?}",
+            actions[0]
+        );
+    }
+
+    #[test]
+    fn diff_alac_passthrough_reencodes_when_target_changes_to_aac() {
+        let mut entry = sample_entry(r"C:\a.m4a", "blake3:aa", 100);
+        entry.encoder = "passthrough".to_string();
+        entry.source_format = "alac".to_string();
+        let manifest = Manifest {
+            version: 1,
+            ipod_serial: None,
+            last_source_root: None,
+            tracks: vec![entry],
+        };
+        let sources = vec![sample_source(r"C:\a.m4a", "blake3:aa", 100)];
+        let actions = diff(
+            &manifest,
+            &sources,
+            never_called(),
+            never_called_audio(),
+            "ffmpeg",
+            TranscodeProfile::Aac128,
+            false,
+        )
+        .unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(
+            matches!(actions[0], Action::Modify { .. }),
+            "ALAC passthrough must be replaced when the target changes to AAC; got {:?}",
             actions[0]
         );
     }

@@ -89,6 +89,25 @@ fn generation_fence_detects_external_metadata_changes() {
 }
 
 #[test]
+fn generation_fence_ignores_macos_appledouble_metadata() {
+    let mount = TempMount::new("appledouble-generation");
+    let session = DeviceMutationSession::acquire(mount.path(), device_id()).unwrap();
+
+    fs::write(
+        mount.path().join("iPod_Control/iTunes/._iTunesDB"),
+        b"volatile AppleDouble metadata",
+    )
+    .unwrap();
+    fs::write(
+        mount.path().join("iPod_Control/classick/._pending"),
+        b"volatile directory metadata",
+    )
+    .unwrap();
+
+    session.verify_expected_generation().unwrap();
+}
+
+#[test]
 fn verified_owned_publication_advances_the_expected_generation() {
     let mount = TempMount::new("advance");
     let session = DeviceMutationSession::acquire(mount.path(), device_id()).unwrap();

@@ -235,7 +235,7 @@ fn owned_authority(
           "device_id":"{}",
           "capability_profile_id":"{}",
           "selection":{{"revision":1,"mutation_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8760","value":{{"schema_version":1,"mode":"all","rules":[]}}}},
-          "settings":{{"revision":1,"mutation_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8761","value":{{"schema_version":1,"auto_sync":false,"rockbox_compat":false}}}},
+          "settings":{{"revision":1,"mutation_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8761","value":{{"schema_version":1,"auto_sync":false,"rockbox_compat":false,"transcode_profile":"alac"}}}},
           "subscriptions":{{"revision":1,"mutation_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8762","value":{{"schema_version":1,"playlists":[]}}}},
           "owned_playlists":[],
           "companion_authorities":[],

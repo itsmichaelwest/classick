@@ -480,7 +480,7 @@ final class DeviceInventoryReducerTests: XCTestCase {
               latestAttempt: cancelled)
           ])))
     model.apply(
-      .historyUpdate(entries: [cancelled, successful], acknowledgedRequestID: "terminal"))
+      .historyUpdate(entries: [successful, cancelled], acknowledgedRequestID: "terminal"))
 
     XCTAssertEqual(model.devices["A"]?.latestSuccessfulSync?.timestamp, successful.timestamp)
     XCTAssertEqual(model.devices["A"]?.latestAttempt, cancelled)
@@ -518,7 +518,7 @@ final class DeviceInventoryReducerTests: XCTestCase {
               latestAttempt: interrupted, lastTerminalError: "finalization_stalled")
           ])))
     model.apply(
-      .historyUpdate(entries: [interrupted, successful], acknowledgedRequestID: "terminal"))
+      .historyUpdate(entries: [successful, interrupted], acknowledgedRequestID: "terminal"))
 
     XCTAssertEqual(model.devices["A"]?.phase, .error("finalization_stalled"))
     XCTAssertEqual(model.devices["A"]?.latestSuccessfulSync, successful)
@@ -578,6 +578,20 @@ final class DeviceInventoryReducerTests: XCTestCase {
     XCTAssertFalse(model.canControlSync(to: "A"))
   }
 
+  func testDisconnectedConfiguredDeviceAllowsSettingsButNotSyncControl() {
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(
+          revision: 1,
+          devices: [
+            device("A", connected: false, mount: nil, phase: .disconnected)
+          ])))
+
+    XCTAssertTrue(model.canSendDeviceCommand(to: "A"))
+    XCTAssertFalse(model.canControlSync(to: "A"))
+  }
+
   func testLaterSnapshotAppliesTerminalStateAtomically() {
     let model = AppModel()
     model.apply(
@@ -605,6 +619,27 @@ final class DeviceInventoryReducerTests: XCTestCase {
     XCTAssertEqual(state?.syncedCount, 20)
     XCTAssertEqual(state?.latestSuccessfulSync, successful)
     XCTAssertEqual(state?.latestAttempt, successful)
+  }
+
+  func testChronologicalHistoryUsesTheNewestAttemptAndSuccessfulRun() {
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(revision: 1, devices: [device("A")])))
+    let olderSuccess = history(
+      serial: "A", sessionID: 40, outcome: "ok", timestamp: "2026-07-18T10:00:00Z")
+    let newerFailure = history(
+      serial: "A", sessionID: 41, outcome: "error", timestamp: "2026-07-19T10:00:00Z")
+    let newestSuccess = history(
+      serial: "A", sessionID: 42, outcome: "ok", timestamp: "2026-07-20T10:00:00Z")
+
+    model.apply(
+      .historyUpdate(
+        entries: [olderSuccess, newerFailure, newestSuccess],
+        acknowledgedRequestID: "broadcast"))
+
+    XCTAssertEqual(model.devices["A"]?.latestAttempt, newestSuccess)
+    XCTAssertEqual(model.devices["A"]?.latestSuccessfulSync, newestSuccess)
   }
 
   func testFocusPriorityIsActiveSessionThenSelectionThenSoleConnected() {
@@ -674,6 +709,19 @@ final class DeviceInventoryReducerTests: XCTestCase {
 
     XCTAssertFalse(first.map(model.isCurrentMountAction) ?? true)
     XCTAssertEqual(model.captureMountAction(for: "A")?.mountPath, "/Volumes/New")
+  }
+
+  func testSuccessfulMountActionImmediatelyMarksTheDeviceDisconnected() throws {
+    let model = AppModel()
+    model.apply(.deviceInventorySnapshot(snapshot(revision: 1, devices: [device("A")])))
+    let action = try XCTUnwrap(model.captureMountAction(for: "A"))
+
+    XCTAssertTrue(model.completeMountAction(action))
+
+    XCTAssertFalse(model.devices["A"]?.connected ?? true)
+    XCTAssertNil(model.devices["A"]?.mountPath)
+    XCTAssertEqual(model.devices["A"]?.phase, .disconnected)
+    XCTAssertNil(model.captureMountAction(for: "A"))
   }
 
   func testOlderOrDuplicateInventoryRevisionCannotRollBackSessionState() {

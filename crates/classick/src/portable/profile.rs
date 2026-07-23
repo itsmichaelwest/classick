@@ -10,7 +10,7 @@ pub use super::profile_scalars::{
 use super::profile_values::COMPONENT_SCHEMA_VERSION;
 pub use super::profile_values::{
     Revised as ProfileComponent, SelectionMode, SelectionRule, SelectionValue, SettingsValue,
-    SubscriptionsValue,
+    SubscriptionsValue, TranscodeProfile,
 };
 
 pub const PORTABLE_PROFILE_SCHEMA_VERSION: u32 = 1;

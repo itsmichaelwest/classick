@@ -158,6 +158,7 @@ fn mixed_revisions_fail_recovery_and_retain_journal() {
         version: crate::device_config::DEVICE_SETTINGS_VERSION,
         auto_sync: false,
         rockbox_compat: true,
+        transcode_profile: crate::portable::profile::TranscodeProfile::Aac192,
     })
     .unwrap();
     AtomicFileWriter::new()

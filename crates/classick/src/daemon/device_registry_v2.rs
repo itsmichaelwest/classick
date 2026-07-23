@@ -65,6 +65,16 @@ impl<T: Clone> From<&Fact<T>> for RegistryFact<T> {
     }
 }
 
+impl<T: Clone> From<&RegistryFact<T>> for Fact<T> {
+    fn from(fact: &RegistryFact<T>) -> Self {
+        Self {
+            value: fact.value.clone(),
+            source: fact.source,
+            confidence: fact.confidence,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryHardwareFacts {
@@ -91,6 +101,19 @@ impl From<&HardwareFacts> for RegistryHardwareFacts {
             colour: facts.colour.as_ref().map(RegistryFact::from),
             firmware: facts.firmware.as_ref().map(RegistryFact::from),
             capacity_bytes: facts.capacity_bytes.as_ref().map(RegistryFact::from),
+        }
+    }
+}
+
+impl From<&RegistryHardwareFacts> for HardwareFacts {
+    fn from(facts: &RegistryHardwareFacts) -> Self {
+        Self {
+            family: facts.family.as_ref().map(Fact::from),
+            generation: facts.generation.as_ref().map(Fact::from),
+            model_code: facts.model_code.as_ref().map(Fact::from),
+            colour: facts.colour.as_ref().map(Fact::from),
+            firmware: facts.firmware.as_ref().map(Fact::from),
+            capacity_bytes: facts.capacity_bytes.as_ref().map(Fact::from),
         }
     }
 }

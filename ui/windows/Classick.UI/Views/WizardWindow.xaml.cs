@@ -131,7 +131,8 @@ public sealed partial class WizardWindow : Window
         var intent = new DeviceSetupIntent(
             payload.Source,
             payload.DeviceId,
-            payload.AutoSync);
+            payload.AutoSync,
+            payload.TranscodeProfile);
         var commands = DeviceSetupCommandFactory.Create(intent, NewId);
         var source = commands.OfType<SetSourceLocationCommand>().Single();
         var adopt = commands.OfType<AdoptDeviceCommand>().Single();

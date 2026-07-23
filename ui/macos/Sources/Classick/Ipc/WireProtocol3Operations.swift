@@ -40,21 +40,26 @@ struct WireV3SettingsValue: Codable, Equatable, Sendable {
   let schemaVersion: UInt32
   let autoSync: Bool
   let rockboxCompat: Bool
+  let transcodeProfile: TranscodeProfile
 
   enum CodingKeys: String, CodingKey {
     case schemaVersion = "schema_version"
     case autoSync = "auto_sync"
     case rockboxCompat = "rockbox_compat"
+    case transcodeProfile = "transcode_profile"
   }
 
   init(_ value: DeviceSettingsWire) {
     schemaVersion = 1
     autoSync = value.autoSync
     rockboxCompat = value.rockboxCompat
+    transcodeProfile = value.transcodeProfile
   }
 
   var value: DeviceSettingsWire {
-    DeviceSettingsWire(autoSync: autoSync, rockboxCompat: rockboxCompat)
+    DeviceSettingsWire(
+      autoSync: autoSync, rockboxCompat: rockboxCompat,
+      transcodeProfile: transcodeProfile)
   }
 }
 

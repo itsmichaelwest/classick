@@ -3,8 +3,53 @@ import SwiftUI
 import os
 
 enum DeviceActionCommand {
+  struct SyncBatch {
+    var commands: [WireV3Command]
+    var selectionReceipt: DeviceMutationReceipt?
+    var subscriptionsReceipt: DeviceMutationReceipt?
+  }
+
   static func sync(serial: DeviceID, requestID: UUID) -> WireV3Command {
     .triggerSync(deviceID: serial, requestID: requestID, trigger: .manual)
+  }
+
+  static func syncBatch(
+    serial: DeviceID,
+    selection: SelectionState?,
+    subscriptions: SubscriptionsWire?,
+    syncRequestID: UUID = WireV3Command.newRequestID(),
+    selectionRequestID: UUID = WireV3Command.newRequestID(),
+    selectionMutationID: UUID = UUID(),
+    subscriptionsRequestID: UUID = WireV3Command.newRequestID(),
+    subscriptionsMutationID: UUID = UUID()
+  ) -> SyncBatch {
+    var commands: [WireV3Command] = []
+    var selectionReceipt: DeviceMutationReceipt?
+    var subscriptionsReceipt: DeviceMutationReceipt?
+
+    if let selection {
+      commands.append(
+        .setSelection(
+          deviceID: serial, requestID: selectionRequestID,
+          mutationID: selectionMutationID, selection: WireV3SelectionValue(selection)))
+      selectionReceipt = .init(
+        requestID: selectionRequestID.uuidString.lowercased(),
+        mutationID: selectionMutationID.uuidString.lowercased())
+    }
+    if let subscriptions {
+      commands.append(
+        .setSubscriptions(
+          deviceID: serial, requestID: subscriptionsRequestID,
+          mutationID: subscriptionsMutationID,
+          subscriptions: WireV3SubscriptionsValue(subscriptions)))
+      subscriptionsReceipt = .init(
+        requestID: subscriptionsRequestID.uuidString.lowercased(),
+        mutationID: subscriptionsMutationID.uuidString.lowercased())
+    }
+    commands.append(sync(serial: serial, requestID: syncRequestID))
+    return SyncBatch(
+      commands: commands, selectionReceipt: selectionReceipt,
+      subscriptionsReceipt: subscriptionsReceipt)
   }
 
   static func cancel(route: WireV3Route, requestID: UUID) -> WireV3Command {
@@ -197,6 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let url = URL(fileURLWithPath: target.mountPath)
     do {
       try NSWorkspace.shared.unmountAndEjectDevice(at: url)
+      model.completeMountAction(target)
     } catch {
       let alert = NSAlert()
       alert.messageText = "Couldn't Eject iPod"
@@ -217,10 +263,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     presentSetup(serial: model.focusedDeviceSerial)
   }
 
-  /// Sends the setup window's `save_config` (folder + auto-sync + the
-  /// currently-detected iPod, if any) and clears any error banner from a
-  /// prior failed handshake/save.
-  func finishSetup(source: String, autoSync: Bool, serial: DeviceID) {
+  /// Saves the global source folder and adopts the selected iPod with its
+  /// initial device settings.
+  func finishSetup(
+    source: String, autoSync: Bool, transcodeProfile: TranscodeProfile, serial: DeviceID
+  ) {
     guard model.canSendDeviceCommand(to: serial) else { return }
     let requestID = WireV3Command.newRequestID()
     let current = model.editableDeviceConfig(for: serial) ?? .defaultState
@@ -228,7 +275,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let settingsMutationID = UUID()
     let subscriptionsMutationID = UUID()
     let settings = DeviceSettingsWire(
-      autoSync: autoSync, rockboxCompat: current.settings.rockboxCompat)
+      autoSync: autoSync, rockboxCompat: current.settings.rockboxCompat,
+      transcodeProfile: transcodeProfile)
     model.editDeviceSettings(settings, for: serial)
     model.willRequestDeviceConfig(
       serial: serial, requestID: requestID.uuidString.lowercased(), intent: .write)
@@ -251,6 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
       serial: serial,
       commands: Self.setupDeviceCommands(
         source: source, serial: serial, current: current, autoSync: autoSync,
+        transcodeProfile: transcodeProfile,
         requestID: requestID, selectionMutationID: selectionMutationID,
         settingsMutationID: settingsMutationID,
         subscriptionsMutationID: subscriptionsMutationID))
@@ -325,11 +374,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// closures, so each hop through here spawns a detached-from-the-caller
   /// `Task` to bridge to the actor.
   func syncNow(serial: DeviceID) {
-    sendSyncControlCommands(
+    guard model.canControlSync(to: serial) else { return }
+    let batch = DeviceActionCommand.syncBatch(
       serial: serial,
-      commands: [
-        DeviceActionCommand.sync(serial: serial, requestID: WireV3Command.newRequestID())
-      ])
+      selection: model.pendingDeviceSelection(for: serial),
+      subscriptions: model.pendingDeviceSubscriptions(for: serial))
+    if let receipt = batch.selectionReceipt {
+      model.markDeviceSelectionSubmitted(for: serial, receipt: receipt)
+    }
+    if let receipt = batch.subscriptionsReceipt {
+      model.markDeviceSubscriptionsSubmitted(for: serial, receipt: receipt)
+    }
+    Task { [daemonClient] in
+      await daemonClient.send(batch.commands)
+    }
   }
 
   func cancelSync(serial: DeviceID) {

@@ -136,7 +136,15 @@ impl RollbackSnapshot {
     pub(crate) fn remove_for_deletion(self) -> Result<()> {
         self.validate_for_deletion()?;
         std::fs::remove_dir_all(&self.root)
-            .with_context(|| format!("remove rollback snapshot {}", self.root.display()))
+            .with_context(|| format!("remove rollback snapshot {}", self.root.display()))?;
+        let sidecar = appledouble_sibling(&self.root);
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!("remove rollback snapshot metadata {}", sidecar.display())
+            }),
+        }
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -299,7 +307,9 @@ fn validate_exact_tree(
             }
             validate_exact_tree(root, &child_relative, expected_files, expected_directories)?;
         } else if metadata.is_file() {
-            if !expected_files.contains(&child_relative) {
+            if !expected_files.contains(&child_relative)
+                && !is_paired_appledouble(&child_relative, expected_files, expected_directories)
+            {
                 bail!(
                     "rollback snapshot contains unindexed file {}",
                     path.display()
@@ -313,6 +323,34 @@ fn validate_exact_tree(
         }
     }
     Ok(())
+}
+
+fn is_paired_appledouble(
+    path: &Path,
+    expected_files: &HashSet<PathBuf>,
+    expected_directories: &HashSet<PathBuf>,
+) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(target_name) = file_name.strip_prefix("._") else {
+        return false;
+    };
+    if target_name.is_empty() {
+        return false;
+    }
+    let target = path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(target_name);
+    expected_files.contains(&target) || expected_directories.contains(&target)
+}
+
+fn appledouble_sibling(path: &Path) -> PathBuf {
+    let Some(name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    path.with_file_name(format!("._{}", name.to_string_lossy()))
 }
 
 fn require_real_directory(path: &Path, label: &str) -> Result<()> {

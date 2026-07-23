@@ -59,9 +59,48 @@ impl LegacyV2PollingCache {
             return cached;
         }
 
-        let detected = cold_scan();
+        let mut detected = cold_scan();
+        if detected.is_empty() {
+            if let Some(retained) =
+                self.retain_mounted(&candidate_set, &mut resolve_volume, &mut probe_usb)
+            {
+                detected = retained;
+            }
+        }
         self.remember(candidate_set, &detected);
         detected
+    }
+
+    fn retain_mounted(
+        &self,
+        candidates: &BTreeSet<PathBuf>,
+        resolve_volume: &mut impl FnMut(&str) -> Option<PathBuf>,
+        probe_usb: &mut impl FnMut(&Path) -> Option<OrdinaryUsbFacts>,
+    ) -> Option<Vec<DetectedIpod>> {
+        if self.known.is_empty() {
+            return None;
+        }
+
+        let mut expected_candidates = self.candidates.clone();
+        let mut detected = Vec::with_capacity(self.known.len());
+        for known in &self.known {
+            let mount = match known.detected.volume_guid.as_deref() {
+                Some(volume_guid) => resolve_volume(volume_guid)?,
+                None => PathBuf::from(&known.detected.drive),
+            };
+            ready_layout_fingerprint(&mount)?;
+            if usb_device_id(probe_usb(&mount))? != DeviceId::parse(&known.detected.serial).ok()? {
+                return None;
+            }
+            expected_candidates.remove(Path::new(&known.detected.drive));
+            expected_candidates.insert(mount.clone());
+
+            let mut current = known.detected.clone();
+            current.drive = mount.to_string_lossy().into_owned();
+            detected.push(current);
+        }
+
+        (*candidates == expected_candidates).then_some(detected)
     }
 
     fn revalidate(

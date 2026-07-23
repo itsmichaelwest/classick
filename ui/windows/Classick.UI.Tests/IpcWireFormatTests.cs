@@ -26,6 +26,27 @@ public class IpcWireFormatTests
     }
 
     [Fact]
+    public void MusicFacingWireStrings_PreserveSupplementaryUnicode()
+    {
+        const string value = "Björk/日本語 🎵/03 – I’m So Free.flac";
+        var json =
+            """{"type":"save_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8816","playlist":{"kind":"manual","slug":"favourites","name":"お気に入り 🎵","tracks":["Björk/日本語 🎵/03 – I’m So Free.flac"]}}""";
+
+        var decoded = Assert.IsType<KnownWireMessage>(
+            WireCodec.DecodeAdmittedMessage(json, WireStream.DaemonReceivingDesktopCommands));
+        var command = Assert.IsType<SavePlaylistCommand>(decoded.Message);
+        var playlist = Assert.IsType<ManualPlaylist>(command.Playlist);
+        Assert.Equal(value, Assert.Single(playlist.Tracks));
+
+        var roundTripped = Assert.IsType<KnownWireMessage>(
+            WireCodec.DecodeAdmittedMessage(
+                WireCodec.Encode(command), WireStream.DaemonReceivingDesktopCommands));
+        var roundTrippedPlaylist = Assert.IsType<ManualPlaylist>(
+            Assert.IsType<SavePlaylistCommand>(roundTripped.Message).Playlist);
+        Assert.Equal(value, Assert.Single(roundTrippedPlaylist.Tracks));
+    }
+
+    [Fact]
     public void SharedNegativeVectors_AreRejectedByTheirAdmittedStream()
     {
         using var manifest = ReadJson("manifest.json");

@@ -410,6 +410,7 @@ mod tests {
                 encoder: "unknown".into(),
                 encoder_version: String::new(),
                 source_format: "flac".into(),
+                transcode_profile: None,
             }],
         }
     }
@@ -429,6 +430,7 @@ mod tests {
                 encoder: "unknown".into(),
                 encoder_version: String::new(),
                 source_format: "flac".into(),
+                transcode_profile: None,
             })
             .collect();
         manifest.encode_v2(source, "SERIAL-1").unwrap()

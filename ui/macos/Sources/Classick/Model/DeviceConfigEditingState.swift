@@ -20,10 +20,7 @@ enum DeviceConfigComponentStatus: Equatable, Sendable {
 
   var message: String? {
     switch self {
-    case .saved: nil
-    case .localDraft: "Unsaved changes"
-    case .savingOnHost: "Saving on this Mac…"
-    case .waitingForDevice: "Waiting for iPod"
+    case .saved, .localDraft, .savingOnHost, .waitingForDevice: nil
     case .hostAcceptanceFailed(let message): "Couldn’t save on this Mac: \(message)"
     case .deviceDeliveryFailed(let message): "Saved on this Mac — \(message)"
     }

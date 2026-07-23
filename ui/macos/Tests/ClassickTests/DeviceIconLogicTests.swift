@@ -3,6 +3,46 @@ import XCTest
 @testable import Classick
 
 final class DeviceIconLogicTests: XCTestCase {
+  func testUnverifiedArtworkUsesAMPDevicesGenericResource() throws {
+    let (cache, cleanup) = try isolatedCache()
+    defer { cleanup() }
+
+    XCTAssertEqual(
+      DeviceIconLogic.resolvedArtwork(
+        for: hardware(), serial: DeviceID("0000000000000ABC"), cache: cache),
+      .exact(resourceName: "iPodGeneric"))
+  }
+
+  func testVerifiedExactArtworkSurvivesMissingDisconnectedFacts() throws {
+    let (cache, cleanup) = try isolatedCache()
+    defer { cleanup() }
+    let serial = DeviceID("0000000000000ABC")
+    let exact = hardware(
+      model: fact("MC297", source: "reported"),
+      colour: fact("black"))
+
+    cache.rememberExactArtwork(for: exact, serial: serial)
+
+    XCTAssertEqual(
+      DeviceIconLogic.resolvedArtwork(for: hardware(), serial: serial, cache: cache),
+      .exact(resourceName: "iPod11B-Black"))
+  }
+
+  func testGenericObservationNeverOverwritesCachedExactArtwork() throws {
+    let (cache, cleanup) = try isolatedCache()
+    defer { cleanup() }
+    let serial = DeviceID("0000000000000ABC")
+    cache.rememberExactArtwork(
+      for: hardware(
+        model: fact("MC293", source: "reported"),
+        colour: fact("silver")),
+      serial: serial)
+
+    cache.rememberExactArtwork(for: hardware(), serial: serial)
+
+    XCTAssertEqual(cache.resourceName(for: serial), "iPod11-Silver")
+  }
+
   func testCertainReportedModelAndDecodedColourSelectExactArtwork() {
     XCTAssertEqual(
       DeviceIconLogic.artwork(
@@ -88,11 +128,6 @@ final class DeviceIconLogicTests: XCTestCase {
       modelCode: nil, colour: nil, firmware: nil, capacityBytes: nil)
     XCTAssertEqual(
       DeviceIconLogic.artwork(for: inferredShuffle), .generic(.shuffle(generation: nil)))
-
-    XCTAssertEqual(GenericDeviceArtwork.classic.baseSystemImage, "ipod")
-    XCTAssertEqual(GenericDeviceArtwork.classic.badgeSystemImage, "circle.circle.fill")
-    XCTAssertNil(GenericDeviceArtwork.ipod.badgeSystemImage)
-    XCTAssertEqual(GenericDeviceArtwork.unknown.badgeSystemImage, "questionmark.circle.fill")
   }
 
   func testAllExactIconsExistOnThisSystem() throws {
@@ -104,6 +139,18 @@ final class DeviceIconLogicTests: XCTestCase {
         FileManager.default.fileExists(atPath: "\(DeviceIconLogic.ampResourcesDir)/\(name).icns"),
         "missing icon resource: \(name).icns")
     }
+    XCTAssertTrue(
+      FileManager.default.fileExists(
+        atPath: "\(DeviceIconLogic.ampResourcesDir)/iPodGeneric.icns"))
+  }
+
+  private func isolatedCache() throws -> (DeviceArtworkCache, () -> Void) {
+    let suiteName = "DeviceIconLogicTests.\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    defaults.removePersistentDomain(forName: suiteName)
+    return (
+      DeviceArtworkCache(defaults: defaults),
+      { defaults.removePersistentDomain(forName: suiteName) })
   }
 
   private func hardware(

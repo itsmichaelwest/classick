@@ -106,6 +106,7 @@ fn build_snapshot(
                     model_label: record.model_label,
                     name: record.name,
                 },
+                hardware: record.hardware_facts,
                 configured: record.configured,
                 connected: connected.is_some(),
                 mount: connected.map(|device| device.drive.clone()),

@@ -14,6 +14,7 @@ use crate::daemon::device_registry_v2::{
     DeviceRegistryV2, ImportedProfileSummary, RegistryDeviceRecordV2, RegistryHardwareFacts,
     RegistryMigrationStatus, RegistryPresentation,
 };
+use crate::device::{HardwareFacts, ObservationId};
 use crate::ipod::device::DetectedIpod;
 use crate::portable::host_cache::{HostCacheLoad, HostCacheStore};
 
@@ -46,6 +47,8 @@ pub(crate) struct DeviceRecord {
     pub settings_revision: u64,
     #[serde(default)]
     pub subscriptions_revision: u64,
+    #[serde(default, skip_serializing_if = "is_empty_hardware")]
+    pub hardware_facts: HardwareFacts,
 }
 
 impl DeviceRecord {
@@ -59,6 +62,7 @@ impl DeviceRecord {
             selection_revision: 0,
             settings_revision: 0,
             subscriptions_revision: 0,
+            hardware_facts: HardwareFacts::default(),
         }
     }
 
@@ -73,7 +77,33 @@ impl DeviceRecord {
             selection_revision: 0,
             settings_revision: 0,
             subscriptions_revision: 0,
+            hardware_facts: HardwareFacts::default(),
         }
+    }
+}
+
+fn is_empty_hardware(facts: &HardwareFacts) -> bool {
+    facts == &HardwareFacts::default()
+}
+
+fn merge_hardware_facts(target: &mut HardwareFacts, observed: HardwareFacts) {
+    if observed.family.is_some() {
+        target.family = observed.family;
+    }
+    if observed.generation.is_some() {
+        target.generation = observed.generation;
+    }
+    if observed.model_code.is_some() {
+        target.model_code = observed.model_code;
+    }
+    if observed.colour.is_some() {
+        target.colour = observed.colour;
+    }
+    if observed.firmware.is_some() {
+        target.firmware = observed.firmware;
+    }
+    if observed.capacity_bytes.is_some() {
+        target.capacity_bytes = observed.capacity_bytes;
     }
 }
 
@@ -127,6 +157,7 @@ impl DeviceRegistry {
                                     record,
                                     ConfigRevisionPart::Subscriptions,
                                 ),
+                                hardware_facts: (&record.presentation.hardware_facts).into(),
                             })
                             .collect(),
                     )?
@@ -183,15 +214,24 @@ impl DeviceRegistry {
     #[allow(dead_code)]
     pub(crate) fn observe(&mut self, identity: &DetectedIpod, now: u64) -> Result<()> {
         let key = Self::required_key(&identity.serial)?;
+        let hardware_facts = crate::device::observe_mount(
+            std::path::Path::new(&identity.drive),
+            ObservationId::new(1),
+        )
+        .map(|observation| observation.hardware_facts().clone())
+        .unwrap_or_default();
         let mut next = self.records.clone();
         match next.get_mut(&key) {
             Some(record) => {
                 record.model_label = identity.model_label.clone();
                 record.name = identity.name.clone();
                 record.last_seen_unix_secs = Some(now);
+                merge_hardware_facts(&mut record.hardware_facts, hardware_facts);
             }
             None => {
-                next.insert(key, DeviceRecord::from_detected(identity, now));
+                let mut record = DeviceRecord::from_detected(identity, now);
+                merge_hardware_facts(&mut record.hardware_facts, hardware_facts);
+                next.insert(key, record);
             }
         }
         self.replace_records(next)
@@ -364,18 +404,22 @@ impl DeviceRegistry {
             .map(|record| {
                 let device_id = crate::device::DeviceId::parse(&record.serial)
                     .with_context(|| format!("validate registry device ID {:?}", record.serial))?;
-                let imported = match cache_store.load(&device_id)? {
-                    HostCacheLoad::Loaded(cache) => {
-                        cache
-                            .last_imported_profile
-                            .map(|profile| ImportedProfileSummary {
-                                schema_version: profile.schema_version,
-                                selection_revision: profile.selection.revision,
-                                settings_revision: profile.settings.revision,
-                                subscriptions_revision: profile.subscriptions.revision,
-                            })
+                let imported = if record.configured {
+                    match cache_store.load(&device_id)? {
+                        HostCacheLoad::Loaded(cache) => {
+                            cache
+                                .last_imported_profile
+                                .map(|profile| ImportedProfileSummary {
+                                    schema_version: profile.schema_version,
+                                    selection_revision: profile.selection.revision,
+                                    settings_revision: profile.settings.revision,
+                                    subscriptions_revision: profile.subscriptions.revision,
+                                })
+                        }
+                        HostCacheLoad::Missing => None,
                     }
-                    HostCacheLoad::Missing => None,
+                } else {
+                    None
                 };
                 let migration_status = if record.configured && imported.is_none() {
                     RegistryMigrationStatus::PendingLegacyImport {
@@ -394,7 +438,7 @@ impl DeviceRegistry {
                             name: record.name.clone(),
                             model_label: (!record.model_label.is_empty())
                                 .then(|| record.model_label.clone()),
-                            hardware_facts: RegistryHardwareFacts::default(),
+                            hardware_facts: RegistryHardwareFacts::from(&record.hardware_facts),
                         },
                         last_seen_unix_secs: record.last_seen_unix_secs,
                         last_storage: None,
@@ -524,6 +568,59 @@ mod tests {
     }
 
     #[test]
+    fn refreshing_v2_registry_preserves_hardware_facts() {
+        let path = temp_path("hardware-facts");
+        std::fs::write(
+            &path,
+            r#"{
+              "schema_version": 2,
+              "devices": {
+                "000A27002138B0A8": {
+                  "configured": true,
+                  "presentation": {
+                    "name": "Michael's iPod",
+                    "model_label": "iPod Classic (3rd gen)",
+                    "hardware_facts": {
+                      "family": {
+                        "value": "classic",
+                        "source": "decoded",
+                        "confidence": "certain"
+                      },
+                      "model_code": {
+                        "value": "MC293",
+                        "source": "reported",
+                        "confidence": "certain"
+                      },
+                      "colour": {
+                        "value": "silver",
+                        "source": "decoded",
+                        "confidence": "certain"
+                      }
+                    }
+                  },
+                  "migration_status": {
+                    "state": "pending_legacy_import",
+                    "selection_revision": 2,
+                    "settings_revision": 0,
+                    "subscriptions_revision": 0
+                  }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let registry = DeviceRegistry::load_or_migrate(path.clone(), None).unwrap();
+        registry.refresh_portable_state().unwrap();
+
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let facts = &persisted["devices"]["000A27002138B0A8"]["presentation"]["hardware_facts"];
+        assert_eq!(facts["model_code"]["value"], "MC293");
+        assert_eq!(facts["colour"]["value"], "silver");
+    }
+
+    #[test]
     fn migrates_legacy_identity_after_empty_registry_was_persisted() {
         let path = temp_path("migrate-after-empty");
         let empty = DeviceRegistry::load_or_migrate(path.clone(), None).unwrap();
@@ -599,6 +696,79 @@ mod tests {
         assert_eq!(records[1].serial, "B");
         assert!(!records[1].configured);
         assert_eq!(records[1].last_seen_unix_secs, Some(42));
+    }
+
+    #[test]
+    fn forgetting_a_portable_device_does_not_reimport_its_host_cache() {
+        let root = temp_path("forget-portable-cache")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let path = root.join("devices/registry.json");
+        let cache_path = root.join("devices/000A27002138B0A8/cache.json");
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
+              "schema_version": 2,
+              "devices": {
+                "000A27002138B0A8": {
+                  "configured": true,
+                  "presentation": {"hardware_facts": {}},
+                  "last_imported_profile": {
+                    "schema_version": 1,
+                    "selection_revision": 1,
+                    "settings_revision": 1,
+                    "subscriptions_revision": 1
+                  },
+                  "migration_status": {"state": "complete"}
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &cache_path,
+            r#"{
+              "schema_version": 1,
+              "device_id": "000A27002138B0A8",
+              "last_imported_profile": {
+                "schema_version": 1,
+                "device_id": "000A27002138B0A8",
+                "capability_profile_id": "classic-late-2009-v1",
+                "selection": {
+                  "revision": 1,
+                  "mutation_id": "5da5ffbc-e15e-4524-8472-0da0acdea501",
+                  "value": {"schema_version": 1, "mode": "include", "rules": []}
+                },
+                "settings": {
+                  "revision": 1,
+                  "mutation_id": "e0c03c06-8c9e-48df-a1b0-33acc1c7f3a0",
+                  "value": {
+                    "schema_version": 1,
+                    "auto_sync": false,
+                    "rockbox_compat": false,
+                    "transcode_profile": "alac"
+                  }
+                },
+                "subscriptions": {
+                  "revision": 1,
+                  "mutation_id": "8b630008-b315-4786-a95a-2cd0f35bdb96",
+                  "value": {"schema_version": 1, "playlists": []}
+                },
+                "owned_playlists": [],
+                "companion_authorities": [],
+                "generated_sysinfo_extended_hash": "6b143e08ca34df8ab9ac50957fe927c46fb516c0af7c110ead8a78c6a39af453"
+              }
+            }"#,
+        )
+        .unwrap();
+        let mut registry = DeviceRegistry::load_or_migrate(path.clone(), None).unwrap();
+
+        registry.forget("000A27002138B0A8").unwrap();
+
+        let reloaded = DeviceRegistry::load_or_migrate(path, None).unwrap();
+        assert!(!reloaded.record("000A27002138B0A8").unwrap().configured);
     }
 
     #[test]

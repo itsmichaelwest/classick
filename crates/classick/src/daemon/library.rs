@@ -570,6 +570,7 @@ mod tests {
             encoder: "unknown".into(),
             encoder_version: String::new(),
             source_format: "flac".into(),
+            transcode_profile: None,
         };
         let manifest = Manifest {
             version: 1,

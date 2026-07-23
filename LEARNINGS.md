@@ -99,6 +99,9 @@ incidents and completed gate reports are archived in
 
 ## Sync execution
 
+- Keep `MetadataOnly` out of the transcode/staged-file pipeline. Journal it as
+  an in-place database/artwork update so coordinated rollback still applies
+  while the existing media file, path, and DBID remain unchanged.
 - Keep both ffmpeg `-nostdin` and `stdin(Stdio::null())`; an inherited daemon
   command pipe otherwise wedges ffmpeg during finalization.
 - Windows child processes that could create a console must use
@@ -157,9 +160,16 @@ incidents and completed gate reports are archived in
 - Adding a command/event requires updating exhaustive Rust, Swift, and C#
   matches together. Wire compatibility is major-version based; minor additions
   must remain ignorable/defaultable.
+- Empty source tags are valid library-display data: the clients render them as
+  “Unknown Artist” / “No Genre”. Library snapshot validation must therefore
+  allow empty display labels, while selection-rule labels remain non-empty.
 - A multi-device client must retain typed sync presentation per device/session.
   Prompt dismissal belongs in that reducer too; clearing only the focused view
   lets an answered prompt reappear after the user switches devices.
+- A manual sync must flush pending debounced selection/subscription mutations
+  in the same ordered socket batch before `trigger_sync`. Sending the trigger
+  alone can snapshot the previous profile and report a successful no-op while
+  newly checked music remains absent.
 
 ## Cross-platform behavior
 

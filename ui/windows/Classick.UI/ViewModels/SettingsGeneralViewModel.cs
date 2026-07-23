@@ -4,6 +4,17 @@ using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace Classick_UI.ViewModels;
 
+public sealed record TranscodeProfileOption(TranscodeProfile Value, string Label)
+{
+    public static IReadOnlyList<TranscodeProfileOption> All { get; } =
+    [
+        new(TranscodeProfile.Alac, "ALAC (Lossless)"),
+        new(TranscodeProfile.Aac256, "AAC 256 kbps"),
+        new(TranscodeProfile.Aac192, "AAC 192 kbps"),
+        new(TranscodeProfile.Aac128, "AAC 128 kbps"),
+    ];
+}
+
 public partial class SettingsGeneralViewModel : ObservableObject
 {
     private readonly DeviceStore _store;
@@ -37,6 +48,7 @@ public partial class SettingsGeneralViewModel : ObservableObject
     [ObservableProperty] private bool selectedDeviceConnected;
     [ObservableProperty] private bool autoSync;
     [ObservableProperty] private bool rockboxCompat;
+    [ObservableProperty] private TranscodeProfile transcodeProfile = TranscodeProfile.Alac;
     [ObservableProperty] private string deliveryStatus = "Settings unavailable";
     [ObservableProperty] private string selectionSummary = "Selection unavailable";
     [ObservableProperty] private string subscriptionsSummary = "Subscriptions unavailable";
@@ -53,7 +65,9 @@ public partial class SettingsGeneralViewModel : ObservableObject
         ScheduleMinutes != checked((int)_originalGlobal.ScheduleMinutes) ||
         DropSyncBehavior != _originalGlobal.DropSyncBehavior;
     public bool IsDeviceSettingsDirty => _loadedDeviceSettings is not null &&
-        (AutoSync != _loadedDeviceSettings.AutoSync || RockboxCompat != _loadedDeviceSettings.RockboxCompat);
+        (AutoSync != _loadedDeviceSettings.AutoSync ||
+         RockboxCompat != _loadedDeviceSettings.RockboxCompat ||
+         TranscodeProfile != _loadedDeviceSettings.TranscodeProfile);
     public bool HasSelectedDevice => SelectedDeviceId is not null;
     public bool CanEditDeviceSettings => _loadedDeviceSettings is not null;
     public bool CanEditSelection => _loadedSelection is not null;
@@ -63,6 +77,8 @@ public partial class SettingsGeneralViewModel : ObservableObject
     public bool IsSubscriptionsDirty => _loadedSubscriptions is not null &&
         PlaylistSubscriptionsText != string.Join(", ", _loadedSubscriptions.Playlists);
     public string SyncModeSummary => SubsequentSyncMode == SyncMode.AutoApply ? "Automatic apply" : "Review before applying";
+    public IReadOnlyList<TranscodeProfileOption> TranscodeProfiles { get; } =
+        TranscodeProfileOption.All;
 
     public void SelectDevice(DeviceId? deviceId)
     {
@@ -100,6 +116,7 @@ public partial class SettingsGeneralViewModel : ObservableObject
             _loadedSubscriptions = null;
             AutoSync = false;
             RockboxCompat = false;
+            TranscodeProfile = TranscodeProfile.Alac;
             DeliveryStatus = "Loading device settings…";
             SelectionSummary = "Loading selection…";
             SubscriptionsSummary = "Loading subscriptions…";
@@ -125,6 +142,7 @@ public partial class SettingsGeneralViewModel : ObservableObject
                 _loadedDeviceSettings = draft.Value;
                 AutoSync = draft.Value.AutoSync;
                 RockboxCompat = draft.Value.RockboxCompat;
+                TranscodeProfile = draft.Value.TranscodeProfile;
                 DeliveryStatus = draft.SaveState switch
                 {
                     DeviceSettingsSaveState.WaitingForDevice when draft.Error is { } error =>

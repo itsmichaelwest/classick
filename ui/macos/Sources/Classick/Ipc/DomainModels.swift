@@ -311,25 +311,49 @@ struct SubscriptionsWire: Codable, Equatable, Sendable {
 /// Per-device settings nested under protocol v3 device configuration
 /// (no `version`; same rationale as
 /// `SubscriptionsWire`).
+enum TranscodeProfile: String, Codable, CaseIterable, Identifiable, Sendable {
+  case alac
+  case aac256 = "aac_256"
+  case aac192 = "aac_192"
+  case aac128 = "aac_128"
+
+  var id: Self { self }
+
+  var title: String {
+    switch self {
+    case .alac: "ALAC (Lossless)"
+    case .aac256: "AAC 256 kbps"
+    case .aac192: "AAC 192 kbps"
+    case .aac128: "AAC 128 kbps"
+    }
+  }
+}
+
 struct DeviceSettingsWire: Codable, Equatable, Sendable {
   var version = 1
   var autoSync: Bool
   var rockboxCompat: Bool
+  var transcodeProfile: TranscodeProfile
 
   enum CodingKeys: String, CodingKey {
     case autoSync = "auto_sync"
     case rockboxCompat = "rockbox_compat"
+    case transcodeProfile = "transcode_profile"
   }
 
-  init(autoSync: Bool, rockboxCompat: Bool) {
+  init(
+    autoSync: Bool, rockboxCompat: Bool, transcodeProfile: TranscodeProfile = .alac
+  ) {
     self.autoSync = autoSync
     self.rockboxCompat = rockboxCompat
+    self.transcodeProfile = transcodeProfile
   }
 
   init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     autoSync = try c.decodeIfPresent(Bool.self, forKey: .autoSync) ?? true
     rockboxCompat = try c.decodeIfPresent(Bool.self, forKey: .rockboxCompat) ?? false
+    transcodeProfile = try c.decode(TranscodeProfile.self, forKey: .transcodeProfile)
   }
 }
 

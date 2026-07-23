@@ -5,7 +5,8 @@ namespace Classick_UI.Devices;
 public sealed record DeviceSetupIntent(
     string Source,
     DeviceId DeviceId,
-    bool AutoSync);
+    bool AutoSync,
+    TranscodeProfile TranscodeProfile = TranscodeProfile.Alac);
 
 public static class DeviceSetupCommandFactory
 {
@@ -24,7 +25,8 @@ public static class DeviceSetupCommandFactory
                 newId(),
                 new SelectionValue(1, SelectionMode.All, []),
                 newId(),
-                new SettingsValue(1, intent.AutoSync, RockboxCompat: false),
+                new SettingsValue(
+                    1, intent.AutoSync, RockboxCompat: false, intent.TranscodeProfile),
                 newId(),
                 new SubscriptionsValue(1, [])),
         ];

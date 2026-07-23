@@ -29,7 +29,8 @@ fn mutation(component: &str, mutation_id: &str) -> Value {
         "settings" => json!({
             "schema_version": 1,
             "auto_sync": false,
-            "rockbox_compat": true
+            "rockbox_compat": true,
+            "transcode_profile": "alac"
         }),
         "subscriptions" => json!({ "schema_version": 1, "playlists": [] }),
         _ => unreachable!(),

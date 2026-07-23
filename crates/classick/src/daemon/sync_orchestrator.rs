@@ -196,8 +196,15 @@ impl WorkerStreamDecoder {
 /// its parent. Without it, a graceful daemon Shutdown leaves an
 /// orphaned sync subprocess transcoding for hours and holding ffmpeg
 /// children — observed in the wild on 2026-05-24.
-pub fn build_command(exe: &std::path::Path, drive: &str, rockbox_compat: bool) -> Command {
+pub fn build_command(
+    exe: &std::path::Path,
+    drive: &str,
+    rockbox_compat: bool,
+    transcode_profile: crate::portable::profile::TranscodeProfile,
+) -> Command {
     let mut cmd = base_command(exe, "--apply", Some(drive));
+    cmd.arg("--transcode-profile")
+        .arg(transcode_profile.as_str());
     if rockbox_compat {
         cmd.arg("--rockbox-compat");
     }
@@ -219,9 +226,15 @@ pub fn build_backfill_command(exe: &std::path::Path, drive: &str) -> Command {
 /// makes `apply_loop::replace_library` skip its interactive confirmation
 /// prompt (see `should_skip_replace_confirmation`); the UI does its own
 /// typed confirmation before ever sending the `replace_library` command.
-pub fn build_replace_library_command(exe: &std::path::Path, drive: &str) -> Command {
+pub fn build_replace_library_command(
+    exe: &std::path::Path,
+    drive: &str,
+    transcode_profile: crate::portable::profile::TranscodeProfile,
+) -> Command {
     let mut cmd = base_command(exe, "--replace-library", Some(drive));
-    cmd.arg("--apply");
+    cmd.arg("--apply")
+        .arg("--transcode-profile")
+        .arg(transcode_profile.as_str());
     cmd
 }
 
@@ -298,13 +311,14 @@ pub async fn run(
     exe: PathBuf,
     drive: String,
     rockbox_compat: bool,
+    transcode_profile: crate::portable::profile::TranscodeProfile,
     cancel_rx: oneshot::Receiver<()>,
     pause_rx: oneshot::Receiver<()>,
     prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
     event_context: EventContext,
 ) -> Result<OrchestratorOutcome> {
-    let cmd = build_command(&exe, &drive, rockbox_compat);
+    let cmd = build_command(&exe, &drive, rockbox_compat, transcode_profile);
     drive_child(
         exe,
         cmd,
@@ -357,13 +371,14 @@ pub async fn run_backfill(
 pub async fn run_replace_library(
     exe: PathBuf,
     drive: String,
+    transcode_profile: crate::portable::profile::TranscodeProfile,
     cancel_rx: oneshot::Receiver<()>,
     pause_rx: oneshot::Receiver<()>,
     prompt_decisions_rx: mpsc::UnboundedReceiver<(u64, i32)>,
     event_tx: broadcast::Sender<DaemonEvent>,
     event_context: EventContext,
 ) -> Result<OrchestratorOutcome> {
-    let cmd = build_replace_library_command(&exe, &drive);
+    let cmd = build_replace_library_command(&exe, &drive, transcode_profile);
     drive_child(
         exe,
         cmd,
@@ -462,6 +477,7 @@ async fn drive_child_with_stall_grace(
 
     let mut tracker = FailureTracker::default();
     let mut last_summary: Option<SyncSummary> = None;
+    let mut last_sync_error: Option<String> = None;
     let mut finish_success: Option<bool> = None;
     let mut finish_db_restored = false;
     let mut cancelled = false;
@@ -520,7 +536,12 @@ async fn drive_child_with_stall_grace(
                         last_summary = Some(summary_from_wire(summary));
                     }
                     WireEvent::TrackDone { .. } => { tracker.tracks_completed += 1; }
-                    WireEvent::SyncError { .. } => {
+                    WireEvent::SyncError { message, .. } => {
+                        if let Some(detail) = message.strip_prefix("Sync failed: ") {
+                            last_sync_error = Some(detail.to_string());
+                        } else if last_sync_error.is_none() {
+                            last_sync_error = Some(message.clone());
+                        }
                         tracker.tracks_errored += 1;
                         if tracker.should_bail() && stop_disposition.is_none() {
                             write_stop_command(&mut stdin, StopReason::Cancelled, &event_context).await;
@@ -702,7 +723,7 @@ async fn drive_child_with_stall_grace(
 
     Ok(OrchestratorOutcome::Aborted {
         reason: if finish_success == Some(false) {
-            "sync_subprocess_reported_failure".to_string()
+            last_sync_error.unwrap_or_else(|| "sync_subprocess_reported_failure".to_string())
         } else {
             format!("sync_subprocess_exited_without_success: {status}")
         },
@@ -1081,6 +1102,42 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn failed_finish_preserves_the_worker_error_for_history_and_ui() {
+        let command = scripted_command(
+            r#"
+                printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
+                printf '%s\n' '{"type":"sync_summary","device_id":"000A27002138B0A8","session_id":41,"summary":{"add":13,"modify":0,"metadata_only":0,"remove":0,"unchanged":0,"total_planned":13}}'
+                printf '%s\n' '{"type":"sync_error","device_id":"000A27002138B0A8","session_id":41,"message":"Sync failed: checkpoint generation fence: external device state changed"}'
+                printf '%s\n' '{"type":"sync_finished","device_id":"000A27002138B0A8","session_id":41,"success":false}'
+            "#,
+        );
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let (_pause_tx, pause_rx) = oneshot::channel();
+        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, _) = broadcast::channel(8);
+
+        let outcome = drive_child_with_stall_grace(
+            PathBuf::from("/bin/sh"),
+            command,
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+            event_tx,
+            event_context(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            OrchestratorOutcome::Aborted { reason, .. }
+                if reason == "checkpoint generation fence: external device state changed"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn scan_output_is_validated_before_legacy_broadcast() {
         let command = scripted_command(
             r#"
@@ -1417,18 +1474,30 @@ mod tests {
 
     #[test]
     fn build_command_passes_apply_and_ipod_flags() {
-        let cmd = build_command(&PathBuf::from("classick.exe"), "G:\\", false);
+        let cmd = build_command(
+            &PathBuf::from("classick.exe"),
+            "G:\\",
+            false,
+            crate::portable::profile::TranscodeProfile::Aac192,
+        );
         let dbg = format!("{cmd:?}");
         assert!(dbg.contains("--ipc-mode"));
         assert!(dbg.contains("--apply"));
         assert!(dbg.contains("--ipod"));
         assert!(dbg.contains("G:\\"));
         assert!(!dbg.contains("--rockbox-compat"));
+        assert!(dbg.contains("--transcode-profile"));
+        assert!(dbg.contains("aac_192"));
     }
 
     #[test]
     fn build_command_adds_rockbox_flag_when_enabled() {
-        let cmd = build_command(&PathBuf::from("classick.exe"), "G:\\", true);
+        let cmd = build_command(
+            &PathBuf::from("classick.exe"),
+            "G:\\",
+            true,
+            crate::portable::profile::TranscodeProfile::Alac,
+        );
         assert!(format!("{cmd:?}").contains("--rockbox-compat"));
     }
 
@@ -1445,13 +1514,19 @@ mod tests {
 
     #[test]
     fn build_replace_library_command_passes_replace_and_apply_flags() {
-        let cmd = build_replace_library_command(&PathBuf::from("classick.exe"), "G:\\");
+        let cmd = build_replace_library_command(
+            &PathBuf::from("classick.exe"),
+            "G:\\",
+            crate::portable::profile::TranscodeProfile::Aac128,
+        );
         let dbg = format!("{cmd:?}");
         assert!(dbg.contains("--ipc-mode"));
         assert!(dbg.contains("--replace-library"));
         assert!(dbg.contains("--apply"));
         assert!(dbg.contains("--ipod"));
         assert!(dbg.contains("G:\\"));
+        assert!(dbg.contains("--transcode-profile"));
+        assert!(dbg.contains("aac_128"));
     }
 
     #[test]

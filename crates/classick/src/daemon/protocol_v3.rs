@@ -2,7 +2,8 @@ use crate::device::{DeviceId, DeviceReadiness, ObservationId};
 use crate::ipc_daemon::DaemonEvent;
 use crate::ipc_device::{DevicePhaseLabel, DeviceSnapshot};
 use crate::portable::device_store::{read_profile, OwnedDeviceProfile};
-use crate::portable::profile::{MutationId, PlaylistSlug, ProfilePath};
+use crate::portable::profile::{MutationId, PlaylistSlug};
+use crate::portable_path::PortablePath;
 use crate::wire::{
     ConfigDelivery, DeliveredComponent, DeviceConfigSnapshot, DevicePhase,
     IdentifiedDeviceSnapshot, ProfileStatus, RequestId, SessionId, StorageFreshness,
@@ -48,7 +49,10 @@ pub(crate) fn event_to_wire(event: &DaemonEvent) -> Result<Option<WireEvent>> {
             entries,
             acknowledged_request_id,
         } => Ok(Some(WireEvent::History {
-            request_id: request(acknowledged_request_id)?,
+            request_id: acknowledged_request_id
+                .as_deref()
+                .map(request)
+                .transpose()?,
             entries: entries
                 .iter()
                 .map(history_entry)
@@ -138,7 +142,7 @@ pub(crate) fn event_to_wire(event: &DaemonEvent) -> Result<Option<WireEvent>> {
             playlist: crate::wire::StoredPlaylist::Manual {
                 slug: PlaylistSlug::parse(&playlist.slug)?,
                 name: playlist.name.clone(),
-                tracks: profile_paths(&playlist.tracks)?,
+                tracks: library_paths(&playlist.tracks)?,
             },
         })),
         DaemonEvent::LibraryMutationRejected {
@@ -296,7 +300,7 @@ pub(crate) fn event_to_wire(event: &DaemonEvent) -> Result<Option<WireEvent>> {
                     playlist: crate::wire::StoredPlaylist::Manual {
                         slug: slug.clone(),
                         name: name.clone(),
-                        tracks: profile_paths(tracks)?,
+                        tracks: library_paths(tracks)?,
                     },
                 },
                 (
@@ -376,7 +380,7 @@ pub(crate) fn event_to_wire(event: &DaemonEvent) -> Result<Option<WireEvent>> {
             acknowledged_request_id,
         } => Ok(Some(WireEvent::ResolvedTracks {
             request_id: request(acknowledged_request_id)?,
-            tracks: profile_paths(tracks)?,
+            tracks: library_paths(tracks)?,
         })),
         DaemonEvent::SourceAvailability {
             state,
@@ -430,6 +434,7 @@ fn legacy_device_config(
                 schema_version: 1,
                 auto_sync: settings.auto_sync,
                 rockbox_compat: settings.rockbox_compat,
+                transcode_profile: settings.transcode_profile,
             },
             delivery: ConfigDelivery::PendingDevice { last_failure: None },
         },
@@ -461,7 +466,7 @@ fn inventory_device(device: &DeviceSnapshot) -> Result<IdentifiedDeviceSnapshot>
     let hardware = observation
         .as_ref()
         .map(|observation| observation.hardware_facts().clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|| device.hardware.clone());
     let mut profile_status = match device.mount.as_deref() {
         Some(mount) => match read_profile(Path::new(mount))? {
             OwnedDeviceProfile::Valid(_) => ProfileStatus::Adopted,
@@ -563,8 +568,8 @@ fn profile_selection(
     serde_json::from_value(value).context("translate portable selection")
 }
 
-fn profile_paths(paths: &[String]) -> Result<Vec<ProfilePath>> {
-    paths.iter().map(|path| ProfilePath::parse(path)).collect()
+fn library_paths(paths: &[String]) -> Result<Vec<PortablePath>> {
+    paths.iter().map(|path| PortablePath::parse(path)).collect()
 }
 
 fn device_id(value: &str) -> Result<DeviceId> {
@@ -613,5 +618,77 @@ fn map_drop_behavior(
     match behavior {
         crate::config_file::DropSyncBehavior::Immediate => crate::wire::DropSyncBehavior::Immediate,
         crate::config_file::DropSyncBehavior::NextSync => crate::wire::DropSyncBehavior::NextSync,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::{Fact, HardwareFacts, IpodColour, IpodFamily};
+    use crate::ipc_device::DeviceIdentitySnapshot;
+
+    #[test]
+    fn playlist_events_accept_unicode_source_relative_paths() {
+        let event = DaemonEvent::PlaylistSelectionAppended {
+            acknowledged_request_id: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8764".to_string(),
+            slug: "new-playlist".to_string(),
+            appended_tracks: 1,
+            playlist_revision: 1,
+            playlist: crate::ipc_daemon::ManualPlaylistPayload {
+                slug: "new-playlist".to_string(),
+                name: "New Playlist".to_string(),
+                tracks: vec!["Björk/日本語 🎵/03 – I’m So Free.flac".to_string()],
+            },
+        };
+
+        let converted = event_to_wire(&event).unwrap().unwrap();
+
+        assert!(matches!(
+            converted,
+            WireEvent::PlaylistSelectionAppended { playlist: crate::wire::StoredPlaylist::Manual { tracks, .. }, .. }
+                if tracks[0].as_str() == "Björk/日本語 🎵/03 – I’m So Free.flac"
+        ));
+    }
+
+    #[test]
+    fn disconnected_inventory_uses_persisted_hardware_facts() {
+        let device = DeviceSnapshot {
+            identity: DeviceIdentitySnapshot {
+                serial: "000A27002138B0A8".to_string(),
+                model_label: "iPod Classic (3rd gen)".to_string(),
+                name: Some("Michael's iPod".to_string()),
+            },
+            hardware: HardwareFacts {
+                family: Some(Fact::decoded(IpodFamily::Classic)),
+                model_code: Some(Fact::reported("MC293".to_string())),
+                colour: Some(Fact::decoded(IpodColour::Silver)),
+                ..HardwareFacts::default()
+            },
+            configured: true,
+            connected: false,
+            mount: None,
+            phase: DevicePhaseLabel::Disconnected,
+            session_id: None,
+            storage: None,
+            synced_count: 0,
+            library_count: None,
+            latest_successful_sync: None,
+            latest_attempt: None,
+            last_terminal_error: None,
+            selection_revision: 1,
+            settings_revision: 1,
+            subscriptions_revision: 1,
+        };
+
+        let inventory = inventory_device(&device).unwrap();
+
+        assert_eq!(
+            inventory.hardware.model_code,
+            Some(Fact::reported("MC293".to_string()))
+        );
+        assert_eq!(
+            inventory.hardware.colour,
+            Some(Fact::decoded(IpodColour::Silver))
+        );
     }
 }

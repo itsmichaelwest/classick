@@ -67,6 +67,7 @@ fn accept_adoption(host: &PathBuf) {
                     schema_version: 1,
                     auto_sync: false,
                     rockbox_compat: false,
+                    transcode_profile: classick::portable::profile::TranscodeProfile::Alac,
                 },
                 0,
             )
@@ -210,6 +211,7 @@ fn manifest_publication_is_attested_in_the_portable_profile() {
                     schema_version: 1,
                     auto_sync: true,
                     rockbox_compat: false,
+                    transcode_profile: classick::portable::profile::TranscodeProfile::Alac,
                 },
                 1,
             )

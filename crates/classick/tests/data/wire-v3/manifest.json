@@ -51,6 +51,7 @@
       {"path":"device/negative/inventory-empty-hardware-string.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
       {"path":"device/negative/inventory-zero-capacity.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
       {"path":"device/negative/set-settings-with-observation.json","expectation":"forbidden_observation_id","stream":"desktop_to_daemon_commands"},
+      {"path":"device/negative/set-settings-missing-transcode-profile.json","expectation":"decode_failure","stream":"desktop_to_daemon_commands"},
       {"path":"device/negative/inventory-zero-observation.json","expectation":"decode_failure","stream":"daemon_to_desktop_events"},
       {"path":"device/negative/inventory-duplicate-observation.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},
       {"path":"device/negative/inventory-zero-revision.json","expectation":"semantic_failure","stream":"daemon_to_desktop_events"},

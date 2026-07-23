@@ -32,7 +32,8 @@ fn valid_profile() -> Value {
             "value": {
                 "schema_version": 1,
                 "auto_sync": false,
-                "rockbox_compat": true
+                "rockbox_compat": true,
+                "transcode_profile": "alac"
             }
         },
         "subscriptions": {
@@ -473,6 +474,7 @@ fn complete_component_values_do_not_default_missing_fields() {
         "/selection/value/rules",
         "/settings/value/auto_sync",
         "/settings/value/rockbox_compat",
+        "/settings/value/transcode_profile",
         "/subscriptions/value/playlists",
     ];
 

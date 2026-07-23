@@ -18,14 +18,18 @@ final class SetupWindowController {
   /// behind whatever currently has focus.
   func show(
     model: AppModel, preferredSerial: DeviceID?,
-    onDone: @escaping (_ source: String, _ autoSync: Bool, _ serial: DeviceID) -> Void
+    onDone: @escaping (
+      _ source: String, _ autoSync: Bool, _ transcodeProfile: TranscodeProfile,
+      _ serial: DeviceID
+    ) -> Void
   ) {
     NSApp.activate(ignoringOtherApps: true)
 
-    if let window {
+    if let window, window.isVisible {
       window.makeKeyAndOrderFront(nil)
       return
     }
+    window = nil
 
     let root = SetupWindow(
       model: model,

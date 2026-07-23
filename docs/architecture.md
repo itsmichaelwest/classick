@@ -84,15 +84,33 @@ remains global and host-owned; portable library identity is deferred.
 8. The daemon retains admission through finalization, terminal history, and
    subprocess EOF.
 
+When a source FLAC's tags or embedded artwork change but its audio-frame
+fingerprint does not, the transaction journals an in-place metadata update.
+The existing device media file, path, and DBID are preserved while iTunesDB,
+ArtworkDB, and the manifest advance together.
+
 Cancellation and pause stop admission at an album boundary. They do not kill a
 subprocess during publication. Client shutdown, OS termination, and parent
 death converge on the same drain path.
+
+Each adopted device carries a portable `transcode_profile`: lossless ALAC or
+AAC-LC at 256, 192, or 128 kbps. ALAC is the default. All four choices are
+available on every supported device; hardware identity and capacity never gate
+the setting. The manifest records the profile used for each transcoded track,
+so changing it promotes affected tracks to `Modify` on the next sync.
+Passthrough tracks retain their source codec and have no Classick-selected
+profile. An ALAC passthrough is nevertheless replaced when the target changes
+to AAC; already-lossy passthrough tracks are not re-encoded.
 
 ## Playlist model
 
 Host playlists have stable slugs. Manual playlists store ordered
 source-relative track paths; smart playlists store deterministic rules. Device
 subscriptions extend the selected library set before syncing.
+
+At daemon startup, subscriptions to absent host playlists are removed from
+legacy and portable host intent. An existing playlist that cannot be read or
+parsed is preserved as unresolved rather than treated as absent.
 
 Classick modifies only playlists for which it has positive device authority:
 
@@ -116,7 +134,8 @@ never serialized to config, logs, IPC errors, or manifests.
 - Device enumeration and mount resolution have platform backends.
 - Windows subprocesses that can display a console use
   `windows_proc::NoConsoleWindow`.
-- macOS transcoding uses `afconvert`; Windows uses ffmpeg or optional refalac.
+- macOS transcoding uses `afconvert`. Windows uses ffmpeg for AAC and ffmpeg or
+  optional refalac for ALAC.
 - Named-pipe, Unix-socket, and worker transports use protocol 3 typed messages.
 - FAT/exFAT and host filesystems do not provide identical rename/unlink
   primitives, so publication uses journals, validation, no-replace creation,

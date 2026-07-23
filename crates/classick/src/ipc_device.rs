@@ -2,6 +2,7 @@
 
 use crate::daemon::device_storage::StorageInfo;
 use crate::daemon::history::HistoryEntry;
+use crate::device::HardwareFacts;
 use serde::{Deserialize, Serialize};
 
 pub type SessionId = u64;
@@ -34,6 +35,8 @@ pub enum DevicePhaseLabel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceSnapshot {
     pub identity: DeviceIdentitySnapshot,
+    #[serde(skip)]
+    pub hardware: HardwareFacts,
     pub configured: bool,
     pub connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

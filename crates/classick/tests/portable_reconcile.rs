@@ -304,7 +304,7 @@ fn profile(device_id: &DeviceId, auto_sync: bool) -> PortableProfile {
               "schema_version":1,
               "device_id":"{}",
               "selection":{{"revision":3,"mutation_id":"{}","value":{{"schema_version":1,"mode":"all","rules":[]}}}},
-              "settings":{{"revision":7,"mutation_id":"{}","value":{{"schema_version":1,"auto_sync":{},"rockbox_compat":false}}}},
+              "settings":{{"revision":7,"mutation_id":"{}","value":{{"schema_version":1,"auto_sync":{},"rockbox_compat":false,"transcode_profile":"alac"}}}},
               "subscriptions":{{"revision":4,"mutation_id":"{}","value":{{"schema_version":1,"playlists":[]}}}},
               "owned_playlists":[],
               "companion_authorities":[]
@@ -324,6 +324,7 @@ fn settings(auto_sync: bool, rockbox_compat: bool) -> SettingsValue {
         schema_version: 1,
         auto_sync,
         rockbox_compat,
+        transcode_profile: classick::portable::profile::TranscodeProfile::Alac,
     }
 }
 

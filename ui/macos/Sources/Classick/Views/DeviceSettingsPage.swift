@@ -26,6 +26,7 @@ struct DeviceSettingsPage: View {
   private struct SettingsDraft: Equatable {
     var autoSync = true
     var rockboxCompat = false
+    var transcodeProfile: TranscodeProfile = .alac
   }
 
   @State private var draft = SettingsDraft()
@@ -101,7 +102,7 @@ struct DeviceSettingsPage: View {
 
   private var settingsForm: some View {
     Form {
-      if configStatus != .saved {
+      if configStatus.message != nil {
         Section { DeviceConfigStatusView(status: configStatus) }
       }
       Section {
@@ -141,6 +142,18 @@ struct DeviceSettingsPage: View {
             isOn: Binding(
               get: { draft.rockboxCompat }, set: { value in edit { $0.rockboxCompat = value } })
           )
+          .disabled(!canEditDevice)
+          Picker(
+            "Music format",
+            selection: Binding(
+              get: { draft.transcodeProfile },
+              set: { value in edit { $0.transcodeProfile = value } })
+          ) {
+            ForEach(TranscodeProfile.allCases) { profile in
+              Text(profile.title).tag(profile)
+            }
+          }
+          .pickerStyle(.menu)
           .disabled(!canEditDevice)
         } else {
           HStack(spacing: 8) {
@@ -192,7 +205,9 @@ struct DeviceSettingsPage: View {
   private func seedIfNeeded() {
     guard let config else { return }
     draft = SettingsDraft(
-      autoSync: config.settings.autoSync, rockboxCompat: config.settings.rockboxCompat)
+      autoSync: config.settings.autoSync,
+      rockboxCompat: config.settings.rockboxCompat,
+      transcodeProfile: config.settings.transcodeProfile)
     hasCanonicalDraft = true
   }
 
@@ -226,7 +241,10 @@ struct DeviceSettingsPage: View {
     guard edited != draft else { return }
     draft = edited
     model.editDeviceSettings(
-      DeviceSettingsWire(autoSync: edited.autoSync, rockboxCompat: edited.rockboxCompat),
+      DeviceSettingsWire(
+        autoSync: edited.autoSync,
+        rockboxCompat: edited.rockboxCompat,
+        transcodeProfile: edited.transcodeProfile),
       for: serial)
     scheduleSave()
   }

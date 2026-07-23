@@ -596,6 +596,20 @@ impl CheckpointCoordinator<'_> {
                     })?;
             }
         }
+        for update in &journal.metadata_updates {
+            let source = &update.candidate_entry.source_path;
+            if let Some(hash) = update.artwork_hash.as_deref() {
+                self.artwork_cache.load_hash(hash).with_context(|| {
+                    format!("prepare metadata artwork for {}", source.display())
+                })?;
+            } else {
+                self.artwork_cache
+                    .load_for_source(source)
+                    .with_context(|| {
+                        format!("prepare metadata artwork for {}", source.display())
+                    })?;
+            }
+        }
         Ok(())
     }
 
@@ -714,6 +728,41 @@ impl CheckpointCoordinator<'_> {
             store
                 .save(journal)
                 .context("journal copied iPod path before DB write")?;
+        }
+
+        for index in 0..journal.metadata_updates.len() {
+            let update = journal.metadata_updates[index].clone();
+            let dbid = update.candidate_entry.ipod_dbid;
+            let source = &update.candidate_entry.source_path;
+            let predecessor_index = candidate
+                .tracks
+                .iter()
+                .position(|entry| entry.ipod_dbid == dbid)
+                .context("metadata update predecessor is missing from the manifest")?;
+            let predecessor = &candidate.tracks[predecessor_index];
+            if &predecessor.source_path != source
+                || predecessor.ipod_relpath != update.candidate_entry.ipod_relpath
+                || predecessor.audio_fingerprint != update.candidate_entry.audio_fingerprint
+                || predecessor.encoder != update.candidate_entry.encoder
+                || predecessor.encoder_version != update.candidate_entry.encoder_version
+                || predecessor.source_format != update.candidate_entry.source_format
+                || predecessor.transcode_profile != update.candidate_entry.transcode_profile
+            {
+                bail!("metadata update changes immutable media identity");
+            }
+            let art = match update.artwork_hash.as_deref() {
+                Some(hash) => Some(self.artwork_cache.load_hash(hash)?),
+                None => self.artwork_cache.load_for_source(source)?,
+            };
+            db.update_track_metadata(dbid, &update.tags, None)
+                .with_context(|| format!("update metadata for dbid {dbid}"))?;
+            db.set_track_artwork(dbid, art.as_deref())
+                .with_context(|| format!("update artwork for dbid {dbid}"))?;
+            candidate.tracks[predecessor_index] = update.candidate_entry;
+            journal.candidate_manifest = Some(candidate.clone());
+            store
+                .save(journal)
+                .context("journal metadata update before DB write")?;
         }
 
         let preparation = (|| -> Result<()> {
@@ -1006,7 +1055,7 @@ impl CheckpointCoordinator<'_> {
     ) -> CheckpointResult {
         CheckpointResult {
             published_albums: journal.albums.len(),
-            published_tracks: journal.staged_files.len(),
+            published_tracks: journal.staged_files.len() + journal.metadata_updates.len(),
             host_cache_warning,
         }
     }
@@ -1079,10 +1128,17 @@ fn remove_validated_snapshot_if_present(path: &Path) -> Result<()> {
 
 fn remove_empty_dir_if_present(path: &Path) -> Result<()> {
     match std::fs::remove_dir(path) {
-        Ok(()) => Ok(()),
+        Ok(()) => remove_file_if_present(&appledouble_sibling(path)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("remove empty {}", path.display())),
     }
+}
+
+fn appledouble_sibling(path: &Path) -> PathBuf {
+    let Some(name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    path.with_file_name(format!("._{}", name.to_string_lossy()))
 }
 
 fn require_empty_owned_directory(path: &Path, label: &str) -> Result<()> {
@@ -1172,7 +1228,8 @@ mod tests {
     use crate::manifest_store::ManifestStore;
     use crate::pending_session::PendingPhase;
     use crate::pending_session::{
-        DeviceManifestPreimage, PendingAlbum, PendingSession, PendingSessionStore, StagedFile,
+        DeviceManifestPreimage, PendingAlbum, PendingMetadataUpdate, PendingSession,
+        PendingSessionStore, StagedFile,
     };
     use std::ffi::CString;
     use std::path::PathBuf;
@@ -1340,6 +1397,31 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_cleanup_accepts_only_paired_macos_appledouble_files() {
+        let mount = temp_mount();
+        let db = mount.join("iPod_Control/iTunes/iTunesDB");
+        std::fs::write(&db, b"old db").unwrap();
+        let snapshot_dir = mount.join("iPod_Control/classick/pending/2.snapshot");
+        let snapshot = RollbackSnapshot::create(&mount, &snapshot_dir).unwrap();
+        drop(snapshot);
+        for relative in [
+            "._snapshot.json",
+            "._iPod_Control",
+            "iPod_Control/._iTunes",
+            "iPod_Control/iTunes/._iTunesDB",
+        ] {
+            std::fs::write(snapshot_dir.join(relative), b"AppleDouble metadata").unwrap();
+        }
+
+        RollbackSnapshot::open_for_deletion(&snapshot_dir)
+            .unwrap()
+            .remove_for_deletion()
+            .unwrap();
+
+        assert!(!snapshot_dir.exists());
+    }
+
+    #[test]
     fn coordinator_publishes_in_order_and_removes_journal_last() {
         let (mount, _host, store, cache, mut manifest) = coordinator_fixture("publish");
         let mut journal = PendingSession::new(11, TEST_DEVICE_ID, Vec::new());
@@ -1367,6 +1449,121 @@ mod tests {
         assert!(!journal_store.path(11).exists());
         assert!(!journal_store.snapshot_dir(11).exists());
         assert!(!staged_dir.exists());
+    }
+
+    #[test]
+    fn metadata_publication_preserves_media_file_path_and_dbid() {
+        let (mount, host, store, cache, mut manifest) = coordinator_fixture("metadata-in-place");
+        let source = manifest
+            .last_source_root
+            .as_ref()
+            .unwrap()
+            .join("album/track.flac");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac"),
+            &source,
+        )
+        .unwrap();
+        let media = host.join("track.m4a");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bare.m4a"),
+            &media,
+        )
+        .unwrap();
+
+        let db = crate::ipod::db::OwnedDb::open(&mount).unwrap();
+        let handle = db
+            .add_track_with_file_strict(
+                &media,
+                &crate::ipod::db::Tags {
+                    title: Some("Old title".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        db.write().unwrap();
+        drop(db);
+
+        let device_file = mount.join(
+            handle
+                .ipod_relpath
+                .replace('\\', std::path::MAIN_SEPARATOR_STR),
+        );
+        let original_media = std::fs::read(&device_file).unwrap();
+        let existing = ManifestEntry {
+            source_path: source.clone(),
+            source_mtime: 1,
+            source_size: 2,
+            source_fingerprint: "old-fingerprint".into(),
+            ipod_dbid: handle.dbid,
+            ipod_relpath: handle.ipod_relpath.clone(),
+            source_known: true,
+            audio_fingerprint: "audio-fingerprint".into(),
+            encoder: "afconvert".into(),
+            encoder_version: "system".into(),
+            source_format: "flac".into(),
+            transcode_profile: Some(crate::portable::profile::TranscodeProfile::Alac),
+        };
+        manifest.tracks.push(existing.clone());
+        cache.record_no_art(&source).unwrap();
+
+        let mut candidate = existing;
+        candidate.source_mtime = 3;
+        candidate.source_size = 4;
+        candidate.source_fingerprint = "new-fingerprint".into();
+        let mut journal =
+            PendingSession::new(32, TEST_DEVICE_ID, vec![PendingAlbum::new("album", 0)]);
+        journal.metadata_updates.push(PendingMetadataUpdate {
+            tags: crate::ipod::db::Tags {
+                title: Some("New title".into()),
+                ..Default::default()
+            },
+            artwork_hash: None,
+            candidate_entry: candidate,
+        });
+
+        let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+        let mutation_session = mutation_session(&mount);
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
+            manifest_store: &store,
+            artwork_cache: cache,
+        };
+
+        let result = coordinator
+            .publish(&mut journal, &mut manifest, &progress)
+            .unwrap();
+        progress.finish(true).unwrap();
+
+        assert_eq!(result.published_tracks, 1);
+        assert_eq!(manifest.tracks.len(), 1);
+        assert_eq!(manifest.tracks[0].ipod_dbid, handle.dbid);
+        assert_eq!(manifest.tracks[0].ipod_relpath, handle.ipod_relpath);
+        assert_eq!(manifest.tracks[0].source_fingerprint, "new-fingerprint");
+        assert_eq!(std::fs::read(&device_file).unwrap(), original_media);
+
+        let reopened = crate::ipod::db::OwnedDb::open(&mount).unwrap();
+        unsafe {
+            let mut node = (*reopened.as_ptr()).tracks;
+            let mut title = None;
+            while !node.is_null() {
+                let track = (*node).data.cast::<crate::ffi::Itdb_Track>();
+                if !track.is_null() && (*track).dbid as u64 == handle.dbid {
+                    title = Some(
+                        std::ffi::CStr::from_ptr((*track).title)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                    break;
+                }
+                node = (*node).next;
+            }
+            assert_eq!(title.as_deref(), Some("New title"));
+        }
     }
 
     #[test]
@@ -1694,6 +1891,7 @@ mod tests {
             encoder: "afconvert".into(),
             encoder_version: String::new(),
             source_format: "flac".into(),
+            transcode_profile: None,
         });
         journal.staged_files.push(staged);
 

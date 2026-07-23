@@ -44,7 +44,8 @@ fn profile(device_id: &DeviceId) -> PortableProfile {
                 "value": {
                     "schema_version": 1,
                     "auto_sync": false,
-                    "rockbox_compat": true
+                    "rockbox_compat": true,
+                    "transcode_profile": "alac"
                 }
             },
             "subscriptions": {

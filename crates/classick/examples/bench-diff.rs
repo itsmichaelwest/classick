@@ -67,6 +67,7 @@ fn main() -> Result<()> {
             source::audio_fingerprint(p)
         },
         "ffmpeg",
+        classick::portable::profile::TranscodeProfile::Alac,
         false,
     )?;
     let t_diff = t2.elapsed();

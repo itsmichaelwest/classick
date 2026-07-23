@@ -1393,6 +1393,19 @@ mod tests {
     }
 
     #[test]
+    fn libgpod_string_boundary_preserves_utf8_metadata() {
+        let value = "日本語 🎵 – I’m So Frëe";
+        let mut slot = ptr::null_mut();
+
+        unsafe {
+            set_str(&mut slot, Some(value));
+            assert!(!slot.is_null());
+            assert_eq!(CStr::from_ptr(slot).to_str().unwrap(), value);
+            ffi::g_free(slot.cast());
+        }
+    }
+
+    #[test]
     fn drop_frees_a_parsed_genius_identifier_exactly_once() {
         unsafe {
             let raw = ffi::itdb_new();

@@ -26,6 +26,7 @@ struct DeviceRowPresentation: Equatable {
   var primaryAction: Action?
   var secondaryAction: Action?
   var accessibilityLabel: String = ""
+  var showsMeter: Bool = true
 
   static func make(device: DeviceViewState?, libraryCount: Int?) -> Self {
     make(device: device, libraryCount: libraryCount, globalPhase: nil)
@@ -89,12 +90,13 @@ struct DeviceRowPresentation: Equatable {
       return Self(
         serial: device.deviceID,
         title: title,
-        subtitle: "Not connected",
-        caption: "Plug it in to sync",
+        subtitle: "Connect to sync",
+        caption: nil,
         meter: .unavailable,
         primaryAction: nil,
         secondaryAction: nil,
-        accessibilityLabel: accessibilityLabel)
+        accessibilityLabel: accessibilityLabel,
+        showsMeter: false)
 
     case .unconfigured:
       return Self(
@@ -133,7 +135,7 @@ struct DeviceRowPresentation: Equatable {
       return Self(
         serial: device.deviceID,
         title: title,
-        subtitle: "Adding \(progress.total) track\(progress.total == 1 ? "" : "s")",
+        subtitle: "Syncing \(progress.total) change\(progress.total == 1 ? "" : "s")",
         caption: nil,
         meter: .progress(
           current: progress.current,

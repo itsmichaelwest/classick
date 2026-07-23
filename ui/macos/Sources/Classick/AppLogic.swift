@@ -16,13 +16,15 @@ extension AppDelegate {
         serial: DeviceID,
         current: DeviceConfigState,
         autoSync: Bool,
+        transcodeProfile: TranscodeProfile = .alac,
         requestID: UUID,
         selectionMutationID: UUID,
         settingsMutationID: UUID,
         subscriptionsMutationID: UUID
     ) -> [WireV3Command] {
         let settings = DeviceSettingsWire(
-            autoSync: autoSync, rockboxCompat: current.settings.rockboxCompat)
+            autoSync: autoSync, rockboxCompat: current.settings.rockboxCompat,
+            transcodeProfile: transcodeProfile)
         return [
             .setSourceLocation(requestID: WireV3Command.newRequestID(), sourceRoot: source),
             .adoptDevice(

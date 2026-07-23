@@ -4,6 +4,55 @@ import XCTest
 
 @MainActor
 final class AppModelReducerTests: XCTestCase {
+  func testSyncBatchFlushesPendingDeviceConfigBeforeTriggeringSync() throws {
+    let deviceID: DeviceID = "A"
+    let selectionRequestID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
+    let selectionMutationID = UUID(uuidString: "00000000-0000-4000-8000-000000000002")!
+    let subscriptionsRequestID = UUID(uuidString: "00000000-0000-4000-8000-000000000003")!
+    let subscriptionsMutationID = UUID(uuidString: "00000000-0000-4000-8000-000000000004")!
+    let syncRequestID = UUID(uuidString: "00000000-0000-4000-8000-000000000005")!
+    let batch = DeviceActionCommand.syncBatch(
+      serial: deviceID,
+      selection: SelectionState(mode: .include, rules: [.artist(name: "Björk")]),
+      subscriptions: SubscriptionsWire(playlists: ["favourites"]),
+      syncRequestID: syncRequestID,
+      selectionRequestID: selectionRequestID,
+      selectionMutationID: selectionMutationID,
+      subscriptionsRequestID: subscriptionsRequestID,
+      subscriptionsMutationID: subscriptionsMutationID)
+
+    let types = try batch.commands.map { command in
+      let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(command))
+      return try XCTUnwrap((object as? [String: Any])?["type"] as? String)
+    }
+
+    XCTAssertEqual(types, ["set_selection", "set_subscriptions", "trigger_sync"])
+    XCTAssertEqual(
+      batch.selectionReceipt,
+      .init(
+        requestID: selectionRequestID.uuidString.lowercased(),
+        mutationID: selectionMutationID.uuidString.lowercased()))
+    XCTAssertEqual(
+      batch.subscriptionsReceipt,
+      .init(
+        requestID: subscriptionsRequestID.uuidString.lowercased(),
+        mutationID: subscriptionsMutationID.uuidString.lowercased()))
+  }
+
+  func testSyncBatchWithoutPendingConfigContainsOnlyTrigger() throws {
+    let batch = DeviceActionCommand.syncBatch(
+      serial: "A", selection: nil, subscriptions: nil,
+      syncRequestID: UUID(uuidString: "00000000-0000-4000-8000-000000000005")!)
+
+    XCTAssertEqual(batch.commands.count, 1)
+    let command = try XCTUnwrap(batch.commands.first)
+    let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(command))
+
+    XCTAssertEqual((object as? [String: Any])?["type"] as? String, "trigger_sync")
+    XCTAssertNil(batch.selectionReceipt)
+    XCTAssertNil(batch.subscriptionsReceipt)
+  }
+
   func testCorrelatedDeviceDropClearsPendingAndPublishesDeliveryOutcome() {
     let model = AppModel()
     seedDevices(["A"], in: model)
@@ -179,6 +228,7 @@ final class AppModelReducerTests: XCTestCase {
       settings: .init(autoSync: false, rockboxCompat: true), preview: nil)
     let commands = AppDelegate.setupDeviceCommands(
       source: "/Music", serial: "0xA", current: current, autoSync: true,
+      transcodeProfile: .aac128,
       requestID: UUID(), selectionMutationID: UUID(), settingsMutationID: UUID(),
       subscriptionsMutationID: UUID())
     let objects = try commands.map {
@@ -190,6 +240,9 @@ final class AppModelReducerTests: XCTestCase {
     let settings = objects[1]["settings"] as! [String: Any]
     XCTAssertEqual(settings["auto_sync"] as? Bool, true)
     XCTAssertEqual(settings["rockbox_compat"] as? Bool, true)
+    XCTAssertEqual(
+      settings["transcode_profile"] as? String,
+      "aac_128")
     XCTAssertNil(objects[1]["model"])
     XCTAssertNil(objects[1]["colour"])
     XCTAssertNil(objects[1]["appearance"])
@@ -220,6 +273,17 @@ final class AppModelReducerTests: XCTestCase {
     XCTAssertNil(
       AppDelegate.setupIpodIdentity(device: nil, preservingCustomSelection: true),
       "no device -> no identity to save")
+  }
+
+  func testSetupUsesGlobalMusicFolderUntilUserChoosesAnother() {
+    XCTAssertEqual(
+      SetupWindowLogic.sourcePath(pickedPath: nil, configuredPath: "/Volumes/Media/Music"),
+      "/Volumes/Media/Music")
+    XCTAssertEqual(
+      SetupWindowLogic.sourcePath(
+        pickedPath: "/Volumes/Other/Music", configuredPath: "/Volumes/Media/Music"),
+      "/Volumes/Other/Music")
+    XCTAssertNil(SetupWindowLogic.sourcePath(pickedPath: nil, configuredPath: ""))
   }
 
   func testFinishSyncEventPopulatesSkippedForSpaceArtworkAndDbRestoredState() {

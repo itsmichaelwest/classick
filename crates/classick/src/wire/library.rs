@@ -1,5 +1,5 @@
-use crate::portable::profile::ProfilePath;
 use crate::portable::profile::SelectionRule;
+use crate::portable_path::PortablePath;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
@@ -81,16 +81,16 @@ impl LibrarySnapshot {
             bail!("never-scanned library snapshot cannot contain indexed content");
         }
         for artist in &self.artists {
-            validate_label(&artist.name, "library artist")?;
+            validate_display_label(&artist.name, "library artist")?;
             for album in &artist.albums {
-                validate_label(&album.name, "library album")?;
+                validate_display_label(&album.name, "library album")?;
                 if let Some(genre) = &album.genre {
-                    validate_label(genre, "library album genre")?;
+                    validate_display_label(genre, "library album genre")?;
                 }
             }
         }
         for genre in &self.genres {
-            validate_label(&genre.name, "library genre")?;
+            validate_display_label(&genre.name, "library genre")?;
         }
         Ok(())
     }
@@ -106,16 +106,16 @@ pub(super) fn validate_selection_rules(rules: &[SelectionRule]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_paths(paths: &[ProfilePath]) -> Result<()> {
+pub(super) fn validate_paths(paths: &[PortablePath]) -> Result<()> {
     if paths.windows(2).any(|pair| pair[0] >= pair[1]) {
         bail!("resolved track paths must be unique and lexicographically sorted");
     }
     Ok(())
 }
 
-fn validate_label(value: &str, kind: &str) -> Result<()> {
-    if value.is_empty() || value.chars().any(char::is_control) {
-        bail!("{kind} must not be empty or contain control characters");
+fn validate_display_label(value: &str, kind: &str) -> Result<()> {
+    if value.chars().any(char::is_control) {
+        bail!("{kind} must not contain control characters");
     }
     Ok(())
 }

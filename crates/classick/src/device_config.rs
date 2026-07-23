@@ -106,6 +106,8 @@ pub struct DeviceSettings {
     pub auto_sync: bool,
     #[serde(default)]
     pub rockbox_compat: bool,
+    #[serde(default)]
+    pub transcode_profile: crate::portable::profile::TranscodeProfile,
 }
 
 impl Default for DeviceSettings {
@@ -114,6 +116,7 @@ impl Default for DeviceSettings {
             version: DEVICE_SETTINGS_VERSION,
             auto_sync: true,
             rockbox_compat: false,
+            transcode_profile: crate::portable::profile::TranscodeProfile::Alac,
         }
     }
 }
@@ -151,6 +154,7 @@ impl DeviceSettings {
             version: DEVICE_SETTINGS_VERSION,
             auto_sync: daemon.enabled,
             rockbox_compat: daemon.rockbox_compat,
+            transcode_profile: crate::portable::profile::TranscodeProfile::Alac,
         };
         if let Err(e) = Self::save_atomic(path, &seeded) {
             tracing::warn!(
@@ -272,9 +276,12 @@ mod tests {
     fn device_settings_load_or_default_missing_file_returns_default() {
         let base = tempdir_under_target("settings-missing");
         let path = base.join("settings.json");
+        let settings = DeviceSettings::load_or_default(&path);
+
+        assert_eq!(settings, DeviceSettings::default());
         assert_eq!(
-            DeviceSettings::load_or_default(&path),
-            DeviceSettings::default()
+            settings.transcode_profile,
+            crate::portable::profile::TranscodeProfile::Alac
         );
     }
 
@@ -297,6 +304,7 @@ mod tests {
             version: DEVICE_SETTINGS_VERSION,
             auto_sync: false,
             rockbox_compat: true,
+            transcode_profile: crate::portable::profile::TranscodeProfile::Aac192,
         };
         DeviceSettings::save_atomic(&path, &settings).unwrap();
         assert_eq!(DeviceSettings::load_or_default(&path), settings);
@@ -317,7 +325,8 @@ mod tests {
             DeviceSettings {
                 version: DEVICE_SETTINGS_VERSION,
                 auto_sync: false,
-                rockbox_compat: true
+                rockbox_compat: true,
+                transcode_profile: crate::portable::profile::TranscodeProfile::Alac,
             }
         );
         assert!(path.exists(), "seed must persist the file");
@@ -338,6 +347,7 @@ mod tests {
                 version: DEVICE_SETTINGS_VERSION,
                 auto_sync: crate::config_file::DaemonSettings::default().enabled,
                 rockbox_compat: crate::config_file::DaemonSettings::default().rockbox_compat,
+                transcode_profile: crate::portable::profile::TranscodeProfile::Alac,
             }
         );
     }
@@ -356,7 +366,8 @@ mod tests {
             DeviceSettings {
                 version: DEVICE_SETTINGS_VERSION,
                 auto_sync: true,
-                rockbox_compat: false
+                rockbox_compat: false,
+                transcode_profile: crate::portable::profile::TranscodeProfile::Alac,
             }
         );
 

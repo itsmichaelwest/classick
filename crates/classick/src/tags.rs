@@ -85,4 +85,33 @@ mod tests {
         assert_eq!(parse_year("2002"), Some(2002));
         assert_eq!(parse_year(""), None);
     }
+
+    #[test]
+    fn preserves_full_unicode_music_metadata() {
+        let probe = ProbeOutput {
+            streams: Vec::new(),
+            format: crate::transcode::ProbeFormat {
+                format_name: Some("flac".to_string()),
+                tags: Some(ProbeTags {
+                    title: Some("日本語 🎵 – I’m So Frëe".to_string()),
+                    artist: Some("Björk".to_string()),
+                    album: Some("Début 初回盤".to_string()),
+                    album_artist: Some("Björk & 宇多田ヒカル".to_string()),
+                    genre: Some("Électronique 電子音楽".to_string()),
+                    composer: Some("Zoë / 李".to_string()),
+                    ..ProbeTags::default()
+                }),
+            },
+            duration_ms: Some(123_456),
+        };
+
+        let tags = tags_from_probe(&probe);
+
+        assert_eq!(tags.title.as_deref(), Some("日本語 🎵 – I’m So Frëe"));
+        assert_eq!(tags.artist.as_deref(), Some("Björk"));
+        assert_eq!(tags.album.as_deref(), Some("Début 初回盤"));
+        assert_eq!(tags.album_artist.as_deref(), Some("Björk & 宇多田ヒカル"));
+        assert_eq!(tags.genre.as_deref(), Some("Électronique 電子音楽"));
+        assert_eq!(tags.composer.as_deref(), Some("Zoë / 李"));
+    }
 }

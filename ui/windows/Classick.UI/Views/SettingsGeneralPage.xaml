@@ -118,6 +118,16 @@
                                   IsEnabled="{x:Bind ViewModel.General.CanEditDeviceSettings, Mode=OneWay}" />
                 </tk:SettingsCard>
 
+                <tk:SettingsCard Header="Music format"
+                                 Description="Choose the format and quality used when Classick converts music for this iPod">
+                    <ComboBox ItemsSource="{x:Bind ViewModel.General.TranscodeProfiles, Mode=OneWay}"
+                              DisplayMemberPath="Label"
+                              SelectedValuePath="Value"
+                              SelectedValue="{x:Bind ViewModel.General.TranscodeProfile, Mode=TwoWay}"
+                              IsEnabled="{x:Bind ViewModel.General.CanEditDeviceSettings, Mode=OneWay}"
+                              MinWidth="180" />
+                </tk:SettingsCard>
+
                 <tk:SettingsCard Header="Device settings"
                                  Description="{x:Bind ViewModel.General.DeliveryStatus, Mode=OneWay}" />
 

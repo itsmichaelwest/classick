@@ -11,10 +11,24 @@ pub struct GenerationEntry {
     pub blake3: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviceGeneration {
     pub entries: Vec<GenerationEntry>,
 }
+
+impl PartialEq for DeviceGeneration {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries
+            .iter()
+            .filter(|entry| !is_appledouble_path(&entry.path))
+            .eq(other
+                .entries
+                .iter()
+                .filter(|entry| !is_appledouble_path(&entry.path)))
+    }
+}
+
+impl Eq for DeviceGeneration {}
 
 pub(super) fn capture(mount: &Path) -> Result<DeviceGeneration> {
     let mut files = Vec::new();
@@ -103,6 +117,13 @@ fn collect_tree(
         .collect::<std::io::Result<Vec<_>>>()?;
     children.sort_by_key(|entry| entry.file_name());
     for child in children {
+        if child
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with("._"))
+        {
+            continue;
+        }
         let path = child.path();
         let relative_to_root = path
             .strip_prefix(root)
@@ -134,6 +155,10 @@ fn excluded_classick(relative: &Path) -> bool {
         let component = component.as_os_str();
         component == "pending" || component == "device.lock"
     })
+}
+
+fn is_appledouble_path(path: &str) -> bool {
+    path.split('/').any(|component| component.starts_with("._"))
 }
 
 fn collect_file(mount: &Path, path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {

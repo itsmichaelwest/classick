@@ -243,6 +243,7 @@ fn parse_settings(
         schema_version: COMPONENT_SCHEMA_VERSION,
         auto_sync: legacy.auto_sync,
         rockbox_compat: legacy.rockbox_compat,
+        transcode_profile: super::profile::TranscodeProfile::Alac,
     })
 }
 

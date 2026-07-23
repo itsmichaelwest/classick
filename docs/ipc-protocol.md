@@ -23,6 +23,14 @@ The shared Rust envelope is `wire::WireMessage`. Language-neutral positive and
 negative examples live under `crates/classick/tests/data/wire-v3/` and are
 consumed unchanged by Rust, Swift, and C# tests.
 
+Music-facing strings are full Unicode and are preserved as UTF-8 on the wire.
+This includes artist, album, title, album artist, composer, genre, playlist
+display names, and source-relative track paths. Source-relative paths must
+still be safe relative paths (forward slashes, no drive prefix, and no empty,
+`.` or `..` components), but are not ASCII-limited. ASCII-only validation is
+reserved for Classick-owned identifiers and structural filenames such as
+device IDs, UUIDs, playlist slugs, and portable-profile paths.
+
 ## Routing and correlation
 
 - Every query and mutation carries a lowercase non-nil UUID `request_id`.
@@ -35,6 +43,9 @@ consumed unchanged by Rust, Swift, and C# tests.
 An acknowledgement is the correlated canonical event for that exact request.
 Socket write completion, an echo, an uncorrelated inventory/config broadcast,
 or a locally predicted state is not an acknowledgement.
+
+`history.request_id` is present on a direct `get_history` response and absent
+on the authoritative history broadcast published after a terminal sync result.
 
 Configuration acceptance and device delivery are separate:
 
@@ -69,6 +80,40 @@ The public families are:
 Inventory uses `device_id` only when ordinary USB identity is available.
 Identity-unavailable observations carry an ephemeral `observation_id` and have
 no mutating commands. Mount paths are operational diagnostics, never identity.
+
+## Portable device settings
+
+The complete protocol-3 `SettingsValue` is:
+
+```json
+{
+  "schema_version": 1,
+  "auto_sync": true,
+  "rockbox_compat": false,
+  "transcode_profile": "alac"
+}
+```
+
+`transcode_profile` is required. Its V1 values are:
+
+| Wire value | Output for sources that require transcoding |
+| --- | --- |
+| `alac` | Apple Lossless in `.m4a` |
+| `aac_256` | AAC-LC at 256 kbps in `.m4a` |
+| `aac_192` | AAC-LC at 192 kbps in `.m4a` |
+| `aac_128` | AAC-LC at 128 kbps in `.m4a` |
+
+The default used when adopting a device is `alac`. The same four values are
+valid for every supported device: clients and the daemon must not infer,
+filter, disable, or rewrite them from model, generation, capacity, or
+capability data.
+
+Changing the value makes affected tracks eligible for replacement on the next
+sync, including an ALAC source previously copied losslessly when the new target
+is AAC. Compatible lossy source files that Classick normally copies without
+transcoding remain passthrough to avoid a lossy-to-lossy conversion. The
+host-local `encoder` choice is separate: it selects the ALAC backend (`ffmpeg`
+or `refalac`) and does not restrict the portable profile.
 
 ## Compatibility
 

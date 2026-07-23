@@ -112,6 +112,7 @@ final class WireProtocol3Tests: XCTestCase {
     else { return XCTFail("device config was not typed") }
     XCTAssertEqual(config.deviceID, "000A27002138B0A8")
     XCTAssertFalse(config.settings.value.autoSync)
+    XCTAssertEqual(config.settings.value.transcodeProfile, .alac)
     XCTAssertEqual(config.settings.delivery.state, "pending_device")
   }
 
@@ -128,8 +129,8 @@ final class WireProtocol3Tests: XCTestCase {
       serial: deviceID, requestID: configRequestID, intent: .read)
     model.apply(try event(deviceLines[3]))
     model.apply(try event(operationLines[0]))
-    model.apply(try event(operationLines[5]))
-    model.apply(try event(operationLines[12]))
+    model.apply(try event(operationLines[6]))
+    model.apply(try event(operationLines[13]))
 
     XCTAssertEqual(model.devices[deviceID]?.identity.name, "Michael West's iPod")
     XCTAssertEqual(model.devices[deviceID]?.config?.settings.autoSync, false)

@@ -8,6 +8,28 @@ import XCTest
 /// behavior for both `SelectStyle`s. No SwiftUI involved — these are all
 /// static functions operating on plain values.
 final class LibraryBrowserLogicTests: XCTestCase {
+    func testDisclosureStateKeepsMultipleGroupsOpenAcrossLibraryRefreshes() {
+        let air = LibraryBrowser.DisclosureKey.artist("Air")
+        let ambient = LibraryBrowser.DisclosureKey.genre("Ambient")
+        var expanded: Set<LibraryBrowser.DisclosureKey> = []
+
+        expanded = LibraryBrowser.toggledDisclosure(air, in: expanded)
+        expanded = LibraryBrowser.toggledDisclosure(ambient, in: expanded)
+
+        XCTAssertEqual(expanded, [air, ambient])
+        XCTAssertEqual(air, LibraryBrowser.DisclosureKey.artist(" air "))
+
+        let replacementLibrary = [
+            LibraryArtist(name: "Air", albums: []),
+            LibraryArtist(name: "Boards of Canada", albums: []),
+        ]
+        XCTAssertEqual(replacementLibrary.first?.name, "Air")
+        XCTAssertTrue(expanded.contains(air))
+
+        expanded = LibraryBrowser.toggledDisclosure(air, in: expanded)
+        XCTAssertEqual(expanded, [ambient])
+    }
+
     private let dragNonce = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     private let library = [
         LibraryArtist(name: "Squarepusher", albums: [

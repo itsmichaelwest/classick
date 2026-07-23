@@ -283,6 +283,12 @@ enum WireV3Codec {
     case "set_subscriptions":
       try WireV3SemanticValidator.validateUniqueStrings(
         object, at: ["subscriptions", "playlists"])
+    case "set_settings", "adopt_device":
+      guard let settings = object["settings"],
+        JSONSerialization.isValidJSONObject(settings)
+      else { throw WireV3Error.invalid("settings are required") }
+      let data = try JSONSerialization.data(withJSONObject: settings)
+      _ = try JSONDecoder().decode(WireV3SettingsValue.self, from: data)
     case "device_config": try WireV3SemanticValidator.validateDeviceConfig(object)
     case "device_inventory": try WireV3SemanticValidator.validateInventory(object)
     default: break

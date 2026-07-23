@@ -397,6 +397,44 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn library_update_with_untagged_labels_is_written_to_the_client() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let event = DaemonEvent::LibraryUpdate {
+            source_root: Some("smb://library/music".to_owned()),
+            scanned_at_unix_secs: Some(1),
+            artists: vec![crate::ipc_daemon::LibraryArtist {
+                name: String::new(),
+                albums: vec![crate::ipc_daemon::LibraryAlbum {
+                    name: String::new(),
+                    genre: Some(String::new()),
+                    tracks: 1,
+                    bytes: 42,
+                }],
+            }],
+            genres: vec![crate::ipc_daemon::LibraryGenre {
+                name: String::new(),
+                tracks: 1,
+                bytes: 42,
+            }],
+            total_tracks: 1,
+            total_bytes: 42,
+            acknowledged_request_id: Some("018f9d7e-2f2b-7b52-9f1d-f78bdb2f8807".to_owned()),
+        };
+
+        write_event(&mut server, &event)
+            .await
+            .expect("untagged display buckets remain valid library data");
+
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let message = serde_json::from_str::<serde_json::Value>(&line).unwrap();
+        assert_eq!(message["type"], "library");
+        assert_eq!(message["artists"][0]["name"], "");
+        assert_eq!(message["genres"][0]["name"], "");
+    }
+
+    #[tokio::test]
     async fn initial_snapshot_drops_broadcasts_queued_before_its_cutover() {
         let (event_tx, _) = broadcast::channel(8);
         let _keepalive_rx = event_tx.subscribe();

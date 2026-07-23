@@ -1,4 +1,4 @@
-//! ffprobe metadata extraction + ffmpeg FLAC→ALAC transcoding.
+//! Metadata extraction plus ALAC/AAC transcoding.
 
 use crate::windows_proc::NoConsoleWindow;
 use anyhow::{anyhow, Context, Result};
@@ -170,6 +170,59 @@ pub fn ffmpeg_args(src: &Path, dst: &Path) -> Vec<String> {
     ]
 }
 
+pub fn ffmpeg_aac_args(
+    src: &Path,
+    dst: &Path,
+    profile: crate::portable::profile::TranscodeProfile,
+) -> Result<Vec<String>> {
+    let bitrate = profile
+        .aac_bitrate_kbps()
+        .context("AAC arguments require an AAC transcode profile")?;
+    Ok(vec![
+        "-nostdin".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
+        "-i".into(),
+        src.to_string_lossy().into_owned(),
+        "-map".into(),
+        "0:a".into(),
+        "-c:a".into(),
+        "aac".into(),
+        "-profile:a".into(),
+        "aac_low".into(),
+        "-b:a".into(),
+        format!("{bitrate}k"),
+        "-vn".into(),
+        "-f".into(),
+        "ipod".into(),
+        dst.to_string_lossy().into_owned(),
+    ])
+}
+
+pub fn afconvert_aac_args(
+    src: &Path,
+    dst: &Path,
+    profile: crate::portable::profile::TranscodeProfile,
+) -> Result<Vec<String>> {
+    let bitrate = profile
+        .aac_bitrate_kbps()
+        .context("AAC arguments require an AAC transcode profile")?
+        * 1_000;
+    Ok(vec![
+        "-f".into(),
+        "m4af".into(),
+        "-d".into(),
+        "aac".into(),
+        "-b".into(),
+        bitrate.to_string(),
+        "-s".into(),
+        "0".into(),
+        src.to_string_lossy().into_owned(),
+        dst.to_string_lossy().into_owned(),
+    ])
+}
+
 /// macOS never spawns ffprobe: probe via lofty instead (see `macos_probe`).
 /// `_ffmpeg_path` is accepted-but-ignored so callers stay platform-agnostic.
 #[cfg(target_os = "macos")]
@@ -262,6 +315,29 @@ pub fn transcode_to_alac(src: &Path, dst: &Path, _ffmpeg_path: &Path) -> Result<
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub fn transcode_to_aac(
+    src: &Path,
+    dst: &Path,
+    _ffmpeg_path: &Path,
+    profile: crate::portable::profile::TranscodeProfile,
+) -> Result<()> {
+    let status = Command::new("/usr/bin/afconvert")
+        .args(afconvert_aac_args(src, dst, profile)?)
+        .stdin(Stdio::null())
+        .no_console()
+        .status()
+        .map_err(|e| anyhow!("failed to spawn afconvert: {e}"))?;
+    if !status.success() {
+        return Err(anyhow!(
+            "afconvert AAC encode failed on {} (exit {:?})",
+            src.display(),
+            status.code()
+        ));
+    }
+    Ok(())
+}
+
 /// Transcode `src` (FLAC) → `dst` (ALAC in MP4/ipod container, art passed through).
 /// `ffmpeg_path` is the configured ffmpeg binary (F-16).
 #[cfg(not(target_os = "macos"))]
@@ -283,6 +359,33 @@ pub fn transcode_to_alac(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<(
     if !status.success() {
         return Err(anyhow!(
             "ffmpeg transcode failed (exit {:?})",
+            status.code()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn transcode_to_aac(
+    src: &Path,
+    dst: &Path,
+    ffmpeg_path: &Path,
+    profile: crate::portable::profile::TranscodeProfile,
+) -> Result<()> {
+    let status = Command::new(ffmpeg_path)
+        .args(ffmpeg_aac_args(src, dst, profile)?)
+        .stdin(Stdio::null())
+        .no_console()
+        .status()
+        .map_err(|e| {
+            anyhow!(
+                "failed to spawn {} (is it on PATH?): {e}",
+                ffmpeg_path.display()
+            )
+        })?;
+    if !status.success() {
+        return Err(anyhow!(
+            "ffmpeg AAC transcode failed (exit {:?})",
             status.code()
         ));
     }
@@ -384,7 +487,7 @@ static NEXT_TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// Per-job temp file under `%TEMP%\<PROJECT_DIR>\` with an optional filename
 /// infix and the given extension. Centralizes the
 /// `%TEMP%/classick/classick-<infix>-<pid>-<seq>.<ext>` pattern used by the
-/// transcode pipeline (alac, wav, art, passthrough). Every call returns a
+/// transcode pipeline (m4a, wav, art, passthrough). Every call returns a
 /// distinct path (see `NEXT_TEMP_SEQ`).
 fn project_temp_path(infix: &str, ext: &str) -> PathBuf {
     let seq = NEXT_TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -403,8 +506,9 @@ fn project_temp_path(infix: &str, ext: &str) -> PathBuf {
     p
 }
 
-/// Build the path to a per-job ALAC temp file: %TEMP%\classick\classick-<pid>-<seq>.m4a.
-pub fn temp_alac_path() -> PathBuf {
+/// Build the path to a per-job ALAC or AAC temp file:
+/// %TEMP%\classick\classick-<pid>-<seq>.m4a.
+pub fn temp_m4a_path() -> PathBuf {
     project_temp_path("", "m4a")
 }
 
@@ -423,8 +527,8 @@ pub enum SourceAction {
     /// Copy the source byte-for-byte; iPod plays it natively (mp3, aac, alac,
     /// and pcm/wav-aiff when `--passthrough-wav` is set).
     Passthrough,
-    /// Decode + re-encode to ALAC via the configured encoder
-    /// (flac, vorbis, opus, and pcm/wav-aiff by default).
+    /// Decode and encode with the selected profile (flac, vorbis, opus, and
+    /// pcm/wav-aiff by default; ALAC when targeting AAC).
     Transcode,
 }
 
@@ -438,6 +542,7 @@ pub enum SourceAction {
 #[derive(Debug, Clone, Copy)]
 pub struct ClassifyConfig {
     pub passthrough_wav: bool,
+    pub transcode_profile: crate::portable::profile::TranscodeProfile,
 }
 
 /// Classify a source file based on its ffprobe output. Returns the action the
@@ -450,7 +555,7 @@ pub struct ClassifyConfig {
 /// | `flac`                 | `flac`                   | Transcode (iPod can't decode FLAC)           |
 /// | `mp3`                  | `mp3`                    | Passthrough                                  |
 /// | `aac`                  | `m4a` / `mp4` / `aac` / `mov` | Passthrough                             |
-/// | `alac`                 | `m4a` / `mp4` / `mov`    | Passthrough                                  |
+/// | `alac`                 | `m4a` / `mp4` / `mov`    | Passthrough for ALAC profile; otherwise transcode |
 /// | `vorbis`               | `ogg`                    | Transcode                                    |
 /// | `opus`                 | `opus` / `ogg`           | Transcode                                    |
 /// | `pcm_*` (any subtype)  | `wav` / `aiff`           | Passthrough iff `passthrough_wav`, else Transcode |
@@ -490,7 +595,11 @@ pub fn classify(probe: &ProbeOutput, config: &ClassifyConfig) -> Result<SourceAc
             SourceAction::Passthrough
         }
         "alac" if in_container("m4a") || in_container("mp4") || in_container("mov") => {
-            SourceAction::Passthrough
+            if config.transcode_profile == crate::portable::profile::TranscodeProfile::Alac {
+                SourceAction::Passthrough
+            } else {
+                SourceAction::Transcode
+            }
         }
         "vorbis" if in_container("ogg") => SourceAction::Transcode,
         "opus" if in_container("opus") || in_container("ogg") => SourceAction::Transcode,
@@ -671,6 +780,7 @@ pub fn extract_cover_art(src: &Path, dst: &Path, ffmpeg_path: &Path) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portable::profile::TranscodeProfile;
     use std::path::Path;
 
     const SAMPLE: &str = include_str!("../tests/fixtures/sample-ffprobe.json");
@@ -693,6 +803,49 @@ mod tests {
         assert!(joined.contains("-f ipod"));
         // The output path is the LAST arg.
         assert_eq!(args.last().unwrap(), r"C:\tmp\out.m4a");
+    }
+
+    #[test]
+    fn ffmpeg_aac_args_use_aac_lc_and_the_profile_bitrate() {
+        let args = ffmpeg_aac_args(
+            Path::new(r"C:\src\song.flac"),
+            Path::new(r"C:\tmp\out.m4a"),
+            TranscodeProfile::Aac192,
+        )
+        .unwrap();
+        let joined = args.join(" ");
+
+        assert!(joined.contains("-c:a aac"));
+        assert!(joined.contains("-profile:a aac_low"));
+        assert!(joined.contains("-b:a 192k"));
+        assert!(joined.contains("-f ipod"));
+        assert_eq!(args.last().unwrap(), r"C:\tmp\out.m4a");
+    }
+
+    #[test]
+    fn afconvert_aac_args_use_m4a_aac_and_cbr() {
+        let args = afconvert_aac_args(
+            Path::new("/music/song.flac"),
+            Path::new("/tmp/out.m4a"),
+            TranscodeProfile::Aac128,
+        )
+        .unwrap();
+
+        assert_eq!(
+            args,
+            [
+                "-f",
+                "m4af",
+                "-d",
+                "aac",
+                "-b",
+                "128000",
+                "-s",
+                "0",
+                "/music/song.flac",
+                "/tmp/out.m4a",
+            ]
+        );
     }
 
     #[test]
@@ -765,7 +918,10 @@ mod tests {
     // Re-uses the existing SAMPLE constant for FLAC (codec_name=flac, format_name=flac).
 
     fn cc(passthrough_wav: bool) -> ClassifyConfig {
-        ClassifyConfig { passthrough_wav }
+        ClassifyConfig {
+            passthrough_wav,
+            transcode_profile: TranscodeProfile::Alac,
+        }
     }
 
     fn parse(s: &str) -> ProbeOutput {
@@ -801,6 +957,21 @@ mod tests {
         assert_eq!(
             classify(&parse(FX_ALAC), &cc(false)).unwrap(),
             SourceAction::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify_alac_is_transcoded_for_an_aac_profile() {
+        assert_eq!(
+            classify(
+                &parse(FX_ALAC),
+                &ClassifyConfig {
+                    passthrough_wav: false,
+                    transcode_profile: TranscodeProfile::Aac128,
+                },
+            )
+            .unwrap(),
+            SourceAction::Transcode
         );
     }
 
@@ -903,12 +1074,12 @@ mod tests {
     // `project_temp_path`-backed helper must now return a distinct path
     // per call.
     #[test]
-    fn temp_alac_path_is_unique_per_call() {
-        let a = temp_alac_path();
-        let b = temp_alac_path();
+    fn temp_m4a_path_is_unique_per_call() {
+        let a = temp_m4a_path();
+        let b = temp_m4a_path();
         assert_ne!(
             a, b,
-            "concurrent transcode jobs must not share a temp ALAC path"
+            "concurrent transcode jobs must not share a temp M4A path"
         );
     }
 
@@ -965,6 +1136,34 @@ mod tests {
 
         let meta = std::fs::metadata(&dst).expect("output file exists");
         assert!(meta.len() > 0, "afconvert output should be non-empty");
+
+        std::fs::remove_file(&dst).ok();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_transcode_to_aac_produces_aac_m4a() {
+        let dst = std::env::temp_dir().join(format!(
+            "classick-test-transcode-aac-{}.m4a",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&dst);
+
+        transcode_to_aac(
+            Path::new(FIXTURE_FLAC),
+            &dst,
+            Path::new("afconvert"),
+            TranscodeProfile::Aac128,
+        )
+        .unwrap();
+
+        let output = probe(&dst, Path::new("afconvert")).unwrap();
+        let codec = output
+            .streams
+            .iter()
+            .find(|stream| stream.codec_type == "audio")
+            .and_then(|stream| stream.codec_name.as_deref());
+        assert_eq!(codec, Some("aac"));
 
         std::fs::remove_file(&dst).ok();
     }

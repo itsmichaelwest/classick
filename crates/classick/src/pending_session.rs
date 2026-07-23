@@ -87,6 +87,14 @@ impl StagedFile {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PendingMetadataUpdate {
+    pub tags: Tags,
+    pub artwork_hash: Option<String>,
+    pub candidate_entry: ManifestEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObsoleteFile {
     pub path: PathBuf,
     pub prior_dbid: u64,
@@ -119,6 +127,8 @@ pub struct PendingSession {
     pub verified_generation: Option<crate::device_coordination::DeviceGeneration>,
     pub albums: Vec<PendingAlbum>,
     pub staged_files: Vec<StagedFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_updates: Vec<PendingMetadataUpdate>,
     pub obsolete_files: Vec<ObsoleteFile>,
     pub candidate_manifest: Option<Manifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,6 +163,7 @@ impl PendingSession {
             verified_generation: None,
             albums,
             staged_files: Vec::new(),
+            metadata_updates: Vec::new(),
             obsolete_files: Vec::new(),
             candidate_manifest: None,
             device_manifest_preimage: None,
@@ -225,6 +236,16 @@ impl PendingSession {
             }
         }
         self.publication_indices()?;
+        let mut metadata_dbids = HashSet::new();
+        for update in &self.metadata_updates {
+            if update.candidate_entry.ipod_dbid == 0
+                || !metadata_dbids.insert(update.candidate_entry.ipod_dbid)
+                || !update.candidate_entry.source_known
+                || update.candidate_entry.ipod_relpath.is_empty()
+            {
+                bail!("pending metadata update is invalid");
+            }
+        }
         if let Some(candidate) = &self.candidate_playlist_ownership {
             candidate
                 .validate_for_serial(&self.serial)
@@ -368,6 +389,13 @@ impl PendingSessionStore {
                 .with_context(|| format!("read entry in {}", self.root.display()))?
                 .path();
             if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("._"))
+            {
+                continue;
+            }
+            if path
                 .extension()
                 .is_some_and(|extension| extension == "json")
             {
@@ -462,11 +490,10 @@ impl PendingSessionStore {
 
     pub fn remove(&self, session_id: SessionId) -> Result<()> {
         let path = self.path(session_id);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| format!("remove journal {}", path.display())),
-        }
+        remove_file_if_present(&path)
+            .with_context(|| format!("remove journal {}", path.display()))?;
+        remove_file_if_present(&appledouble_sibling(&path))
+            .with_context(|| format!("remove journal metadata {}", path.display()))
     }
 }
 
@@ -508,11 +535,25 @@ fn remove_if_unreferenced(path: &Path, referenced: &ReferencedPaths) -> Result<(
     if referenced.contains(path) {
         return Ok(());
     }
+    remove_file_if_present(path)
+        .with_context(|| format!("remove staged file {}", path.display()))?;
+    remove_file_if_present(&appledouble_sibling(path))
+        .with_context(|| format!("remove staged file metadata {}", path.display()))
+}
+
+fn remove_file_if_present(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("remove staged file {}", path.display())),
+        Err(error) => Err(error).with_context(|| format!("remove file {}", path.display())),
     }
+}
+
+fn appledouble_sibling(path: &Path) -> PathBuf {
+    let Some(name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    path.with_file_name(format!("._{}", name.to_string_lossy()))
 }
 
 fn normalize_path(path: PathBuf) -> PathBuf {

@@ -14,7 +14,7 @@
 {"type":"add_selection_to_device","device_id":"000A27002138B0A8","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8813","mutation_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8830","rules":[{"kind":"genre","name":"Pop"}]}
 {"type":"list_playlists","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8814"}
 {"type":"get_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8815","slug":"favourites"}
-{"type":"save_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8816","playlist":{"kind":"manual","slug":"favourites","name":"Favourites","tracks":["Birdy/Fire Within/01.flac"]}}
+{"type":"save_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8816","playlist":{"kind":"manual","slug":"favourites","name":"お気に入り","tracks":["Björk/日本語/03 – I’m So Free.flac"]}}
 {"type":"save_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8817","playlist":{"kind":"smart","name":"Recent Pop","rules":{"version":1,"matching":"all","rules":[{"field":"genre","op":"is","value":"Pop"}],"limit":null,"order":"recently_modified","seed":0}}}
 {"type":"delete_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8818","slug":"favourites"}
 {"type":"append_selection_to_playlist","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8819","slug":"favourites","rules":[{"kind":"artist","name":"Birdy"}]}

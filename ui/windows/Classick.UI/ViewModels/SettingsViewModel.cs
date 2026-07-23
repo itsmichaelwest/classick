@@ -40,7 +40,9 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
                 catch (Exception exception) { General.SaveError = exception.Message; }
                 return;
             }
-            if (eventArgs.PropertyName is nameof(SettingsGeneralViewModel.AutoSync) or nameof(SettingsGeneralViewModel.RockboxCompat))
+            if (eventArgs.PropertyName is nameof(SettingsGeneralViewModel.AutoSync)
+                or nameof(SettingsGeneralViewModel.RockboxCompat)
+                or nameof(SettingsGeneralViewModel.TranscodeProfile))
             {
                 _ = SaveDeviceSettingsAsync();
             }
@@ -141,7 +143,8 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         if (!General.IsDeviceSettingsDirty || General.SelectedDeviceId is not { } deviceId) return;
         var command = _store.SettingsDrafts.Edit(
             deviceId,
-            new SettingsValue(1, General.AutoSync, General.RockboxCompat),
+            new SettingsValue(
+                1, General.AutoSync, General.RockboxCompat, General.TranscodeProfile),
             NewId(),
             NewId());
         General.RefreshDeviceDraft();

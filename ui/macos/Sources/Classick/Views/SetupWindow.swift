@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// First-run setup: pick the music library folder, confirm the detected
-/// iPod, opt into auto-sync, and persist it all in one `save_config`.
+/// First-run setup: confirm the global music folder and detected iPod, then
+/// choose this iPod's sync settings.
 /// Reached from the `.notConfigured` menu row ("Set Up Classick…") and
 /// auto-presented on first run — see `SetupWindowController`, which hosts
 /// this view in an AppKit `NSWindow` (rather than a lazy SwiftUI `Window`
@@ -11,12 +11,24 @@ import SwiftUI
 struct SetupWindow: View {
   var model: AppModel
   var preferredSerial: DeviceID?
-  var onDone: (_ source: String, _ autoSync: Bool, _ serial: DeviceID) -> Void
+  var onDone: (
+    _ source: String,
+    _ autoSync: Bool,
+    _ transcodeProfile: TranscodeProfile,
+    _ serial: DeviceID
+  ) -> Void
   var onClose: () -> Void
 
   @State private var pickedPath: String?
   @State private var autoSync = true
+  @State private var transcodeProfile: TranscodeProfile = .alac
   @State private var isPickingFolder = false
+
+  private var sourcePath: String? {
+    SetupWindowLogic.sourcePath(
+      pickedPath: pickedPath,
+      configuredPath: model.config?.source)
+  }
 
   private var candidateDevice: DeviceViewState? {
     if let preferredSerial, let state = model.devices[preferredSerial], state.connected {
@@ -39,16 +51,19 @@ struct SetupWindow: View {
         .font(.title2.bold())
 
       VStack(alignment: .leading, spacing: 6) {
-        Text("Music Library")
+        Text("Music Folder")
           .font(.headline)
         HStack {
-          Text(pickedPath ?? "No folder selected")
-            .foregroundStyle(pickedPath == nil ? .secondary : .primary)
+          Text(sourcePath ?? "No folder selected")
+            .foregroundStyle(sourcePath == nil ? .secondary : .primary)
             .lineLimit(1)
             .truncationMode(.middle)
           Spacer()
           Button("Choose…") { isPickingFolder = true }
         }
+        Text("Used for every iPod you sync with this Mac.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
       }
 
       VStack(alignment: .leading, spacing: 6) {
@@ -79,36 +94,39 @@ struct SetupWindow: View {
         }
       }
 
-      Toggle("Sync automatically when plugged in", isOn: $autoSync)
+      Toggle("Sync automatically when connected", isOn: $autoSync)
         .disabled(setupDevice == nil)
 
+      Picker("Music format", selection: $transcodeProfile) {
+        ForEach(TranscodeProfile.allCases) { profile in
+          Text(profile.title).tag(profile)
+        }
+      }
+      .pickerStyle(.menu)
+      .disabled(setupDevice == nil)
+
       Text(
-        "Quit Music.app before syncing — iTunes will reject a Classick-managed iPod while it's running."
+        "Classick will ask you to quit Music before syncing, and creates a recovery snapshot before changing the iPod."
       )
       .font(.footnote)
       .foregroundStyle(.secondary)
       .fixedSize(horizontal: false, vertical: true)
 
-      Text("Classick backs up your iPod's database before every sync.")
-        .font(.footnote)
-        .foregroundStyle(.secondary)
-        .fixedSize(horizontal: false, vertical: true)
-
       Spacer(minLength: 0)
 
       HStack {
         Spacer()
-        Button("Done") {
-          guard let pickedPath, let deviceID = setupDevice?.deviceID else { return }
-          onDone(pickedPath, autoSync, deviceID)
+        Button("Set Up") {
+          guard let sourcePath, let deviceID = setupDevice?.deviceID else { return }
+          onDone(sourcePath, autoSync, transcodeProfile, deviceID)
           onClose()
         }
         .keyboardShortcut(.defaultAction)
-        .disabled(pickedPath == nil || setupDevice == nil)
+        .disabled(sourcePath == nil || setupDevice == nil)
       }
     }
     .padding(20)
-    .frame(width: 420, height: 370)
+    .frame(width: 420, height: 410)
     .fileImporter(isPresented: $isPickingFolder, allowedContentTypes: [.folder]) { result in
       if case .success(let url) = result {
         pickedPath = url.path
@@ -119,7 +137,17 @@ struct SetupWindow: View {
   private var setupDevicePrompt: String {
     model.devices.values.filter(\.connected).count > 1
       ? "Select an iPod in Classick"
-      : "Plug in your iPod"
+      : "Connect an iPod"
+  }
+}
+
+enum SetupWindowLogic {
+  static func sourcePath(pickedPath: String?, configuredPath: String?) -> String? {
+    if let pickedPath, !pickedPath.isEmpty {
+      return pickedPath
+    }
+    guard let configuredPath, !configuredPath.isEmpty else { return nil }
+    return configuredPath
   }
 }
 
@@ -128,13 +156,13 @@ struct SetupWindow: View {
     SetupWindow(
       model: PreviewFixtures.notConfiguredModel(),
       preferredSerial: try! DeviceID(PreviewFixtures.pairedIpod.serial),
-      onDone: { _, _, _ in }, onClose: {})
+      onDone: { _, _, _, _ in }, onClose: {})
   }
 
   #Preview("No device") {
     SetupWindow(
       model: PreviewFixtures.firstRunModel(), preferredSerial: nil,
-      onDone: { _, _, _ in }, onClose: {})
+      onDone: { _, _, _, _ in }, onClose: {})
   }
 
   #Preview("Finder initialization required") {
@@ -142,12 +170,12 @@ struct SetupWindow: View {
       model: PreviewFixtures.nativeDeviceModel(
         readiness: "needs_apple_initialization", configured: false),
       preferredSerial: PreviewFixtures.nativeDeviceID,
-      onDone: { _, _, _ in }, onClose: {})
+      onDone: { _, _, _, _ in }, onClose: {})
   }
 
   #Preview("Identity unavailable") {
     SetupWindow(
       model: PreviewFixtures.unidentifiedDeviceModel(), preferredSerial: nil,
-      onDone: { _, _, _ in }, onClose: {})
+      onDone: { _, _, _, _ in }, onClose: {})
   }
 #endif

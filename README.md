@@ -17,7 +17,7 @@ Sync a FLAC library to an iPod Classic — from **Windows** or **macOS**.
 
 ---
 
-Classick wraps libgpod, transcodes FLAC to ALAC on the way over, and runs quietly from the system tray (Windows) or menu bar (macOS). Point it at your library, plug in the iPod, and it keeps the two in sync.
+Classick wraps libgpod, converts FLAC to ALAC or a chosen AAC quality on the way over, and runs quietly from the system tray (Windows) or menu bar (macOS). Point it at your library, plug in the iPod, and it keeps the two in sync.
 
 ## Status
 

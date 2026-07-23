@@ -1,4 +1,5 @@
 mod journal;
+mod reconcile;
 mod transaction;
 
 use crate::daemon::device_registry::DeviceRegistry;
@@ -29,4 +30,12 @@ pub(crate) fn recover_pending_playlist_mutations(
     state_root: &Path,
 ) -> Result<()> {
     transaction::recover_pending_playlist_mutations(registry, state_root)
+}
+
+pub(crate) fn reconcile_missing_subscriptions(
+    store: &PlaylistStore,
+    registry: &mut DeviceRegistry,
+    state_root: &Path,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    reconcile::reconcile_missing_subscriptions(store, registry, state_root)
 }

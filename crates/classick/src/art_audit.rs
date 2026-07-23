@@ -405,6 +405,7 @@ mod tests {
             manifest_path: PathBuf::from("/nonexistent-manifest.json"),
             save_config: false,
             encoder: crate::cli::EncoderChoice::Ffmpeg,
+            transcode_profile: crate::portable::profile::TranscodeProfile::Alac,
             refalac_path: PathBuf::from("refalac64"),
             passthrough_wav: false,
             force_reencode: false,

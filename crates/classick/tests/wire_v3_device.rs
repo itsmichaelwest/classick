@@ -115,7 +115,7 @@ fn manifest_discovers_every_device_vector_and_negative_cases_fail() {
 
 #[test]
 fn unidentified_observations_cannot_form_mutation_commands() {
-    let json = r#"{"type":"set_settings","observation_id":7,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8767","mutation_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8774","settings":{"schema_version":1,"auto_sync":false,"rockbox_compat":false}}"#;
+    let json = r#"{"type":"set_settings","observation_id":7,"request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8767","mutation_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8774","settings":{"schema_version":1,"auto_sync":false,"rockbox_compat":false,"transcode_profile":"alac"}}"#;
     assert!(
         decode_admitted_message(json, &AdmittedStream::DaemonReceivingDesktopCommands).is_err()
     );
@@ -283,6 +283,9 @@ fn read_negative(path: &str) -> &'static str {
         }
         "device/negative/set-settings-with-observation.json" => {
             include_str!("data/wire-v3/device/negative/set-settings-with-observation.json")
+        }
+        "device/negative/set-settings-missing-transcode-profile.json" => {
+            include_str!("data/wire-v3/device/negative/set-settings-missing-transcode-profile.json")
         }
         "device/negative/inventory-zero-observation.json" => {
             include_str!("data/wire-v3/device/negative/inventory-zero-observation.json")

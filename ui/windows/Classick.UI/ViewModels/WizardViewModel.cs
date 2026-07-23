@@ -31,7 +31,8 @@ public sealed record WizardDeviceCandidate(
 public sealed record SaveConfigPayload(
     string Source,
     DeviceId DeviceId,
-    bool AutoSync);
+    bool AutoSync,
+    TranscodeProfile TranscodeProfile);
 
 public partial class WizardViewModel : ObservableObject
 {
@@ -45,8 +46,11 @@ public partial class WizardViewModel : ObservableObject
     [ObservableProperty] private bool scanning;
     [ObservableProperty] private string scanError = "";
     [ObservableProperty] private bool isAutomatic = true;
+    [ObservableProperty] private TranscodeProfile transcodeProfile = TranscodeProfile.Alac;
 
     public ObservableCollection<WizardDeviceCandidate> Candidates { get; } = new();
+    public IReadOnlyList<TranscodeProfileOption> TranscodeProfiles { get; } =
+        TranscodeProfileOption.All;
 
     public WizardViewModel(Func<SaveConfigPayload, Task> sendConfigFunc)
     {
@@ -190,7 +194,8 @@ public partial class WizardViewModel : ObservableObject
     private SaveConfigPayload BuildPayload() => new(
         SourcePath,
         SelectedDevice!.DeviceId!,
-        IsAutomatic);
+        IsAutomatic,
+        TranscodeProfile);
 
     public event Action? WizardFinished;
 }

@@ -66,7 +66,7 @@ pub enum DaemonEvent {
     },
     HistoryUpdate {
         entries: Vec<HistoryEntry>,
-        acknowledged_request_id: String,
+        acknowledged_request_id: Option<String>,
     },
     DeviceConnected {
         serial: String,
@@ -370,6 +370,8 @@ pub struct DeviceSettingsPayload {
     pub auto_sync: bool,
     #[serde(default)]
     pub rockbox_compat: bool,
+    #[serde(default)]
+    pub transcode_profile: crate::portable::profile::TranscodeProfile,
 }
 
 /// `save_playlist` command payload, tagged by `kind`. An absent `slug` on
@@ -1314,6 +1316,7 @@ mod tests {
             settings: DeviceSettingsPayload {
                 auto_sync: true,
                 rockbox_compat: false,
+                transcode_profile: crate::portable::profile::TranscodeProfile::Alac,
             },
             selection_revision: 3,
             settings_revision: 4,
@@ -1323,7 +1326,7 @@ mod tests {
         let json = serde_json::to_string(&evt).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"include","rules":[]},"subscriptions":{"playlists":["gym"]},"settings":{"auto_sync":true,"rockbox_compat":false},"selection_revision":3,"settings_revision":4,"subscriptions_revision":5,"acknowledged_request_id":"request-a"}"#
+            r#"{"type":"device_config_update","serial":"0xABC","selection":{"mode":"include","rules":[]},"subscriptions":{"playlists":["gym"]},"settings":{"auto_sync":true,"rockbox_compat":false,"transcode_profile":"alac"},"selection_revision":3,"settings_revision":4,"subscriptions_revision":5,"acknowledged_request_id":"request-a"}"#
         );
     }
 
@@ -1339,6 +1342,7 @@ mod tests {
             settings: DeviceSettingsPayload {
                 auto_sync: true,
                 rockbox_compat: false,
+                transcode_profile: crate::portable::profile::TranscodeProfile::Alac,
             },
             selection_revision: 3,
             settings_revision: 4,
@@ -1598,6 +1602,7 @@ mod tests {
                 model_label: "iPod Classic".into(),
                 name: Some(format!("Device {serial}")),
             },
+            hardware: crate::device::HardwareFacts::default(),
             configured,
             connected,
             mount: connected.then(|| format!("/Volumes/{serial}")),

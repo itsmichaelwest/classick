@@ -2,6 +2,7 @@
 
 use crate::cli::{Cli, EncoderChoice};
 use crate::config_file::{self, PersistedConfig};
+use crate::portable::profile::TranscodeProfile;
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
 
@@ -26,6 +27,7 @@ pub struct Config {
     //         the comment on EncoderChoice in cli.rs. This stays a single global
     //         value until/unless that future arrives.
     pub encoder: EncoderChoice,
+    pub transcode_profile: TranscodeProfile,
     pub refalac_path: PathBuf,
     pub passthrough_wav: bool,
     pub force_reencode: bool,
@@ -123,6 +125,7 @@ pub fn resolve_with(
         .encoder
         .or_else(|| persisted.as_ref().and_then(|p| p.encoder))
         .unwrap_or_default();
+    let transcode_profile = cli.transcode_profile.unwrap_or_default();
 
     let refalac_path = cli
         .refalac_path
@@ -164,6 +167,7 @@ pub fn resolve_with(
         manifest_path,
         save_config: cli.save_config,
         encoder,
+        transcode_profile,
         refalac_path,
         passthrough_wav,
         force_reencode,
@@ -279,6 +283,7 @@ mod tests {
         assert_eq!(config.manifest_path, manifest);
         // Phase 3 defaults.
         assert_eq!(config.encoder, EncoderChoice::Ffmpeg);
+        assert_eq!(config.transcode_profile, TranscodeProfile::Alac);
         assert_eq!(config.refalac_path, PathBuf::from("refalac64"));
         assert!(!config.passthrough_wav);
         assert!(!config.force_reencode);
@@ -387,6 +392,23 @@ mod tests {
         let cli = Cli::try_parse_from(["classick", "--source", r"D:\m"]).unwrap();
         let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
         assert_eq!(cfg.encoder, EncoderChoice::Ffmpeg);
+    }
+
+    #[test]
+    fn cli_transcode_profile_threads_through_without_becoming_global_config() {
+        let cli = Cli::try_parse_from([
+            "classick",
+            "--source",
+            r"D:\m",
+            "--transcode-profile",
+            "aac_128",
+        ])
+        .unwrap();
+        let cfg = resolve_with(cli, None, None, PathBuf::from("dummy.json")).unwrap();
+        assert_eq!(cfg.transcode_profile, TranscodeProfile::Aac128);
+        assert!(!toml::to_string(&cfg.to_persisted())
+            .unwrap()
+            .contains("transcode_profile"));
     }
 
     #[test]

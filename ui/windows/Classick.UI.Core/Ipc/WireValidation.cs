@@ -36,8 +36,8 @@ internal static partial class WireValidation
             return;
         }
         if (message is not GlobalConfigEvent and not WireSourceAvailabilityEvent and not DeviceInventoryEvent and
-            not DeviceConfigEvent and not LibraryEvent and not PlaylistsEvent and not LibraryScanStartedEvent and
-            not LibraryScanProgressEvent and not LibraryScanFinishedEvent)
+            not DeviceConfigEvent and not HistoryEvent and not LibraryEvent and not PlaylistsEvent and
+            not LibraryScanStartedEvent and not LibraryScanProgressEvent and not LibraryScanFinishedEvent)
             throw new JsonException("request ID must not be null");
     }
 
@@ -171,7 +171,7 @@ internal static partial class WireValidation
                 break;
             case ResolvedTracksEvent resolved:
                 ValidateSortedUnique(resolved.Tracks, "resolved tracks");
-                foreach (var path in resolved.Tracks) ValidateProfilePath(path);
+                foreach (var path in resolved.Tracks) ValidateLibraryPath(path);
                 break;
             case DevicePreviewEvent preview:
                 ValidateSortedUnique(preview.UnresolvedSubscriptions, "unresolved subscriptions");
@@ -425,6 +425,14 @@ internal static partial class WireValidation
         if (string.IsNullOrEmpty(value) || value.StartsWith('/') || value.EndsWith('/') || value.Contains("//", StringComparison.Ordinal) ||
             value.Any(character => !char.IsAscii(character) || character is ':' or '*' or '?' or '"' or '<' or '>' or '|' or '@' || char.IsControl(character)))
             throw new JsonException("profile path is invalid");
+    }
+
+    private static void ValidateLibraryPath(string value)
+    {
+        if (string.IsNullOrEmpty(value) || value.StartsWith('/') || value.Contains('\\') ||
+            (value.Length > 1 && char.IsAsciiLetter(value[0]) && value[1] == ':') ||
+            value.Split('/').Any(component => component is "" or "." or ".."))
+            throw new JsonException("library path is invalid");
     }
 
     private static void ValidateSortedUnique(IEnumerable<string> values, string label)

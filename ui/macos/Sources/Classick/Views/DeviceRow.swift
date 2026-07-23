@@ -31,7 +31,9 @@ struct DeviceRow: View {
   var body: some View {
     VStack(alignment: .leading, spacing: DeviceRowLayout.headerToMeterSpacing) {
       header
-      meter
+      if presentation.showsMeter {
+        meter
+      }
     }
     .padding(.horizontal, DeviceRowLayout.horizontalPadding)
     .padding(.vertical, DeviceRowLayout.verticalPadding)
@@ -66,7 +68,8 @@ struct DeviceRow: View {
       HStack(spacing: 12) {
         DeviceIcon(
           hardware: hardware,
-          size: DeviceRowLayout.artworkSize)
+          size: DeviceRowLayout.artworkSize,
+          serial: presentation.serial)
 
         VStack(alignment: .leading, spacing: 2) {
           Text(presentation.title)

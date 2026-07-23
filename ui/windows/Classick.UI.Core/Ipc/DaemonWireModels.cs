@@ -80,10 +80,21 @@ public sealed record SelectionValue(
     [property: JsonRequired, JsonPropertyName("mode")] SelectionMode Mode,
     [property: JsonRequired, JsonPropertyName("rules")] IReadOnlyList<SelectionRule> Rules);
 
+[JsonConverter(typeof(StrictStringEnumConverter<TranscodeProfile>))]
+public enum TranscodeProfile
+{
+    [JsonStringEnumMemberName("alac")] Alac,
+    [JsonStringEnumMemberName("aac_256")] Aac256,
+    [JsonStringEnumMemberName("aac_192")] Aac192,
+    [JsonStringEnumMemberName("aac_128")] Aac128,
+}
+
 public sealed record SettingsValue(
     [property: JsonRequired, JsonPropertyName("schema_version")] uint SchemaVersion,
     [property: JsonRequired, JsonPropertyName("auto_sync")] bool AutoSync,
-    [property: JsonRequired, JsonPropertyName("rockbox_compat")] bool RockboxCompat);
+    [property: JsonRequired, JsonPropertyName("rockbox_compat")] bool RockboxCompat,
+    [property: JsonRequired, JsonPropertyName("transcode_profile")]
+    TranscodeProfile TranscodeProfile = TranscodeProfile.Alac);
 
 public sealed record SubscriptionsValue(
     [property: JsonRequired, JsonPropertyName("schema_version")] uint SchemaVersion,

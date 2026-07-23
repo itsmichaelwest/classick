@@ -38,6 +38,41 @@ struct LibraryBrowser: View {
     var mode: Mode
     var search: String = ""
     var launchNonce: UUID? = nil
+    var expandedDisclosures: Binding<Set<DisclosureKey>>? = nil
+    @State private var localExpandedDisclosures: Set<DisclosureKey> = []
+
+    struct DisclosureKey: Hashable, Sendable {
+        enum Kind: Hashable, Sendable {
+            case artist
+            case genre
+        }
+
+        var kind: Kind
+        var name: String
+
+        static func artist(_ name: String) -> Self {
+            Self(kind: .artist, name: canonicalName(name))
+        }
+
+        static func genre(_ name: String) -> Self {
+            Self(kind: .genre, name: canonicalName(name))
+        }
+
+        private static func canonicalName(_ name: String) -> String {
+            name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+    }
+
+    nonisolated static func toggledDisclosure(
+        _ key: DisclosureKey,
+        in expanded: Set<DisclosureKey>
+    ) -> Set<DisclosureKey> {
+        var next = expanded
+        if !next.insert(key).inserted {
+            next.remove(key)
+        }
+        return next
+    }
 
     nonisolated static func dragPayload(
         for rule: SelectionRule, summary: String, mode: Mode, launchNonce: UUID
@@ -146,7 +181,8 @@ struct LibraryBrowser: View {
         let title = artist.name.isEmpty ? "Unknown Artist" : artist.name
         let totalBytes = artist.albums.reduce(UInt64(0)) { $0 + $1.bytes }
         let columns = ["\(artist.albums.count) album\(artist.albums.count == 1 ? "" : "s")", formatBytes(totalBytes)]
-        DisclosureGroup {
+        let disclosureKey = DisclosureKey.artist(artist.name)
+        DisclosureGroup(isExpanded: disclosureBinding(for: disclosureKey)) {
             ForEach(artist.albums, id: \.name) { album in
                 albumRow(artist: artist, album: album)
             }
@@ -157,6 +193,12 @@ struct LibraryBrowser: View {
                     .libraryDragSource(
                         payload(for: .artist(name: artist.name), summary: title),
                         systemImage: "person.fill")
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        let state = disclosureState
+                        state.wrappedValue = Self.toggledDisclosure(
+                            disclosureKey, in: state.wrappedValue)
+                    }
             case let .select(checked, style):
                 let state = Self.checkState(for: artist, checked: checked.wrappedValue)
                 rowLabel(title: title, columns: columns, isChecked: state != .off, isMixed: state == .mixed) {
@@ -198,7 +240,8 @@ struct LibraryBrowser: View {
         let title = genre.name.isEmpty ? "No Genre" : genre.name
         let columns = [trackCountText(genre.tracks), formatBytes(genre.bytes)]
         let entries = Self.albums(inGenre: genre.name, of: library.artists)
-        DisclosureGroup {
+        let disclosureKey = DisclosureKey.genre(genre.name)
+        DisclosureGroup(isExpanded: disclosureBinding(for: disclosureKey)) {
             ForEach(entries, id: \.id) { entry in
                 genreAlbumRow(entry: entry, genre: genre.name, genreEntries: entries)
             }
@@ -209,6 +252,12 @@ struct LibraryBrowser: View {
                     .libraryDragSource(
                         payload(for: .genre(name: genre.name), summary: title),
                         systemImage: "tag.fill")
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        let state = disclosureState
+                        state.wrappedValue = Self.toggledDisclosure(
+                            disclosureKey, in: state.wrappedValue)
+                    }
             case let .select(checked, _):
                 let state = Self.genreCheckState(genre.name, artists: library.artists, checked: checked.wrappedValue)
                 rowLabel(title: title, columns: columns, isChecked: state != .off, isMixed: state == .mixed) {
@@ -252,6 +301,23 @@ struct LibraryBrowser: View {
         guard let launchNonce else { return nil }
         return Self.dragPayload(
             for: rule, summary: summary, mode: mode, launchNonce: launchNonce)
+    }
+
+    private func disclosureBinding(for key: DisclosureKey) -> Binding<Bool> {
+        let state = disclosureState
+        return Binding(
+            get: { state.wrappedValue.contains(key) },
+            set: { isExpanded in
+                if isExpanded {
+                    state.wrappedValue.insert(key)
+                } else {
+                    state.wrappedValue.remove(key)
+                }
+            })
+    }
+
+    private var disclosureState: Binding<Set<DisclosureKey>> {
+        expandedDisclosures ?? $localExpandedDisclosures
     }
 
     /// Shared row chrome. `onToggle == nil` renders NO checkbox at all —

@@ -25,7 +25,7 @@ fn main() -> Result<()> {
         transcode::has_embedded_art(&probe)
     );
 
-    let dst = transcode::temp_alac_path();
+    let dst = transcode::temp_m4a_path();
     if let Some(p) = dst.parent() {
         std::fs::create_dir_all(p).ok();
     }

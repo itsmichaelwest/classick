@@ -55,6 +55,7 @@ struct DeviceMusicPage: View {
   @State private var rememberedRules: [SelectionMode: Set<SelectionKey>] = [:]
   @State private var hasCanonicalDraft = false
   @State private var facet: LibraryBrowser.Facet = .artists
+  @State private var expandedDisclosures: Set<LibraryBrowser.DisclosureKey> = []
   @State private var saveTask: Task<Void, Never>?
 
   private var deviceState: DeviceViewState? {
@@ -250,7 +251,9 @@ struct DeviceMusicPage: View {
         deviceEmptyState
       case .browser:
         if let library = model.library {
-          LibraryBrowser(library: library, facet: facet, mode: browserMode, search: "")
+          LibraryBrowser(
+            library: library, facet: facet, mode: browserMode, search: "",
+            expandedDisclosures: $expandedDisclosures)
         }
       }
     }
