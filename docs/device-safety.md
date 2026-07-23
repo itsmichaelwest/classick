@@ -134,12 +134,13 @@ each selected manifest entry against the live DBID/path pair and regular media
 file. Missing pairs are repaired; DBID/path ambiguity fails closed. The release
 binary then republished all five tracks, verified 5/5 artwork, left no pending
 transaction, preserved source hashes, and produced a stable five-unchanged
-follow-up dry run.
+follow-up dry run. After a clean Finder eject and reconnect, the album remained
+present and its tracks remained playable.
 
 This verifies the mounted HFS+ core, firmware playback/artwork, and Finder
-delete/Classick-repair round trip. FAT-formatted behavior, Windows behavior,
-Apple Music beyond Finder's device-management surface, Rockbox, and an
-explicitly observed clean eject remain separate physical gates.
+delete/Classick-repair/clean-eject round trip. FAT-formatted behavior, Windows
+behavior, Apple Music beyond Finder's device-management surface, and Rockbox
+remain separate physical gates.
 
 ## Recovery precedes new work
 

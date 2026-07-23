@@ -1,6 +1,6 @@
 # Native device protocol — Rust core plan
 
-**Status:** implemented; bounded macOS/HFS+ publication and Finder/firmware round trip passed
+**Status:** implemented; bounded macOS/HFS+ publication, Finder/firmware, and clean-eject round trips passed
 
 **Depends on:** [approved design](../design/2026-07-19-native-device-protocol.md)
 

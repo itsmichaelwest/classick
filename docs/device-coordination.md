@@ -368,12 +368,13 @@ publication, persisted artwork reopen, transaction cleanup, source
 byte-stability, and graceful daemon shutdown without unmounting. The same
 device subsequently passed firmware playback and visible-artwork checks,
 Finder Manage Storage deletion, and a generation-fenced Classick repair of the
-five externally removed DB/media pairs. The remaining physical work is an
-explicit clean-eject observation, Apple Music behavior beyond Finder's
-management surface, and the same lock/publication behavior on a FAT-formatted
-Classic and Windows. Additional families are advertised only after their own
-read, write, Apple interoperability, interruption, and clean-eject tests pass.
-The music share remains read-only throughout.
+five externally removed DB/media pairs. A clean Finder eject and reconnect
+preserved the album and playable tracks. The remaining physical work is Apple
+Music behavior beyond Finder's management surface and the same
+lock/publication behavior on a FAT-formatted Classic and Windows. Additional
+families are advertised only after their own read, write, Apple
+interoperability, interruption, and clean-eject tests pass. The music share
+remains read-only throughout.
 
 ## Rejected alternatives
 
