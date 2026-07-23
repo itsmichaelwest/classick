@@ -58,6 +58,27 @@ struct Sidebar: View {
         }
       }
 
+      if !model.unidentifiedDevices.isEmpty {
+        Section("Detected iPods") {
+          ForEach(model.unidentifiedDevices.values.sorted { $0.observationID < $1.observationID }, id: \.observationID) { _ in
+            let guidance = DeviceReadinessLogic.identityUnavailableGuidance
+            HStack(alignment: .top, spacing: 8) {
+              Image(systemName: guidance.systemImage)
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+              VStack(alignment: .leading, spacing: 2) {
+                Text(guidance.title)
+                Text(guidance.message)
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+                  .lineLimit(2)
+              }
+            }
+            .accessibilityElement(children: .combine)
+          }
+        }
+      }
+
       Section {
         ForEach(model.playlists, id: \.slug) { summary in
           playlistRow(summary)
@@ -164,8 +185,19 @@ struct Sidebar: View {
       // Constraints rule this implements) while leaving the eject
       // Button as a real, non-nested, top-level control.
       HStack {
-        Image(systemName: "ipod")
-        Text(device.name)
+        HStack(spacing: 8) {
+          DeviceIcon(hardware: device.hardware, size: 22)
+          VStack(alignment: .leading, spacing: 1) {
+            Text(device.name)
+              .lineLimit(1)
+            Text(device.detail)
+              .font(.caption)
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+          }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(device.accessibilityLabel)
         Spacer()
         if device.connected {
           Button {
@@ -226,6 +258,16 @@ struct SidebarDeviceRow: Identifiable, Equatable {
   var connected: Bool
   var configured: Bool
   var phase: DevicePhase
+  var readiness: String
+  var hardware: WireV3Hardware
+  var accessibilityLabel: String
+
+  var detail: String {
+    if let guidance = DeviceReadinessLogic.guidance(for: readiness) {
+      return guidance.title
+    }
+    return connected ? (DeviceIdentityLogic.hardwareDescription(hardware) ?? "Connected") : "Not connected"
+  }
 
   var id: DeviceID { serial }
 }
@@ -236,10 +278,14 @@ enum SidebarInventory {
       .map { device in
         SidebarDeviceRow(
           serial: device.deviceID,
-          name: device.identity.name ?? device.identity.modelLabel,
+          name: DeviceIdentityLogic.title(identity: device.identity, hardware: device.hardware),
           connected: device.connected,
           configured: device.configured,
-          phase: device.phase)
+          phase: device.phase,
+          readiness: device.readiness,
+          hardware: device.hardware,
+          accessibilityLabel: DeviceIdentityLogic.accessibilityLabel(
+            identity: device.identity, hardware: device.hardware))
       }
       .sorted { lhs, rhs in
         let lhsName = lhs.name.lowercased()
@@ -280,5 +326,9 @@ enum SidebarInventory {
 
   #Preview("Playlist error badge") {
     SidebarPreviewHost(model: PreviewFixtures.noDeviceModel())
+  }
+
+  #Preview("Identity unavailable") {
+    SidebarPreviewHost(model: PreviewFixtures.unidentifiedDeviceModel())
   }
 #endif

@@ -71,7 +71,11 @@ struct DeviceMusicPage: View {
     DeviceSurfaceLogic.phase(for: deviceState, globalPhase: model.phase)
   }
   private var deviceName: String {
-    deviceState?.identity.name ?? deviceState?.identity.modelLabel ?? serial.rawValue
+    guard let deviceState else { return "iPod" }
+    return DeviceIdentityLogic.title(identity: deviceState.identity, hardware: deviceState.hardware)
+  }
+  private var readinessGuidance: DeviceReadinessGuidance? {
+    deviceState.flatMap { DeviceReadinessLogic.guidance(for: $0.readiness) }
   }
 
   var body: some View {
@@ -89,15 +93,16 @@ struct DeviceMusicPage: View {
       .navigationSubtitle(lastSyncedSubtitle)
       .toolbar {
         ToolbarItemGroup(placement: .primaryAction) {
-          Picker(selection: Binding(get: { draft.mode }, set: setMode)) {
-            Text("Entire library").tag(SelectionMode.all)
-            Text("Selected items").tag(SelectionMode.include)
-            Text("All except selected").tag(SelectionMode.exclude)
-          } label: {
-            Text("Sync")
-          }
-          .pickerStyle(.menu)
-          .help("What syncs to this iPod")
+          if readinessGuidance == nil {
+            Picker(selection: Binding(get: { draft.mode }, set: setMode)) {
+              Text("Entire library").tag(SelectionMode.all)
+              Text("Selected items").tag(SelectionMode.include)
+              Text("All except selected").tag(SelectionMode.exclude)
+            } label: {
+              Text("Sync")
+            }
+            .pickerStyle(.menu)
+            .help("What syncs to this iPod")
           // Disabled until the persisted config seeds the draft
           // (sweep finding #1): before that this picker shows the
           // compiled-in `.all` default — and worse, touching it in
@@ -105,18 +110,20 @@ struct DeviceMusicPage: View {
           // latched `userEdited`, blocked the real config from ever
           // seeding, and debounced-saved the wrong selection over
           // the persisted one.
-          .disabled(!hasCanonicalDraft || !canEditDevice)
+            .disabled(!hasCanonicalDraft || !canEditDevice)
           // HIDDEN (not disabled) while disconnected: a permanently
           // washed-out prominent capsule reads as broken chrome, and
           // the bottom device bar already explains "<name> not
           // connected". Disabled is reserved for transient busy
           // states (sync/scan in flight) where the button will
           // shortly work again.
-          if isConnected {
-            Button("Sync Now") { onSyncNow(serial) }
-              .buttonStyle(.borderedProminent)
-              .disabled(
-                DeviceMusicLogic.isSyncNowDisabled(phase: surfacePhase, isConnected: isConnected))
+            if isConnected {
+              Button("Sync Now") { onSyncNow(serial) }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                  DeviceMusicLogic.isSyncNowDisabled(
+                    phase: surfacePhase, isConnected: isConnected))
+            }
           }
         }
       }
@@ -167,13 +174,17 @@ struct DeviceMusicPage: View {
   // should a home for it return.)
 
   private var facetBar: some View {
-    Picker("", selection: $facet) {
-      ForEach(LibraryBrowser.Facet.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+    Group {
+      if readinessGuidance == nil {
+        Picker("", selection: $facet) {
+          ForEach(LibraryBrowser.Facet.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 320)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity)
+      }
     }
-    .pickerStyle(.segmented)
-    .frame(width: 320)
-    .padding(.vertical, 14)
-    .frame(maxWidth: .infinity)
   }
 
   private var lastSyncedSubtitle: String {
@@ -197,7 +208,9 @@ struct DeviceMusicPage: View {
   /// read-only browse list that snapped into checkbox mode a beat later.
   @ViewBuilder
   private var seededContent: some View {
-    if hasCanonicalDraft {
+    if let readinessGuidance {
+      DeviceReadinessView(guidance: readinessGuidance)
+    } else if hasCanonicalDraft {
       content
     } else {
       VStack(spacing: 8) {

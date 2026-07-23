@@ -151,6 +151,28 @@ final class DeviceRowPresentationTests: XCTestCase {
     XCTAssertNil(presentation.secondaryAction)
   }
 
+  func testAppleInitializationReadinessReplacesClassickSetupAction() {
+    let device = makeDevice(
+      phase: .unconfigured, configured: false, readiness: "needs_apple_initialization")
+
+    let presentation = DeviceRowPresentation.make(device: device, libraryCount: 91)
+
+    XCTAssertEqual(presentation.subtitle, "Finish setup in Finder")
+    XCTAssertTrue(presentation.caption?.contains("Apple software") == true)
+    XCTAssertNil(presentation.primaryAction)
+    XCTAssertNil(presentation.secondaryAction)
+  }
+
+  func testInvalidDatabaseAndUnknownReadinessOfferNoMutation() {
+    for readiness in ["invalid_database", "identity_unavailable", "future_state"] {
+      let presentation = DeviceRowPresentation.make(
+        device: makeDevice(phase: .idle, readiness: readiness), libraryCount: 91)
+      XCTAssertEqual(presentation.meter, .unavailable)
+      XCTAssertNil(presentation.primaryAction, readiness)
+      XCTAssertNil(presentation.secondaryAction, readiness)
+    }
+  }
+
   func testLongIdentityAndErrorCopyRemainIntactInPresentation() {
     let longName = "Michael's extraordinarily long engraved silver iPod Classic used for road trips"
     let longError =
@@ -242,12 +264,14 @@ final class DeviceRowPresentationTests: XCTestCase {
     phase: DevicePhase,
     configured: Bool = true,
     connected: Bool = true,
-    sessionID: UInt64? = nil
+    sessionID: UInt64? = nil,
+    readiness: String = "ready"
   ) -> DeviceViewState {
     DeviceViewState(
       deviceID: try! DeviceID(
         String(repeating: "0", count: 16 - serial.count) + serial.uppercased()),
       identity: .init(serial: serial, modelLabel: "iPod Classic (160 GB)", name: name),
+      readiness: readiness,
       configured: configured,
       connected: connected,
       mountPath: connected ? "/Volumes/\(serial)" : nil,

@@ -44,7 +44,11 @@ struct DeviceSettingsPage: View {
     DeviceSurfaceLogic.phase(for: deviceState, globalPhase: model.phase)
   }
   private var deviceName: String {
-    deviceState?.identity.name ?? deviceState?.identity.modelLabel ?? serial.rawValue
+    guard let deviceState else { return "iPod" }
+    return DeviceIdentityLogic.title(identity: deviceState.identity, hardware: deviceState.hardware)
+  }
+  private var readinessGuidance: DeviceReadinessGuidance? {
+    deviceState.flatMap { DeviceReadinessLogic.guidance(for: $0.readiness) }
   }
   private var syncedSummary: String {
     if let total = deviceState?.libraryCount {
@@ -54,9 +58,49 @@ struct DeviceSettingsPage: View {
   }
 
   var body: some View {
+    Group {
+      if let readinessGuidance {
+        DeviceReadinessView(guidance: readinessGuidance)
+      } else {
+        settingsForm
+      }
+    }
+    .navigationTitle(deviceName)
+    // Same dual-coverage rationale as `DeviceMusicPage`: `.task(id:)`
+    // covers a config already cached from a prior visit this launch
+    // (seed fires immediately); the `.onChange` covers the reply
+    // arriving after this view appears.
+    .task(id: serial) {
+      guard canEditDevice else { return }
+      seedIfNeeded()
+      onLoadDeviceConfig(serial)
+    }
+    .onChange(of: canEditDevice) { _, isAvailable in
+      handleDeviceAvailabilityChange(isAvailable)
+    }
+    .onChange(of: config?.settings) { _, _ in seedIfNeeded() }
+    .onChange(of: deviceState?.settingsRevision) { _, _ in seedIfNeeded() }
+    .onDisappear { saveTask?.cancel() }
+    .sheet(isPresented: $showReplaceConfirm) {
+      ReplaceLibraryConfirmationSheet(
+        deviceName: deviceName,
+        syncedCount: deviceState?.syncedCount ?? 0,
+        onConfirm: {
+          onReplaceLibrary(serial)
+          showReplaceConfirm = false
+        },
+        onCancel: { showReplaceConfirm = false }
+      )
+    }
+  }
+
+  private var settingsForm: some View {
     Form {
       Section {
         LabeledContent("Name", value: deviceName)
+        if let hardware = deviceState.flatMap({ DeviceIdentityLogic.hardwareDescription($0.hardware) }) {
+          LabeledContent("Model", value: hardware)
+        }
         if let capacity = DeviceSurfaceLogic.storageText(deviceState) {
           LabeledContent("Capacity", value: capacity)
         }
@@ -134,36 +178,6 @@ struct DeviceSettingsPage: View {
       }
     }
     .formStyle(.grouped)
-    .navigationTitle(deviceName)
-    // Same dual-coverage rationale as `DeviceMusicPage`: `.task(id:)`
-    // covers a config already cached from a prior visit this launch
-    // (seed fires immediately); the `.onChange` covers the reply
-    // arriving after this view appears.
-    .task(id: serial) {
-      guard canEditDevice else { return }
-      seedIfNeeded()
-      onLoadDeviceConfig(serial)
-    }
-    .onChange(of: canEditDevice) { _, isAvailable in
-      handleDeviceAvailabilityChange(isAvailable)
-    }
-    .onChange(of: config?.settings) { _, _ in seedIfNeeded() }
-    .onChange(of: deviceState?.settingsRevision) { _, _ in seedIfNeeded() }
-    // See `DeviceMusicPage`'s identical `.onDisappear` for the
-    // rationale — cancels an in-flight debounced save the instant this
-    // page is navigated away from.
-    .onDisappear { saveTask?.cancel() }
-    .sheet(isPresented: $showReplaceConfirm) {
-      ReplaceLibraryConfirmationSheet(
-        deviceName: deviceName,
-        syncedCount: deviceState?.syncedCount ?? 0,
-        onConfirm: {
-          onReplaceLibrary(serial)
-          showReplaceConfirm = false
-        },
-        onCancel: { showReplaceConfirm = false }
-      )
-    }
   }
 
   private func shortDate(_ iso: String) -> String {

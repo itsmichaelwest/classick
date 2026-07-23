@@ -2,10 +2,10 @@ import Foundation
 
 struct LibraryDropEligibility: Equatable {
   static func targetForDevice(_ device: DeviceViewState) -> LibraryDropTarget? {
-    guard device.configured else { return nil }
+    guard device.configured, DeviceReadinessLogic.isReady(device.readiness) else { return nil }
     return .device(
       serial: device.deviceID,
-      displayName: device.identity.name ?? device.identity.modelLabel)
+      displayName: DeviceIdentityLogic.title(identity: device.identity, hardware: device.hardware))
   }
 
   static func targetForCard(_ presentation: DeviceRowPresentation) -> LibraryDropTarget? {

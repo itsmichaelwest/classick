@@ -17,6 +17,24 @@ final class LibraryDropStateTests: XCTestCase {
     XCTAssertNil(
       LibraryDropEligibility.targetForDevice(
         device(serial: "B", configured: false, connected: true)))
+    var notReady = device(serial: "A", configured: true, connected: true)
+    notReady.readiness = "needs_apple_initialization"
+    XCTAssertNil(LibraryDropEligibility.targetForDevice(notReady))
+  }
+
+  func testDeviceCommandGateRequiresReadyAuthoritativeInventoryEntry() {
+    let ready = device(serial: "A", configured: true, connected: true)
+    var invalid = ready
+    invalid.readiness = "invalid_database"
+    XCTAssertTrue(
+      DeviceCommandGate.allows(
+        serial: "A", hasAuthoritativeInventory: true, devices: ["A": ready]))
+    XCTAssertFalse(
+      DeviceCommandGate.allows(
+        serial: "A", hasAuthoritativeInventory: true, devices: ["A": invalid]))
+    XCTAssertFalse(
+      DeviceCommandGate.allows(
+        serial: "A", hasAuthoritativeInventory: false, devices: ["A": ready]))
   }
 
   func testOnlyExplicitCardAcceptsDeviceDrop() {

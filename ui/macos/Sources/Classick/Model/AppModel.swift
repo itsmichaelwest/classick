@@ -79,7 +79,8 @@ enum DeviceCommandGate {
     hasAuthoritativeInventory: Bool,
     devices: [DeviceID: DeviceViewState]
   ) -> Bool {
-    hasAuthoritativeInventory && devices[serial] != nil
+    hasAuthoritativeInventory
+      && devices[serial].map { DeviceReadinessLogic.isReady($0.readiness) } == true
   }
 }
 

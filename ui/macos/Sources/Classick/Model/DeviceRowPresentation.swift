@@ -25,6 +25,7 @@ struct DeviceRowPresentation: Equatable {
   var meter: Meter
   var primaryAction: Action?
   var secondaryAction: Action?
+  var accessibilityLabel: String = ""
 
   static func make(device: DeviceViewState?, libraryCount: Int?) -> Self {
     make(device: device, libraryCount: libraryCount, globalPhase: nil)
@@ -39,7 +40,9 @@ struct DeviceRowPresentation: Equatable {
       return makeWithoutDevice(libraryCount: libraryCount, globalPhase: globalPhase)
     }
 
-    let title = device.identity.name ?? device.identity.modelLabel
+    let title = DeviceIdentityLogic.title(identity: device.identity, hardware: device.hardware)
+    let accessibilityLabel = DeviceIdentityLogic.accessibilityLabel(
+      identity: device.identity, hardware: device.hardware)
 
     if device.finalization != nil {
       return Self(
@@ -49,7 +52,20 @@ struct DeviceRowPresentation: Equatable {
         caption: "Keep the iPod connected",
         meter: .indeterminate(label: "Saving completed albums"),
         primaryAction: nil,
-        secondaryAction: nil)
+        secondaryAction: nil,
+        accessibilityLabel: accessibilityLabel)
+    }
+
+    if let guidance = DeviceReadinessLogic.guidance(for: device.readiness) {
+      return Self(
+        serial: device.deviceID,
+        title: title,
+        subtitle: guidance.title,
+        caption: guidance.message,
+        meter: .unavailable,
+        primaryAction: nil,
+        secondaryAction: nil,
+        accessibilityLabel: accessibilityLabel)
     }
 
     if case .scanning(let current, let total) = globalPhase {
@@ -64,7 +80,8 @@ struct DeviceRowPresentation: Equatable {
           label: "Scanning library",
           etaSeconds: nil),
         primaryAction: nil,
-        secondaryAction: nil)
+        secondaryAction: nil,
+        accessibilityLabel: accessibilityLabel)
     }
 
     switch device.phase {
@@ -76,7 +93,8 @@ struct DeviceRowPresentation: Equatable {
         caption: "Plug it in to sync",
         meter: .unavailable,
         primaryAction: nil,
-        secondaryAction: nil)
+        secondaryAction: nil,
+        accessibilityLabel: accessibilityLabel)
 
     case .unconfigured:
       return Self(
@@ -86,7 +104,8 @@ struct DeviceRowPresentation: Equatable {
         caption: nil,
         meter: .unavailable,
         primaryAction: .setUp,
-        secondaryAction: nil)
+        secondaryAction: nil,
+        accessibilityLabel: accessibilityLabel)
 
     case .idle:
       return Self(
@@ -96,7 +115,8 @@ struct DeviceRowPresentation: Equatable {
         caption: rollupCaption(device),
         meter: capacityMeter(device),
         primaryAction: .syncNow,
-        secondaryAction: nil)
+        secondaryAction: nil,
+        accessibilityLabel: accessibilityLabel)
 
     case .syncing:
       guard let progress = device.syncProgress, progress.total > 0 else {
@@ -107,7 +127,8 @@ struct DeviceRowPresentation: Equatable {
           caption: nil,
           meter: .indeterminate(label: "Preparing sync…"),
           primaryAction: .pause,
-          secondaryAction: .cancel)
+          secondaryAction: .cancel,
+          accessibilityLabel: accessibilityLabel)
       }
       return Self(
         serial: device.deviceID,
@@ -120,7 +141,8 @@ struct DeviceRowPresentation: Equatable {
           label: progress.label.isEmpty ? nil : progress.label,
           etaSeconds: progress.etaSecs),
         primaryAction: .pause,
-        secondaryAction: .cancel)
+        secondaryAction: .cancel,
+        accessibilityLabel: accessibilityLabel)
 
     case .paused:
       let total = device.libraryCount ?? libraryCount ?? 0
@@ -139,7 +161,8 @@ struct DeviceRowPresentation: Equatable {
           label: summary,
           etaSeconds: nil),
         primaryAction: .resume,
-        secondaryAction: nil)
+        secondaryAction: nil,
+        accessibilityLabel: accessibilityLabel)
 
     case .error(let message):
       return Self(
@@ -149,7 +172,8 @@ struct DeviceRowPresentation: Equatable {
         caption: message,
         meter: .unavailable,
         primaryAction: .retry,
-        secondaryAction: .details)
+        secondaryAction: .details,
+        accessibilityLabel: accessibilityLabel)
     }
   }
 
@@ -210,7 +234,8 @@ struct DeviceRowPresentation: Equatable {
       caption: libraryCaption(libraryCount),
       meter: .unavailable,
       primaryAction: nil,
-      secondaryAction: nil)
+      secondaryAction: nil,
+      accessibilityLabel: "No iPod connected")
   }
 
   private static func libraryCaption(_ count: Int?) -> String {

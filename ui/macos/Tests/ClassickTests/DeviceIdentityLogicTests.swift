@@ -84,4 +84,70 @@ final class DeviceIdentityLogicTests: XCTestCase {
             DeviceIdentityLogic.placeholder,
             "must never show the CONNECTED device's synced count on a different device's page")
     }
+
+    func testAppleOwnedNameWinsOverHardwareDescription() {
+        let identity = DeviceIdentityWire(
+            serial: "A", modelLabel: "Legacy label", name: "Michael's iPod")
+        XCTAssertEqual(
+            DeviceIdentityLogic.title(identity: identity, hardware: classicHardware()),
+            "Michael's iPod")
+    }
+
+    func testBlankAppleNameFallsBackToKnownFamilyAndGeneration() {
+        let identity = DeviceIdentityWire(serial: "A", modelLabel: "Legacy label", name: "  ")
+        XCTAssertEqual(
+            DeviceIdentityLogic.title(identity: identity, hardware: classicHardware()),
+            "iPod classic (3rd generation)")
+    }
+
+    func testPresentationNeverUsesLegacyStorageLabelOrInferredGenerationAsIdentity() {
+        let identity = DeviceIdentityWire(
+            serial: "A", modelLabel: "iPod Classic (160 GB)", name: nil)
+        let unknown = WireV3Hardware(
+            family: nil, generation: nil, modelCode: nil, colour: nil, firmware: nil,
+            capacityBytes: .init(
+                value: 160_000_000_000, source: "reported", confidence: "certain"))
+        XCTAssertEqual(DeviceIdentityLogic.title(identity: identity, hardware: unknown), "iPod")
+
+        let capacityInferred = WireV3Hardware(
+            family: .init(value: "classic", source: "decoded", confidence: "certain"),
+            generation: .init(value: "1", source: "inferred", confidence: "heuristic"),
+            modelCode: nil, colour: nil, firmware: nil, capacityBytes: nil)
+        XCTAssertEqual(
+            DeviceIdentityLogic.hardwareDescription(capacityInferred), "iPod classic")
+    }
+
+    func testVoiceOverLabelStatesKnownHardwareWithoutRelyingOnArtwork() {
+        let identity = DeviceIdentityWire(
+            serial: "A", modelLabel: "Legacy label", name: "Michael's iPod")
+        XCTAssertEqual(
+            DeviceIdentityLogic.accessibilityLabel(identity: identity, hardware: classicHardware()),
+            "Michael's iPod, iPod classic (3rd generation)")
+    }
+
+    func testReadinessGuidanceIsExplicitAndMutationFailsClosed() {
+        XCTAssertTrue(DeviceReadinessLogic.isReady("ready"))
+        XCTAssertFalse(DeviceReadinessLogic.isReady("future_state"))
+        XCTAssertNil(DeviceReadinessLogic.guidance(for: "ready"))
+        XCTAssertEqual(
+            DeviceReadinessLogic.guidance(for: "needs_apple_initialization")?.title,
+            "Finish setup in Finder")
+        XCTAssertTrue(
+            DeviceReadinessLogic.guidance(for: "needs_apple_initialization")?.message
+                .contains("Apple software") == true)
+        XCTAssertEqual(
+            DeviceReadinessLogic.guidance(for: "invalid_database")?.title,
+            "This iPod needs recovery")
+        XCTAssertEqual(
+            DeviceReadinessLogic.guidance(for: "identity_unavailable")?.title,
+            "iPod identity unavailable")
+        XCTAssertNotNil(DeviceReadinessLogic.guidance(for: "future_state"))
+    }
+
+    private func classicHardware() -> WireV3Hardware {
+        WireV3Hardware(
+            family: .init(value: "classic", source: "decoded", confidence: "certain"),
+            generation: .init(value: "3", source: "decoded", confidence: "certain"),
+            modelCode: nil, colour: nil, firmware: nil, capacityBytes: nil)
+    }
 }

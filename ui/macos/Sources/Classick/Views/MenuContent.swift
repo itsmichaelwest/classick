@@ -56,6 +56,11 @@ struct MenuContent: View {
     } else if model.devices.values.filter(\.connected).count > 1 {
       Text("Select an iPod in Classick")
         .disabled(true)
+    } else if !model.unidentifiedDevices.isEmpty {
+      let guidance = DeviceReadinessLogic.identityUnavailableGuidance
+      Text(guidance.title)
+      Text(guidance.message)
+        .disabled(true)
     } else {
       Text("No iPod connected")
         .disabled(true)
@@ -64,6 +69,17 @@ struct MenuContent: View {
 
   @ViewBuilder
   private func deviceContent(serial: DeviceID, state: DeviceViewState) -> some View {
+    if let guidance = DeviceReadinessLogic.guidance(for: state.readiness) {
+      Text(guidance.title)
+      Text(guidance.message)
+        .disabled(true)
+    } else {
+      readyDeviceContent(serial: serial, state: state)
+    }
+  }
+
+  @ViewBuilder
+  private func readyDeviceContent(serial: DeviceID, state: DeviceViewState) -> some View {
     switch DeviceSurfaceLogic.phase(for: state, globalPhase: model.phase) {
     case .noDevice:
       Text("No iPod connected")
@@ -73,7 +89,7 @@ struct MenuContent: View {
       Button("Set Up Classick…") { onSetUp(serial) }
 
     case .idle:
-      Text(state.identity.name ?? state.identity.modelLabel)
+      Text(DeviceIdentityLogic.title(identity: state.identity, hardware: state.hardware))
       if let storageText = DeviceSurfaceLogic.storageText(state) {
         Text(storageText)
       }
@@ -167,5 +183,17 @@ private func formatLastSync(_ iso: String) -> String {
   #Preview("Music share needs attention") {
     MenuContent(model: PreviewFixtures.sourceAttentionModel())
       .frame(width: 280)
+  }
+
+  #Preview("Needs Finder setup") {
+    MenuContent(
+      model: PreviewFixtures.nativeDeviceModel(
+        readiness: "needs_apple_initialization", configured: false))
+      .frame(width: 320)
+  }
+
+  #Preview("Identity unavailable") {
+    MenuContent(model: PreviewFixtures.unidentifiedDeviceModel())
+      .frame(width: 320)
   }
 #endif

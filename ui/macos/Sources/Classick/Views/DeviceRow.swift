@@ -21,8 +21,11 @@ struct DeviceRow: View {
       libraryCount: model.libraryCount ?? model.library?.totalTracks)
   }
 
-  private var drive: String? {
-    presentation.serial.flatMap { model.devices[$0]?.mountPath }
+  private var hardware: WireV3Hardware {
+    presentation.serial.flatMap { model.devices[$0]?.hardware }
+      ?? WireV3Hardware(
+        family: nil, generation: nil, modelCode: nil, colour: nil, firmware: nil,
+        capacityBytes: nil)
   }
 
   var body: some View {
@@ -60,22 +63,25 @@ struct DeviceRow: View {
 
   private var header: some View {
     HStack(spacing: 12) {
-      DeviceIcon(
-        serial: presentation.serial,
-        drive: drive,
-        size: DeviceRowLayout.artworkSize)
+      HStack(spacing: 12) {
+        DeviceIcon(
+          hardware: hardware,
+          size: DeviceRowLayout.artworkSize)
 
-      VStack(alignment: .leading, spacing: 2) {
-        Text(presentation.title)
-          .font(.title3.bold())
-          .lineLimit(DeviceRowLayout.titleLineLimit)
-          .truncationMode(.tail)
-        Text(presentation.subtitle)
-          .foregroundStyle(subtitleStyle)
-          .lineLimit(DeviceRowLayout.subtitleLineLimit)
-          .truncationMode(.tail)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(presentation.title)
+            .font(.title3.bold())
+            .lineLimit(DeviceRowLayout.titleLineLimit)
+            .truncationMode(.tail)
+          Text(presentation.subtitle)
+            .foregroundStyle(subtitleStyle)
+            .lineLimit(DeviceRowLayout.subtitleLineLimit)
+            .truncationMode(.tail)
+        }
+        .layoutPriority(1)
       }
-      .layoutPriority(1)
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(presentation.accessibilityLabel)
 
       Spacer(minLength: 8)
       actions
@@ -389,5 +395,26 @@ extension View {
 
   #Preview("Not configured") {
     deviceRowPreview(PreviewFixtures.notConfiguredModel(), width: 820, colorScheme: .light)
+  }
+
+  #Preview("Long Apple name · exact artwork") {
+    deviceRowPreview(
+      PreviewFixtures.nativeDeviceModel(
+        name: "Michael West's extraordinarily long road-trip iPod classic"),
+      width: 600, colorScheme: .light)
+  }
+
+  #Preview("Remembered · generic artwork") {
+    deviceRowPreview(
+      PreviewFixtures.nativeDeviceModel(
+        hardware: PreviewFixtures.genericClassicHardware, connected: false),
+      width: 820, colorScheme: .light)
+  }
+
+  #Preview("Needs Finder setup") {
+    deviceRowPreview(
+      PreviewFixtures.nativeDeviceModel(
+        readiness: "needs_apple_initialization", configured: false),
+      width: 820, colorScheme: .light)
   }
 #endif

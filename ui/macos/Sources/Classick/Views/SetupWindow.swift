@@ -18,12 +18,19 @@ struct SetupWindow: View {
   @State private var autoSync = true
   @State private var isPickingFolder = false
 
-  private var setupDevice: DeviceViewState? {
+  private var candidateDevice: DeviceViewState? {
     if let preferredSerial, let state = model.devices[preferredSerial], state.connected {
       return state
     }
     let connected = model.devices.values.filter(\.connected)
     return connected.count == 1 ? connected[0] : nil
+  }
+
+  private var setupDevice: DeviceViewState? {
+    guard let candidateDevice, DeviceReadinessLogic.isReady(candidateDevice.readiness) else {
+      return nil
+    }
+    return candidateDevice
   }
 
   var body: some View {
@@ -47,11 +54,33 @@ struct SetupWindow: View {
       VStack(alignment: .leading, spacing: 6) {
         Text("iPod")
           .font(.headline)
-        Text(setupDevice.map { $0.identity.name ?? $0.identity.modelLabel } ?? setupDevicePrompt)
+        if let candidateDevice,
+          let guidance = DeviceReadinessLogic.guidance(for: candidateDevice.readiness)
+        {
+          Label(guidance.title, systemImage: guidance.systemImage)
+          Text(guidance.message)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        } else if candidateDevice == nil, !model.unidentifiedDevices.isEmpty {
+          Label(
+            DeviceReadinessLogic.identityUnavailableGuidance.title,
+            systemImage: DeviceReadinessLogic.identityUnavailableGuidance.systemImage)
+          Text(DeviceReadinessLogic.identityUnavailableGuidance.message)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        } else {
+          Text(
+            setupDevice.map {
+              DeviceIdentityLogic.title(identity: $0.identity, hardware: $0.hardware)
+            } ?? setupDevicePrompt
+          )
           .foregroundStyle(setupDevice == nil ? .secondary : .primary)
+        }
       }
 
       Toggle("Sync automatically when plugged in", isOn: $autoSync)
+        .disabled(setupDevice == nil)
 
       Text(
         "Quit Music.app before syncing — iTunes will reject a Classick-managed iPod while it's running."
@@ -105,6 +134,20 @@ struct SetupWindow: View {
   #Preview("No device") {
     SetupWindow(
       model: PreviewFixtures.firstRunModel(), preferredSerial: nil,
+      onDone: { _, _, _ in }, onClose: {})
+  }
+
+  #Preview("Finder initialization required") {
+    SetupWindow(
+      model: PreviewFixtures.nativeDeviceModel(
+        readiness: "needs_apple_initialization", configured: false),
+      preferredSerial: PreviewFixtures.nativeDeviceID,
+      onDone: { _, _, _ in }, onClose: {})
+  }
+
+  #Preview("Identity unavailable") {
+    SetupWindow(
+      model: PreviewFixtures.unidentifiedDeviceModel(), preferredSerial: nil,
       onDone: { _, _, _ in }, onClose: {})
   }
 #endif

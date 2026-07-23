@@ -2,112 +2,122 @@ import XCTest
 
 @testable import Classick
 
-/// `DeviceIconLogic` (device row icon): parsing the board-reported
-/// `ModelNumStr` out of `iPod_Control/Device/SysInfo` and the
-/// libgpod-derived model → Finder-icon table (see the enum's doc comment;
-/// the table mirrors itdb_device.c's `ipod_model_table` at the vendored
-/// commit).
 final class DeviceIconLogicTests: XCTestCase {
-  // MARK: - SysInfo parse (→ libgpod's 4-char table form, leading M stripped)
-
-  func testParsesModelNumFromRealSysInfoShape() {
-    let sysInfo = """
-      BoardHwName: iPod Q
-      pszSerialNumber: 000A27002138B0A8
-      ModelNumStr: MC293
-      buildID: 0x061710B3
-      """
-    XCTAssertEqual(DeviceIconLogic.parseModelNum(sysInfo: sysInfo), "C293")
+  func testCertainReportedModelAndDecodedColourSelectExactArtwork() {
+    XCTAssertEqual(
+      DeviceIconLogic.artwork(
+        for: hardware(model: fact("MC293", source: "reported"), colour: fact("silver"))),
+      .exact(resourceName: "iPod11-Silver"))
+    XCTAssertEqual(
+      DeviceIconLogic.artwork(
+        for: hardware(model: fact("MC297", source: "reported"), colour: fact("black"))),
+      .exact(resourceName: "iPod11B-Black"))
   }
 
-  func testStripsFirmwareXPrefixAndRegionSuffix() {
-    XCTAssertEqual(DeviceIconLogic.parseModelNum(sysInfo: "ModelNumStr: xMC297ZP/A"), "C297")
+  func testExactArtworkRequiresIndependentDecodedColour() {
+    XCTAssertEqual(
+      DeviceIconLogic.artwork(
+        for: hardware(
+          model: fact("MC297", source: "reported"),
+          colour: fact("black", source: "reported"))),
+      .generic(.classic))
+    XCTAssertEqual(
+      DeviceIconLogic.artwork(
+        for: hardware(
+          model: fact("MC297", source: "reported"),
+          colour: fact("black", confidence: "heuristic"))),
+      .generic(.classic))
   }
 
-  func testUppercasesAndNormalizesModelNum() {
-    XCTAssertEqual(DeviceIconLogic.parseModelNum(sysInfo: "ModelNumStr: mb565"), "B565")
+  func testUnknownMissingAndMismatchedFactsUseGenericArtwork() {
+    XCTAssertEqual(DeviceIconLogic.artwork(for: hardware()), .generic(.classic))
+    XCTAssertEqual(
+      DeviceIconLogic.artwork(
+        for: hardware(model: fact("UNKNOWN", source: "reported"), colour: fact("black"))),
+      .generic(.classic))
+    XCTAssertEqual(
+      DeviceIconLogic.artwork(
+        for: hardware(model: fact("MC293", source: "reported"), colour: fact("black"))),
+      .generic(.classic))
   }
 
-  func testFirstGenNumericModelSurvivesMStrip() {
-    XCTAssertEqual(DeviceIconLogic.parseModelNum(sysInfo: "ModelNumStr: M8541"), "8541")
+  func testConflictingOrInferredFamilyCannotSelectClassicArtwork() {
+    let exactModel = fact("MC293", source: "reported")
+    let exactColour = fact("silver")
+    let nano = WireV3Hardware(
+      family: fact("nano"), generation: fact("3"), modelCode: exactModel,
+      colour: exactColour, firmware: nil, capacityBytes: nil)
+    XCTAssertEqual(DeviceIconLogic.artwork(for: nano), .generic(.nano))
+
+    let inferred = WireV3Hardware(
+      family: fact("classic", source: "inferred", confidence: "heuristic"),
+      generation: fact("3"), modelCode: exactModel, colour: exactColour,
+      firmware: nil, capacityBytes: nil)
+    XCTAssertEqual(DeviceIconLogic.artwork(for: inferred), .generic(.unknown))
   }
 
-  func testMissingModelNumLineIsNil() {
-    XCTAssertNil(DeviceIconLogic.parseModelNum(sysInfo: "BoardHwName: iPod Q\n"))
+  func testInferredStorageAndFamilyNeverBecomeExactArtwork() {
+    let facts = WireV3Hardware(
+      family: fact("classic", source: "decoded"),
+      generation: fact("1", source: "inferred", confidence: "heuristic"),
+      modelCode: nil, colour: nil, firmware: nil,
+      capacityBytes: fact(80_000_000_000, source: "reported"))
+    XCTAssertEqual(DeviceIconLogic.artwork(for: facts), .generic(.classic))
   }
 
-  func testEmptyOrTruncatedValueIsNil() {
-    XCTAssertNil(DeviceIconLogic.parseModelNum(sysInfo: "ModelNumStr: \n"))
-    XCTAssertNil(DeviceIconLogic.parseModelNum(sysInfo: "ModelNumStr: M12\n"))
-  }
-
-  // MARK: - Model → icon mapping (one representative per family)
-
-  func testEveryFamilyMapsToItsIcon() {
-    let expectations: [(String, String)] = [
-      ("8541", "iPod1"),  // 1G scroll wheel
-      ("8738", "iPod1"),  // 2G touch wheel
-      ("9244", "iPod2"),  // 3G dock connector
-      ("9282", "iPod4-White"),  // 4G mono
-      ("9787", "iPod4-BlackRed"),  // 4G U2
-      ("9436", "iPod3-Blue"),  // mini 1G blue
-      ("9437", "iPod3-Gold"),  // mini 1G gold (2G dropped it)
-      ("9803", "iPod3B-Blue"),  // mini 2G brighter blue
-      ("9829", "iPod4-White"),  // photo
-      ("A002", "iPod5-White"),  // Video 5G white
-      ("A146", "iPod6-Black"),  // Video 5G black (no iPod5-Black asset)
-      ("A452", "iPod5-BlackRed"),  // Video 5G U2
-      ("A448", "iPod6-White"),  // Video 5.5G 80GB
-      ("A107", "iPod7-Black"),  // nano 1G black
-      ("A489", "iPod9-Pink"),  // nano 2G pink
-      ("B249", "iPod12-Blue"),  // nano 3G blue
-      ("B917", "iPod15-Red"),  // nano 4G red 16GB
-      ("C043", "iPod16-Yellow"),  // nano 5G yellow
-      ("C694", "iPod17-DarkGray"),  // nano 6G black → graphite art
-      ("B029", "iPod11-Silver"),  // Classic 2007 80 silver
-      ("B565", "iPod11-Black"),  // Classic 2008 120 black
-      ("C293", "iPod11-Silver"),  // Classic 2009 silver
-      ("C297", "iPod11B-Black"),  // Classic 2009 black (blacker art)
+  func testGenericArtworkUsesEveryDeterministicFamilyAndHonestShuffleGeneration() {
+    let expected: [(String, GenericDeviceArtwork)] = [
+      ("classic", .classic), ("nano", .nano), ("mini", .mini),
+      ("video", .video), ("photo", .photo), ("touch", .touch), ("ipod", .ipod),
     ]
-    for (model, icon) in expectations {
-      XCTAssertEqual(DeviceIconLogic.iconBaseName(modelNum: model), icon, "model \(model)")
+    for (family, token) in expected {
+      let facts = WireV3Hardware(
+        family: fact(family), generation: nil, modelCode: nil, colour: nil,
+        firmware: nil, capacityBytes: nil)
+      XCTAssertEqual(DeviceIconLogic.artwork(for: facts), .generic(token), family)
     }
-  }
 
-  func testUnknownModelAndShufflesFallBackToSilverClassic() {
-    XCTAssertEqual(DeviceIconLogic.iconBaseName(modelNum: nil), "iPod11-Silver")
-    XCTAssertEqual(DeviceIconLogic.iconBaseName(modelNum: "ZZZZ"), "iPod11-Silver")
-    // Shuffles are deliberately unmapped (no iTunesDB, unsyncable).
-    XCTAssertEqual(DeviceIconLogic.iconBaseName(modelNum: "C584"), "iPod11-Silver")
-  }
+    let knownShuffle = WireV3Hardware(
+      family: fact("shuffle"), generation: fact("3"), modelCode: nil, colour: nil,
+      firmware: nil, capacityBytes: nil)
+    XCTAssertEqual(DeviceIconLogic.artwork(for: knownShuffle), .generic(.shuffle(generation: 3)))
 
-  func testCacheKeyRetainsDeviceIdentityAcrossDisconnectedRows() {
-    XCTAssertNotEqual(
-      DeviceIconLogic.cacheKey(serial: "A", drive: nil),
-      DeviceIconLogic.cacheKey(serial: "B", drive: nil))
+    let inferredShuffle = WireV3Hardware(
+      family: fact("shuffle"),
+      generation: fact("3", source: "inferred", confidence: "heuristic"),
+      modelCode: nil, colour: nil, firmware: nil, capacityBytes: nil)
     XCTAssertEqual(
-      DeviceIconLogic.cacheKey(serial: "A", drive: "/Volumes/iPod"),
-      DeviceIconLogic.cacheKey(serial: "A", drive: "/Volumes/iPod"))
+      DeviceIconLogic.artwork(for: inferredShuffle), .generic(.shuffle(generation: nil)))
+
+    XCTAssertEqual(GenericDeviceArtwork.classic.baseSystemImage, "ipod")
+    XCTAssertEqual(GenericDeviceArtwork.classic.badgeSystemImage, "circle.circle.fill")
+    XCTAssertNil(GenericDeviceArtwork.ipod.badgeSystemImage)
+    XCTAssertEqual(GenericDeviceArtwork.unknown.badgeSystemImage, "questionmark.circle.fill")
   }
 
-  func testCacheKeyUsesNonIdentityFallbackWhenDeviceIDIsUnavailable() {
-    XCTAssertEqual(
-      DeviceIconLogic.cacheKey(serial: nil, drive: nil),
-      "<unknown>|<disconnected>")
-  }
-
-  /// Every icon the table can name must exist in the AMPDevices resources
-  /// on this Mac — catches both table typos and an OS release moving the
-  /// framework (skips rather than fails when the dir is gone entirely,
-  /// since the view falls back gracefully at runtime).
-  func testAllTableIconsExistOnThisSystem() throws {
+  func testAllExactIconsExistOnThisSystem() throws {
     try XCTSkipUnless(
       FileManager.default.fileExists(atPath: DeviceIconLogic.ampResourcesDir),
-      "AMPDevices resources not present on this OS — runtime falls back to volume icon/SF Symbol")
-    for name in DeviceIconLogic.allIconBaseNames.sorted() {
+      "AMPDevices resources not present on this OS — runtime uses the generic symbol")
+    for name in DeviceIconLogic.allExactResourceNames.sorted() {
       XCTAssertTrue(
         FileManager.default.fileExists(atPath: "\(DeviceIconLogic.ampResourcesDir)/\(name).icns"),
         "missing icon resource: \(name).icns")
     }
+  }
+
+  private func hardware(
+    model: WireV3HardwareFact<String>? = nil,
+    colour: WireV3HardwareFact<String>? = nil
+  ) -> WireV3Hardware {
+    WireV3Hardware(
+      family: fact("classic"), generation: fact("3"), modelCode: model, colour: colour,
+      firmware: nil, capacityBytes: nil)
+  }
+
+  private func fact<T: Codable & Equatable & Sendable>(
+    _ value: T, source: String = "decoded", confidence: String = "certain"
+  ) -> WireV3HardwareFact<T> {
+    .init(value: value, source: source, confidence: confidence)
   }
 }
