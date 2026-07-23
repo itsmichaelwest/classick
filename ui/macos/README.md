@@ -92,7 +92,7 @@ generates the Sparkle appcast. It is arm64-only and runs locally (not CI).
 
 ```bash
 scripts/release-macos.sh 0.1.0                # -> dist/Classick-0.1.0.dmg + dist/appcast.xml
-RELEASE_GH=1 scripts/release-macos.sh 0.1.0   # also `gh release create v0.1.0`
+RELEASE_GH=1 scripts/release-macos.sh 0.1.0   # also creates GitHub prerelease v0.1.0
 ```
 
 **Secrets never touch the repo.** All three credentials live only in the

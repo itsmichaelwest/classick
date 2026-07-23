@@ -5,7 +5,7 @@
 # notarytool profile); nothing sensitive is read from or written to the repo.
 #
 # Usage: scripts/release-macos.sh <version>   e.g.  scripts/release-macos.sh 0.1.0
-#        RELEASE_GH=1 scripts/release-macos.sh 0.1.0   # also `gh release create`
+#        RELEASE_GH=1 scripts/release-macos.sh 0.1.0   # also creates a GitHub prerelease
 set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION="${1:?usage: release-macos.sh <version>}"
@@ -85,8 +85,9 @@ if [ -x "$GEN_APPCAST" ]; then
 fi
 
 if [ "${RELEASE_GH:-0}" = "1" ]; then
-  echo "==> gh release create v$VERSION"
-  gh release create "v$VERSION" "$DMG" --title "Classick $VERSION" --notes "Classick $VERSION"
+  echo "==> gh release create --prerelease v$VERSION"
+  gh release create "v$VERSION" "$DMG" --prerelease \
+    --title "Classick $VERSION" --notes "Classick $VERSION"
 fi
 
 echo "==> done: $DMG"
