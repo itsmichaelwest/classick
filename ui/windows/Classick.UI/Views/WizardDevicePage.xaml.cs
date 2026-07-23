@@ -23,12 +23,14 @@ public sealed partial class WizardDevicePage : Page
         var daemon = App.Daemon;
         if (router is null || daemon is null) return;
 
-        router.DeviceConnected += OnDeviceConnected;
-        router.DeviceDisconnected += OnDeviceDisconnected;
+        router.DeviceInventoryReceived += OnDeviceInventory;
         _vm.BeginScanning();
+        _vm.ApplyInventory(
+            App.Store.Devices.Values.Select(device => device.Inventory),
+            App.Store.Unidentified.Values);
 
-        try { await daemon.SendAsync(new SubscribeDeviceEventsCommand()); }
-        catch (Exception ex) { Debug.WriteLine($"wizard-device: subscribe failed: {ex}"); }
+        try { await daemon.SendAsync(new GetInventoryCommand(Guid.NewGuid().ToString("D"))); }
+        catch (Exception ex) { Debug.WriteLine($"wizard-device: inventory failed: {ex}"); }
     }
 
     protected override async void OnNavigatedFrom(NavigationEventArgs e)
@@ -36,26 +38,21 @@ public sealed partial class WizardDevicePage : Page
         var router = App.Router;
         if (router is not null)
         {
-            router.DeviceConnected -= OnDeviceConnected;
-            router.DeviceDisconnected -= OnDeviceDisconnected;
+            router.DeviceInventoryReceived -= OnDeviceInventory;
         }
         _vm?.EndScanning();
         _vm = null;
 
-        var daemon = App.Daemon;
-        if (daemon is null) return;
-        try { await daemon.SendAsync(new UnsubscribeDeviceEventsCommand()); }
-        catch (Exception ex) { Debug.WriteLine($"wizard-device: unsubscribe failed: {ex}"); }
+        await Task.CompletedTask;
     }
 
-    private void OnDeviceConnected(DeviceConnectedEvent dc)
+    private void OnDeviceInventory(DeviceInventoryEvent inventory)
     {
-        DispatcherQueue.TryEnqueue(() =>
-            _vm?.OnDeviceConnected(new IpodIdentityCandidate(dc.Serial, dc.ModelLabel, dc.Drive, dc.Name)));
+        DispatcherQueue.TryEnqueue(() => _vm?.ApplyInventory(inventory));
     }
 
-    private void OnDeviceDisconnected(DeviceDisconnectedEvent dd)
+    private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        DispatcherQueue.TryEnqueue(() => _vm?.OnDeviceDisconnected(dd.Serial));
+        if (_vm?.SelectedDevice is { CanAdopt: false }) _vm.SelectedDevice = null;
     }
 }

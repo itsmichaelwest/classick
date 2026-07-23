@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using Classick_UI.Core;
+using Classick_UI.Ipc;
 using Classick_UI.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -26,13 +27,13 @@ public sealed partial class SettingsGeneralPage : Page
     // boolean properties on the page itself.
     public bool IsAutomatic
     {
-        get => ViewModel?.General.SubsequentSyncMode == "auto_apply";
+        get => ViewModel?.General.SubsequentSyncMode == SyncMode.AutoApply;
         set
         {
             if (value && ViewModel is not null)
             {
-                ViewModel.General.SubsequentSyncMode = "auto_apply";
-                ViewModel.General.FirstSyncMode = "auto_apply";
+                ViewModel.General.SubsequentSyncMode = SyncMode.AutoApply;
+                ViewModel.General.FirstSyncMode = SyncMode.AutoApply;
                 OnPropertyChangedSelf();
             }
         }
@@ -40,16 +41,42 @@ public sealed partial class SettingsGeneralPage : Page
 
     public bool IsManual
     {
-        get => ViewModel?.General.SubsequentSyncMode == "review";
+        get => ViewModel?.General.SubsequentSyncMode == SyncMode.Review;
         set
         {
             if (value && ViewModel is not null)
             {
-                ViewModel.General.SubsequentSyncMode = "review";
-                ViewModel.General.FirstSyncMode = "review";
+                ViewModel.General.SubsequentSyncMode = SyncMode.Review;
+                ViewModel.General.FirstSyncMode = SyncMode.Review;
                 OnPropertyChangedSelf();
             }
         }
+    }
+
+    public bool IsSelectionAll
+    {
+        get => ViewModel?.General.DeviceSelectionMode == SelectionMode.All;
+        set { if (value && ViewModel is not null) SetSelectionMode(SelectionMode.All); }
+    }
+
+    public bool IsSelectionInclude
+    {
+        get => ViewModel?.General.DeviceSelectionMode == SelectionMode.Include;
+        set { if (value && ViewModel is not null) SetSelectionMode(SelectionMode.Include); }
+    }
+
+    public bool IsSelectionExclude
+    {
+        get => ViewModel?.General.DeviceSelectionMode == SelectionMode.Exclude;
+        set { if (value && ViewModel is not null) SetSelectionMode(SelectionMode.Exclude); }
+    }
+
+    private void SetSelectionMode(SelectionMode mode)
+    {
+        ViewModel!.General.DeviceSelectionMode = mode;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelectionAll)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelectionInclude)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelectionExclude)));
     }
 
     public new event PropertyChangedEventHandler? PropertyChanged;
@@ -57,6 +84,9 @@ public sealed partial class SettingsGeneralPage : Page
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsAutomatic)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsManual)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelectionAll)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelectionInclude)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelectionExclude)));
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -91,7 +121,8 @@ public sealed partial class SettingsGeneralPage : Page
         var result = await dialog.ShowAsync();
         if (result == ContentDialogResult.Primary)
         {
-            ViewModel.Chooser.Remove(current);
+            try { await ViewModel.ForgetSelectedAsync(); }
+            catch (Exception exception) { Debug.WriteLine($"settings: forget device failed: {exception.Message}"); }
         }
     }
 
@@ -103,5 +134,29 @@ public sealed partial class SettingsGeneralPage : Page
         Directory.CreateDirectory(path);
         try { Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true }); }
         catch (Exception ex) { Debug.WriteLine($"settings: open log folder failed: {ex.Message}"); }
+    }
+
+    private async void OnSyncNow(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        try { await ViewModel.SyncSelectedAsync(); }
+        catch (Exception exception) { Debug.WriteLine($"settings: sync failed: {exception.Message}"); }
+    }
+
+    private async void OnReplaceLibrary(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null) return;
+        var dialog = new ContentDialog
+        {
+            Title = "Replace this iPod's library?",
+            Content = "Classick will explicitly replace the selected iPod's music from the current library.",
+            PrimaryButtonText = "Replace",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        try { await ViewModel.ReplaceSelectedLibraryAsync(); }
+        catch (Exception exception) { Debug.WriteLine($"settings: replace failed: {exception.Message}"); }
     }
 }

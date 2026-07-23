@@ -1,54 +1,66 @@
-using System;
 using System.Collections.ObjectModel;
-using System.Threading.Tasks;
-using CommunityToolkit.Mvvm.ComponentModel;
+using Classick_UI.Devices;
 using Classick_UI.Ipc;
+using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace Classick_UI.ViewModels;
 
-/// <summary>
-/// Shell ViewModel for SettingsWindow. Holds the live PersistedConfig
-/// snapshot the user is editing and exposes per-tab sub-ViewModels.
-///
-/// Save model — the Settings window has no Save/Cancel buttons; each
-/// sub-VM raises PropertyChanged on edits, this VM debounces writes
-/// (DebounceMs) and pushes a SaveConfigCommand to the daemon. Keeps
-/// the UX edit-and-forget while collapsing dropdown spam into a
-/// single round-trip.
-/// </summary>
-public partial class SettingsViewModel : ObservableObject
+public partial class SettingsViewModel : ObservableObject, IDisposable
 {
-    private const int DebounceMs = 400;
-
     private readonly DaemonClient _daemon;
     private readonly DaemonEventRouter _router;
-    // DispatcherTimer instead of a Task.Delay+CTS pattern: resetting
-    // a timer is exception-free, whereas cancelling Task.Delay throws
-    // TaskCanceledException on every edit (first-chance exceptions
-    // are caught but still logged by the debugger and are slow in
-    // Debug builds).
+    private readonly DeviceStore _store;
     private readonly Microsoft.UI.Xaml.DispatcherTimer _debounceTimer;
+    private string? _pendingSourceRequest;
+    private string? _pendingGlobalRequest;
 
-    public SettingsViewModel(DaemonClient daemon, DaemonEventRouter router, ConfigUpdateEvent currentConfig)
+    public SettingsViewModel(DaemonClient daemon, DaemonEventRouter router, DeviceStore store)
     {
         _daemon = daemon;
         _router = router;
-        General = new SettingsGeneralViewModel(currentConfig);
-        Notifications = new SettingsNotificationsViewModel(currentConfig);
+        _store = store;
+        var global = store.GlobalConfig ?? new GlobalConfigEvent(
+            null, 0, null,
+            new GlobalSettings(SyncMode.Review, SyncMode.AutoApply, 30, NotifyLevel.All, DropSyncBehavior.Immediate));
+        General = new SettingsGeneralViewModel(global, store, WindowsStartupRegistration.IsEnabled());
+        Notifications = new SettingsNotificationsViewModel(global.Settings.NotifyOn);
         History = new SettingsHistoryViewModel(daemon, router);
         About = new SettingsAboutViewModel();
-        Chooser = new IpodChooserViewModel(currentConfig, daemon);
+        Chooser = new IpodChooserViewModel(store);
+        General.SelectDevice(Chooser.Selected?.DeviceId);
 
-        _debounceTimer = new Microsoft.UI.Xaml.DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(DebounceMs),
-        };
+        _debounceTimer = new Microsoft.UI.Xaml.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
         _debounceTimer.Tick += OnDebounceTick;
-
-        // Any change in a sub-VM kicks the debounce timer.
-        General.PropertyChanged += (_, _) => QueueSave();
+        General.PropertyChanged += (_, eventArgs) =>
+        {
+            if (General.IsApplyingCanonical) return;
+            if (eventArgs.PropertyName == nameof(SettingsGeneralViewModel.LaunchOnStartup))
+            {
+                try { WindowsStartupRegistration.SetEnabled(General.LaunchOnStartup); }
+                catch (Exception exception) { General.SaveError = exception.Message; }
+                return;
+            }
+            if (eventArgs.PropertyName is nameof(SettingsGeneralViewModel.AutoSync) or nameof(SettingsGeneralViewModel.RockboxCompat))
+            {
+                _ = SaveDeviceSettingsAsync();
+            }
+            else if (eventArgs.PropertyName == nameof(SettingsGeneralViewModel.DeviceSelectionMode))
+            {
+                _ = SaveSelectionAsync();
+            }
+            else
+            {
+                QueueSave();
+            }
+        };
         Notifications.PropertyChanged += (_, _) => QueueSave();
-        Chooser.Changed += QueueSave;
+        Chooser.SelectionChanged += deviceId =>
+        {
+            General.SelectDevice(deviceId);
+            if (deviceId is { } id) _ = RequestDeviceConfigAsync(id);
+        };
+        router.EventReceived += OnWireEvent;
+        if (Chooser.Selected is { } selected) _ = RequestDeviceConfigAsync(selected.DeviceId);
     }
 
     public SettingsGeneralViewModel General { get; }
@@ -57,12 +69,9 @@ public partial class SettingsViewModel : ObservableObject
     public SettingsAboutViewModel About { get; }
     public IpodChooserViewModel Chooser { get; }
 
-    /// <summary>Schedule a debounced save. Each call resets the timer
-    /// so the user's last edit within DebounceMs wins; the timer
-    /// fires once on the UI thread, no continuations, no
-    /// TaskCanceledException churn.</summary>
     public void QueueSave()
     {
+        if (General.IsApplyingCanonical) return;
         _debounceTimer.Stop();
         _debounceTimer.Start();
     }
@@ -73,300 +82,218 @@ public partial class SettingsViewModel : ObservableObject
         await SaveAsync();
     }
 
-    /// <summary>Push current dirty fields to the daemon as a single
-    /// SaveConfigCommand. Public so tests can drive it directly.</summary>
     public async Task SaveAsync()
     {
-        var cmd = new SaveConfigCommand(
-            Source: General.IsSourceDirty ? General.SourcePath : null,
-            Daemon: BuildDaemonSettings(),
-            Ipod: null,
-            RequestId: Guid.NewGuid().ToString("N"));
-        try { await _daemon.SendAsync(cmd); }
-        catch (Exception e) { System.Diagnostics.Debug.WriteLine($"settings: save failed: {e}"); }
+        try
+        {
+            if (General.IsSourceDirty)
+            {
+                _pendingSourceRequest = NewId();
+                await _daemon.SendAsync(new SetSourceLocationCommand(_pendingSourceRequest, General.SourcePath));
+            }
+            if (General.IsGlobalDirty || Notifications.IsDirty)
+            {
+                _pendingGlobalRequest = NewId();
+                await _daemon.SendAsync(new SetGlobalSettingsCommand(_pendingGlobalRequest, new GlobalSettings(
+                    General.FirstSyncMode,
+                    General.SubsequentSyncMode,
+                    checked((uint)General.ScheduleMinutes),
+                    Notifications.NotifyOn,
+                    General.DropSyncBehavior)));
+            }
+            if (General.IsSubscriptionsDirty && General.SelectedDeviceId is { } deviceId)
+            {
+                var playlists = General.PlaylistSubscriptionsText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+                var command = _store.ComponentDrafts.EditSubscriptions(
+                    deviceId,
+                    new SubscriptionsValue(1, playlists),
+                    NewId(),
+                    NewId());
+                General.RefreshDeviceDraft();
+                try { await _daemon.SendAsync(command); }
+                catch (Exception exception)
+                {
+                    _store.ComponentDrafts.ApplyFailure(new ConfigMutationFailedEvent(
+                        deviceId,
+                        command.RequestId,
+                        command.MutationId,
+                        ConfigComponent.Subscriptions,
+                        ConfigFailureStage.HostAcceptance,
+                        exception.Message));
+                    General.RefreshDeviceDraft();
+                    throw;
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            General.SaveError = exception.Message;
+        }
     }
 
-    private DaemonSettings? BuildDaemonSettings()
+    private async Task SaveDeviceSettingsAsync()
     {
-        if (!General.IsAnyDaemonFieldDirty && !Notifications.IsDirty) return null;
-        // TODO(windows-autosync): `Enabled: true` is hardcoded, but the daemon
-        // now gates auto-sync on `daemon.enabled` (see
-        // crates/classick/src/daemon/runtime.rs::auto_sync_enabled), not on
-        // SubsequentSyncMode. So the "Manual" sync mode no longer disables
-        // auto-sync on Windows. Expose an explicit auto-sync on/off control and
-        // map it to Enabled here (leaving SubsequentSyncMode for apply-vs-review
-        // only). Not done this session — no Windows build environment.
-        return new DaemonSettings(
-            Enabled: true,
-            AutostartWithWindows: General.LaunchOnStartup,
-            FirstSyncMode: General.FirstSyncMode,
-            SubsequentSyncMode: General.SubsequentSyncMode,
-            ScheduleMinutes: (uint)General.ScheduleMinutes,
-            NotifyOn: Notifications.NotifyOn,
-            RockboxCompat: false);
+        if (!General.IsDeviceSettingsDirty || General.SelectedDeviceId is not { } deviceId) return;
+        var command = _store.SettingsDrafts.Edit(
+            deviceId,
+            new SettingsValue(1, General.AutoSync, General.RockboxCompat),
+            NewId(),
+            NewId());
+        General.RefreshDeviceDraft();
+        try
+        {
+            await _daemon.SendAsync(command);
+        }
+        catch (Exception exception)
+        {
+            _store.SettingsDrafts.MarkTransportFailure(deviceId, exception.Message);
+            General.RefreshDeviceDraft();
+        }
+    }
+
+    private async Task SaveSelectionAsync()
+    {
+        if (!General.IsSelectionDirty || General.SelectedDeviceId is not { } deviceId ||
+            General.LoadedSelection is not { } loaded) return;
+        var value = new SelectionValue(
+            1,
+            General.DeviceSelectionMode,
+            loaded.Rules);
+        var command = _store.ComponentDrafts.EditSelection(deviceId, value, NewId(), NewId());
+        General.RefreshDeviceDraft();
+        try { await _daemon.SendAsync(command); }
+        catch (Exception exception)
+        {
+            _store.ComponentDrafts.ApplyFailure(new ConfigMutationFailedEvent(
+                deviceId,
+                command.RequestId,
+                command.MutationId,
+                ConfigComponent.Selection,
+                ConfigFailureStage.HostAcceptance,
+                exception.Message));
+            General.RefreshDeviceDraft();
+            General.SaveError = exception.Message;
+        }
+    }
+
+    public async Task ForgetSelectedAsync()
+    {
+        if (Chooser.Selected is not { } selected) return;
+        var requestId = NewId();
+        var wasLastDevice = _store.Devices.Count == 1;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnEvent(WireEvent wireEvent)
+        {
+            if (wireEvent is DeviceForgottenEvent forgotten && forgotten.RequestId == requestId)
+                completion.TrySetResult();
+            else if (wireEvent is CommandFailedEvent failed && failed.RequestId == requestId)
+                completion.TrySetException(new InvalidOperationException(failed.Message));
+        }
+        _router.EventReceived += OnEvent;
+        try
+        {
+            await _daemon.SendAsync(new ForgetDeviceCommand(selected.DeviceId, requestId));
+            await completion.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            if (wasLastDevice) App.RequestPairNewIpod();
+        }
+        catch (Exception exception)
+        {
+            General.SaveError = exception is TimeoutException
+                ? "Classick did not confirm that the iPod was removed. Try again."
+                : exception.Message;
+            throw;
+        }
+        finally
+        {
+            _router.EventReceived -= OnEvent;
+        }
+    }
+
+    public Task SyncSelectedAsync() => Chooser.Selected is { } selected
+        ? _daemon.SendAsync(new WireTriggerSyncCommand(selected.DeviceId, NewId(), SyncTrigger.Manual))
+        : Task.CompletedTask;
+
+    public Task ReplaceSelectedLibraryAsync() => Chooser.Selected is { } selected
+        ? _daemon.SendAsync(new ReplaceLibraryCommand(selected.DeviceId, NewId()))
+        : Task.CompletedTask;
+
+    private void OnWireEvent(WireEvent wireEvent)
+    {
+        if (wireEvent is GlobalConfigEvent global)
+        {
+            App.DispatcherQueue.TryEnqueue(() =>
+            {
+                if (global.RequestId == _pendingSourceRequest)
+                {
+                    General.AcceptSource(global.SourceRoot);
+                    _pendingSourceRequest = null;
+                }
+                if (global.RequestId == _pendingGlobalRequest)
+                {
+                    General.AcceptGlobal(global.Settings);
+                    Notifications.AcceptGlobal(global.Settings.NotifyOn);
+                    _pendingGlobalRequest = null;
+                }
+            });
+        }
+        else if (wireEvent is CommandFailedEvent failed &&
+                 (failed.RequestId == _pendingSourceRequest || failed.RequestId == _pendingGlobalRequest))
+        {
+            App.DispatcherQueue.TryEnqueue(() => General.SaveError = failed.Message);
+            if (failed.RequestId == _pendingSourceRequest) _pendingSourceRequest = null;
+            if (failed.RequestId == _pendingGlobalRequest) _pendingGlobalRequest = null;
+        }
+        else if (wireEvent is DeviceConfigEvent or ConfigMutationFailedEvent or HistoryEvent)
+        {
+            App.DispatcherQueue.TryEnqueue(General.RefreshDeviceDraft);
+        }
+        else if (wireEvent is DeviceInventoryEvent or DeviceForgottenEvent)
+        {
+            App.DispatcherQueue.TryEnqueue(() =>
+            {
+                Chooser.Refresh();
+                General.SelectDevice(Chooser.Selected?.DeviceId);
+            });
+        }
+    }
+
+    private async Task RequestDeviceConfigAsync(DeviceId deviceId)
+    {
+        try { await _daemon.SendAsync(new GetDeviceConfigCommand(deviceId, NewId())); }
+        catch (Exception exception) { General.SaveError = exception.Message; }
+    }
+
+    private static string NewId() => Guid.NewGuid().ToString("D");
+
+    public void Dispose()
+    {
+        _debounceTimer.Stop();
+        _router.EventReceived -= OnWireEvent;
+        History.Dispose();
     }
 }
-
-// ---------------------------------------------------------------------
-// General — Music folder, Sync mode, Sync frequency, Launch on startup,
-// Remove iPod, About footer. Schedule fields used to live on a separate
-// page; merged here per the Figma which folds them into General.
-// ---------------------------------------------------------------------
-
-public partial class SettingsGeneralViewModel : ObservableObject
-{
-    private readonly string _originalSource;
-    private readonly DaemonSettings? _originalDaemon;
-
-    public SettingsGeneralViewModel(ConfigUpdateEvent c)
-    {
-        _originalSource = c.Source ?? "";
-        _originalDaemon = c.Daemon;
-        SourcePath = _originalSource;
-        IpodModelLabel = c.Ipod?.ModelLabel ?? "(not configured)";
-        IpodSerial = c.Ipod?.Serial ?? "";
-        FirstSyncMode = c.Daemon?.FirstSyncMode ?? "review";
-        SubsequentSyncMode = c.Daemon?.SubsequentSyncMode ?? "auto_apply";
-        ScheduleMinutes = (int)(c.Daemon?.ScheduleMinutes ?? 30);
-        LaunchOnStartup = c.Daemon?.AutostartWithWindows ?? false;
-    }
-
-    [ObservableProperty] private string sourcePath = "";
-    [ObservableProperty] private string ipodModelLabel = "";
-    [ObservableProperty] private string ipodSerial = "";
-    [ObservableProperty] private string firstSyncMode = "review";
-    [ObservableProperty] private string subsequentSyncMode = "auto_apply";
-    [ObservableProperty] private int scheduleMinutes = 30;
-    [ObservableProperty] private bool launchOnStartup;
-
-    public bool IsSourceDirty => SourcePath != _originalSource;
-
-    public bool IsAnyDaemonFieldDirty =>
-        FirstSyncMode != (_originalDaemon?.FirstSyncMode ?? "review") ||
-        SubsequentSyncMode != (_originalDaemon?.SubsequentSyncMode ?? "auto_apply") ||
-        ScheduleMinutes != (int)(_originalDaemon?.ScheduleMinutes ?? 30) ||
-        LaunchOnStartup != (_originalDaemon?.AutostartWithWindows ?? false);
-
-    public string ScheduleLabel => ScheduleMinutes == 0
-        ? "Only on plug-in"
-        : ScheduleMinutes < 60
-            ? $"Every {ScheduleMinutes} minutes"
-            : $"Every {ScheduleMinutes / 60.0:0.#} hours";
-
-    /// <summary>Human-readable sync-mode label for the SettingsExpander header.</summary>
-    public string SyncModeSummary => SubsequentSyncMode switch
-    {
-        "auto_apply" => "Automatic",
-        "review"     => "Manual",
-        _            => SubsequentSyncMode,
-    };
-
-    partial void OnScheduleMinutesChanged(int value) => OnPropertyChanged(nameof(ScheduleLabel));
-    partial void OnSubsequentSyncModeChanged(string value) => OnPropertyChanged(nameof(SyncModeSummary));
-}
-
-// ---------------------------------------------------------------------
-// Notifications — currently a single NotifyOn enum on the daemon. The
-// Figma sketches a per-event toggle model; we surface the same control
-// surface but coalesce into NotifyOn for the wire until the daemon
-// grows per-event toggles.
-// ---------------------------------------------------------------------
 
 public partial class SettingsNotificationsViewModel : ObservableObject
 {
-    private readonly string _originalNotifyOn;
+    private NotifyLevel _original;
 
-    public SettingsNotificationsViewModel(ConfigUpdateEvent c)
+    public SettingsNotificationsViewModel(NotifyLevel notifyOn)
     {
-        _originalNotifyOn = c.Daemon?.NotifyOn ?? "all";
-        ApplyFromNotifyOn(_originalNotifyOn);
+        _original = notifyOn;
+        NotifyOnSyncComplete = notifyOn == NotifyLevel.All;
+        NotifyOnSyncFailed = notifyOn != NotifyLevel.None;
+        NotifyOnDeviceConnected = notifyOn == NotifyLevel.All;
     }
 
-    [ObservableProperty] private bool notifyOnSyncComplete = true;
-    [ObservableProperty] private bool notifyOnSyncFailed = true;
-    [ObservableProperty] private bool notifyOnDeviceConnected = true;
-
-    public bool IsDirty => NotifyOn != _originalNotifyOn;
-
-    /// <summary>Coalesce the three per-event toggles into the single
-    /// NotifyOn wire enum: all → any success+failure on, errors_only →
-    /// only failures on, none → all off.</summary>
-    public string NotifyOn => (NotifyOnSyncComplete, NotifyOnSyncFailed) switch
-    {
-        (true,  _)     => "all",
-        (false, true)  => "errors_only",
-        _              => "none",
-    };
-
-    private void ApplyFromNotifyOn(string val)
-    {
-        switch (val)
-        {
-            case "all":
-                NotifyOnSyncComplete = true;
-                NotifyOnSyncFailed = true;
-                NotifyOnDeviceConnected = true;
-                break;
-            case "errors_only":
-                NotifyOnSyncComplete = false;
-                NotifyOnSyncFailed = true;
-                NotifyOnDeviceConnected = false;
-                break;
-            default:
-                NotifyOnSyncComplete = false;
-                NotifyOnSyncFailed = false;
-                NotifyOnDeviceConnected = false;
-                break;
-        }
-    }
-
+    [ObservableProperty] private bool notifyOnSyncComplete;
+    [ObservableProperty] private bool notifyOnSyncFailed;
+    [ObservableProperty] private bool notifyOnDeviceConnected;
+    public NotifyLevel NotifyOn => NotifyOnSyncComplete ? NotifyLevel.All :
+        NotifyOnSyncFailed ? NotifyLevel.ErrorsOnly : NotifyLevel.None;
+    public bool IsDirty => NotifyOn != _original;
+    public void AcceptGlobal(NotifyLevel notifyOn) => _original = notifyOn;
     partial void OnNotifyOnSyncCompleteChanged(bool value) => OnPropertyChanged(nameof(NotifyOn));
     partial void OnNotifyOnSyncFailedChanged(bool value) => OnPropertyChanged(nameof(NotifyOn));
-}
-
-// ---------------------------------------------------------------------
-// History
-// ---------------------------------------------------------------------
-
-public partial class SettingsHistoryViewModel : ObservableObject
-{
-    private readonly DaemonClient _daemon;
-
-    public SettingsHistoryViewModel(DaemonClient daemon, DaemonEventRouter router)
-    {
-        _daemon = daemon;
-        router.HistoryUpdated += OnHistoryUpdated;
-        Entries = new ObservableCollection<HistoryEntryViewModel>();
-        _ = LoadAsync();
-    }
-
-    public ObservableCollection<HistoryEntryViewModel> Entries { get; }
-
-    private async Task LoadAsync()
-    {
-        try { await _daemon.SendAsync(new GetHistoryCommand(Limit: 50, RequestId: Guid.NewGuid().ToString("N"))); }
-        catch (Exception e) { System.Diagnostics.Debug.WriteLine($"history: load failed: {e}"); }
-    }
-
-    private void OnHistoryUpdated(HistoryUpdateEvent e)
-    {
-        App.DispatcherQueue.TryEnqueue(() =>
-        {
-            Entries.Clear();
-            for (int i = e.Entries.Count - 1; i >= 0; i--)
-            {
-                Entries.Add(new HistoryEntryViewModel(e.Entries[i]));
-            }
-        });
-    }
-}
-
-// ---------------------------------------------------------------------
-// About — sits as a footer card on the General page now.
-// ---------------------------------------------------------------------
-
-public partial class SettingsAboutViewModel : ObservableObject
-{
-    public SettingsAboutViewModel()
-    {
-        var asm = System.Reflection.Assembly.GetExecutingAssembly();
-        UiVersion = asm.GetName().Version?.ToString() ?? "unknown";
-    }
-
-    public string AppName => "classick";
-    public string UiVersion { get; }
-    public string VersionLabel => $"Version {UiVersion}";
-    public string LicenseText => "MIT OR Apache-2.0";
-    public string GitHubUrl => "https://github.com/itsmichaelwest/classick";
-}
-
-// ---------------------------------------------------------------------
-// Multi-iPod chooser. UI shell only — the daemon currently knows one
-// iPod identity, so the collection contains a single live entry today.
-// Rename writes the friendly name back through SaveConfig; Remove
-// requests the wizard be re-run.
-// ---------------------------------------------------------------------
-
-public partial class IpodChooserViewModel : ObservableObject
-{
-    private readonly DaemonClient? _daemon;
-    public event Action? Changed;
-
-    public IpodChooserViewModel(ConfigUpdateEvent c, DaemonClient? daemon = null)
-    {
-        _daemon = daemon;
-        Items = new ObservableCollection<IpodChooserItemViewModel>();
-        if (c.Ipod is { } id)
-        {
-            var item = new IpodChooserItemViewModel(id.Serial, id.Name, id.ModelLabel);
-            Items.Add(item);
-            Selected = item;
-        }
-    }
-
-    public ObservableCollection<IpodChooserItemViewModel> Items { get; }
-
-    [ObservableProperty] private IpodChooserItemViewModel? selected;
-
-    public string SelectedDisplayName => Selected?.DisplayName ?? "No iPod paired";
-
-    partial void OnSelectedChanged(IpodChooserItemViewModel? value)
-    {
-        OnPropertyChanged(nameof(SelectedDisplayName));
-        Changed?.Invoke();
-    }
-
-    public void Select(IpodChooserItemViewModel item) => Selected = item;
-
-    public void Rename(IpodChooserItemViewModel item, string newName)
-    {
-        item.Rename(newName);
-        if (ReferenceEquals(item, Selected)) OnPropertyChanged(nameof(SelectedDisplayName));
-        Changed?.Invoke();
-    }
-
-    public void Remove(IpodChooserItemViewModel item)
-    {
-        Items.Remove(item);
-        if (ReferenceEquals(item, Selected)) Selected = Items.Count > 0 ? Items[0] : null;
-        Changed?.Invoke();
-        // Persist the removal: ForgetIpod clears the daemon's
-        // ipod_identity from disk. Without this the iPod would
-        // reappear on the next app launch because ConfigUpdate
-        // would still include the old identity.
-        if (_daemon is not null)
-        {
-            _ = SendForgetAsync(_daemon, item.Serial);
-        }
-        // Kick the wizard so the user can pair a new iPod.
-        App.RequestPairNewIpod();
-    }
-
-    private static async Task SendForgetAsync(DaemonClient daemon, string serial)
-    {
-        try { await daemon.SendAsync(new ForgetIpodCommand(serial, Guid.NewGuid().ToString("N"))); }
-        catch (Exception e) { System.Diagnostics.Debug.WriteLine($"chooser: forget_ipod failed: {e}"); }
-    }
-}
-
-public partial class IpodChooserItemViewModel : ObservableObject
-{
-    public IpodChooserItemViewModel(string serial, string? friendlyName, string modelLabel)
-    {
-        Serial = serial;
-        FriendlyName = friendlyName ?? "";
-        ModelLabel = modelLabel;
-    }
-
-    public string Serial { get; }
-    [ObservableProperty] private string friendlyName = "";
-    public string ModelLabel { get; }
-
-    public string DisplayName => !string.IsNullOrWhiteSpace(FriendlyName) ? FriendlyName : ModelLabel;
-
-    public void Rename(string newName)
-    {
-        FriendlyName = newName;
-        OnPropertyChanged(nameof(DisplayName));
-    }
 }

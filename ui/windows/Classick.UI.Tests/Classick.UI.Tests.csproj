@@ -43,8 +43,12 @@
              Link="LinkedViewModels\ReviewViewModel.cs" />
     <Compile Include="..\Classick.UI\ViewModels\WizardViewModel.cs"
              Link="LinkedViewModels\WizardViewModel.cs" />
+    <Compile Include="..\Classick.UI\ViewModels\SettingsGeneralViewModel.cs"
+             Link="LinkedViewModels\SettingsGeneralViewModel.cs" />
     <Compile Include="..\Classick.UI\ViewModels\PopoverViewModel.cs"
              Link="LinkedViewModels\PopoverViewModel.cs" />
+    <Compile Include="..\Classick.UI\ViewModels\PopoverViewModel.DevicePresentation.cs"
+             Link="LinkedViewModels\PopoverViewModel.DevicePresentation.cs" />
     <Compile Include="..\Classick.UI\ViewModels\PopoverViewModel.SyncSession.cs"
              Link="LinkedViewModels\PopoverViewModel.SyncSession.cs" />
     <Compile Include="..\Classick.UI\ViewModels\PopoverViewModel.SourceRecovery.cs"

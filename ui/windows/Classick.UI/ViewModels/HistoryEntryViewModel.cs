@@ -20,6 +20,27 @@ public partial class HistoryEntryViewModel : ObservableObject
         Summary = e.Summary;
     }
 
+    public HistoryEntryViewModel(WireHistoryEntry entry)
+    {
+        Timestamp = entry.Timestamp;
+        DurationSecs = entry.DurationSecs;
+        Trigger = entry.Trigger.ToString().ToLowerInvariant();
+        Outcome = entry.Outcome.ToString().ToLowerInvariant();
+        ErrorMessage = entry.ErrorMessage;
+        Summary = entry.Summary is { } summary
+            ? new SyncSummary(
+                summary.Add,
+                summary.Modify,
+                summary.MetadataOnly,
+                summary.Remove,
+                summary.Unchanged,
+                summary.Skipped,
+                summary.SkippedForSpaceTracks,
+                summary.SkippedForSpaceBytes,
+                summary.ArtworkFailedSources)
+            : null;
+    }
+
     public string Timestamp { get; }
     public ulong DurationSecs { get; }
     public string Trigger { get; }
@@ -29,10 +50,10 @@ public partial class HistoryEntryViewModel : ObservableObject
 
     public string OutcomeGlyph => Outcome switch
     {
-        "ok"      => "✓",  // check
-        "error"   => "!",
+        "ok" => "✓",  // check
+        "error" => "!",
         "aborted" => "✗",  // cross
-        _         => "?",
+        _ => "?",
     };
 
     public string SummaryText => Summary is null

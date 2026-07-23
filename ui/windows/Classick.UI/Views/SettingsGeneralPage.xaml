@@ -28,7 +28,7 @@
                     <Button Content="Change…" Click="OnPickSource" />
                 </tk:SettingsCard>
 
-                <tk:SettingsExpander Header="Sync mode"
+                <tk:SettingsExpander Header="Apply policy"
                                      Description="{x:Bind ViewModel.General.SyncModeSummary, Mode=OneWay}">
                     <tk:SettingsExpander.HeaderIcon>
                         <FontIcon Glyph="&#xE895;" />
@@ -37,16 +37,16 @@
                         <tk:SettingsCard ContentAlignment="Left">
                             <StackPanel Spacing="8" Margin="0,0,0,6">
                                 <RadioButton GroupName="SyncMode"
-                                             Content="Automatic"
+                                             Content="Apply automatically"
                                              IsChecked="{x:Bind IsAutomatic, Mode=TwoWay}" />
-                                <TextBlock Text="Your iPod will automatically sync whenever it's plugged in"
+                                <TextBlock Text="Apply planned library changes without asking for review"
                                            Margin="28,-12,0,8"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            TextWrapping="Wrap" />
                                 <RadioButton GroupName="SyncMode"
-                                             Content="Manual"
+                                             Content="Review changes"
                                              IsChecked="{x:Bind IsManual, Mode=TwoWay}" />
-                                <TextBlock Text="You'll need to start each sync manually from the tray"
+                                <TextBlock Text="Show the change plan before Classick writes to the iPod"
                                            Margin="28,-12,0,0"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            TextWrapping="Wrap" />
@@ -92,11 +92,64 @@
                 </tk:SettingsCard>
 
                 <tk:SettingsCard Header="Launch classick on startup"
-                                 Description="Start automatically when you sign in to Windows">
+                                 Description="Start this app automatically when you sign in to Windows">
                     <tk:SettingsCard.HeaderIcon>
                         <FontIcon Glyph="&#xE7E8;" />
                     </tk:SettingsCard.HeaderIcon>
                     <ToggleSwitch IsOn="{x:Bind ViewModel.General.LaunchOnStartup, Mode=TwoWay}" />
+                </tk:SettingsCard>
+
+                <tk:SettingsCard Header="{x:Bind ViewModel.General.SelectedDeviceName, Mode=OneWay}"
+                                 Description="{x:Bind ViewModel.General.SelectedDeviceSummary, Mode=OneWay}">
+                    <tk:SettingsCard.HeaderIcon>
+                        <ImageIcon Source="ms-appx:///Assets/ipod-generic.svg" />
+                    </tk:SettingsCard.HeaderIcon>
+                </tk:SettingsCard>
+
+                <tk:SettingsCard Header="Sync this iPod automatically"
+                                 Description="This setting belongs to the selected iPod and remains editable while disconnected">
+                    <ToggleSwitch IsOn="{x:Bind ViewModel.General.AutoSync, Mode=TwoWay}"
+                                  IsEnabled="{x:Bind ViewModel.General.CanEditDeviceSettings, Mode=OneWay}" />
+                </tk:SettingsCard>
+
+                <tk:SettingsCard Header="Rockbox compatibility"
+                                 Description="Maintain the additional files required when this iPod uses Rockbox">
+                    <ToggleSwitch IsOn="{x:Bind ViewModel.General.RockboxCompat, Mode=TwoWay}"
+                                  IsEnabled="{x:Bind ViewModel.General.CanEditDeviceSettings, Mode=OneWay}" />
+                </tk:SettingsCard>
+
+                <tk:SettingsCard Header="Device settings"
+                                 Description="{x:Bind ViewModel.General.DeliveryStatus, Mode=OneWay}" />
+
+                <tk:SettingsCard Header="Music selection mode"
+                                 Description="{x:Bind ViewModel.General.SelectionSummary, Mode=OneWay}">
+                    <StackPanel Spacing="4" IsEnabled="{x:Bind ViewModel.General.CanEditSelection, Mode=OneWay}">
+                        <RadioButton GroupName="SelectionMode" Content="All music"
+                                     IsChecked="{x:Bind IsSelectionAll, Mode=TwoWay}" />
+                        <RadioButton GroupName="SelectionMode" Content="Only matching selection rules"
+                                     IsChecked="{x:Bind IsSelectionInclude, Mode=TwoWay}" />
+                        <RadioButton GroupName="SelectionMode" Content="Everything except matching selection rules"
+                                     IsChecked="{x:Bind IsSelectionExclude, Mode=TwoWay}" />
+                    </StackPanel>
+                </tk:SettingsCard>
+
+                <tk:SettingsCard Header="Playlist subscriptions"
+                                 Description="{x:Bind ViewModel.General.SubscriptionsSummary, Mode=OneWay}">
+                    <TextBox Text="{x:Bind ViewModel.General.PlaylistSubscriptionsText, Mode=TwoWay}"
+                             PlaceholderText="playlist-slug, another-playlist"
+                             IsEnabled="{x:Bind ViewModel.General.CanEditSubscriptions, Mode=OneWay}"
+                             MinWidth="220" />
+                </tk:SettingsCard>
+
+                <tk:SettingsCard Header="Last sync"
+                                 Description="{x:Bind ViewModel.General.LastSyncStatus, Mode=OneWay}" />
+
+                <tk:SettingsCard Header="Device actions"
+                                 Description="Sync now or explicitly replace this iPod's library from the selected Classick library">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Sync now" Click="OnSyncNow" />
+                        <Button Content="Replace library…" Click="OnReplaceLibrary" />
+                    </StackPanel>
                 </tk:SettingsCard>
 
                 <tk:SettingsCard Header="Remove this iPod"
@@ -108,10 +161,14 @@
                 </tk:SettingsCard>
             </StackPanel>
 
+            <TextBlock Text="{x:Bind ViewModel.General.SaveError, Mode=OneWay}"
+                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                       TextWrapping="Wrap" />
+
             <!-- ============ iTunes interop notice ============ -->
-            <TextBlock Text="iTunes" Style="{ThemeResource BodyStrongTextBlockStyle}" Margin="0,12,0,0" />
-            <tk:SettingsCard Header="Don't use iTunes with this iPod"
-                             Description="iTunes will refuse this iPod's library (&quot;cannot read contents&quot;) once classick has written to it. That's expected — never click Restore in iTunes; your iPod is fine. Keep iTunes closed before any sync.">
+            <TextBlock Text="Apple software" Style="{ThemeResource BodyStrongTextBlockStyle}" Margin="0,12,0,0" />
+            <tk:SettingsCard Header="Finder, Apple Devices, and iTunes remain supported"
+                             Description="Classick uses the Apple-initialized iPod database. Keep other device managers closed only while Classick is actively writing to the iPod.">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE7BA;" />
                 </tk:SettingsCard.HeaderIcon>
@@ -122,7 +179,7 @@
             <tk:SettingsCard Header="{x:Bind ViewModel.About.AppName, Mode=OneWay}"
                              Description="{x:Bind ViewModel.About.VersionLabel, Mode=OneWay}">
                 <tk:SettingsCard.HeaderIcon>
-                    <ImageIcon Source="ms-appx:///Assets/ipod.svg" />
+                    <ImageIcon Source="ms-appx:///Assets/ipod-generic.svg" />
                 </tk:SettingsCard.HeaderIcon>
                 <Button Click="OnShowLogFolder">
                     <StackPanel Orientation="Horizontal" Spacing="6">

@@ -203,6 +203,31 @@ public class PopoverViewModelTests
     }
 
     [Fact]
+    public void Protocol3_readiness_disables_mutation_and_surfaces_Apple_guidance()
+    {
+        var vm = new PopoverViewModel();
+        vm.Update(WireDevice(
+            sessionId: null,
+            readiness: DeviceReadiness.NeedsAppleInitialization,
+            profile: ProfileStatus.NotAdopted));
+
+        Assert.False(vm.DeviceReadyForSync);
+        Assert.False(vm.ShowSyncNowButton);
+        Assert.Contains("Apple setup required", vm.DeviceReadinessText);
+        Assert.Contains("does not initialize", vm.DeviceGuidance);
+    }
+
+    [Fact]
+    public void Protocol3_missing_colour_uses_generic_accessible_artwork()
+    {
+        var vm = new PopoverViewModel();
+        vm.Update(WireDevice(sessionId: null));
+
+        Assert.Equal("iPod classic", vm.DeviceArtworkDescription);
+        Assert.DoesNotContain("silver", vm.DeviceArtworkDescription, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Clearing_ambiguous_focus_disables_protocol3_mutation()
     {
         var vm = new PopoverViewModel();
@@ -238,15 +263,18 @@ public class PopoverViewModelTests
             SubscriptionsRevision: 1);
     }
 
-    private static IdentifiedDeviceSnapshot WireDevice(ulong? sessionId) => new(
+    private static IdentifiedDeviceSnapshot WireDevice(
+        ulong? sessionId,
+        DeviceReadiness readiness = DeviceReadiness.Ready,
+        ProfileStatus profile = ProfileStatus.Adopted) => new(
         WireDeviceId,
         "Michael's iPod",
-        DeviceReadiness.Ready,
+        readiness,
         new HardwareFacts(Family: new HardwareFact<IpodFamily>(
             IpodFamily.Classic,
             FactSource.Decoded,
             FactConfidence.Certain)),
-        ProfileStatus.Adopted,
+        profile,
         true,
         "D:\\",
         sessionId is null ? DevicePhase.Idle : DevicePhase.Syncing,

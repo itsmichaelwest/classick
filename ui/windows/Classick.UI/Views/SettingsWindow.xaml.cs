@@ -1,4 +1,5 @@
 using System;
+using Classick_UI.Ipc;
 using Classick_UI.ViewModels;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
@@ -70,7 +71,7 @@ public sealed partial class SettingsWindow : Window
 
         Nav.SelectedItem = Nav.MenuItems[0];
         RebuildChooserFlyout();
-        ViewModel.Chooser.Changed += RebuildChooserFlyout;
+        ViewModel.Chooser.ItemsChanged += RebuildChooserFlyout;
     }
 
     private bool _anchored;
@@ -113,13 +114,10 @@ public sealed partial class SettingsWindow : Window
             var row = new MenuFlyoutSubItem { Text = item.DisplayName };
             var select = new MenuFlyoutItem { Text = "Select" };
             select.Click += (_, _) => ViewModel.Chooser.Select(item);
-            var rename = new MenuFlyoutItem { Text = "Rename…" };
-            rename.Click += async (_, _) => await PromptRenameAsync(item);
             var remove = new MenuFlyoutItem { Text = "Remove" };
             remove.Click += async (_, _) => await ConfirmRemoveAsync(item);
             row.Items.Add(select);
             row.Items.Add(new MenuFlyoutSeparator());
-            row.Items.Add(rename);
             row.Items.Add(remove);
             IpodChooserFlyout.Items.Add(row);
         }
@@ -136,25 +134,6 @@ public sealed partial class SettingsWindow : Window
         IpodChooserFlyout.Items.Add(addNew);
     }
 
-    private async System.Threading.Tasks.Task PromptRenameAsync(IpodChooserItemViewModel item)
-    {
-        var input = new TextBox { Text = item.DisplayName, SelectionLength = item.DisplayName.Length };
-        var dialog = new ContentDialog
-        {
-            Title = "Rename iPod",
-            Content = input,
-            PrimaryButtonText = "Rename",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Primary,
-            XamlRoot = SettingsRoot.XamlRoot,
-        };
-        var result = await dialog.ShowAsync();
-        if (result == ContentDialogResult.Primary && !string.IsNullOrWhiteSpace(input.Text))
-        {
-            ViewModel.Chooser.Rename(item, input.Text.Trim());
-        }
-    }
-
     private async System.Threading.Tasks.Task ConfirmRemoveAsync(IpodChooserItemViewModel item)
     {
         var dialog = new ContentDialog
@@ -169,7 +148,15 @@ public sealed partial class SettingsWindow : Window
         var result = await dialog.ShowAsync();
         if (result == ContentDialogResult.Primary)
         {
-            ViewModel.Chooser.Remove(item);
+            try
+            {
+                ViewModel.Chooser.Select(item);
+                await ViewModel.ForgetSelectedAsync();
+            }
+            catch (Exception exception)
+            {
+                System.Diagnostics.Debug.WriteLine($"settings: forget device failed: {exception.Message}");
+            }
         }
     }
 }

@@ -5,10 +5,12 @@ using System.IO.Pipes;
 using System.Threading.Tasks;
 using Classick_UI.Ipc;
 using Classick_UI.Notifications;
+using Classick_UI.Startup;
 using Classick_UI.ViewModels;
 using Classick_UI.Views;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace Classick_UI;
 
@@ -69,11 +71,16 @@ public partial class App : Application
         }
 
         try { Daemon = await DaemonClient.ConnectAsync(); }
+        catch (WireCompatibilityException e)
+        {
+            Debug.WriteLine($"app: incompatible daemon: {e}");
+            ShowStartupFailure(StartupFailurePresentationFactory.For(e));
+            return;
+        }
         catch (Exception e)
         {
             Debug.WriteLine($"app: failed to connect to daemon: {e}");
-            Tray?.Dispose();
-            Environment.Exit(0);
+            ShowStartupFailure(StartupFailurePresentationFactory.For(e));
             return;
         }
 
@@ -120,11 +127,7 @@ public partial class App : Application
         // hack from M3 goes away.
         if (!HasAdoptedDevice())
         {
-            // W3 replaces the serial-keyed wizard. Do not launch the legacy
-            // flow against a protocol-3 daemon or send identity-unsafe v2
-            // commands while that migration is pending.
-            Debug.WriteLine("app: setup unavailable until the protocol-3 device wizard migration");
-            UpdateTrayVisibility();
+            ShowWizard();
         }
         else
         {
@@ -136,6 +139,37 @@ public partial class App : Application
     }
 
     private void ShowWizard() => ShowWizardStatic();
+
+    private static void ShowStartupFailure(StartupFailurePresentation presentation)
+    {
+        Tray?.Dispose();
+        var close = new Button { Content = "Close", HorizontalAlignment = HorizontalAlignment.Left };
+        var content = new StackPanel
+        {
+            Padding = new Thickness(32),
+            Spacing = 16,
+            Children =
+            {
+                new TextBlock
+                {
+                    Text = presentation.Title,
+                    Style = Application.Current.Resources["TitleTextBlockStyle"] as Style,
+                },
+                new TextBlock
+                {
+                    Text = presentation.Message,
+                    TextWrapping = TextWrapping.Wrap,
+                    MaxWidth = 480,
+                },
+                close,
+            },
+        };
+        var window = new Window { Title = presentation.Title, Content = content };
+        Window = window;
+        close.Click += (_, _) => window.Close();
+        window.Closed += (_, _) => Environment.Exit(0);
+        window.Activate();
+    }
 
     /// <summary>True while the pair wizard owns the user's attention.
     /// The tray icon is hidden and popover requests are no-ops in
@@ -264,10 +298,16 @@ public partial class App : Application
             // overlapping flyouts anchored to the same tray corner.
             _popover?.Close();
             if (_settings is not null) { _settings.Activate(); return; }
-            // The per-device settings surface migrates in W4. W2 deliberately
-            // refuses to synthesize a legacy serial-keyed configuration from
-            // protocol-3 device identity.
-            Debug.WriteLine("app: settings unavailable until the per-device settings migration");
+            if (Daemon is null || Router is null) return;
+            _settings = new SettingsWindow(new SettingsViewModel(Daemon, Router, Store));
+            SettingsWindowHandle = WinRT.Interop.WindowNative.GetWindowHandle(_settings);
+            _settings.Closed += (_, _) =>
+            {
+                _settings?.ViewModel.Dispose();
+                _settings = null;
+                SettingsWindowHandle = IntPtr.Zero;
+            };
+            _settings.Activate();
         });
     }
 
@@ -280,7 +320,7 @@ public partial class App : Application
         {
             _settings?.Close();
             _popover?.Close();
-            Debug.WriteLine("app: pair-device flow unavailable until the protocol-3 wizard migration");
+            ShowWizardStatic();
         });
     }
 

@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.Threading.Tasks;
+using Classick_UI.Devices;
 using Classick_UI.Ipc;
 using Classick_UI.ViewModels;
 using Microsoft.UI;
@@ -127,18 +128,49 @@ public sealed partial class WizardWindow : Window
     private async Task SendSaveConfigAsync(SaveConfigPayload payload)
     {
         var daemon = App.Daemon ?? throw new InvalidOperationException("daemon not connected");
-        var daemonSettings = new DaemonSettings(
-            Enabled: true,
-            AutostartWithWindows: payload.AutostartWithWindows,
-            FirstSyncMode: "review",
-            SubsequentSyncMode: payload.SubsequentSyncMode,
-            ScheduleMinutes: payload.ScheduleMinutes,
-            NotifyOn: "all",
-            RockboxCompat: false);
-        await daemon.SendAsync(new SaveConfigCommand(
-            Source: payload.Source,
-            Daemon: daemonSettings,
-            Ipod: new IpodIdentity(payload.IpodSerial, payload.IpodModelLabel, payload.IpodName, CustomSelection: false),
-            RequestId: Guid.NewGuid().ToString("N")));
+        var intent = new DeviceSetupIntent(
+            payload.Source,
+            payload.DeviceId,
+            payload.AutoSync);
+        var commands = DeviceSetupCommandFactory.Create(intent, NewId);
+        var source = commands.OfType<SetSourceLocationCommand>().Single();
+        var adopt = commands.OfType<AdoptDeviceCommand>().Single();
+        var tracker = new DeviceSetupAcknowledgementTracker(source, adopt);
+        var sourceAccepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnEvent(WireEvent wireEvent)
+        {
+            tracker.Observe(wireEvent);
+            if (tracker.SourceAccepted) sourceAccepted.TrySetResult();
+            if (tracker.Failure is { } failure)
+            {
+                sourceAccepted.TrySetException(new InvalidOperationException(failure));
+                completion.TrySetException(new InvalidOperationException(failure));
+            }
+            else if (tracker.IsComplete)
+            {
+                completion.TrySetResult();
+            }
+        }
+
+        var router = App.Router ?? throw new InvalidOperationException("event router not connected");
+        router.EventReceived += OnEvent;
+        try
+        {
+            await daemon.SendAsync(source);
+            await sourceAccepted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await daemon.SendAsync(adopt);
+            await completion.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (TimeoutException)
+        {
+            throw new InvalidOperationException("Classick did not confirm the new device settings. Try again.");
+        }
+        finally
+        {
+            router.EventReceived -= OnEvent;
+        }
     }
+
+    private static string NewId() => Guid.NewGuid().ToString("D");
 }

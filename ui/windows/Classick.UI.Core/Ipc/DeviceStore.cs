@@ -1,3 +1,5 @@
+using Classick_UI.Devices;
+
 namespace Classick_UI.Ipc;
 
 public sealed record DeviceActionTarget(DeviceId DeviceId);
@@ -28,6 +30,8 @@ public sealed class DeviceStore
     private DeviceId? _explicitSelection;
 
     public GlobalConfigEvent? GlobalConfig { get; private set; }
+    public DeviceSettingsDraftStore SettingsDrafts { get; } = new();
+    public DeviceComponentDraftStore ComponentDrafts { get; } = new();
     public WireSourceAvailabilityEvent? SourceAvailability { get; private set; }
     public IReadOnlyDictionary<DeviceId, DeviceClientState> Devices => _devices;
     public IReadOnlyDictionary<ulong, UnidentifiedDeviceSnapshot> Unidentified => _unidentified;
@@ -48,8 +52,19 @@ public sealed class DeviceStore
             case DeviceInventoryEvent inventory:
                 return ReduceInventory(inventory);
             case DeviceConfigEvent config:
-                if (_devices.TryGetValue(config.DeviceId, out var device)) device.Config = config;
-                else _pendingConfigs[config.DeviceId] = config;
+                var mergedConfig = MergeConfig(
+                    _devices.TryGetValue(config.DeviceId, out var device)
+                        ? device.Config
+                        : _pendingConfigs.GetValueOrDefault(config.DeviceId),
+                    config);
+                if (device is not null) device.Config = mergedConfig;
+                else _pendingConfigs[config.DeviceId] = mergedConfig;
+                SettingsDrafts.ApplyCanonical(mergedConfig);
+                ComponentDrafts.ApplyCanonical(mergedConfig);
+                return true;
+            case ConfigMutationFailedEvent failure:
+                SettingsDrafts.ApplyFailure(failure);
+                ComponentDrafts.ApplyFailure(failure);
                 return true;
             case HistoryEvent history:
                 _pendingHistory.Clear();
@@ -73,6 +88,8 @@ public sealed class DeviceStore
                 var removed = _devices.Remove(forgotten.DeviceId);
                 _pendingConfigs.Remove(forgotten.DeviceId);
                 _pendingHistory.Remove(forgotten.DeviceId);
+                SettingsDrafts.Remove(forgotten.DeviceId);
+                ComponentDrafts.Remove(forgotten.DeviceId);
                 if (_explicitSelection == forgotten.DeviceId) _explicitSelection = null;
                 if (FocusedDeviceId == forgotten.DeviceId) FocusedDeviceId = null;
                 RefreshFocus();
@@ -128,8 +145,15 @@ public sealed class DeviceStore
             if (_devices.TryGetValue(snapshot.DeviceId, out var existing))
             {
                 existing.Inventory = snapshot;
-                existing.ActiveSessionId = snapshot.SessionId;
-                if (snapshot.SessionId is null) existing.LastProgress = null;
+                if (snapshot.SessionId is { } snapshotSession)
+                {
+                    existing.ActiveSessionId = snapshotSession;
+                }
+                else if (existing.LastProgress is not (SyncPausedEvent or SyncCancelledEvent))
+                {
+                    existing.ActiveSessionId = null;
+                    existing.LastProgress = null;
+                }
             }
             else
             {
@@ -163,12 +187,32 @@ public sealed class DeviceStore
         }
 
         device.LastProgress = progress;
-        if (progress is SyncCancelledEvent or SyncPausedEvent or SyncFinishedEvent)
+        // Paused/cancelled are intermediate terminal-state notices. The core
+        // still publishes the authoritative sync_finished rollup for the same
+        // session, so retain the route until that final event arrives.
+        if (progress is SyncFinishedEvent)
         {
             device.ActiveSessionId = null;
             RefreshFocus();
         }
         return true;
+    }
+
+    private static DeviceConfigEvent MergeConfig(DeviceConfigEvent? current, DeviceConfigEvent incoming)
+    {
+        if (current is null) return incoming;
+        return incoming with
+        {
+            Selection = incoming.Selection.Revision >= current.Selection.Revision
+                ? incoming.Selection
+                : current.Selection,
+            Settings = incoming.Settings.Revision >= current.Settings.Revision
+                ? incoming.Settings
+                : current.Settings,
+            Subscriptions = incoming.Subscriptions.Revision >= current.Subscriptions.Revision
+                ? incoming.Subscriptions
+                : current.Subscriptions,
+        };
     }
 
     private void RefreshFocus()
@@ -191,7 +235,7 @@ public sealed class DeviceStore
 
         var soleConnectedConfigured = _devices
             .Where(pair => pair.Value.Inventory is
-                { Connected: true, Readiness: DeviceReadiness.Ready, ProfileStatus: ProfileStatus.Adopted })
+            { Connected: true, Readiness: DeviceReadiness.Ready, ProfileStatus: ProfileStatus.Adopted })
             .Select(pair => pair.Key)
             .ToArray();
         FocusedDeviceId = soleConnectedConfigured.Length == 1 ? soleConnectedConfigured[0] : null;

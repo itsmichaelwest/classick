@@ -76,6 +76,26 @@ public class DaemonEventRouterTests
     }
 
     [Fact]
+    public void Route_PausedInventoryRetainsRouteUntilFinishedThenRejectsLateProgress()
+    {
+        var channel = Channel.CreateUnbounded<WireEvent>();
+        using var router = new DaemonEventRouter(channel.Reader);
+        var received = new List<RoutedSyncEvent>();
+        router.SyncEventReceived += received.Add;
+        router.Route(Inventory(1, 72));
+        router.Route(new SyncPausedEvent(Device, 72));
+        router.Route(IdleInventory(2));
+
+        router.Route(new SyncFinishedEvent(Device, 72, true));
+        router.Route(new SyncLogEvent(Device, 72, "late"));
+
+        Assert.Collection(
+            received,
+            item => Assert.IsType<SyncPausedEvent>(item.Event),
+            item => Assert.IsType<SyncFinishedEvent>(item.Event));
+    }
+
+    [Fact]
     public async Task Start_RoutesChannelEventsInOrder()
     {
         var channel = Channel.CreateUnbounded<WireEvent>();
@@ -135,6 +155,26 @@ public class DaemonEventRouterTests
                 "/Volumes/iPod",
                 DevicePhase.Syncing,
                 sessionId,
+                null,
+                0,
+                null,
+                null)],
+            []);
+
+    private static DeviceInventoryEvent IdleInventory(ulong revision) =>
+        new(
+            null,
+            revision,
+            [new IdentifiedDeviceSnapshot(
+                Device,
+                "iPod",
+                DeviceReadiness.Ready,
+                new HardwareFacts(),
+                ProfileStatus.Adopted,
+                true,
+                "/Volumes/iPod",
+                DevicePhase.Idle,
+                null,
                 null,
                 0,
                 null,

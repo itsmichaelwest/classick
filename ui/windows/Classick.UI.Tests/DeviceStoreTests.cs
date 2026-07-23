@@ -35,6 +35,29 @@ public sealed class DeviceStoreTests
     }
 
     [Fact]
+    public void OlderComponentRevisionCannotRegressDeviceConfig()
+    {
+        var store = new DeviceStore();
+        store.Reduce(Inventory(1, Device(First)));
+        var newer = new DeviceConfigEvent(
+            null,
+            First,
+            Selection(),
+            new DeliveredComponent<SettingsValue>(3, "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8821", new SettingsValue(1, false, true), new PendingDeviceDelivery()),
+            Subscriptions());
+        var older = newer with
+        {
+            Settings = new DeliveredComponent<SettingsValue>(2, "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8822", new SettingsValue(1, true, false), new DeviceCommittedDelivery()),
+        };
+
+        store.Reduce(newer);
+        store.Reduce(older);
+
+        Assert.False(store.Devices[First].Config!.Settings.Value.AutoSync);
+        Assert.Equal((ulong)3, store.Devices[First].Config!.Settings.Revision);
+    }
+
+    [Fact]
     public void HistorySnapshot_ClearsDevicesOmittedFromLaterResponse()
     {
         var store = new DeviceStore();
@@ -78,15 +101,44 @@ public sealed class DeviceStoreTests
     }
 
     [Fact]
-    public void PausedProgress_ClearsTerminatedSession()
+    public void PausedProgress_RetainsSessionUntilFinishedRollup()
     {
         var store = new DeviceStore();
         store.Reduce(Inventory(1, Device(First, sessionId: 72)));
 
         store.Reduce(new SyncPausedEvent(First, 72));
 
+        Assert.Equal((ulong)72, store.Devices[First].ActiveSessionId);
+        Assert.Equal(new DeviceSessionTarget(First, 72), store.CaptureFocusedSessionAction());
+
+        Assert.True(store.Reduce(Finished(First, 72)));
         Assert.Null(store.Devices[First].ActiveSessionId);
-        Assert.Null(store.CaptureFocusedSessionAction());
+        Assert.IsType<SyncFinishedEvent>(store.Devices[First].LastProgress);
+    }
+
+    [Fact]
+    public void CancelledProgress_RetainsRouteForFollowingFinishedRollup()
+    {
+        var store = new DeviceStore();
+        store.Reduce(Inventory(1, Device(First, sessionId: 72)));
+
+        Assert.True(store.Reduce(new SyncCancelledEvent(First, 72)));
+        Assert.True(store.Reduce(Finished(First, 72)));
+
+        Assert.Null(store.Devices[First].ActiveSessionId);
+        Assert.IsType<SyncFinishedEvent>(store.Devices[First].LastProgress);
+    }
+
+    [Fact]
+    public void PausedInventoryWithoutSession_RetainsRouteForFinishedRollup()
+    {
+        var store = new DeviceStore();
+        store.Reduce(Inventory(1, Device(First, sessionId: 72)));
+        store.Reduce(new SyncPausedEvent(First, 72));
+        store.Reduce(Inventory(2, Device(First)));
+
+        Assert.True(store.Reduce(Finished(First, 72)));
+        Assert.Null(store.Devices[First].ActiveSessionId);
     }
 
     [Fact]
@@ -167,6 +219,9 @@ public sealed class DeviceStoreTests
 
     private static UnidentifiedDeviceSnapshot Unidentified(ulong id) =>
         new(id, DeviceReadiness.IdentityUnavailable, new HardwareFacts());
+
+    private static SyncFinishedEvent Finished(DeviceId deviceId, ulong sessionId) =>
+        new(deviceId, sessionId, true);
 
     private static DeliveredComponent<SelectionValue> Selection() =>
         new(1, "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8811", new SelectionValue(1, SelectionMode.All, []), new DeviceCommittedDelivery());

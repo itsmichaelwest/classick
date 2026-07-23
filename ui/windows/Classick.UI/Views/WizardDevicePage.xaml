@@ -23,29 +23,43 @@
         <ListView Grid.Row="2"
                   Padding="0,2"
                   ItemsSource="{Binding Candidates}"
-                  SelectedItem="{Binding SelectedIpod, Mode=TwoWay}"
+                  SelectedItem="{Binding SelectedDevice, Mode=TwoWay}"
+                  SelectionChanged="OnSelectionChanged"
                   SelectionMode="Single"
                   BorderThickness="1"
                   BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                   CornerRadius="{StaticResource OverlayCornerRadius}"
                   Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
             <ListView.ItemTemplate>
-                <DataTemplate x:DataType="vm:IpodIdentityCandidate">
+                <DataTemplate x:DataType="vm:WizardDeviceCandidate">
                     <Grid ColumnSpacing="12" Padding="4,12,4,12">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
                         <Image Grid.Column="0"
-                               Source="ms-appx:///Assets/ipod.svg"
+                               Source="{x:Bind ArtworkUri}"
+                               AutomationProperties.Name="{x:Bind ArtworkDescription}"
                                Width="32" Height="32"
                                VerticalAlignment="Center" />
                         <StackPanel Grid.Column="1" VerticalAlignment="Center">
                             <TextBlock Text="{x:Bind DisplayName}"
                                        Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="{x:Bind ModelLabel}"
+                            <TextBlock Text="{x:Bind HardwareSummary}"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="{x:Bind HardwareProvenance}"
+                                       TextWrapping="Wrap"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                            <TextBlock Text="{x:Bind Status}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="{x:Bind Guidance}"
+                                       MaxWidth="460"
+                                       TextWrapping="Wrap"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                         </StackPanel>
                     </Grid>
                 </DataTemplate>

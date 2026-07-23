@@ -7,6 +7,7 @@ public sealed class DaemonEventRouter : IDisposable
 {
     private readonly Func<CancellationToken, IAsyncEnumerable<object>> _readEvents;
     private readonly Dictionary<DeviceId, ulong> _activeSessions = [];
+    private readonly HashSet<DeviceId> _awaitingFinished = [];
     private CancellationTokenSource? _cts;
     private Task? _loop;
     private ulong? _inventoryRevision;
@@ -143,6 +144,15 @@ public sealed class DaemonEventRouter : IDisposable
         }
         EventReceived?.Invoke(wireEvent);
         SyncEventReceived?.Invoke(new RoutedSyncEvent(routed.DeviceId, routed.SessionId, wireEvent));
+        if (wireEvent is SyncPausedEvent or SyncCancelledEvent)
+        {
+            _awaitingFinished.Add(routed.DeviceId);
+        }
+        else if (wireEvent is SyncFinishedEvent)
+        {
+            _activeSessions.Remove(routed.DeviceId);
+            _awaitingFinished.Remove(routed.DeviceId);
+        }
     }
 
     private bool UpdateActiveSessions(DeviceInventoryEvent inventory)
@@ -154,14 +164,25 @@ public sealed class DaemonEventRouter : IDisposable
         }
 
         _inventoryRevision = inventory.Revision;
+        var previous = _activeSessions.ToArray();
         _activeSessions.Clear();
         foreach (var device in inventory.Devices)
         {
             if (device.SessionId is { } sessionId)
             {
                 _activeSessions[device.DeviceId] = sessionId;
+                _awaitingFinished.Remove(device.DeviceId);
             }
         }
+        var present = inventory.Devices.Select(device => device.DeviceId).ToHashSet();
+        foreach (var (deviceId, sessionId) in previous)
+        {
+            if (present.Contains(deviceId) && _awaitingFinished.Contains(deviceId))
+            {
+                _activeSessions.TryAdd(deviceId, sessionId);
+            }
+        }
+        _awaitingFinished.RemoveWhere(deviceId => !present.Contains(deviceId));
         return true;
     }
 

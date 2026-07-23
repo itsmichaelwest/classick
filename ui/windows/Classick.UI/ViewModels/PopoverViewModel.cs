@@ -117,7 +117,8 @@ public partial class PopoverViewModel : ObservableObject
     /// <summary>True when the footer should show the Sync Now button —
     /// connected AND idle AND no prompt in flight.</summary>
     public bool ShowSyncNowButton => IpodConnected && !Syncing && !PromptActive &&
-        !FinishingSync && !ShowSourceRecovery;
+        !FinishingSync && !ShowSourceRecovery && DeviceReadyForSync;
+    public bool ShowDeviceGuidance => !string.IsNullOrWhiteSpace(DeviceGuidance);
     public bool CanControlActiveSync => ActiveSyncContext is not null &&
         IpodConnected && Syncing && !FinishingSync;
     public bool CanControlActiveDeviceSync => ActiveDeviceSession is not null &&
@@ -296,36 +297,6 @@ public partial class PopoverViewModel : ObservableObject
         {
             StatusText = "Finishing sync…";
             LastSyncedLabel = "iPod disconnected";
-        }
-    }
-
-    public void Update(IdentifiedDeviceSnapshot device)
-    {
-        ArgumentNullException.ThrowIfNull(device);
-        DisplayedDeviceId = device.DeviceId;
-        SetDeviceLabel(device.Name, device.Hardware.Generation?.Value ?? device.Hardware.Family?.Value.ToString());
-        FinishingSync = false;
-        Paused = device.Phase == DevicePhase.Paused;
-        Syncing = device.Phase == DevicePhase.Syncing;
-        IpodConnected = device.Connected;
-        ApplyStorage(device.Storage);
-        if (Syncing)
-        {
-            StatusText = "Syncing iPod…";
-            LastSyncedLabel = "Syncing now";
-        }
-        else if (!device.Connected)
-        {
-            StatusText = "iPod not connected";
-            LastSyncedLabel = "";
-        }
-        else if (device.LastTerminalError is { } error)
-        {
-            StatusText = $"Last sync failed: {error}";
-        }
-        else
-        {
-            StatusText = "Up to date · iPod connected";
         }
     }
 

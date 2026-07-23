@@ -62,6 +62,13 @@ public partial class PopoverViewModel
         FinishingSync = false;
         Paused = false;
         DeviceLabel = "iPod";
+        DeviceHardwareSummary = "";
+        DeviceHardwareProvenance = "";
+        DeviceReadinessText = "";
+        DeviceGuidance = "";
+        DeviceArtworkUri = "ms-appx:///Assets/ipod-generic.svg";
+        DeviceArtworkDescription = "iPod";
+        DeviceReadyForSync = false;
         StatusText = "iPod not connected";
     }
 

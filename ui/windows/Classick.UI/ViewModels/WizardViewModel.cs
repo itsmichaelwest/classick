@@ -1,30 +1,37 @@
-using System;
 using System.Collections.ObjectModel;
 using System.IO;
-using System.Threading.Tasks;
+using Classick_UI.Devices;
+using Classick_UI.Ipc;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
 namespace Classick_UI.ViewModels;
 
-public sealed record IpodIdentityCandidate(
-    string Serial,
-    string ModelLabel,
-    string Drive,
-    string? Name = null)
+public sealed record WizardDeviceCandidate(
+    DeviceId? DeviceId,
+    ulong? ObservationId,
+    DevicePresentation Presentation)
 {
-    /// <summary>Falls back through Name → "iPod" so the list never renders blank.</summary>
-    public string DisplayName => string.IsNullOrWhiteSpace(Name) ? "iPod" : Name!;
+    public string DisplayName => Presentation.Title;
+    public string HardwareSummary => Presentation.HardwareSummary;
+    public string HardwareProvenance => Presentation.HardwareProvenance;
+    public string Status => Presentation.Status;
+    public string Guidance => Presentation.Guidance;
+    public bool CanAdopt => DeviceId is not null && Presentation.CanAdopt;
+    public string ArtworkUri => Presentation.Artwork.AssetUri;
+    public string ArtworkDescription => Presentation.Artwork.AccessibleDescription;
+
+    public static WizardDeviceCandidate From(IdentifiedDeviceSnapshot device) =>
+        new(device.DeviceId, null, DevicePresentationFactory.For(device));
+
+    public static WizardDeviceCandidate From(UnidentifiedDeviceSnapshot device) =>
+        new(null, device.ObservationId, DevicePresentationFactory.For(device));
 }
 
 public sealed record SaveConfigPayload(
     string Source,
-    string IpodSerial,
-    string IpodModelLabel,
-    string? IpodName,
-    string SubsequentSyncMode,
-    uint ScheduleMinutes,
-    bool AutostartWithWindows);
+    DeviceId DeviceId,
+    bool AutoSync);
 
 public partial class WizardViewModel : ObservableObject
 {
@@ -34,17 +41,12 @@ public partial class WizardViewModel : ObservableObject
 
     [ObservableProperty] private int currentStep = 1;
     [ObservableProperty] private string sourcePath = "";
-    [ObservableProperty] private IpodIdentityCandidate? selectedIpod;
+    [ObservableProperty] private WizardDeviceCandidate? selectedDevice;
     [ObservableProperty] private bool scanning;
     [ObservableProperty] private string scanError = "";
-
-    // Defaults mirror DaemonSettings defaults so a click-through wizard
-    // produces the same config as a manual user would set up via Settings.
     [ObservableProperty] private bool isAutomatic = true;
-    [ObservableProperty] private int scheduleMinutes = 30;
-    [ObservableProperty] private bool autostartWithWindows = true;
 
-    public ObservableCollection<IpodIdentityCandidate> Candidates { get; } = new();
+    public ObservableCollection<WizardDeviceCandidate> Candidates { get; } = new();
 
     public WizardViewModel(Func<SaveConfigPayload, Task> sendConfigFunc)
     {
@@ -56,8 +58,12 @@ public partial class WizardViewModel : ObservableObject
         OnPropertyChanged(nameof(IsSourcePathValid));
         NextCommand.NotifyCanExecuteChanged();
     }
-    partial void OnSelectedIpodChanged(IpodIdentityCandidate? value) => NextCommand.NotifyCanExecuteChanged();
+
+    partial void OnSelectedDeviceChanged(WizardDeviceCandidate? value) =>
+        NextCommand.NotifyCanExecuteChanged();
+
     partial void OnScanErrorChanged(string value) => OnPropertyChanged(nameof(HasScanError));
+
     partial void OnCurrentStepChanged(int value)
     {
         NextCommand.NotifyCanExecuteChanged();
@@ -72,25 +78,23 @@ public partial class WizardViewModel : ObservableObject
         OnPropertyChanged(nameof(ShowFinishButton));
         OnPropertyChanged(nameof(CanGoBackToPrevious));
     }
+
     partial void OnIsAutomaticChanged(bool value) => OnPropertyChanged(nameof(IsManual));
 
-    /// <summary>Inverse projection of <see cref="IsAutomatic"/> for the "Manual" radio.</summary>
     public bool IsManual
     {
         get => !IsAutomatic;
         set { if (value) IsAutomatic = false; }
     }
 
-    public bool IsWelcomeStep      => CurrentStep == 1;
-    public bool IsFolderStep       => CurrentStep == 2;
-    public bool IsDeviceStep       => CurrentStep == 3;
+    public bool IsWelcomeStep => CurrentStep == 1;
+    public bool IsFolderStep => CurrentStep == 2;
+    public bool IsDeviceStep => CurrentStep == 3;
     public bool IsSyncSettingsStep => CurrentStep == 4;
-    public bool IsDoneStep         => CurrentStep == 5;
-
-    public bool ShowNextButton    => CurrentStep < TotalSteps;
-    public bool ShowFinishButton  => CurrentStep == TotalSteps;
+    public bool IsDoneStep => CurrentStep == 5;
+    public bool ShowNextButton => CurrentStep < TotalSteps;
+    public bool ShowFinishButton => CurrentStep == TotalSteps;
     public bool CanGoBackToPrevious => CurrentStep > 1 && CurrentStep < TotalSteps;
-
     public bool HasScanError => !string.IsNullOrEmpty(ScanError);
 
     public bool IsSourcePathValid
@@ -103,35 +107,66 @@ public partial class WizardViewModel : ObservableObject
         }
     }
 
-    private bool CanGoNext()
+    public void ApplyInventory(DeviceInventoryEvent inventory) =>
+        ApplyInventory(inventory.Devices, inventory.Unidentified);
+
+    public void ApplyInventory(
+        IEnumerable<IdentifiedDeviceSnapshot> identified,
+        IEnumerable<UnidentifiedDeviceSnapshot> unidentified)
     {
-        return CurrentStep switch
-        {
-            1 => true,
-            2 => IsSourcePathValid,
-            3 => SelectedIpod is not null,
-            4 => true,
-            _ => false,
-        };
+        var selectedId = SelectedDevice?.DeviceId;
+        var replacements = identified
+            .Select(WizardDeviceCandidate.From)
+            .OrderBy(candidate => candidate.DisplayName, StringComparer.CurrentCultureIgnoreCase)
+            .Concat(unidentified
+                .Select(WizardDeviceCandidate.From)
+                .OrderBy(candidate => candidate.ObservationId))
+            .ToArray();
+
+        Candidates.Clear();
+        foreach (var candidate in replacements) Candidates.Add(candidate);
+        SelectedDevice = selectedId is null
+            ? null
+            : Candidates.FirstOrDefault(candidate => candidate.DeviceId == selectedId && candidate.CanAdopt);
+        Scanning = false;
+        ScanError = "";
     }
+
+    public void BeginScanning() => Scanning = true;
+    public void EndScanning() => Scanning = false;
+
+    [RelayCommand]
+    private void ClearCandidates()
+    {
+        Candidates.Clear();
+        SelectedDevice = null;
+        ScanError = "";
+        Scanning = true;
+    }
+
+    private bool CanGoNext() => CurrentStep switch
+    {
+        1 => true,
+        2 => IsSourcePathValid,
+        3 => SelectedDevice?.CanAdopt == true,
+        4 => true,
+        _ => false,
+    };
 
     [RelayCommand(CanExecute = nameof(CanGoNext))]
     private async Task NextAsync()
     {
         if (CurrentStep == 4)
         {
-            // Save on the 4 → 5 transition; on failure the user stays put
-            // with a visible error so they can adjust and retry without
-            // losing context.
             try
             {
                 await _sendConfigFunc(BuildPayload());
                 ScanError = "";
                 CurrentStep = 5;
             }
-            catch (Exception e)
+            catch (Exception exception)
             {
-                ScanError = $"Couldn't save settings: {e.Message}";
+                ScanError = $"Couldn't save settings: {exception.Message}";
             }
         }
         else if (CurrentStep < TotalSteps)
@@ -147,84 +182,15 @@ public partial class WizardViewModel : ObservableObject
     }
 
     private bool CanGoBack() => CurrentStep > 1 && CurrentStep < TotalSteps;
-
     private bool CanFinish() => CurrentStep == TotalSteps;
 
     [RelayCommand(CanExecute = nameof(CanFinish))]
-    private void Finish()
-    {
-        // Save already happened on the 4 → 5 transition; Finish just dismisses.
-        WizardFinished?.Invoke();
-    }
+    private void Finish() => WizardFinished?.Invoke();
 
-    /// <summary>
-    /// Adds a newly-detected iPod, deduping by serial. If a candidate with
-    /// the same serial already exists, replaces it in place — this is how
-    /// the daemon's two-phase DeviceConnected broadcast (initial → re-fire
-    /// with name from iTunesDB) updates the row's <see cref="IpodIdentityCandidate.Name"/>
-    /// so the eventual save_config carries the friendly name, not just the
-    /// model label. Selection is never set automatically; the user picks.
-    /// </summary>
-    public void OnDeviceConnected(IpodIdentityCandidate candidate)
-    {
-        for (int i = 0; i < Candidates.Count; i++)
-        {
-            if (Candidates[i].Serial != candidate.Serial) continue;
-            if (Candidates[i] == candidate) return;
-            var wasSelected = ReferenceEquals(SelectedIpod, Candidates[i]);
-            Candidates[i] = candidate;
-            if (wasSelected) SelectedIpod = candidate;
-            return;
-        }
-        Candidates.Add(candidate);
-        ScanError = "";
-    }
-
-    public void OnDeviceDisconnected(string serial)
-    {
-        for (int i = Candidates.Count - 1; i >= 0; i--)
-        {
-            if (Candidates[i].Serial == serial)
-            {
-                if (ReferenceEquals(SelectedIpod, Candidates[i])) SelectedIpod = null;
-                Candidates.RemoveAt(i);
-            }
-        }
-    }
-
-    public void BeginScanning() => Scanning = true;
-    public void EndScanning() => Scanning = false;
-
-    [RelayCommand]
-    private void ClearCandidates()
-    {
-        Candidates.Clear();
-        SelectedIpod = null;
-        ScanError = "";
-        Scanning = true;
-    }
-
-    private SaveConfigPayload BuildPayload()
-    {
-        // TODO(windows-autosync): the daemon now gates auto-sync on
-        // `daemon.enabled`, NOT `subsequent_sync_mode` (see
-        // crates/classick/src/daemon/runtime.rs::auto_sync_enabled). This still
-        // encodes the on/off intent in SubsequentSyncMode and never sets
-        // `enabled`, so with the new gate a Windows user who picks Manual mode
-        // will be auto-synced anyway. Map IsAutomatic -> Enabled here (and make
-        // SubsequentSyncMode purely apply-vs-review). Couldn't do it this
-        // session — no Windows build environment. macOS already writes
-        // `enabled` correctly.
-        var ipod = SelectedIpod!;
-        return new SaveConfigPayload(
-            Source: SourcePath,
-            IpodSerial: ipod.Serial,
-            IpodModelLabel: ipod.ModelLabel,
-            IpodName: ipod.Name,
-            SubsequentSyncMode: IsAutomatic ? "auto_apply" : "review",
-            ScheduleMinutes: (uint)ScheduleMinutes,
-            AutostartWithWindows: AutostartWithWindows);
-    }
+    private SaveConfigPayload BuildPayload() => new(
+        SourcePath,
+        SelectedDevice!.DeviceId!,
+        IsAutomatic);
 
     public event Action? WizardFinished;
 }

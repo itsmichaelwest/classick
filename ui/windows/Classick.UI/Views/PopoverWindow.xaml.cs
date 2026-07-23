@@ -15,12 +15,13 @@ namespace Classick_UI.Views;
 
 public sealed partial class PopoverWindow : Window
 {
-    // Popover footprint (Figma 360×192). Source-of-truth in code so
+    // Popover footprint. W3 adds truthful hardware/readiness and recovery
+    // guidance, so the content needs room beyond the original compact card.
     // WinAppSDK's window-header reservation doesn't surface dark bands
     // around a fixed-size XAML Grid. Hot-reload these constants in
     // dev to tweak the popover footprint.
     private const int PopoverWidthDip = 360;
-    private const int PopoverHeightDip = 156;
+    private const int PopoverHeightDip = 300;
 
     // Gap between the popover's VISIBLE edge and the work-area edges.
     // 12 DIP per Figma — WindowAnchor compensates for the invisible

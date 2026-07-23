@@ -45,21 +45,39 @@
                 Connected layout — device row, storage bar, and (during
                 sync) progress block.
             -->
+            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          Visibility="{x:Bind ViewModel.ShowConnectedContent, Mode=OneWay}">
             <StackPanel Padding="16"
-                        Spacing="12"
-                        Visibility="{x:Bind ViewModel.ShowConnectedContent, Mode=OneWay}">
+                        Spacing="12">
                 <StackPanel Orientation="Horizontal" Spacing="12">
                     <Image Width="30"
                            Height="44"
-                           Source="ms-appx:///Assets/ipod.svg"
+                           Source="{x:Bind ViewModel.DeviceArtworkUri, Mode=OneWay}"
+                           AutomationProperties.Name="{x:Bind ViewModel.DeviceArtworkDescription, Mode=OneWay}"
                            Stretch="Uniform" />
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="{x:Bind ViewModel.DeviceLabel, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock Text="{x:Bind ViewModel.DeviceHardwareSummary, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Text="{x:Bind ViewModel.DeviceHardwareProvenance, Mode=OneWay}"
+                                   TextWrapping="Wrap"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock Text="{x:Bind ViewModel.DeviceReadinessText, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         <TextBlock Text="{x:Bind ViewModel.LastSyncedLabel, Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </StackPanel>
                 </StackPanel>
+
+                <InfoBar IsOpen="{x:Bind ViewModel.ShowDeviceGuidance, Mode=OneWay}"
+                         IsClosable="False"
+                         Severity="Informational"
+                         Message="{x:Bind ViewModel.DeviceGuidance, Mode=OneWay}" />
 
                 <!--
                     Storage block. Always rendered when idle so the
@@ -112,6 +130,7 @@
                     </Grid>
                 </StackPanel>
             </StackPanel>
+            </ScrollViewer>
 
             <!--
                 Empty state — "No iPod connected" centered hero, shown
@@ -124,7 +143,7 @@
                 <Image Width="30"
                        Height="44"
                        HorizontalAlignment="Center"
-                       Source="ms-appx:///Assets/ipod.svg"
+                       Source="ms-appx:///Assets/ipod-generic.svg"
                        Stretch="Uniform" />
                 <StackPanel HorizontalAlignment="Center">
                     <TextBlock HorizontalAlignment="Center"

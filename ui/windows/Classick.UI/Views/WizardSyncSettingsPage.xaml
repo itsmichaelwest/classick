@@ -10,7 +10,7 @@
                    MaxWidth="420"
                    HorizontalAlignment="Left"
                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                   Text="classick can start with Windows to automatically sync music to your iPod whenever it's connected." />
+                   Text="Choose whether this iPod syncs automatically. You can change its settings later, even while it is disconnected." />
 
         <StackPanel Spacing="4" Margin="0,12,0,0">
             <RadioButton GroupName="WizardSyncMode"
@@ -20,33 +20,6 @@
                        Margin="32,-6,0,8"
                        TextWrapping="Wrap"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <StackPanel Orientation="Horizontal"
-                        Spacing="12"
-                        Margin="32,0,0,8">
-                <TextBlock Text="Sync frequency"
-                           VerticalAlignment="Center" />
-                <ComboBox SelectedValue="{Binding ScheduleMinutes, Mode=TwoWay}"
-                          SelectedValuePath="Tag"
-                          IsEnabled="{Binding IsAutomatic}"
-                          MinWidth="160">
-                    <ComboBoxItem Content="Every 15 minutes">
-                        <ComboBoxItem.Tag><x:Int32>15</x:Int32></ComboBoxItem.Tag>
-                    </ComboBoxItem>
-                    <ComboBoxItem Content="Every 30 minutes">
-                        <ComboBoxItem.Tag><x:Int32>30</x:Int32></ComboBoxItem.Tag>
-                    </ComboBoxItem>
-                    <ComboBoxItem Content="Every hour">
-                        <ComboBoxItem.Tag><x:Int32>60</x:Int32></ComboBoxItem.Tag>
-                    </ComboBoxItem>
-                    <ComboBoxItem Content="Every 4 hours">
-                        <ComboBoxItem.Tag><x:Int32>240</x:Int32></ComboBoxItem.Tag>
-                    </ComboBoxItem>
-                    <ComboBoxItem Content="Once a day">
-                        <ComboBoxItem.Tag><x:Int32>1440</x:Int32></ComboBoxItem.Tag>
-                    </ComboBoxItem>
-                </ComboBox>
-            </StackPanel>
-
             <RadioButton GroupName="WizardSyncMode"
                          Content="Manual"
                          IsChecked="{Binding IsManual, Mode=TwoWay}" />
@@ -55,10 +28,6 @@
                        TextWrapping="Wrap"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </StackPanel>
-
-        <CheckBox Content="Launch classick on startup"
-                  IsChecked="{Binding AutostartWithWindows, Mode=TwoWay}"
-                  Margin="0,12,0,0" />
 
         <TextBlock Text="{Binding ScanError}"
                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
