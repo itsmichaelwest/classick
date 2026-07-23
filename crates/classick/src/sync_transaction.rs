@@ -750,8 +750,7 @@ impl CheckpointCoordinator<'_> {
             playlist_publication::inject(
                 options.playlist_failure_point,
                 PlaylistFailurePoint::BeforeDatabaseWrite,
-            )?;
-            remove_stale_artwork_outputs(self.mount)
+            )
         })();
         if let Err(error) = preparation {
             let message = format!("{error:#}");
@@ -762,7 +761,10 @@ impl CheckpointCoordinator<'_> {
 
         self.verify_generation_fence()
             .context("database pre-publication generation fence")?;
-        if let Err(error) = write_coordinated_database(&db) {
+        if let Err(error) =
+            remove_stale_artwork_outputs(self.mount).and_then(|()| write_coordinated_database(&db))
+        {
+            self.record_interrupted_generation(journal, store)?;
             drop(db);
             self.rollback_to_ready(journal, store, snapshot, error)?;
             bail!("database publication failed; database and artwork restored");
@@ -1365,6 +1367,31 @@ mod tests {
         assert!(!journal_store.path(11).exists());
         assert!(!journal_store.snapshot_dir(11).exists());
         assert!(!staged_dir.exists());
+    }
+
+    #[test]
+    fn stale_artwork_cleanup_occurs_inside_the_publication_generation_fence() {
+        let (mount, _host, store, cache, mut manifest) = coordinator_fixture("existing-artwork");
+        let artwork = mount.join("iPod_Control/Artwork");
+        std::fs::create_dir_all(&artwork).unwrap();
+        std::fs::write(artwork.join("ArtworkDB"), b"stale artwork database").unwrap();
+        std::fs::write(artwork.join("F1069_1.ithmb"), b"stale thumbnails").unwrap();
+        let mutation_session = mutation_session(&mount);
+        let mut journal = PendingSession::new(31, TEST_DEVICE_ID, Vec::new());
+        let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
+            manifest_store: &store,
+            artwork_cache: cache,
+        };
+
+        let result = coordinator.publish(&mut journal, &mut manifest, &progress);
+        progress.finish(result.is_ok()).unwrap();
+
+        assert!(result.is_ok(), "{result:#?}");
+        assert!(!PendingSessionStore::new(&mount).path(31).exists());
     }
 
     #[test]

@@ -50,6 +50,9 @@ incidents and completed gate reports are archived in
 - Treat database, artwork, playlists, ownership, and manifests as one
   coordinated publication. Rollback must restore the exact recorded
   bytes-or-absence for every authority before becoming terminal.
+- Remove stale managed artwork only after the pre-publication generation
+  fence and within the database-publication failure boundary. Cleaning it
+  earlier makes Classick misclassify its own changes as an external mutation.
 - Registry-v2 migration is all-or-nothing: reject duplicate or noncanonical
   device keys and unknown metadata at every nested boundary. Legacy revisions
   remain `pending_legacy_import`; they are not imported portable-profile
