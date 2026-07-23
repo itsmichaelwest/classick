@@ -47,13 +47,17 @@ enum Notifier {
       : "Your iPod is up to date — playlists and settings applied."
   }
 
+  nonisolated static func title(for notification: SyncFinishedNotification) -> String {
+    notification.success
+      ? "Sync complete — \(notification.displayName)"
+      : "Sync failed — \(notification.displayName)"
+  }
+
   static func syncFinished(_ notification: SyncFinishedNotification) {
     let content = UNMutableNotificationContent()
+    content.title = title(for: notification)
     if notification.success {
-      content.title = "Sync complete"
       content.body = successBody(added: notification.added)
-    } else {
-      content.title = "Sync failed"
     }
     content.sound = .default
 

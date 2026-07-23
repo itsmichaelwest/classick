@@ -42,6 +42,28 @@ struct MenuBarLabelPresentation: Equatable {
     }
   }
 
+  static func make(globalPhase: Phase, devices: [DeviceID: DeviceViewState]) -> Self {
+    if devices.values.contains(where: { $0.finalization != nil }) {
+      return make(activity: .finalizing)
+    }
+    let connected = devices.values.filter(\.connected)
+    if connected.contains(where: { $0.phase == .syncing }) {
+      return make(activity: .syncing)
+    }
+    if connected.contains(where: { $0.phase == .paused }) {
+      return make(activity: .paused)
+    }
+    if case .scanning = globalPhase {
+      return make(activity: .scanning)
+    }
+    if connected.contains(where: {
+      if case .error = $0.phase { true } else { false }
+    }) {
+      return make(activity: .error)
+    }
+    return make(activity: .idle)
+  }
+
   fileprivate enum Activity {
     case idle
     case syncing

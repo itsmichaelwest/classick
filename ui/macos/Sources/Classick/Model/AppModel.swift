@@ -23,9 +23,21 @@ struct DeviceState: Equatable, Sendable {
 }
 
 struct PendingPrompt: Equatable, Sendable {
+  enum Kind: Equatable, Sendable {
+    case choice(options: [String])
+    case form(initial: String?, hint: String?)
+  }
+
+  var route: WireV3Route
   var id: UInt64
   var message: String
-  var options: [String]
+  var kind: Kind
+}
+
+struct DeviceMountAction: Equatable, Sendable {
+  var deviceID: DeviceID
+  var inventoryRevision: UInt64
+  var mountPath: String
 }
 
 /// A `resolved_tracks` reply tagged with the slug of the playlist editor
@@ -226,6 +238,22 @@ final class AppModel {
 
   func canControlSync(to serial: DeviceID) -> Bool {
     canSendDeviceCommand(to: serial) && devices[serial]?.finalization == nil
+  }
+
+  func captureMountAction(for serial: DeviceID) -> DeviceMountAction? {
+    guard let inventoryRevision = lastInventoryRevision,
+      let state = devices[serial], state.connected,
+      let mountPath = state.mountPath
+    else { return nil }
+    return DeviceMountAction(
+      deviceID: serial, inventoryRevision: inventoryRevision, mountPath: mountPath)
+  }
+
+  func isCurrentMountAction(_ action: DeviceMountAction) -> Bool {
+    guard action.inventoryRevision == lastInventoryRevision,
+      let state = devices[action.deviceID]
+    else { return false }
+    return state.connected && state.mountPath == action.mountPath
   }
 
   func editableDeviceConfig(for serial: DeviceID) -> DeviceConfigState? {
@@ -705,13 +733,14 @@ final class AppModel {
     switch progress.kind {
     case .prompt:
       if let id = progress.promptID, let message = progress.message, let options = progress.options {
-        pendingPrompt = PendingPrompt(id: id, message: message, options: options)
+        pendingPrompt = PendingPrompt(
+          route: progress.route, id: id, message: message, kind: .choice(options: options))
       }
     case .form:
       if let id = progress.promptID, let label = progress.label {
         pendingPrompt = PendingPrompt(
-          id: id, message: progress.hint ?? label,
-          options: progress.initial.map { [$0] } ?? [])
+          route: progress.route, id: id, message: label,
+          kind: .form(initial: progress.initial, hint: progress.hint))
       }
     case .syncError:
       if let message = progress.message { state.phase = .error(message) }
@@ -792,7 +821,8 @@ final class AppModel {
 
   /// Called once a surfaced `pendingPrompt` has been answered (its
   /// `decide_prompt` sent) so the same prompt isn't re-presented.
-  func clearPendingPrompt() {
+  func clearPendingPrompt(route: WireV3Route, promptID: UInt64) {
+    guard pendingPrompt?.route == route, pendingPrompt?.id == promptID else { return }
     pendingPrompt = nil
   }
 

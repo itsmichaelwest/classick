@@ -12,26 +12,55 @@ import AppKit
 /// event loop has no such dependency.
 @MainActor
 enum PromptAlert {
-    /// Activates the app (required to bring a modal to the front from an
-    /// `LSUIElement` accessory app) and blocks — via `NSAlert.runModal()` —
-    /// until the user picks an option. Returns the chosen option's index.
-    static func present(_ prompt: PendingPrompt) -> Int32 {
-        NSApp.activate(ignoringOtherApps: true)
+  enum Response: Equatable {
+    case choice(UInt32)
+    case form(String?)
+  }
 
-        let alert = NSAlert()
-        alert.messageText = prompt.message
-        alert.alertStyle = .informational
+  /// Activates the app (required to bring a modal to the front from an
+  /// `LSUIElement` accessory app) and blocks until the interaction is answered.
+  static func present(_ prompt: PendingPrompt) -> Response {
+    NSApp.activate(ignoringOtherApps: true)
 
-        let options = prompt.options.isEmpty ? ["OK"] : prompt.options
-        for option in options {
-            alert.addButton(withTitle: option)
-        }
+    let alert = NSAlert()
+    alert.messageText = prompt.message
+    alert.alertStyle = .informational
 
-        // NSAlert.runModal() response codes are assigned in the order
-        // buttons were added, starting at .alertFirstButtonReturn — so the
-        // offset from that base is exactly the option's index.
-        let response = alert.runModal()
-        let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-        return Int32(index)
+    switch prompt.kind {
+    case .choice(let suppliedOptions):
+      let options = suppliedOptions.isEmpty ? ["OK"] : suppliedOptions
+      for option in options {
+        alert.addButton(withTitle: option)
+      }
+      let response = alert.runModal()
+      let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+      return .choice(UInt32(clamping: index))
+
+    case .form(let initial, let hint):
+      if let hint, !hint.isEmpty {
+        alert.informativeText = hint
+      }
+      let field = NSTextField(string: initial ?? "")
+      field.placeholderString = hint
+      field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+      alert.accessoryView = field
+      alert.addButton(withTitle: "Submit")
+      alert.addButton(withTitle: "Cancel")
+      let response = alert.runModal()
+      return .form(response == .alertFirstButtonReturn ? field.stringValue : nil)
     }
+  }
+
+  nonisolated static func command(
+    for prompt: PendingPrompt, response: Response, requestID: UUID
+  ) -> WireV3Command {
+    switch response {
+    case .choice(let choice):
+      .promptDecision(
+        route: prompt.route, requestID: requestID, promptID: prompt.id, choice: choice)
+    case .form(let value):
+      .formDecision(
+        route: prompt.route, requestID: requestID, promptID: prompt.id, value: value)
+    }
+  }
 }

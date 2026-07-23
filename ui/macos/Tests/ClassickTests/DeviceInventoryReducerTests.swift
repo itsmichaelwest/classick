@@ -636,6 +636,46 @@ final class DeviceInventoryReducerTests: XCTestCase {
     XCTAssertNil(model.focusedDeviceSerial)
   }
 
+  func testPromptAnswerRetainsOriginalDeviceAndSessionAfterNavigation() throws {
+    let model = AppModel()
+    model.apply(
+      try protocol3Event(
+        Data(
+          #"{"type":"device_inventory","revision":1,"devices":[{"device_id":"000A27002138B0A8","readiness":"ready","hardware":{},"profile_status":"adopted","connected":true,"mount_path":"/Volumes/A","phase":"syncing","session_id":42,"synced_count":0},{"device_id":"000A27002138B0A9","readiness":"ready","hardware":{},"profile_status":"adopted","connected":true,"mount_path":"/Volumes/B","phase":"idle","synced_count":0}],"unidentified":[]}"#
+            .utf8)))
+    model.apply(
+      try protocol3Event(
+        Data(
+          #"{"type":"prompt","device_id":"000A27002138B0A8","session_id":42,"prompt_id":7,"message":"Choose","options":["Continue","Abort"]}"#
+            .utf8)))
+    model.selectedDestination = .device(serial: "000A27002138B0A9", page: .music)
+
+    let prompt = try XCTUnwrap(model.pendingPrompt)
+    let command = PromptAlert.command(for: prompt, response: .choice(1), requestID: UUID())
+
+    guard case .promptDecision(let route, _, let promptID, let choice) = command else {
+      return XCTFail("expected prompt decision")
+    }
+    XCTAssertEqual(route, WireV3Route(deviceID: "000A27002138B0A8", sessionID: 42))
+    XCTAssertEqual(promptID, 7)
+    XCTAssertEqual(choice, 1)
+  }
+
+  func testMountActionIsFencedByInventoryRevisionAndCurrentMount() {
+    let model = AppModel()
+    model.apply(.deviceInventorySnapshot(snapshot(revision: 1, devices: [device("A")])))
+    let first = model.captureMountAction(for: "A")
+    XCTAssertNotNil(first)
+    XCTAssertTrue(first.map(model.isCurrentMountAction) ?? false)
+
+    model.apply(
+      .deviceInventorySnapshot(
+        snapshot(revision: 2, devices: [device("A", connected: true, mount: "/Volumes/New")])) )
+
+    XCTAssertFalse(first.map(model.isCurrentMountAction) ?? true)
+    XCTAssertEqual(model.captureMountAction(for: "A")?.mountPath, "/Volumes/New")
+  }
+
   func testOlderOrDuplicateInventoryRevisionCannotRollBackSessionState() {
     let model = AppModel()
     model.apply(

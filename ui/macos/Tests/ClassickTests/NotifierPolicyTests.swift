@@ -76,7 +76,10 @@ final class NotifierPolicyTests: XCTestCase {
 
     XCTAssertEqual(
       coordinator.consume(inventoryEvent(revision: 2), devices: model.devices),
-      [SyncFinishedNotification(serial: "A", sessionID: 42, success: true, added: 3)])
+      [
+        SyncFinishedNotification(
+          serial: "A", sessionID: 42, displayName: "A's iPod", success: true, added: 3)
+      ])
     XCTAssertEqual(
       coordinator.consume(inventoryEvent(revision: 2), devices: model.devices), [],
       "duplicate terminal snapshots must not post twice")
@@ -104,6 +107,56 @@ final class NotifierPolicyTests: XCTestCase {
       coordinator.consume(inventoryEvent(revision: 2), devices: model.devices), [])
   }
 
+  func testNotificationTitleUsesDeviceNameWithoutRawIdentifier() {
+    let notification = SyncFinishedNotification(
+      serial: "000000000000000A", sessionID: 42, displayName: "Michael's iPod",
+      success: true, added: 3)
+
+    let title = Notifier.title(for: notification)
+
+    XCTAssertEqual(title, "Sync complete — Michael's iPod")
+    XCTAssertFalse(title.contains(notification.serial.rawValue))
+  }
+
+  func testConcurrentSessionsProduceIndependentNamedNotifications() {
+    var coordinator = SyncNotificationCoordinator()
+    let model = AppModel()
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 1,
+          devices: [
+            deviceSnapshot(serial: "A", name: "Alpha iPod", phase: .syncing, sessionID: 42),
+            deviceSnapshot(serial: "B", name: "Beta iPod", phase: .syncing, sessionID: 84),
+          ])))
+    _ = coordinator.consume(inventoryEvent(revision: 1), devices: model.devices)
+
+    let alpha = HistoryEntry(
+      serial: "000000000000000A", sessionID: 42, timestamp: "2026-07-19T12:00:00Z",
+      durationSecs: 10, trigger: "manual", outcome: "ok")
+    let beta = HistoryEntry(
+      serial: "000000000000000B", sessionID: 84, timestamp: "2026-07-19T12:00:01Z",
+      durationSecs: 11, trigger: "manual", outcome: "error")
+    model.apply(
+      .deviceInventorySnapshot(
+        .init(
+          revision: 2,
+          devices: [
+            deviceSnapshot(
+              serial: "A", name: "Alpha iPod", phase: .idle, sessionID: nil,
+              latestSuccessfulSync: alpha, latestAttempt: alpha),
+            deviceSnapshot(
+              serial: "B", name: "Beta iPod", phase: .error, sessionID: nil,
+              latestAttempt: beta, lastTerminalError: "Sync failed"),
+          ])))
+    model.apply(.historyUpdate(entries: [alpha, beta], acknowledgedRequestID: "terminal"))
+
+    let notifications = coordinator.consume(inventoryEvent(revision: 2), devices: model.devices)
+
+    XCTAssertEqual(notifications.map(\.displayName), ["Alpha iPod", "Beta iPod"])
+    XCTAssertEqual(notifications.map(\.success), [true, false])
+  }
+
   func testSeriallessScanStreamNeverProducesSyncNotification() {
     var coordinator = SyncNotificationCoordinator()
     let model = AppModel()
@@ -129,14 +182,24 @@ final class NotifierPolicyTests: XCTestCase {
     DeviceInventorySnapshot(
       revision: revision,
       devices: [
-        DeviceSnapshotWire(
-          identity: .init(serial: "A", modelLabel: "iPod Classic", name: "A's iPod"),
-          configured: true, connected: true, mount: "/Volumes/A", phase: phase,
-          sessionID: sessionID, storage: nil, syncedCount: 10, libraryCount: 10,
-          latestSuccessfulSync: latestSuccessfulSync, latestAttempt: latestAttempt,
-          lastTerminalError: nil, selectionRevision: 1, settingsRevision: 1,
-          subscriptionsRevision: 1)
+        deviceSnapshot(
+          serial: "A", name: "A's iPod", phase: phase, sessionID: sessionID,
+          latestSuccessfulSync: latestSuccessfulSync, latestAttempt: latestAttempt)
       ])
+  }
+
+  private func deviceSnapshot(
+    serial: String, name: String, phase: DevicePhaseLabel, sessionID: UInt64?,
+    latestSuccessfulSync: HistoryEntry? = nil, latestAttempt: HistoryEntry? = nil,
+    lastTerminalError: String? = nil
+  ) -> DeviceSnapshotWire {
+    DeviceSnapshotWire(
+      identity: .init(serial: serial, modelLabel: "iPod Classic", name: name),
+      configured: true, connected: true, mount: "/Volumes/\(serial)", phase: phase,
+      sessionID: sessionID, storage: nil, syncedCount: 10, libraryCount: 10,
+      latestSuccessfulSync: latestSuccessfulSync, latestAttempt: latestAttempt,
+      lastTerminalError: lastTerminalError, selectionRevision: 1, settingsRevision: 1,
+      subscriptionsRevision: 1)
   }
 
   private func history(sessionID: UInt64, outcome: String) -> HistoryEntry {

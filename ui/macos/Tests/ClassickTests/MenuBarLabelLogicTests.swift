@@ -49,6 +49,26 @@ final class MenuBarLabelLogicTests: XCTestCase {
     XCTAssertTrue(presentations.allSatisfy { $0.accessibilityLabel == "Classick" })
   }
 
+  func testAggregatePresentationDoesNotDependOnFocusedDevice() {
+    let idle = makeDevice(phase: .idle, finalizing: false)
+    var syncing = makeDevice(phase: .syncing, finalizing: false)
+    syncing.deviceID = "B"
+
+    XCTAssertEqual(
+      MenuBarLabelPresentation.make(
+        globalPhase: .idle, devices: [idle.deviceID: idle, syncing.deviceID: syncing]
+      ).systemImage,
+      "arrow.triangle.2.circlepath")
+
+    syncing.finalization = .init(reason: .cancelled, stagedAlbums: 1, stagedTracks: 2)
+    syncing.connected = false
+    XCTAssertEqual(
+      MenuBarLabelPresentation.make(
+        globalPhase: .idle, devices: [idle.deviceID: idle, syncing.deviceID: syncing]
+      ).systemImage,
+      "arrow.triangle.2.circlepath")
+  }
+
   func testLabelLayoutHasOneFixedOpticalFootprint() {
     XCTAssertEqual(MenuBarLabelLayout.opticalFrameWidth, 18)
     XCTAssertEqual(MenuBarLabelLayout.opticalFrameHeight, 18)

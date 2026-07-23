@@ -54,8 +54,13 @@ struct MenuContent: View {
     {
       deviceContent(serial: serial, state: state)
     } else if model.devices.values.filter(\.connected).count > 1 {
-      Text("Select an iPod in Classick")
-        .disabled(true)
+      ForEach(MenuContentLogic.connectedDeviceIDs(devices: model.devices), id: \.self) { serial in
+        if let state = model.devices[serial] {
+          Menu(DeviceIdentityLogic.title(identity: state.identity, hardware: state.hardware)) {
+            deviceContent(serial: serial, state: state)
+          }
+        }
+      }
     } else if !model.unidentifiedDevices.isEmpty {
       let guidance = DeviceReadinessLogic.identityUnavailableGuidance
       Text(guidance.title)
@@ -136,6 +141,14 @@ enum MenuContentLogic {
       return nil
     }
     return focusedSerial
+  }
+
+  static func connectedDeviceIDs(devices: [DeviceID: DeviceViewState]) -> [DeviceID] {
+    devices.values.filter(\.connected).sorted {
+      let lhs = DeviceIdentityLogic.title(identity: $0.identity, hardware: $0.hardware)
+      let rhs = DeviceIdentityLogic.title(identity: $1.identity, hardware: $1.hardware)
+      return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+    }.map(\.deviceID)
   }
 }
 

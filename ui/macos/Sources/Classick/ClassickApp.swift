@@ -191,8 +191,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// succeeds; when it doesn't (Finder/another app holding files open),
   /// the system's error is surfaced in an alert rather than swallowed.
   func ejectIpod(serial: DeviceID) {
-    guard let drive = model.devices[serial]?.mountPath else { return }
-    let url = URL(fileURLWithPath: drive)
+    guard let target = model.captureMountAction(for: serial),
+      model.isCurrentMountAction(target)
+    else { return }
+    let url = URL(fileURLWithPath: target.mountPath)
     do {
       try NSWorkspace.shared.unmountAndEjectDevice(at: url)
     } catch {
@@ -308,18 +310,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// with the chosen option and clears it so it isn't re-shown.
   private func presentPromptIfNeeded() {
     guard let prompt = model.pendingPrompt else { return }
-    guard let serial = model.focusedDeviceSerial,
-      let sessionID = model.devices[serial]?.sessionID
-    else { return }
-    let choice = PromptAlert.present(prompt)
-    model.clearPendingPrompt()
+    let response = PromptAlert.present(prompt)
+    model.clearPendingPrompt(route: prompt.route, promptID: prompt.id)
     sendDeviceCommands(
-      serial: serial,
+      serial: prompt.route.deviceID,
       commands: [
-        .promptDecision(
-          route: WireV3Route(deviceID: serial, sessionID: sessionID),
-          requestID: WireV3Command.newRequestID(), promptID: prompt.id,
-          choice: UInt32(clamping: choice))
+        PromptAlert.command(
+          for: prompt, response: response, requestID: WireV3Command.newRequestID())
       ])
   }
 
@@ -672,9 +669,7 @@ struct ClassickApp: App {
       MenuBarLabel(
         presentation: MenuBarLabelPresentation.make(
           globalPhase: appDelegate.model.phase,
-          device: appDelegate.model.focusedDeviceSerial.flatMap {
-            appDelegate.model.devices[$0]
-          }))
+          devices: appDelegate.model.devices))
     }
     .menuBarExtraStyle(.menu)
 

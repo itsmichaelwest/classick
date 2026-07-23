@@ -131,6 +131,7 @@ private struct HistorySessionIdentity: Hashable {
 struct SyncFinishedNotification: Equatable, Sendable {
   var serial: DeviceID
   var sessionID: UInt64
+  var displayName: String
   var success: Bool
   var added: Int
 }
@@ -224,6 +225,8 @@ struct SyncNotificationCoordinator {
         SyncFinishedNotification(
           serial: session.serial,
           sessionID: session.id,
+          displayName: DeviceIdentityLogic.title(
+            identity: state.identity, hardware: state.hardware),
           success: success,
           added: success ? (addedBySession[session] ?? 0) : 0))
     }
