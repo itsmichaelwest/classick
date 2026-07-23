@@ -202,7 +202,7 @@ public partial class PopoverViewModel
         if (!string.Equals(_pendingInteractionRequestId, requestId, StringComparison.Ordinal)) return;
         _pendingInteractionRequestId = null;
         InteractionDecisionEnabled = true;
-        StatusText = $"Could not send response: {message}";
+        PromptMessage = $"{_wireInteraction!.Message}\n\nCould not send response: {message}";
     }
 
     private static int ToProgressValue(ulong value) =>

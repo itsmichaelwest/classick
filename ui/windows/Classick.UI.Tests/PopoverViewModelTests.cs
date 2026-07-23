@@ -159,7 +159,7 @@ public sealed class PopoverViewModelTests
     }
 
     [Fact]
-    public void CorrelatedCommandFailureReenablesPendingInteraction()
+    public void CorrelatedCommandFailureRemainsVisibleAfterInventoryRefresh()
     {
         var viewModel = ActiveViewModel(42);
         var presentation = Presentation(42);
@@ -170,10 +170,11 @@ public sealed class PopoverViewModelTests
         Assert.False(viewModel.InteractionDecisionEnabled);
 
         viewModel.InteractionCommandFailed(requestId, "Rejected");
+        viewModel.Update(Device());
 
         Assert.True(viewModel.PromptActive);
         Assert.True(viewModel.InteractionDecisionEnabled);
-        Assert.Contains("Rejected", viewModel.StatusText);
+        Assert.Contains("Rejected", viewModel.PromptMessage);
     }
 
     [Fact]

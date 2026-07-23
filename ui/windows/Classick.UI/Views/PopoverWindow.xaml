@@ -303,6 +303,7 @@
             </ScrollViewer>
             <ItemsControl Grid.Row="1"
                           Margin="0,8,0,0"
+                          IsEnabled="{x:Bind ViewModel.InteractionDecisionEnabled, Mode=OneWay}"
                           ItemsSource="{x:Bind ViewModel.PromptOptions, Mode=OneWay}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
@@ -313,7 +314,6 @@
                     <DataTemplate x:DataType="x:String">
                         <Button HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Left"
-                                IsEnabled="{x:Bind ViewModel.InteractionDecisionEnabled, Mode=OneWay}"
                                 Content="{x:Bind}"
                                 Click="OnPromptOptionClicked" />
                     </DataTemplate>
