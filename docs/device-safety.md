@@ -126,10 +126,20 @@ contained exactly five published media files, transaction directories were
 cleaned, source hashes were unchanged, and the device remained mounted through
 graceful daemon shutdown.
 
-This verifies the mounted core publication and reopen path. It does not prove
-firmware playback, visible artwork on the iPod, Finder/Apple Music management,
-FAT-formatted behavior, Windows behavior, or clean eject; those remain separate
-physical gates.
+A follow-up round trip verified firmware playback and visible artwork for all
+five tracks. Finder displayed the post-Classick tracks in Manage Storage and
+deleted them successfully. Finder left the Classick manifest intact while
+removing the live database records and media, so the planner now cross-checks
+each selected manifest entry against the live DBID/path pair and regular media
+file. Missing pairs are repaired; DBID/path ambiguity fails closed. The release
+binary then republished all five tracks, verified 5/5 artwork, left no pending
+transaction, preserved source hashes, and produced a stable five-unchanged
+follow-up dry run.
+
+This verifies the mounted HFS+ core, firmware playback/artwork, and Finder
+delete/Classick-repair round trip. FAT-formatted behavior, Windows behavior,
+Apple Music beyond Finder's device-management surface, Rockbox, and an
+explicitly observed clean eject remain separate physical gates.
 
 ## Recovery precedes new work
 

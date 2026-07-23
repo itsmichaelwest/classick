@@ -53,6 +53,10 @@ incidents and completed gate reports are archived in
 - Remove stale managed artwork only after the pre-publication generation
   fence and within the database-publication failure boundary. Cleaning it
   earlier makes Classick misclassify its own changes as an external mutation.
+- A portable manifest is not proof that its track still exists after Finder
+  management. Before diffing, require the recorded DBID/path pair plus a
+  regular media file; repair a missing pair, but fail closed on duplicate or
+  reassigned DBIDs and normalized paths.
 - Registry-v2 migration is all-or-nothing: reject duplicate or noncanonical
   device keys and unknown metadata at every nested boundary. Legacy revisions
   remain `pending_legacy_import`; they are not imported portable-profile

@@ -274,10 +274,30 @@ pub enum Action {
 pub fn diff(
     manifest: &Manifest,
     sources: &[SourceEntry],
+    compute_fingerprint: impl FnMut(&Path) -> Result<String>,
+    compute_audio_fingerprint: impl FnMut(&Path) -> Result<String>,
+    target_encoder: &str,
+    force_reencode: bool,
+) -> Result<Vec<Action>> {
+    diff_with_device_presence(
+        manifest,
+        sources,
+        compute_fingerprint,
+        compute_audio_fingerprint,
+        target_encoder,
+        force_reencode,
+        |_| Ok(true),
+    )
+}
+
+pub fn diff_with_device_presence(
+    manifest: &Manifest,
+    sources: &[SourceEntry],
     mut compute_fingerprint: impl FnMut(&Path) -> Result<String>,
     mut compute_audio_fingerprint: impl FnMut(&Path) -> Result<String>,
     target_encoder: &str,
     force_reencode: bool,
+    mut device_entry_present: impl FnMut(&ManifestEntry) -> Result<bool>,
 ) -> Result<Vec<Action>> {
     let manifest_by_path: HashMap<&PathBuf, &ManifestEntry> = manifest
         .tracks
@@ -294,6 +314,10 @@ pub fn diff(
         match manifest_by_path.get(&src.path) {
             None => actions.push(Action::Add(src.clone())),
             Some(entry) => {
+                if !device_entry_present(entry)? {
+                    actions.push(Action::Modify(src.clone(), (*entry).clone()));
+                    continue;
+                }
                 let stat_matches = entry.source_mtime == src.mtime && entry.source_size == src.size;
                 if stat_matches {
                     // FAST PATH — no fingerprint read.
@@ -444,6 +468,33 @@ mod tests {
             mtime: 1700000000,
             size,
         }
+    }
+
+    #[test]
+    fn missing_live_device_track_is_repaired_even_when_source_stats_match() {
+        let source = sample_source("/music/track.flac", "same", 1_000);
+        let manifest = Manifest {
+            version: 2,
+            ipod_serial: Some("SERIAL-1".into()),
+            last_source_root: Some(PathBuf::from("/music")),
+            tracks: vec![sample_entry("/music/track.flac", "same", 1_000)],
+        };
+
+        let actions = diff_with_device_presence(
+            &manifest,
+            &[source],
+            |_| panic!("matching stats must not hash the source"),
+            |_| panic!("matching stats must not hash audio"),
+            "ffmpeg",
+            false,
+            |_| Ok(false),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(actions.as_slice(), [Action::Modify(_, _)]),
+            "a source-selected track missing from the live device must be repaired: {actions:?}"
+        );
     }
 
     fn portable_source(root: &str) -> crate::source_location::SourceLocation {

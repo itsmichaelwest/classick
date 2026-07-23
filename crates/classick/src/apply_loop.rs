@@ -551,13 +551,18 @@ fn run_connected(
     //    branch (manifest::is_encoder_mismatch) so an existing entry whose
     //    body was written by a different encoder gets promoted to Modify.
     let target_encoder = encoder_str(config.encoder);
-    let actions = manifest::diff(
+    let live_db =
+        OwnedDb::open(Path::new(&mount)).context("inspect live tracks before sync planning")?;
+    let live_tracks = LiveTrackIndex::from_handles(live_db.list_tracks_for_rebuild())?;
+    drop(live_db);
+    let actions = manifest::diff_with_device_presence(
         &manifest,
         &sources,
         source::fingerprint,
         source::audio_fingerprint,
         target_encoder,
         config.force_reencode,
+        |entry| manifest_entry_present_on_device(Path::new(&mount), &live_tracks, entry),
     )?;
 
     // Fit pass (Task 8): defer whole albums that won't fit the device's
@@ -1315,6 +1320,89 @@ fn stage_transcoded_result(
 
 fn device_file_path(mount: &Path, relative: &str) -> PathBuf {
     mount.join(relative.replace('\\', std::path::MAIN_SEPARATOR_STR))
+}
+
+fn normalize_ipod_relpath(path: &str) -> String {
+    path.trim_start_matches(['/', '\\'])
+        .replace(['/', ':'], "\\")
+        .to_ascii_lowercase()
+}
+
+#[derive(Default)]
+struct LiveTrackIndex {
+    by_dbid: std::collections::HashMap<u64, String>,
+    by_path: std::collections::HashMap<String, u64>,
+}
+
+impl LiveTrackIndex {
+    fn from_handles(handles: impl IntoIterator<Item = TrackHandle>) -> Result<Self> {
+        let mut index = Self::default();
+        for handle in handles {
+            index.insert(handle.dbid, handle.ipod_relpath)?;
+        }
+        Ok(index)
+    }
+
+    fn insert(&mut self, dbid: u64, path: String) -> Result<()> {
+        let normalized = normalize_ipod_relpath(&path);
+        if self.by_dbid.contains_key(&dbid) {
+            anyhow::bail!("live iTunesDB contains duplicate track dbid {dbid}");
+        }
+        if !normalized.is_empty() {
+            if let Some(existing_dbid) = self.by_path.get(&normalized) {
+                anyhow::bail!(
+                    "live iTunesDB track dbids {existing_dbid} and {dbid} share path {path:?}"
+                );
+            }
+            self.by_path.insert(normalized.clone(), dbid);
+        }
+        self.by_dbid.insert(dbid, normalized);
+        Ok(())
+    }
+}
+
+fn manifest_entry_present_on_device(
+    mount: &Path,
+    live_tracks: &LiveTrackIndex,
+    entry: &ManifestEntry,
+) -> Result<bool> {
+    let expected = normalize_ipod_relpath(&entry.ipod_relpath);
+    if let Some(live_dbid) = live_tracks.by_path.get(&expected) {
+        if *live_dbid != entry.ipod_dbid {
+            anyhow::bail!(
+                "manifest track path {:?} is owned by live dbid {}, not recorded dbid {}",
+                entry.ipod_relpath,
+                live_dbid,
+                entry.ipod_dbid
+            );
+        }
+    }
+    let database_present = match live_tracks.by_dbid.get(&entry.ipod_dbid) {
+        Some(actual) if *actual == expected => true,
+        Some(actual) => {
+            anyhow::bail!(
+                "manifest track dbid {} path mismatch: recorded {:?}, live {:?}",
+                entry.ipod_dbid,
+                entry.ipod_relpath,
+                actual
+            )
+        }
+        None => false,
+    };
+    let media = device_file_path(mount, &entry.ipod_relpath);
+    let media_present = match std::fs::symlink_metadata(&media) {
+        Ok(metadata) if metadata.file_type().is_file() => true,
+        Ok(_) => anyhow::bail!(
+            "manifest track path is not a regular file: {}",
+            media.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect manifest track {}", media.display()));
+        }
+    };
+    Ok(database_present && media_present)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2502,6 +2590,61 @@ impl ArtworkCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_manifest_presence_requires_matching_database_record_and_regular_media() {
+        let mount = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-tmp")
+            .join(format!("live-manifest-presence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mount);
+        let media = mount.join("iPod_Control/Music/F00/track.m4a");
+        std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+        let entry = crate::manifest::ManifestEntry {
+            source_path: PathBuf::from("/music/track.flac"),
+            source_mtime: 0,
+            source_size: 1,
+            source_fingerprint: "fp".into(),
+            ipod_dbid: 42,
+            ipod_relpath: "iPod_Control/Music/F00/track.m4a".into(),
+            source_known: true,
+            audio_fingerprint: String::new(),
+            encoder: "ffmpeg".into(),
+            encoder_version: String::new(),
+            source_format: "flac".into(),
+        };
+        let mut live_tracks = LiveTrackIndex::default();
+
+        assert!(!manifest_entry_present_on_device(&mount, &live_tracks, &entry).unwrap());
+        std::fs::write(&media, b"audio").unwrap();
+        assert!(!manifest_entry_present_on_device(&mount, &live_tracks, &entry).unwrap());
+        live_tracks
+            .insert(42, "iPod_Control/Music/F01/different.m4a".into())
+            .unwrap();
+        assert!(manifest_entry_present_on_device(&mount, &live_tracks, &entry).is_err());
+        live_tracks = LiveTrackIndex::default();
+        live_tracks
+            .insert(42, "ipod_control\\music\\f00\\track.m4a".into())
+            .unwrap();
+        assert!(manifest_entry_present_on_device(&mount, &live_tracks, &entry).unwrap());
+        std::fs::remove_file(&media).unwrap();
+        assert!(!manifest_entry_present_on_device(&mount, &live_tracks, &entry).unwrap());
+        std::fs::create_dir(&media).unwrap();
+        assert!(manifest_entry_present_on_device(&mount, &live_tracks, &entry).is_err());
+        std::fs::remove_dir(&media).unwrap();
+        std::fs::write(&media, b"audio").unwrap();
+        live_tracks = LiveTrackIndex::default();
+        live_tracks.insert(7, entry.ipod_relpath.clone()).unwrap();
+        assert!(
+            manifest_entry_present_on_device(&mount, &live_tracks, &entry).is_err(),
+            "a live track with a different DBID now owns the recorded path"
+        );
+        assert!(
+            live_tracks
+                .insert(8, "ipod_control\\music\\f00\\track.m4a".into())
+                .is_err(),
+            "two live DBIDs must not claim the same normalized media path"
+        );
+    }
 
     fn loaded_with_identity(
         identity: Option<crate::source_location::SourceIdentity>,
