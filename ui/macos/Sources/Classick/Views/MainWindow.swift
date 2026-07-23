@@ -38,10 +38,11 @@ struct MainWindow: View {
   var onLoadDeviceConfig: (DeviceID) -> Void = { _ in }
   var onSaveAndPreviewDeviceConfig:
     (_ serial: DeviceID, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) ->
-      String? =
+      DeviceMusicMutationReceipt? =
       { _, _, _ in nil }
   // Device Settings page (Task 6).
-  var onSaveDeviceSettings: (_ serial: DeviceID, _ settings: DeviceSettingsWire) -> String? = {
+  var onSaveDeviceSettings:
+    (_ serial: DeviceID, _ settings: DeviceSettingsWire) -> DeviceMutationReceipt? = {
     _, _ in nil
   }
 

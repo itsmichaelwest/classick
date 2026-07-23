@@ -17,7 +17,8 @@ struct DeviceSettingsPage: View {
   var model: AppModel
   var serial: DeviceID
   var onLoadDeviceConfig: (DeviceID) -> Void
-  var onSaveDeviceSettings: (_ serial: DeviceID, _ settings: DeviceSettingsWire) -> String?
+  var onSaveDeviceSettings:
+    (_ serial: DeviceID, _ settings: DeviceSettingsWire) -> DeviceMutationReceipt?
   var onForgetIpod: (DeviceID) -> Void
   var onBackfill: (DeviceID) -> Void
   var onReplaceLibrary: (DeviceID) -> Void
@@ -28,8 +29,6 @@ struct DeviceSettingsPage: View {
   }
 
   @State private var draft = SettingsDraft()
-  @State private var acknowledgedDraft = AcknowledgedDraft(
-    canonical: SettingsDraft(), revision: 0)
   @State private var hasCanonicalDraft = false
   @State private var saveTask: Task<Void, Never>?
   @State private var showReplaceConfirm = false
@@ -37,7 +36,12 @@ struct DeviceSettingsPage: View {
   private var deviceState: DeviceViewState? {
     DeviceSurfaceLogic.state(serial: serial, in: model.devices)
   }
-  private var config: DeviceConfigState? { deviceState?.config }
+  private var config: DeviceConfigState? {
+    model.editableDeviceConfig(for: serial) ?? deviceState?.config
+  }
+  private var configStatus: DeviceConfigComponentStatus {
+    model.deviceConfigStatus(for: serial, component: .settings)
+  }
   private var canEditDevice: Bool { model.canSendDeviceCommand(to: serial) }
   private var isConnected: Bool { deviceState?.connected == true }
   private var surfacePhase: Phase {
@@ -74,13 +78,14 @@ struct DeviceSettingsPage: View {
       guard canEditDevice else { return }
       seedIfNeeded()
       onLoadDeviceConfig(serial)
+      submitPendingChanges()
     }
     .onChange(of: canEditDevice) { _, isAvailable in
       handleDeviceAvailabilityChange(isAvailable)
     }
     .onChange(of: config?.settings) { _, _ in seedIfNeeded() }
     .onChange(of: deviceState?.settingsRevision) { _, _ in seedIfNeeded() }
-    .onDisappear { saveTask?.cancel() }
+    .onDisappear { submitPendingChanges() }
     .sheet(isPresented: $showReplaceConfirm) {
       ReplaceLibraryConfirmationSheet(
         deviceName: deviceName,
@@ -96,6 +101,9 @@ struct DeviceSettingsPage: View {
 
   private var settingsForm: some View {
     Form {
+      if configStatus != .saved {
+        Section { DeviceConfigStatusView(status: configStatus) }
+      }
       Section {
         LabeledContent("Name", value: deviceName)
         if let hardware = deviceState.flatMap({ DeviceIdentityLogic.hardwareDescription($0.hardware) }) {
@@ -128,17 +136,12 @@ struct DeviceSettingsPage: View {
               get: { draft.autoSync }, set: { value in edit { $0.autoSync = value } })
           )
           .disabled(!canEditDevice)
-          // Disabled while disconnected (user decision, overriding
-          // the earlier stays-editable rule for THIS toggle):
-          // Rockbox mode implies an on-device format change, so
-          // flipping it with no iPod present promises work the
-          // app can't start.
           Toggle(
             "Rockbox compatibility mode",
             isOn: Binding(
               get: { draft.rockboxCompat }, set: { value in edit { $0.rockboxCompat = value } })
           )
-          .disabled(!isConnected || !canEditDevice)
+          .disabled(!canEditDevice)
         } else {
           HStack(spacing: 8) {
             ProgressView().controlSize(.small)
@@ -187,13 +190,9 @@ struct DeviceSettingsPage: View {
 
   /// Reconciles persisted settings while preserving newer local edits.
   private func seedIfNeeded() {
-    guard let config, let deviceState else { return }
-    let canonical = SettingsDraft(
+    guard let config else { return }
+    draft = SettingsDraft(
       autoSync: config.settings.autoSync, rockboxCompat: config.settings.rockboxCompat)
-    acknowledgedDraft.reconcile(
-      canonical: canonical, revision: deviceState.settingsRevision,
-      acknowledgedRequestID: model.deviceConfigAcknowledgedRequestIDs[serial])
-    draft = acknowledgedDraft.value
     hasCanonicalDraft = true
   }
 
@@ -201,19 +200,23 @@ struct DeviceSettingsPage: View {
   /// with only `settings` populated (selection/subscriptions stay nil —
   /// this page never edits sync intent). Mirrors `DeviceMusicPage`'s
   /// 400ms `scheduleSave`.
-  private func scheduleSave(_ d: SettingsDraft) {
+  private func scheduleSave() {
     saveTask?.cancel()
     saveTask = Task {
       guard
         await DeviceDraftSaveGate.waitUntilReady(
           serial: serial, model: model)
       else { return }
-      guard
-        let requestID = onSaveDeviceSettings(
-          serial, DeviceSettingsWire(autoSync: d.autoSync, rockboxCompat: d.rockboxCompat))
-      else { return }
-      acknowledgedDraft.markSubmitted(requestID: requestID)
+      submitPendingChanges()
     }
+  }
+
+  private func submitPendingChanges() {
+    saveTask?.cancel()
+    guard canEditDevice, let settings = model.pendingDeviceSettings(for: serial),
+      let receipt = onSaveDeviceSettings(serial, settings)
+    else { return }
+    model.markDeviceSettingsSubmitted(for: serial, receipt: receipt)
   }
 
   private func edit(_ mutation: (inout SettingsDraft) -> Void) {
@@ -221,20 +224,22 @@ struct DeviceSettingsPage: View {
     var edited = draft
     mutation(&edited)
     guard edited != draft else { return }
-    acknowledgedDraft.edit(edited)
-    draft = acknowledgedDraft.value
-    scheduleSave(draft)
+    draft = edited
+    model.editDeviceSettings(
+      DeviceSettingsWire(autoSync: edited.autoSync, rockboxCompat: edited.rockboxCompat),
+      for: serial)
+    scheduleSave()
   }
 
   private func handleDeviceAvailabilityChange(_ isAvailable: Bool) {
     guard isAvailable else {
-      saveTask?.cancel()
+      submitPendingChanges()
       showReplaceConfirm = false
-      hasCanonicalDraft = false
       return
     }
     seedIfNeeded()
     onLoadDeviceConfig(serial)
+    submitPendingChanges()
   }
 }
 
@@ -367,7 +372,7 @@ private struct ReplaceLibraryConfirmationSheet: View {
     DeviceSettingsPage(
       model: PreviewFixtures.connectedSyncedModel(),
       serial: try! DeviceID(PreviewFixtures.pairedIpod.serial),
-      onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in "preview" },
+      onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in .init(requestID: "preview", mutationID: "preview") },
       onForgetIpod: { _ in }, onBackfill: { _ in }, onReplaceLibrary: { _ in }
     )
     .frame(width: 520, height: 520)
@@ -377,7 +382,7 @@ private struct ReplaceLibraryConfirmationSheet: View {
     DeviceSettingsPage(
       model: PreviewFixtures.disconnectedModel(),
       serial: try! DeviceID(PreviewFixtures.pairedIpod.serial),
-      onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in "preview" },
+      onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in .init(requestID: "preview", mutationID: "preview") },
       onForgetIpod: { _ in }, onBackfill: { _ in }, onReplaceLibrary: { _ in }
     )
     .frame(width: 520, height: 520)

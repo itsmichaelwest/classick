@@ -25,7 +25,7 @@ struct DeviceMusicPage: View {
   var onLoadDeviceConfig: (DeviceID) -> Void
   var onSaveAndPreviewDeviceConfig:
     (_ serial: DeviceID, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) ->
-      String?
+      DeviceMusicMutationReceipt?
   // Required (no no-op default) — see `MainWindow`'s doc comment on
   // `onSavePlaylist` for why a defaulted closure here would be exactly
   // how this action could ship silently dead.
@@ -47,10 +47,6 @@ struct DeviceMusicPage: View {
   }
 
   @State private var draft = MusicDraft()
-  @State private var acknowledgedSelection = AcknowledgedDraft(
-    canonical: SelectionDraft(), revision: 0)
-  @State private var acknowledgedSubscriptions = AcknowledgedDraft(
-    canonical: Set<String>(), revision: 0)
   /// Per-mode memory of checked sets, page-lifetime only: flipping modes
   /// stashes the departing mode's checks and restores the target's, so
   /// Selected → Entire → Selected round-trips the user's original picks
@@ -64,7 +60,15 @@ struct DeviceMusicPage: View {
   private var deviceState: DeviceViewState? {
     DeviceSurfaceLogic.state(serial: serial, in: model.devices)
   }
-  private var config: DeviceConfigState? { deviceState?.config }
+  private var config: DeviceConfigState? {
+    model.editableDeviceConfig(for: serial) ?? deviceState?.config
+  }
+  private var configStatus: DeviceConfigComponentStatus {
+    DeviceConfigStatusLogic.mostImportant([
+      model.deviceConfigStatus(for: serial, component: .selection),
+      model.deviceConfigStatus(for: serial, component: .subscriptions),
+    ])
+  }
   private var canEditDevice: Bool { model.canSendDeviceCommand(to: serial) }
   private var isConnected: Bool { deviceState?.connected == true }
   private var surfacePhase: Phase {
@@ -135,6 +139,7 @@ struct DeviceMusicPage: View {
         guard canEditDevice else { return }
         seedIfNeeded()
         onLoadDeviceConfig(serial)
+        submitPendingChanges()
       }
       .onChange(of: canEditDevice) { _, isAvailable in
         handleDeviceAvailabilityChange(isAvailable)
@@ -148,7 +153,7 @@ struct DeviceMusicPage: View {
       // cancels an in-flight debounce the instant this page is
       // navigated away from. Reconnects use the same cancellation path
       // through `handleDeviceAvailabilityChange`.
-      .onDisappear { saveTask?.cancel() }
+      .onDisappear { submitPendingChanges() }
       .libraryDropDestination(
         target: libraryDropTarget,
         launchNonce: model.libraryDragLaunchNonce,
@@ -211,7 +216,10 @@ struct DeviceMusicPage: View {
     if let readinessGuidance {
       DeviceReadinessView(guidance: readinessGuidance)
     } else if hasCanonicalDraft {
-      content
+      VStack(spacing: 0) {
+        DeviceConfigStatusView(status: configStatus)
+        content
+      }
     } else {
       VStack(spacing: 8) {
         Spacer()
@@ -368,16 +376,11 @@ struct DeviceMusicPage: View {
   /// Reconciles persisted selection and subscriptions independently because
   /// their daemon revisions advance separately.
   private func seedIfNeeded() {
-    guard let config, let deviceState else { return }
-    let acknowledgement = model.deviceConfigAcknowledgedRequestIDs[serial]
-    acknowledgedSelection.reconcile(
-      canonical: SelectionDraft(
-        mode: config.selection.mode, checked: Set(config.selection.rules)),
-      revision: deviceState.selectionRevision, acknowledgedRequestID: acknowledgement)
-    acknowledgedSubscriptions.reconcile(
-      canonical: Set(config.subscriptions.playlists),
-      revision: deviceState.subscriptionsRevision, acknowledgedRequestID: acknowledgement)
-    copyAcknowledgedValuesToDraft()
+    guard let config else { return }
+    draft = MusicDraft(
+      mode: config.selection.mode,
+      checked: Set(config.selection.rules),
+      subscriptions: Set(config.subscriptions.playlists))
     hasCanonicalDraft = true
   }
 
@@ -404,69 +407,73 @@ struct DeviceMusicPage: View {
   /// page, Task 6) followed by a fresh `preview_device` so the capacity
   /// bar tracks the edit. Mirrors `DeviceView.scheduleSave`/the retired
   /// LibraryView's `scheduleSave` (400ms).
-  private func scheduleSave(_ d: MusicDraft) {
+  private func scheduleSave() {
     saveTask?.cancel()
     saveTask = Task {
       guard
         await DeviceDraftSaveGate.waitUntilReady(
           serial: serial, model: model)
       else { return }
-      guard
-        let requestID = onSaveAndPreviewDeviceConfig(
-          serial,
-          SelectionState(mode: d.mode, rules: Array(d.checked)),
-          SubscriptionsWire(playlists: Array(d.subscriptions).sorted()))
-      else { return }
-      acknowledgedSelection.markSubmitted(requestID: requestID)
-      acknowledgedSubscriptions.markSubmitted(requestID: requestID)
+      submitPendingChanges()
+    }
+  }
+
+  private func submitPendingChanges() {
+    saveTask?.cancel()
+    guard canEditDevice else { return }
+    let selection = model.pendingDeviceSelection(for: serial)
+    let subscriptions = model.pendingDeviceSubscriptions(for: serial)
+    guard selection != nil || subscriptions != nil,
+      let receipt = onSaveAndPreviewDeviceConfig(serial, selection, subscriptions)
+    else { return }
+    if let selectionReceipt = receipt.selection {
+      model.markDeviceSelectionSubmitted(for: serial, receipt: selectionReceipt)
+    }
+    if let subscriptionsReceipt = receipt.subscriptions {
+      model.markDeviceSubscriptionsSubmitted(for: serial, receipt: subscriptionsReceipt)
     }
   }
 
   private func editSelection(_ mutation: (inout SelectionDraft) -> Void) {
     guard hasCanonicalDraft, canEditDevice else { return }
-    var edited = acknowledgedSelection.value
+    var edited = SelectionDraft(mode: draft.mode, checked: draft.checked)
     mutation(&edited)
-    guard edited != acknowledgedSelection.value else { return }
-    acknowledgedSelection.edit(edited)
-    copyAcknowledgedValuesToDraft()
-    scheduleSave(draft)
+    guard edited.mode != draft.mode || edited.checked != draft.checked else { return }
+    draft.mode = edited.mode
+    draft.checked = edited.checked
+    model.editDeviceSelection(
+      SelectionState(mode: edited.mode, rules: Array(edited.checked)), for: serial)
+    scheduleSave()
   }
 
   private func editSubscriptions(_ mutation: (inout Set<String>) -> Void) {
     guard hasCanonicalDraft, canEditDevice else { return }
-    var edited = acknowledgedSubscriptions.value
+    var edited = draft.subscriptions
     mutation(&edited)
-    guard edited != acknowledgedSubscriptions.value else { return }
-    acknowledgedSubscriptions.edit(edited)
-    copyAcknowledgedValuesToDraft()
-    scheduleSave(draft)
-  }
-
-  private func copyAcknowledgedValuesToDraft() {
-    draft = MusicDraft(
-      mode: acknowledgedSelection.value.mode,
-      checked: acknowledgedSelection.value.checked,
-      subscriptions: acknowledgedSubscriptions.value)
+    guard edited != draft.subscriptions else { return }
+    draft.subscriptions = edited
+    model.editDeviceSubscriptions(
+      SubscriptionsWire(playlists: Array(edited).sorted()), for: serial)
+    scheduleSave()
   }
 
   private func scrubDeletedSubscriptions() {
     guard hasCanonicalDraft else { return }
     let validSlugs = Set(model.playlists.map(\.slug))
     let scrubbed = DeviceMusicLogic.scrubbedSubscriptions(
-      acknowledgedSubscriptions.value, validSlugs: validSlugs)
-    guard scrubbed != acknowledgedSubscriptions.value else { return }
+      draft.subscriptions, validSlugs: validSlugs)
+    guard scrubbed != draft.subscriptions else { return }
     editSubscriptions { $0 = scrubbed }
   }
 
   private func handleDeviceAvailabilityChange(_ isAvailable: Bool) {
     guard isAvailable else {
-      saveTask?.cancel()
-      hasCanonicalDraft = false
-      rememberedRules.removeAll()
+      submitPendingChanges()
       return
     }
     seedIfNeeded()
     onLoadDeviceConfig(serial)
+    submitPendingChanges()
   }
 }
 
@@ -493,7 +500,7 @@ enum DeviceDraftSaveGate {
       DeviceMusicPage(
         model: model, serial: try! DeviceID(PreviewFixtures.pairedIpod.serial),
         onSyncNow: { _ in }, onLoadDeviceConfig: { _ in },
-        onSaveAndPreviewDeviceConfig: { _, _, _ in "preview" }, onScan: {})
+        onSaveAndPreviewDeviceConfig: { _, _, _ in .init() }, onScan: {})
     }
     .frame(width: 760, height: 560)
   }

@@ -62,7 +62,7 @@ struct DeviceConfigState: Equatable, Sendable {
     preview: nil)
 }
 
-enum DeviceConfigRequestIntent {
+enum DeviceConfigRequestIntent: Equatable {
   case read
   case write
 }
@@ -173,6 +173,7 @@ final class AppModel {
   private(set) var configRevision: UInt64 = 0
   private(set) var configAcknowledgedRequestID: String?
   private(set) var deviceConfigAcknowledgedRequestIDs: [DeviceID: String] = [:]
+  private(set) var deviceConfigDrafts: [DeviceID: DeviceConfigEditingState] = [:]
   private(set) var devices: [DeviceID: DeviceViewState] = [:]
   private(set) var unidentifiedDevices: [ObservationID: UnidentifiedDeviceViewState] = [:]
   var deviceConfigs: [DeviceID: DeviceConfigState] {
@@ -225,6 +226,85 @@ final class AppModel {
 
   func canControlSync(to serial: DeviceID) -> Bool {
     canSendDeviceCommand(to: serial) && devices[serial]?.finalization == nil
+  }
+
+  func editableDeviceConfig(for serial: DeviceID) -> DeviceConfigState? {
+    if let draft = deviceConfigDrafts[serial] {
+      var value = draft.value
+      value.preview = devices[serial]?.preview
+      return value
+    }
+    return devices[serial]?.config
+  }
+
+  func editDeviceSelection(_ selection: SelectionState, for serial: DeviceID) {
+    guard var draft = deviceConfigEditor(for: serial) else { return }
+    draft.selection.edit(selection)
+    deviceConfigDrafts[serial] = draft
+  }
+
+  func editDeviceSettings(_ settings: DeviceSettingsWire, for serial: DeviceID) {
+    guard var draft = deviceConfigEditor(for: serial) else { return }
+    draft.settings.edit(settings)
+    deviceConfigDrafts[serial] = draft
+  }
+
+  func editDeviceSubscriptions(_ subscriptions: SubscriptionsWire, for serial: DeviceID) {
+    guard var draft = deviceConfigEditor(for: serial) else { return }
+    draft.subscriptions.edit(subscriptions)
+    deviceConfigDrafts[serial] = draft
+  }
+
+  func pendingDeviceSelection(for serial: DeviceID) -> SelectionState? {
+    guard let draft = deviceConfigDrafts[serial], draft.selection.hasUnsubmittedChanges else {
+      return nil
+    }
+    return draft.selection.value
+  }
+
+  func pendingDeviceSettings(for serial: DeviceID) -> DeviceSettingsWire? {
+    guard let draft = deviceConfigDrafts[serial], draft.settings.hasUnsubmittedChanges else {
+      return nil
+    }
+    return draft.settings.value
+  }
+
+  func pendingDeviceSubscriptions(for serial: DeviceID) -> SubscriptionsWire? {
+    guard let draft = deviceConfigDrafts[serial], draft.subscriptions.hasUnsubmittedChanges else {
+      return nil
+    }
+    return draft.subscriptions.value
+  }
+
+  func markDeviceSelectionSubmitted(for serial: DeviceID, receipt: DeviceMutationReceipt) {
+    guard var draft = deviceConfigEditor(for: serial) else { return }
+    draft.selection.markSubmitted(requestID: receipt.requestID, mutationID: receipt.mutationID)
+    deviceConfigDrafts[serial] = draft
+  }
+
+  func markDeviceSettingsSubmitted(for serial: DeviceID, receipt: DeviceMutationReceipt) {
+    guard var draft = deviceConfigEditor(for: serial) else { return }
+    draft.settings.markSubmitted(requestID: receipt.requestID, mutationID: receipt.mutationID)
+    deviceConfigDrafts[serial] = draft
+  }
+
+  func markDeviceSubscriptionsSubmitted(for serial: DeviceID, receipt: DeviceMutationReceipt) {
+    guard var draft = deviceConfigEditor(for: serial) else { return }
+    draft.subscriptions.markSubmitted(requestID: receipt.requestID, mutationID: receipt.mutationID)
+    deviceConfigDrafts[serial] = draft
+  }
+
+  func deviceConfigStatus(
+    for serial: DeviceID, component: DeviceConfigComponent
+  ) -> DeviceConfigComponentStatus {
+    guard let draft = deviceConfigDrafts[serial] else { return .saved }
+    return draft.status(for: component, delivery: devices[serial]?.configDelivery)
+  }
+
+  private func deviceConfigEditor(for serial: DeviceID) -> DeviceConfigEditingState? {
+    if let draft = deviceConfigDrafts[serial] { return draft }
+    guard let state = devices[serial] else { return nil }
+    return DeviceConfigEditingState(config: state.config ?? .defaultState, state: state)
   }
 
   // MARK: - Protocol 1.7.0: Add Songs picker track resolution
@@ -343,13 +423,11 @@ final class AppModel {
     case .deviceConfig(let wire):
       applyDeviceConfig(wire)
     case .configMutationFailed(let failure):
-      guard failure.stage == "host_acceptance", var state = devices[failure.deviceID] else { return }
-      state.phase = .error(failure.message)
-      devices[failure.deviceID] = state
-      refreshFocusedDeviceProjection()
+      applyConfigMutationFailure(failure)
     case .deviceForgotten(let forgotten):
       devices.removeValue(forKey: forgotten.deviceID)
       deviceConfigAcknowledgedRequestIDs.removeValue(forKey: forgotten.deviceID)
+      deviceConfigDrafts.removeValue(forKey: forgotten.deviceID)
       refreshFocusedDeviceProjection()
     case .syncAccepted(let accepted):
       guard var state = devices[accepted.deviceID] else { return }
@@ -455,21 +533,103 @@ final class AppModel {
   private func applyDeviceConfig(_ wire: WireV3DeviceConfig) {
     let requestID = wire.requestID?.uuidString.lowercased()
     guard shouldApplyProtocol3DeviceConfigResponse(serial: wire.deviceID, requestID: requestID),
-      var state = devices[wire.deviceID],
-      wire.selection.revision >= state.selectionRevision,
-      wire.settings.revision >= state.settingsRevision,
-      wire.subscriptions.revision >= state.subscriptionsRevision
+      var state = devices[wire.deviceID]
     else { return }
-    state.config = DeviceConfigState(
-      selection: wire.selection.value, subscriptions: wire.subscriptions.value,
-      settings: wire.settings.value, preview: state.preview)
-    state.configDelivery = DeviceConfigDeliveryState(
-      selection: wire.selection, settings: wire.settings, subscriptions: wire.subscriptions)
-    state.selectionRevision = wire.selection.revision
-    state.settingsRevision = wire.settings.revision
-    state.subscriptionsRevision = wire.subscriptions.revision
+    var config = state.config ?? .defaultState
+    var delivery = state.configDelivery
+    var editor = deviceConfigDrafts[wire.deviceID]
+      ?? DeviceConfigEditingState(config: config, state: state)
+
+    if wire.selection.revision >= state.selectionRevision {
+      config.selection = wire.selection.value
+      state.selectionRevision = wire.selection.revision
+      editor.selection.reconcile(
+        canonical: wire.selection.value, revision: wire.selection.revision,
+        acknowledgedRequestID: requestID,
+        acknowledgedMutationID: wire.selection.mutationID.uuidString.lowercased())
+    }
+    if wire.settings.revision >= state.settingsRevision {
+      config.settings = wire.settings.value
+      state.settingsRevision = wire.settings.revision
+      editor.settings.reconcile(
+        canonical: wire.settings.value, revision: wire.settings.revision,
+        acknowledgedRequestID: requestID,
+        acknowledgedMutationID: wire.settings.mutationID.uuidString.lowercased())
+    }
+    if wire.subscriptions.revision >= state.subscriptionsRevision {
+      config.subscriptions = wire.subscriptions.value
+      state.subscriptionsRevision = wire.subscriptions.revision
+      editor.subscriptions.reconcile(
+        canonical: wire.subscriptions.value, revision: wire.subscriptions.revision,
+        acknowledgedRequestID: requestID,
+        acknowledgedMutationID: wire.subscriptions.mutationID.uuidString.lowercased())
+    }
+    if var currentDelivery = delivery {
+      if wire.selection.revision >= currentDelivery.selection.revision {
+        currentDelivery.selection = wire.selection
+      }
+      if wire.settings.revision >= currentDelivery.settings.revision {
+        currentDelivery.settings = wire.settings
+      }
+      if wire.subscriptions.revision >= currentDelivery.subscriptions.revision {
+        currentDelivery.subscriptions = wire.subscriptions
+      }
+      delivery = currentDelivery
+    } else {
+      delivery = DeviceConfigDeliveryState(
+        selection: wire.selection, settings: wire.settings, subscriptions: wire.subscriptions)
+    }
+    config.preview = state.preview
+    state.config = config
+    state.configDelivery = delivery
     devices[wire.deviceID] = state
+    deviceConfigDrafts[wire.deviceID] = editor
     if let requestID { deviceConfigAcknowledgedRequestIDs[wire.deviceID] = requestID }
+  }
+
+  private func applyConfigMutationFailure(_ failure: WireV3ConfigMutationFailedEvent) {
+    guard var editor = deviceConfigDrafts[failure.deviceID] else { return }
+    let requestID = failure.requestID.uuidString.lowercased()
+    let mutationID = failure.mutationID.uuidString.lowercased()
+    let component = DeviceConfigComponent(rawValue: failure.component)
+    if failure.stage == "host_acceptance" {
+      switch component {
+      case .selection: editor.selection.reject(requestID: requestID, mutationID: mutationID, message: failure.message)
+      case .settings: editor.settings.reject(requestID: requestID, mutationID: mutationID, message: failure.message)
+      case .subscriptions: editor.subscriptions.reject(requestID: requestID, mutationID: mutationID, message: failure.message)
+      case nil: return
+      }
+      deviceConfigDrafts[failure.deviceID] = editor
+      return
+    }
+    guard failure.stage == "device_delivery", var state = devices[failure.deviceID],
+      var delivery = state.configDelivery
+    else { return }
+    let failed = WireV3Delivery(state: "pending_device", lastFailure: failure.message)
+    switch component {
+    case .selection
+      where delivery.selection.delivery.state == "pending_device"
+        && editor.selection.acceptsDeliveryFailure(requestID: requestID, mutationID: mutationID):
+      delivery.selection = .init(
+        revision: delivery.selection.revision, mutationID: delivery.selection.mutationID,
+        value: delivery.selection.value, delivery: failed)
+    case .settings
+      where delivery.settings.delivery.state == "pending_device"
+        && editor.settings.acceptsDeliveryFailure(requestID: requestID, mutationID: mutationID):
+      delivery.settings = .init(
+        revision: delivery.settings.revision, mutationID: delivery.settings.mutationID,
+        value: delivery.settings.value, delivery: failed)
+    case .subscriptions
+      where delivery.subscriptions.delivery.state == "pending_device"
+        && editor.subscriptions.acceptsDeliveryFailure(
+          requestID: requestID, mutationID: mutationID):
+      delivery.subscriptions = .init(
+        revision: delivery.subscriptions.revision, mutationID: delivery.subscriptions.mutationID,
+        value: delivery.subscriptions.value, delivery: failed)
+    default: return
+    }
+    state.configDelivery = delivery
+    devices[failure.deviceID] = state
   }
 
   private func applyLibraryScan(_ scan: WireV3LibraryScanEvent) {
@@ -565,6 +725,11 @@ final class AppModel {
   }
 
   private func resetForProtocolEpoch() {
+    deviceConfigDrafts = deviceConfigDrafts.mapValues { draft in
+      var draft = draft
+      draft.prepareForProtocolReconnect()
+      return draft
+    }
     nextDeviceRequestGeneration = 0
     deviceConfigRequests.removeAll()
     latestDeviceConfigGeneration.removeAll()
@@ -721,8 +886,9 @@ final class AppModel {
       return true
     }
     guard let request = deviceConfigRequests[requestID] else { return false }
-    return request.serial == serial
-      && latestDeviceConfigGeneration[serial] == request.generation
+    guard request.serial == serial else { return false }
+    if request.configIntent == .write { return true }
+    return latestDeviceConfigGeneration[serial] == request.generation
   }
 
   private func refreshFocusedDeviceProjection() {

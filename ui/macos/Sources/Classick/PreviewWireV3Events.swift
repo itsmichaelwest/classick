@@ -121,9 +121,10 @@
     static func deviceConfigUpdate(
       serial: String, selection: SelectionState, subscriptions: SubscriptionsWire,
       settings: DeviceSettingsWire, selectionRevision: UInt64, settingsRevision: UInt64,
-      subscriptionsRevision: UInt64, acknowledgedRequestID _: String?
+      subscriptionsRevision: UInt64, acknowledgedRequestID _: String?,
+      deliveryState: String = "device_committed"
     ) -> Self {
-      let delivery = WireV3Delivery(state: "device_committed", lastFailure: nil)
+      let delivery = WireV3Delivery(state: deliveryState, lastFailure: nil)
       return .deviceConfig(
         WireV3DeviceConfig(
           requestID: nil, deviceID: fixtureDeviceID(serial),

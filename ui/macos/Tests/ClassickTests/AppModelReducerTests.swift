@@ -172,14 +172,36 @@ final class AppModelReducerTests: XCTestCase {
       ).accessibleMessage,
       "No matches")
   }
-  /// Regression: the first-run setup wizard must NOT reset an enabled Rockbox
-  /// compatibility toggle back to off (SaveConfig replaces the whole daemon
-  /// blob, so the wizard has to carry the existing value through).
-  func testSetupWizardPreservesRockboxCompat() {
-    let preserved = AppDelegate.setupDaemonSettings(autoSync: true, preservingRockboxCompat: true)
-    XCTAssertTrue(preserved.rockboxCompat, "wizard must preserve an enabled Rockbox toggle")
-    let off = AppDelegate.setupDaemonSettings(autoSync: true, preservingRockboxCompat: false)
-    XCTAssertFalse(off.rockboxCompat)
+  func testSetupAutoSyncUsesPerDeviceAdoptionWithoutChangingGlobalSettings() throws {
+    let current = DeviceConfigState(
+      selection: .init(mode: .include, rules: [.artist(name: "Boards of Canada")]),
+      subscriptions: .init(playlists: ["offline"]),
+      settings: .init(autoSync: false, rockboxCompat: true), preview: nil)
+    let commands = AppDelegate.setupDeviceCommands(
+      source: "/Music", serial: "0xA", current: current, autoSync: true,
+      requestID: UUID(), selectionMutationID: UUID(), settingsMutationID: UUID(),
+      subscriptionsMutationID: UUID())
+    let objects = try commands.map {
+      try JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) as! [String: Any]
+    }
+
+    XCTAssertEqual(objects.map { $0["type"] as? String }, ["set_source_location", "adopt_device"])
+    XCTAssertFalse(objects.contains { ($0["type"] as? String) == "set_global_settings" })
+    let settings = objects[1]["settings"] as! [String: Any]
+    XCTAssertEqual(settings["auto_sync"] as? Bool, true)
+    XCTAssertEqual(settings["rockbox_compat"] as? Bool, true)
+    XCTAssertNil(objects[1]["model"])
+    XCTAssertNil(objects[1]["colour"])
+    XCTAssertNil(objects[1]["appearance"])
+  }
+
+  func testDeviceConfigCacheContainsOnlyFunctionalSyncConfiguration() {
+    let fields = Set(Mirror(reflecting: DeviceConfigState.defaultState).children.compactMap(\.label))
+
+    XCTAssertEqual(fields, ["selection", "subscriptions", "settings", "preview"])
+    XCTAssertFalse(fields.contains("appearance"))
+    XCTAssertFalse(fields.contains("colour"))
+    XCTAssertFalse(fields.contains("model"))
   }
 
   /// Regression (protocol 1.5.0): finishing setup builds a fresh

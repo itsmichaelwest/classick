@@ -59,6 +59,216 @@ final class DeviceInventoryReducerTests: XCTestCase {
       expectedRequestID)
   }
 
+  func testDisconnectedAcceptedConfigReportsWaitingThenCommitted() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+    let deviceID = DeviceID("000A27002138B0A8")
+    let requestID = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8765"
+    model.apply(try protocol3Event(lines[0]))
+    model.willRequestDeviceConfig(serial: deviceID, requestID: requestID, intent: .write)
+    model.editDeviceSettings(.init(autoSync: false, rockboxCompat: false), for: deviceID)
+    model.markDeviceSettingsSubmitted(
+      for: deviceID,
+      receipt: .init(
+        requestID: requestID,
+        mutationID: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8771"))
+    model.apply(try protocol3Event(lines[3]))
+
+    XCTAssertEqual(model.deviceConfigStatus(for: deviceID, component: .settings), .waitingForDevice)
+    XCTAssertEqual(model.devices[deviceID]?.config?.settings.autoSync, false)
+
+    model.apply(try protocol3Event(lines[4]))
+
+    XCTAssertEqual(model.deviceConfigStatus(for: deviceID, component: .settings), .saved)
+    XCTAssertEqual(model.devices[deviceID]?.config?.settings.autoSync, false)
+  }
+
+  func testStaleBroadcastCannotOverwriteDisconnectedLocalDraft() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+    let deviceID = DeviceID("000A27002138B0A8")
+    let requestID = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8765"
+    model.apply(try protocol3Event(lines[0]))
+    model.willRequestDeviceConfig(serial: deviceID, requestID: requestID, intent: .write)
+    model.apply(try protocol3Event(lines[3]))
+    model.apply(try protocol3Event(lines[1]))
+    model.editDeviceSelection(
+      .init(mode: .include, rules: [.artist(name: "Local")]), for: deviceID)
+
+    model.apply(try protocol3Event(lines[4]))
+
+    XCTAssertEqual(model.editableDeviceConfig(for: deviceID)?.selection.mode, .include)
+    XCTAssertEqual(
+      model.editableDeviceConfig(for: deviceID)?.selection.rules, [.artist(name: "Local")])
+    XCTAssertEqual(model.deviceConfigStatus(for: deviceID, component: .selection), .localDraft)
+  }
+
+  func testHostFailureRetainsExactDraftWithoutTurningSyncPhaseIntoError() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+    let deviceID = DeviceID("000A27002138B0A8")
+    let configRequestID = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8765"
+    model.apply(try protocol3Event(lines[0]))
+    model.willRequestDeviceConfig(serial: deviceID, requestID: configRequestID, intent: .write)
+    model.apply(try protocol3Event(lines[3]))
+    model.editDeviceSettings(.init(autoSync: true, rockboxCompat: false), for: deviceID)
+    model.markDeviceSettingsSubmitted(
+      for: deviceID,
+      receipt: .init(
+        requestID: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8767",
+        mutationID: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8774"))
+
+    model.apply(try protocol3Event(lines[5]))
+
+    XCTAssertEqual(model.editableDeviceConfig(for: deviceID)?.settings.autoSync, true)
+    XCTAssertEqual(
+      model.deviceConfigStatus(for: deviceID, component: .settings),
+      .hostAcceptanceFailed("Could not save the setting"))
+    XCTAssertEqual(model.devices[deviceID]?.phase, .idle)
+  }
+
+  func testDeviceDeliveryFailureRetainsAcceptedHostValue() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+    let deviceID = DeviceID("000A27002138B0A8")
+    let requestID = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8765"
+    model.apply(try protocol3Event(lines[0]))
+    model.willRequestDeviceConfig(serial: deviceID, requestID: requestID, intent: .write)
+    model.editDeviceSettings(.init(autoSync: false, rockboxCompat: false), for: deviceID)
+    model.markDeviceSettingsSubmitted(
+      for: deviceID,
+      receipt: .init(
+        requestID: requestID,
+        mutationID: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8771"))
+    model.apply(try protocol3Event(lines[3]))
+    let unrelatedFailure = String(decoding: lines[6], as: UTF8.self)
+      .replacingOccurrences(of: "subscriptions", with: "settings")
+      .replacingOccurrences(of: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8775", with: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8771")
+
+    model.apply(try protocol3Event(Data(unrelatedFailure.utf8)))
+    XCTAssertEqual(model.deviceConfigStatus(for: deviceID, component: .settings), .waitingForDevice)
+
+    let correlatedFailure = unrelatedFailure.replacingOccurrences(
+      of: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8768", with: requestID)
+    model.apply(try protocol3Event(Data(correlatedFailure.utf8)))
+
+    XCTAssertEqual(model.devices[deviceID]?.config?.settings.autoSync, false)
+    XCTAssertEqual(
+      model.deviceConfigStatus(for: deviceID, component: .settings),
+      .deviceDeliveryFailed("iPod is disconnected"))
+  }
+
+  func testIndependentComponentWriteRepliesClearOnlyExactMutation() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+    let deviceID = DeviceID("000A27002138B0A8")
+    model.apply(try protocol3Event(lines[0]))
+    model.apply(try protocol3Event(lines[4]))
+    model.editDeviceSelection(.init(mode: .include, rules: []), for: deviceID)
+    model.editDeviceSubscriptions(.init(playlists: ["x"]), for: deviceID)
+    let selectionRequest = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8801"
+    let subscriptionsRequest = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8802"
+    model.willRequestDeviceConfig(serial: deviceID, requestID: selectionRequest, intent: .write)
+    model.willRequestDeviceConfig(serial: deviceID, requestID: subscriptionsRequest, intent: .write)
+    model.markDeviceSelectionSubmitted(
+      for: deviceID,
+      receipt: .init(
+        requestID: selectionRequest,
+        mutationID: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8770"))
+    model.markDeviceSubscriptionsSubmitted(
+      for: deviceID,
+      receipt: .init(
+        requestID: subscriptionsRequest,
+        mutationID: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8772"))
+    let base = String(decoding: lines[3], as: UTF8.self)
+      .replacingOccurrences(of: "\"mode\":\"all\"", with: "\"mode\":\"include\"")
+      .replacingOccurrences(of: "\"playlists\":[]", with: "\"playlists\":[\"x\"]")
+    let selectionReply = base.replacingOccurrences(
+      of: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8765", with: selectionRequest)
+    let subscriptionsReply = base.replacingOccurrences(
+      of: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8765", with: subscriptionsRequest)
+
+    model.apply(try protocol3Event(Data(selectionReply.utf8)))
+    XCTAssertEqual(model.deviceConfigStatus(for: deviceID, component: .selection), .saved)
+    XCTAssertEqual(model.deviceConfigStatus(for: deviceID, component: .subscriptions), .savingOnHost)
+
+    model.apply(try protocol3Event(Data(subscriptionsReply.utf8)))
+    XCTAssertEqual(
+      model.deviceConfigStatus(for: deviceID, component: .subscriptions),
+      .deviceDeliveryFailed("iPod is disconnected"))
+  }
+
+  func testTwoDeviceDraftsRemainIndependent() {
+    let model = AppModel()
+    model.apply(.deviceInventorySnapshot(snapshot(revision: 1, devices: [device("A"), device("B")])))
+    for serial: DeviceID in ["A", "B"] {
+      model.willRequestDeviceConfig(serial: serial, requestID: serial.rawValue, intent: .read)
+      model.apply(
+        .deviceConfigUpdate(
+          serial: serial.rawValue, selection: .init(mode: .all, rules: []),
+          subscriptions: .init(playlists: []),
+          settings: .init(autoSync: true, rockboxCompat: false),
+          selectionRevision: 1, settingsRevision: 2, subscriptionsRevision: 3,
+          acknowledgedRequestID: serial.rawValue))
+    }
+
+    model.editDeviceSettings(.init(autoSync: false, rockboxCompat: false), for: "A")
+
+    XCTAssertEqual(model.editableDeviceConfig(for: "A")?.settings.autoSync, false)
+    XCTAssertEqual(model.editableDeviceConfig(for: "B")?.settings.autoSync, true)
+  }
+
+  func testDisconnectedDraftSurvivesNavigationAndReconnect() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+    let deviceID = DeviceID("000A27002138B0A8")
+    model.apply(try protocol3Event(lines[0]))
+    model.apply(try protocol3Event(lines[4]))
+    model.apply(try protocol3Event(lines[1]))
+    model.selectedDestination = .device(serial: deviceID, page: .music)
+    model.editDeviceSettings(.init(autoSync: false, rockboxCompat: true), for: deviceID)
+    model.markDeviceSettingsSubmitted(
+      for: deviceID,
+      receipt: .init(
+        requestID: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8890",
+        mutationID: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8891"))
+
+    model.selectedDestination = .library
+    model.selectedDestination = .device(serial: deviceID, page: .settings)
+    model.apply(
+      .hello(
+        WireV3Hello(
+          protocolVersion: "3.0.0", role: .daemon,
+          softwareVersion: "test", capabilities: WireV3Codec.daemonCapabilities)))
+    model.apply(try protocol3Event(lines[0]))
+
+    XCTAssertEqual(model.editableDeviceConfig(for: deviceID)?.settings.autoSync, false)
+    XCTAssertEqual(model.editableDeviceConfig(for: deviceID)?.settings.rockboxCompat, true)
+    XCTAssertEqual(model.deviceConfigStatus(for: deviceID, component: .settings), .localDraft)
+    XCTAssertNotNil(model.pendingDeviceSettings(for: deviceID))
+  }
+
+  func testEditableConfigPreservesNonEditableDevicePreview() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+    let deviceID = DeviceID("000A27002138B0A8")
+    model.apply(try protocol3Event(lines[0]))
+    model.apply(try protocol3Event(lines[4]))
+    let previewRequestID = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8990"
+    model.willRequestDevicePreview(serial: deviceID, requestID: previewRequestID)
+    model.apply(
+      .devicePreview(
+        .init(
+          serial: deviceID.rawValue, selectedTracks: 10, selectedBytes: 20,
+          playlistExtraTracks: 1, playlistExtraBytes: 2, projectedFreeBytes: 3,
+          unresolvedSubscriptions: ["missing"], acknowledgedRequestID: previewRequestID)))
+    model.editDeviceSelection(.init(mode: .include, rules: []), for: deviceID)
+
+    XCTAssertEqual(model.editableDeviceConfig(for: deviceID)?.preview?.selectedTracks, 10)
+    XCTAssertEqual(
+      model.editableDeviceConfig(for: deviceID)?.preview?.unresolvedSubscriptions, ["missing"])
+  }
+
   func testProtocol3ProgressRoutesByExactDeviceAndSession() throws {
     let model = AppModel()
     model.apply(

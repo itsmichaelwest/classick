@@ -220,29 +220,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// prior failed handshake/save.
   func finishSetup(source: String, autoSync: Bool, serial: DeviceID) {
     guard model.canSendDeviceCommand(to: serial) else { return }
-    let daemon = Self.setupDaemonSettings(
-      autoSync: autoSync,
-      preservingRockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
     let requestID = WireV3Command.newRequestID()
-    let current = model.devices[serial]?.config ?? .defaultState
+    let current = model.editableDeviceConfig(for: serial) ?? .defaultState
+    let selectionMutationID = UUID()
+    let settingsMutationID = UUID()
+    let subscriptionsMutationID = UUID()
+    let settings = DeviceSettingsWire(
+      autoSync: autoSync, rockboxCompat: current.settings.rockboxCompat)
+    model.editDeviceSettings(settings, for: serial)
     model.willRequestDeviceConfig(
       serial: serial, requestID: requestID.uuidString.lowercased(), intent: .write)
+    model.markDeviceSelectionSubmitted(
+      for: serial,
+      receipt: .init(
+        requestID: requestID.uuidString.lowercased(),
+        mutationID: selectionMutationID.uuidString.lowercased()))
+    model.markDeviceSettingsSubmitted(
+      for: serial,
+      receipt: .init(
+        requestID: requestID.uuidString.lowercased(),
+        mutationID: settingsMutationID.uuidString.lowercased()))
+    model.markDeviceSubscriptionsSubmitted(
+      for: serial,
+      receipt: .init(
+        requestID: requestID.uuidString.lowercased(),
+        mutationID: subscriptionsMutationID.uuidString.lowercased()))
     sendDeviceCommands(
       serial: serial,
-      commands: [
-        .setSourceLocation(requestID: WireV3Command.newRequestID(), sourceRoot: source),
-        .setGlobalSettings(
-          requestID: WireV3Command.newRequestID(), settings: WireV3GlobalSettings(daemon)),
-        .adoptDevice(
-          deviceID: serial, requestID: requestID,
-          selectionMutationID: UUID(), selection: WireV3SelectionValue(current.selection),
-          settingsMutationID: UUID(),
-          settings: WireV3SettingsValue(
-            DeviceSettingsWire(
-              autoSync: autoSync, rockboxCompat: current.settings.rockboxCompat)),
-          subscriptionsMutationID: UUID(),
-          subscriptions: WireV3SubscriptionsValue(current.subscriptions)),
-      ])
+      commands: Self.setupDeviceCommands(
+        source: source, serial: serial, current: current, autoSync: autoSync,
+        requestID: requestID, selectionMutationID: selectionMutationID,
+        settingsMutationID: settingsMutationID,
+        subscriptionsMutationID: subscriptionsMutationID))
   }
 
   /// Settings window's debounced edits. `ipod` is omitted (nil) so an
@@ -450,53 +459,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// the save before it evaluates the following preview.
   func saveAndPreviewDeviceConfig(
     serial: DeviceID, selection: SelectionState?, subscriptions: SubscriptionsWire?
-  ) -> String? {
+  ) -> DeviceMusicMutationReceipt? {
     guard model.canSendDeviceCommand(to: serial) else { return nil }
     let selectionRequestID = selection.map { _ in WireV3Command.newRequestID() }
     let subscriptionsRequestID = subscriptions.map { _ in WireV3Command.newRequestID() }
-    guard let saveRequestID = subscriptionsRequestID ?? selectionRequestID else { return nil }
+    guard subscriptionsRequestID != nil || selectionRequestID != nil else { return nil }
+    let selectionMutationID = selection.map { _ in UUID() }
+    let subscriptionsMutationID = subscriptions.map { _ in UUID() }
     let previewRequestID = WireV3Command.newRequestID()
-    model.willRequestDeviceConfig(
-      serial: serial, requestID: saveRequestID.uuidString.lowercased(), intent: .write)
     model.willRequestDevicePreview(
       serial: serial, requestID: previewRequestID.uuidString.lowercased())
     var commands: [WireV3Command] = []
-    if let selection, let requestID = selectionRequestID {
+    var receipt = DeviceMusicMutationReceipt()
+    if let selection, let requestID = selectionRequestID, let mutationID = selectionMutationID {
+      model.willRequestDeviceConfig(
+        serial: serial, requestID: requestID.uuidString.lowercased(), intent: .write)
       commands.append(
         .setSelection(
-          deviceID: serial, requestID: requestID, mutationID: UUID(),
+          deviceID: serial, requestID: requestID, mutationID: mutationID,
           selection: WireV3SelectionValue(selection)))
+      receipt.selection = .init(
+        requestID: requestID.uuidString.lowercased(),
+        mutationID: mutationID.uuidString.lowercased())
     }
-    if let subscriptions, let requestID = subscriptionsRequestID {
+    if let subscriptions, let requestID = subscriptionsRequestID,
+      let mutationID = subscriptionsMutationID
+    {
+      model.willRequestDeviceConfig(
+        serial: serial, requestID: requestID.uuidString.lowercased(), intent: .write)
       commands.append(
         .setSubscriptions(
-          deviceID: serial, requestID: requestID, mutationID: UUID(),
+          deviceID: serial, requestID: requestID, mutationID: mutationID,
           subscriptions: WireV3SubscriptionsValue(subscriptions)))
+      receipt.subscriptions = .init(
+        requestID: requestID.uuidString.lowercased(),
+        mutationID: mutationID.uuidString.lowercased())
     }
     commands.append(.previewDevice(deviceID: serial, requestID: previewRequestID))
     sendDeviceCommands(
       serial: serial,
       commands: commands)
-    return saveRequestID.uuidString.lowercased()
+    return receipt
   }
 
   /// Device Settings page's debounced auto-save (Task 6): the mirror image
   /// of `saveDeviceConfig` above — `selection`/`subscriptions` are always
   /// omitted (nil = "don't change") via `DeviceSettingsLogic.saveSettingsCommand`,
   /// so a toggle edit here can never disturb the Music page's sync intent.
-  func saveDeviceSettings(serial: DeviceID, settings: DeviceSettingsWire) -> String? {
+  func saveDeviceSettings(
+    serial: DeviceID, settings: DeviceSettingsWire
+  ) -> DeviceMutationReceipt? {
     guard model.canSendDeviceCommand(to: serial) else { return nil }
     let requestID = WireV3Command.newRequestID()
+    let mutationID = UUID()
     model.willRequestDeviceConfig(
       serial: serial, requestID: requestID.uuidString.lowercased(), intent: .write)
     sendDeviceCommands(
       serial: serial,
       commands: [
         .setSettings(
-          deviceID: serial, requestID: requestID, mutationID: UUID(),
+          deviceID: serial, requestID: requestID, mutationID: mutationID,
           settings: WireV3SettingsValue(settings))
       ])
-    return requestID.uuidString.lowercased()
+    return .init(
+      requestID: requestID.uuidString.lowercased(),
+      mutationID: mutationID.uuidString.lowercased())
   }
 
   private func sendDeviceCommands(serial: DeviceID, commands: [WireV3Command]) {

@@ -107,4 +107,32 @@ final class AcknowledgedDraftTests: XCTestCase {
     XCTAssertEqual(draft.value, "local")
     XCTAssertFalse(draft.isDirty)
   }
+
+  func testAcknowledgementRequiresExactRequestAndMutation() {
+    var draft = AcknowledgedDraft(canonical: "original", revision: 1)
+    draft.edit("local")
+    draft.markSubmitted(requestID: "request", mutationID: "mutation")
+
+    draft.reconcile(
+      canonical: "other", revision: 2, acknowledgedRequestID: "request",
+      acknowledgedMutationID: "different")
+
+    XCTAssertEqual(draft.value, "local")
+    XCTAssertTrue(draft.isDirty)
+    XCTAssertTrue(draft.hasPendingSubmission)
+  }
+
+  func testHostRejectionRetainsAttemptAsDirtyDraft() {
+    var draft = AcknowledgedDraft(canonical: "original", revision: 1)
+    draft.edit("local")
+    draft.markSubmitted(requestID: "request", mutationID: "mutation")
+
+    XCTAssertTrue(
+      draft.reject(requestID: "request", mutationID: "mutation", message: "Disk full"))
+
+    XCTAssertEqual(draft.value, "local")
+    XCTAssertTrue(draft.isDirty)
+    XCTAssertFalse(draft.hasPendingSubmission)
+    XCTAssertEqual(draft.hostAcceptanceFailure, "Disk full")
+  }
 }

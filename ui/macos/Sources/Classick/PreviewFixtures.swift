@@ -472,7 +472,7 @@
           subscriptions: SubscriptionsWire(playlists: [electronicEssentials.slug]),
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
           selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1,
-          acknowledgedRequestID: requestID))
+          acknowledgedRequestID: requestID, deliveryState: "pending_device"))
       return m
     }
 

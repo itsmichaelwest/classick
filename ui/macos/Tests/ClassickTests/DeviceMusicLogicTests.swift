@@ -11,6 +11,18 @@ import XCTest
 /// picker). Every cell of the 3x3 `SelectionMode` transition truth table is
 /// covered explicitly below, per the plan's mandate.
 final class DeviceMusicLogicTests: XCTestCase {
+  func testMusicStatusShowsPendingDeliveryAcrossEitherComponent() {
+    XCTAssertEqual(
+      DeviceConfigStatusLogic.mostImportant([.saved, .waitingForDevice]), .waitingForDevice)
+  }
+
+  func testMusicStatusDoesNotHideDeliveryFailureBehindPendingState() {
+    XCTAssertEqual(
+      DeviceConfigStatusLogic.mostImportant([
+        .waitingForDevice, .deviceDeliveryFailed("iPod is disconnected"),
+      ]),
+      .deviceDeliveryFailed("iPod is disconnected"))
+  }
   @MainActor
   func testDebouncedDeviceSaveScheduledBeforeHelloIsIgnored() async {
     let model = AppModel()

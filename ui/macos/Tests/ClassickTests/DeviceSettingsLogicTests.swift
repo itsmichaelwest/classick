@@ -40,6 +40,16 @@ final class DeviceSettingsLogicTests: XCTestCase {
     XCTAssertEqual(settings["rockbox_compat"] as? Bool, false)
   }
 
+  func testAcceptedSettingWaitingForDeviceUsesCompactStatus() {
+    XCTAssertEqual(DeviceConfigComponentStatus.waitingForDevice.message, "Waiting for iPod")
+  }
+
+  func testDeviceDeliveryFailureStillDescribesHostValueAsSaved() {
+    XCTAssertEqual(
+      DeviceConfigComponentStatus.deviceDeliveryFailed("iPod is disconnected").message,
+      "Saved on this Mac — iPod is disconnected")
+  }
+
   // MARK: - Replace Library disabled predicate (syncing/scanning, or wrong device)
 
   func testReplaceDisabledWhileSyncing() {

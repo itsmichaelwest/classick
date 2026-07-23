@@ -45,6 +45,7 @@
 		4FB908A351CF502DE07174A1 /* Notifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 971A1C21B70044C6DB7B777B /* Notifier.swift */; };
 		514D0D9344CE9C40A9E0C81F /* DeviceRowPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ECE629212707A1810016520 /* DeviceRowPresentationTests.swift */; };
 		527BFB4E9746416B400D0024 /* DeviceMusicLogic.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94679F5F5E0F364FB50D0FA0 /* DeviceMusicLogic.swift */; };
+		59EC818C0068235FD460CFDE /* DeviceConfigEditingState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E68C028CBBDAFF8BF70324B /* DeviceConfigEditingState.swift */; };
 		6AC6AB622DA1E6F81828A21D /* WireProtocol3Durability.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FEAA886F6C31D1535E926D3 /* WireProtocol3Durability.swift */; };
 		6AF96239949CDBFAE834B0C3 /* LibraryDropFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 784B54A59F0D1CC6D3EDFCB2 /* LibraryDropFlowTests.swift */; };
 		7185921B45D7FB0EE69E8AB9 /* SelectionDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF66143092AD180B04081EF /* SelectionDraft.swift */; };
@@ -79,6 +80,7 @@
 		C90B212C0DEEB37830957951 /* DaemonShutdownCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7461FA00AAEC60E377B23276 /* DaemonShutdownCoordinator.swift */; };
 		CF1AB17F1791DFC4242406E8 /* DomainModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B033817A842993EA5848B750 /* DomainModels.swift */; };
 		D83FAF017035AD719B0CB09D /* WireProtocol3Validation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16ECE92B4255806D4580598D /* WireProtocol3Validation.swift */; };
+		D8F6963422570DDBF1314398 /* DeviceConfigStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCBDC2BDE26B8E3E87548B79 /* DeviceConfigStatusView.swift */; };
 		DD6453B4CA9A988965EAFDF8 /* DeviceIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0C70C5977ABC785EA99BB4F /* DeviceIcon.swift */; };
 		E06826251887736DC07D13FB /* PreviewFixtures+NativeDevice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 050C2552ED6844EEA2FB790C /* PreviewFixtures+NativeDevice.swift */; };
 		E465894365DD1EC7F62E3A66 /* DaemonSocketIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF12EC3463F859E74BA2EE7D /* DaemonSocketIO.swift */; };
@@ -123,6 +125,7 @@
 		41284FF3EF16C964A6FDCCEF /* AppModelReducerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelReducerTests.swift; sourceTree = "<group>"; };
 		46F9D02AD62558680BC9C35C /* LibraryDragPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryDragPayload.swift; sourceTree = "<group>"; };
 		495FAA88EEF9E0F49604E450 /* MainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindow.swift; sourceTree = "<group>"; };
+		4E68C028CBBDAFF8BF70324B /* DeviceConfigEditingState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceConfigEditingState.swift; sourceTree = "<group>"; };
 		50B6A16ACA69CE88142B0B14 /* AddSongsPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddSongsPicker.swift; sourceTree = "<group>"; };
 		50FF7715E9CE2C4924FCBC1D /* LibraryBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryBrowser.swift; sourceTree = "<group>"; };
 		5EBCC5FA0BAE57BC86471748 /* LibrarySelectionLogic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibrarySelectionLogic.swift; sourceTree = "<group>"; };
@@ -168,6 +171,7 @@
 		C7A16C43DE7D0AE54DBCE519 /* AcknowledgedDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcknowledgedDraftTests.swift; sourceTree = "<group>"; };
 		C953300763A84341E122B83D /* LibraryDropStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryDropStateTests.swift; sourceTree = "<group>"; };
 		CAFC22FBF6AE96AE44011EC1 /* DeviceViewState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceViewState.swift; sourceTree = "<group>"; };
+		CCBDC2BDE26B8E3E87548B79 /* DeviceConfigStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceConfigStatusView.swift; sourceTree = "<group>"; };
 		D2027E7A77B12C98BEA1CB81 /* DeviceMusicLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMusicLogicTests.swift; sourceTree = "<group>"; };
 		DAB3C64FBA7F0070A69F92BD /* PromptAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptAlert.swift; sourceTree = "<group>"; };
 		DD34388BC51EFD2420DCC244 /* DaemonProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonProcess.swift; sourceTree = "<group>"; };
@@ -253,6 +257,7 @@
 				80E72C223A9EBD9E1A6131D0 /* AcknowledgedDraft.swift */,
 				3F08940741D874678EDEC6A1 /* AppModel.swift */,
 				1D2A6B821B672C47C5AFD5EE /* AppModel+DeviceReducer.swift */,
+				4E68C028CBBDAFF8BF70324B /* DeviceConfigEditingState.swift */,
 				9A51A603F41264AD5B3F1497 /* DeviceRowPresentation.swift */,
 				CAFC22FBF6AE96AE44011EC1 /* DeviceViewState.swift */,
 				46F9D02AD62558680BC9C35C /* LibraryDragPayload.swift */,
@@ -278,6 +283,7 @@
 			isa = PBXGroup;
 			children = (
 				50B6A16ACA69CE88142B0B14 /* AddSongsPicker.swift */,
+				CCBDC2BDE26B8E3E87548B79 /* DeviceConfigStatusView.swift */,
 				C0C70C5977ABC785EA99BB4F /* DeviceIcon.swift */,
 				F96332DE24D3C875F50522D3 /* DeviceIdentityLogic.swift */,
 				94679F5F5E0F364FB50D0FA0 /* DeviceMusicLogic.swift */,
@@ -546,6 +552,8 @@
 				21C4AD8118E2A87AC6B16D8B /* DaemonProcess.swift in Sources */,
 				C90B212C0DEEB37830957951 /* DaemonShutdownCoordinator.swift in Sources */,
 				E465894365DD1EC7F62E3A66 /* DaemonSocketIO.swift in Sources */,
+				59EC818C0068235FD460CFDE /* DeviceConfigEditingState.swift in Sources */,
+				D8F6963422570DDBF1314398 /* DeviceConfigStatusView.swift in Sources */,
 				DD6453B4CA9A988965EAFDF8 /* DeviceIcon.swift in Sources */,
 				3E24510C5CBC2388AAF2A5C0 /* DeviceIdentityLogic.swift in Sources */,
 				527BFB4E9746416B400D0024 /* DeviceMusicLogic.swift in Sources */,

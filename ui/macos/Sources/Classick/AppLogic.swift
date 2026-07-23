@@ -11,18 +11,29 @@ extension AppDelegate {
             name: device.name, customSelection: customSelection)
     }
 
-    static func setupDaemonSettings(
+    static func setupDeviceCommands(
+        source: String,
+        serial: DeviceID,
+        current: DeviceConfigState,
         autoSync: Bool,
-        preservingRockboxCompat rockboxCompat: Bool
-    ) -> DaemonSettings {
-        DaemonSettings(
-            enabled: autoSync,
-            autostartWithWindows: false,
-            firstSyncMode: "auto_apply",
-            subsequentSyncMode: "auto_apply",
-            scheduleMinutes: 0,
-            notifyOn: "all",
-            rockboxCompat: rockboxCompat)
+        requestID: UUID,
+        selectionMutationID: UUID,
+        settingsMutationID: UUID,
+        subscriptionsMutationID: UUID
+    ) -> [WireV3Command] {
+        let settings = DeviceSettingsWire(
+            autoSync: autoSync, rockboxCompat: current.settings.rockboxCompat)
+        return [
+            .setSourceLocation(requestID: WireV3Command.newRequestID(), sourceRoot: source),
+            .adoptDevice(
+                deviceID: serial, requestID: requestID,
+                selectionMutationID: selectionMutationID,
+                selection: WireV3SelectionValue(current.selection),
+                settingsMutationID: settingsMutationID,
+                settings: WireV3SettingsValue(settings),
+                subscriptionsMutationID: subscriptionsMutationID,
+                subscriptions: WireV3SubscriptionsValue(current.subscriptions)),
+        ]
     }
 
     static func withCustomSelection(
