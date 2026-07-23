@@ -235,6 +235,19 @@ public sealed partial class PopoverWindow : Window
         Close();
     }
 
+    private void OnDeviceSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ViewModel.ConsumeDeviceSelection() is { } deviceId)
+            App.RequestPopoverDeviceFocus(deviceId);
+    }
+
+    private async void OnEject(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.DisplayedDeviceId is not { } deviceId) return;
+        await App.RequestEjectAsync(deviceId);
+        Close();
+    }
+
     /// <summary>
     /// Fires when the user clicks one of the dynamic option buttons
     /// in the prompt overlay. Resolves the option index from the
@@ -260,36 +273,32 @@ public sealed partial class PopoverWindow : Window
             return;
         }
 
-        var command = ViewModel.CreateWirePromptDecisionCommand(index, Guid.NewGuid().ToString("D"));
+        var requestId = Guid.NewGuid().ToString("D");
+        var command = ViewModel.CreateWireInteractionCommand(index, requestId);
         if (command is null) return;
-        // Optimistic dismiss — the daemon's response is fire-and-
-        // forward; keeping the overlay up until a TrackStart arrives
-        // would leave the user staring at the prompt while the
-        // subprocess does prep work.
-        ViewModel.ClearPrompt();
         try
         {
             await _daemon.SendAsync(command);
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"popover: decide_prompt failed: {ex}");
+            ViewModel.InteractionCommandFailed(requestId, "Classick could not reach the daemon");
+            Debug.WriteLine($"popover: interaction decision failed: {ex}");
         }
     }
 
     /// <summary>
     /// Always-on keyboard handler. Escape is context-sensitive:
-    /// when a prompt overlay is active it clears the overlay (so the
-    /// user can recover from a stuck sync), otherwise it dismisses
-    /// the popover. DEBUG builds dispatch additional Ctrl+Shift
+    /// Escape dismisses the popover. A pending interaction remains in
+    /// the per-session reducer and is shown again when reopened, so the
+    /// worker cannot be left waiting with no recovery surface. DEBUG builds dispatch additional Ctrl+Shift
     /// chords through <see cref="OnDebugKeyDownChord"/>.
     /// </summary>
     private void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (e.Key == VirtualKey.Escape)
         {
-            if (ViewModel.PromptActive) ViewModel.ClearPrompt();
-            else Close();
+            Close();
             e.Handled = true;
             return;
         }
@@ -300,24 +309,6 @@ public sealed partial class PopoverWindow : Window
     }
 
 #if DEBUG
-    private int _debugScenarioIndex;
-
-    /// <summary>
-    /// DEBUG-only Ctrl+Shift hotkeys for iterating on the prompt
-    /// overlay without driving a real sync into a real prompt, and
-    /// toggling the runtime focus-loss-dismiss lock so the XAML Live
-    /// Visual Tree / VS Hot Reload can hold focus over the popover:
-    ///
-    ///   Ctrl+Shift+1 → short prompt (2 options)
-    ///   Ctrl+Shift+2 → source-change prompt (3 options, medium)
-    ///   Ctrl+Shift+3 → retry-on-failure prompt (3 options, long)
-    ///   Ctrl+Shift+0 → clear overlay
-    ///   Ctrl+Shift+L → toggle <see cref="DebugLockEnabled"/>
-    ///
-    /// NumberPad0/1/2/3 alternates so the numeric keypad works too.
-    /// Each scenario fires through <see cref="PopoverViewModel.ApplyIpcProgress"/>
-    /// so XAML hot-reload reflects edits to the overlay immediately.
-    /// </summary>
     private void OnDebugKeyDownChord(KeyRoutedEventArgs e)
     {
         var ctrl = Microsoft.UI.Input.InputKeyboardSource
@@ -328,45 +319,13 @@ public sealed partial class PopoverWindow : Window
             .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
         if (!ctrl || !shift) return;
 
-        switch (e.Key)
+        if (e.Key == VirtualKey.L)
         {
-            case VirtualKey.Number1:
-            case VirtualKey.NumberPad1:
-                FireDebugPrompt(DebugPromptScenarios.Short);
-                e.Handled = true;
-                break;
-            case VirtualKey.Number2:
-            case VirtualKey.NumberPad2:
-                FireDebugPrompt(DebugPromptScenarios.SourceChange);
-                e.Handled = true;
-                break;
-            case VirtualKey.Number3:
-            case VirtualKey.NumberPad3:
-                FireDebugPrompt(DebugPromptScenarios.RetryOnFailure);
-                e.Handled = true;
-                break;
-            case VirtualKey.Number0:
-            case VirtualKey.NumberPad0:
-                ViewModel.ClearPrompt();
-                e.Handled = true;
-                break;
-            case VirtualKey.L:
-                DebugLockEnabled = !DebugLockEnabled;
-                Debug.WriteLine(
-                    $"popover: debug lock {(DebugLockEnabled ? "ENABLED" : "disabled")}");
-                e.Handled = true;
-                break;
+            DebugLockEnabled = !DebugLockEnabled;
+            Debug.WriteLine(
+                $"popover: debug lock {(DebugLockEnabled ? "ENABLED" : "disabled")}");
+            e.Handled = true;
         }
-    }
-
-    private void FireDebugPrompt(PromptEvent canned)
-    {
-        // Cycle the prompt id so consecutive triggers look distinct
-        // in the daemon log (matches how a real sequence of retries
-        // would arrive with monotonically-increasing ids).
-        _debugScenarioIndex++;
-        var fresh = canned with { Id = (ulong)_debugScenarioIndex };
-        ViewModel.ApplyIpcProgress(fresh);
     }
 #endif
 }

@@ -1,79 +1,66 @@
 using Classick_UI.Ipc;
 using Classick_UI.Notifications;
-using Xunit;
 
-public class NotificationServiceTests
+namespace Classick_UI.Tests;
+
+public sealed class NotificationServiceTests
 {
-    private static StatusUpdateEvent Status(string state, string? errorMessage = null)
+    private static readonly DeviceId Device = DeviceId.Parse("000A27002138B0A8");
+
+    [Fact]
+    public void TypedSessionEvents_IncludeDeviceNameWithoutDisplayingRawId()
     {
-        var lastSync = errorMessage is null
-            ? new HistoryEntry("2026-05-25T10:00:00Z", 5, "plug_in", "ok", null,
-                new SyncSummary(1, 0, 0, 0, 0, 0, 0, 0, 0), "SERIAL-A")
-            : new HistoryEntry("2026-05-25T10:00:00Z", 5, "plug_in", "error", errorMessage, null, "SERIAL-A");
-        return new StatusUpdateEvent(state, true, true, lastSync, null, null, 0, null, null);
+        var tracker = new NotificationDecisionTracker();
+
+        var started = tracker.Reduce(Accepted(), _ => "Michael's iPod", "all");
+        var completed = tracker.Reduce(Finished(success: true), _ => "Michael's iPod", "all");
+
+        Assert.Equal(ToastKind.Started, started!.Kind);
+        Assert.Contains("Michael's iPod", started.Body);
+        Assert.Equal(ToastKind.Complete, completed!.Kind);
+        Assert.Contains("Michael's iPod", completed.Body);
+        Assert.DoesNotContain(Device.Value, started.Body + completed.Body);
     }
 
     [Fact]
-    public void DecideToast_idle_after_syncing_with_ok_outcome_fires_complete_on_all()
+    public void DeviceAndSession_DeduplicateRepeatedTerminalEventsIndependently()
     {
-        var decision = NotificationService.DecideToast(
-            previousState: "syncing", newStatus: Status("idle"), notifyOn: "all");
-        Assert.NotNull(decision);
-        Assert.Equal(ToastKind.Complete, decision!.Kind);
+        var tracker = new NotificationDecisionTracker();
+
+        Assert.NotNull(tracker.Reduce(Finished(success: true), _ => "iPod", "all"));
+        Assert.Null(tracker.Reduce(Finished(success: true), _ => "iPod", "all"));
+        Assert.NotNull(tracker.Reduce(Finished(success: true, sessionId: 8), _ => "iPod", "all"));
     }
 
     [Fact]
-    public void DecideToast_idle_after_syncing_with_error_outcome_fires_error_on_all()
+    public void ErrorsOnly_SuppressesStartAndSuccessAndKeepsFailureDetailPrivate()
     {
-        var decision = NotificationService.DecideToast(
-            previousState: "syncing",
-            newStatus: Status("idle", errorMessage: "Source unreachable"),
-            notifyOn: "all");
-        Assert.NotNull(decision);
-        Assert.Equal(ToastKind.Error, decision!.Kind);
+        var tracker = new NotificationDecisionTracker();
+
+        Assert.Null(tracker.Reduce(Accepted(), _ => "Work iPod", "errors_only"));
+        Assert.Null(tracker.Reduce(Finished(success: true), _ => "Work iPod", "errors_only"));
+        tracker.Reduce(new SyncErrorEvent(Device, 8, "Source unavailable"), _ => "Work iPod", "errors_only");
+        var failed = tracker.Reduce(Finished(success: false, sessionId: 8), _ => "Work iPod", "errors_only");
+
+        Assert.Equal(ToastKind.Error, failed!.Kind);
+        Assert.Equal("Work iPod could not be synced. Open Classick for details.", failed.Body);
+        Assert.DoesNotContain("Source unavailable", failed.Body);
     }
 
     [Fact]
-    public void DecideToast_idle_after_syncing_with_ok_does_not_fire_on_errors_only()
+    public void RawIdResolverResult_FallsBackToGenericName()
     {
-        var decision = NotificationService.DecideToast(
-            previousState: "syncing", newStatus: Status("idle"), notifyOn: "errors_only");
-        Assert.Null(decision);
+        var tracker = new NotificationDecisionTracker();
+
+        var decision = tracker.Reduce(Accepted(), _ => Device.Value, "all");
+
+        Assert.Equal("Syncing iPod…", decision!.Body);
+        Assert.DoesNotContain(Device.Value, decision.Body);
     }
 
-    [Fact]
-    public void DecideToast_idle_after_syncing_with_error_fires_on_errors_only()
-    {
-        var decision = NotificationService.DecideToast(
-            previousState: "syncing",
-            newStatus: Status("idle", errorMessage: "Source unreachable"),
-            notifyOn: "errors_only");
-        Assert.NotNull(decision);
-        Assert.Equal(ToastKind.Error, decision!.Kind);
-    }
+    private static SyncAcceptedEvent Accepted() =>
+        new(Device, 7, "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8801", SyncOperation.Sync);
 
-    [Fact]
-    public void DecideToast_anything_returns_null_when_notify_on_none()
-    {
-        var decision = NotificationService.DecideToast(
-            previousState: "syncing", newStatus: Status("idle"), notifyOn: "none");
-        Assert.Null(decision);
-    }
-
-    [Fact]
-    public void DecideToast_syncing_after_idle_fires_started_on_all()
-    {
-        var decision = NotificationService.DecideToast(
-            previousState: "idle", newStatus: Status("syncing"), notifyOn: "all");
-        Assert.NotNull(decision);
-        Assert.Equal(ToastKind.Started, decision!.Kind);
-    }
-
-    [Fact]
-    public void DecideToast_no_transition_returns_null()
-    {
-        var decision = NotificationService.DecideToast(
-            previousState: "idle", newStatus: Status("idle"), notifyOn: "all");
-        Assert.Null(decision);
-    }
+    private static SyncFinishedEvent Finished(bool success, ulong sessionId = 7) =>
+        new(Device, sessionId, success);
 }

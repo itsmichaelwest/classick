@@ -20,6 +20,67 @@ public sealed class DeviceStoreTests
         Assert.Null(store.Devices[Second].Config);
         Assert.Equal("first", Assert.IsType<WireTrackStartEvent>(store.Devices[First].LastProgress).Label);
         Assert.Equal("second", Assert.IsType<WireTrackStartEvent>(store.Devices[Second].LastProgress).Label);
+        Assert.Equal("first", store.Devices[First].SyncPresentation!.CurrentTrack);
+        Assert.Equal("second", store.Devices[Second].SyncPresentation!.CurrentTrack);
+    }
+
+    [Fact]
+    public void Prompts_RemainOwnedByTheOriginatingImmutableSession()
+    {
+        var store = new DeviceStore();
+        store.Reduce(Inventory(1, Device(First, sessionId: 41), Device(Second, sessionId: 52)));
+
+        store.Reduce(new WirePromptEvent(First, 41, 7, "First prompt", ["Continue"]));
+        store.Reduce(new WireTrackStartEvent(Second, 52, 3, 10, "second"));
+
+        var interaction = store.Devices[First].SyncPresentation!.Interaction;
+        Assert.Equal(new DeviceSessionTarget(First, 41), interaction!.Owner);
+        Assert.Equal("First prompt", interaction.Message);
+        Assert.Null(store.Devices[Second].SyncPresentation!.Interaction);
+    }
+
+    [Fact]
+    public void PromptRemainsAvailableUntilOwnedSessionMakesProgress()
+    {
+        var store = new DeviceStore();
+        store.Reduce(Inventory(1, Device(First, sessionId: 41), Device(Second, sessionId: 52)));
+        store.Reduce(new WirePromptEvent(First, 41, 7, "First prompt", ["Continue"]));
+
+        store.SelectDevice(Second);
+        store.SelectDevice(First);
+
+        Assert.NotNull(store.Devices[First].SyncPresentation!.Interaction);
+        store.Reduce(new WireTrackStartEvent(First, 41, 1, 2, "track"));
+        Assert.Null(store.Devices[First].SyncPresentation!.Interaction);
+    }
+
+    [Fact]
+    public void MountAction_RequiresTheCurrentConnectedInventoryEntry()
+    {
+        var store = new DeviceStore();
+        store.Reduce(Inventory(4, Device(First, mount: "E:\\")));
+
+        var captured = store.CaptureMountAction(First);
+        store.Reduce(Inventory(5, Device(First, connected: false, mount: null)));
+
+        Assert.Equal("E:\\", captured!.MountPath);
+        Assert.Equal((ulong)4, captured.InventoryRevision);
+        Assert.False(store.IsCurrentMountAction(captured));
+        Assert.Null(store.CaptureMountAction(First));
+    }
+
+    [Fact]
+    public void MutationTargetRequiresConnectedReadyAdoptedIdleDevice()
+    {
+        var store = new DeviceStore();
+        store.Reduce(Inventory(1, Device(First, sessionId: 41)));
+        Assert.Null(store.CaptureDeviceMutation(First));
+
+        store.Reduce(Inventory(2, Device(First)));
+        Assert.Equal(First, store.CaptureDeviceMutation(First)!.DeviceId);
+
+        store.Reduce(Inventory(3, Device(First, connected: false, mount: null)));
+        Assert.Null(store.CaptureDeviceMutation(First));
     }
 
     [Fact]
@@ -178,6 +239,18 @@ public sealed class DeviceStoreTests
         store.Reduce(Inventory(2, Device(First, sessionId: 91), Device(Second, sessionId: 92)));
 
         Assert.Equal(First, store.FocusedDeviceId);
+    }
+
+    [Fact]
+    public void ExplicitSelection_CanInspectAnotherConcurrentSession()
+    {
+        var store = new DeviceStore();
+        store.Reduce(Inventory(1, Device(First, sessionId: 91), Device(Second, sessionId: 92)));
+
+        Assert.True(store.SelectDevice(Second));
+
+        Assert.Equal(Second, store.FocusedDeviceId);
+        Assert.Equal(new DeviceSessionTarget(Second, 92), store.CaptureFocusedSessionAction());
     }
 
     [Fact]

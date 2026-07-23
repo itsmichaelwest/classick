@@ -143,6 +143,9 @@ incidents and completed gate reports are archived in
 - Adding a command/event requires updating exhaustive Rust, Swift, and C#
   matches together. Wire compatibility is major-version based; minor additions
   must remain ignorable/defaultable.
+- A multi-device client must retain typed sync presentation per device/session.
+  Prompt dismissal belongs in that reducer too; clearing only the focused view
+  lets an answered prompt reappear after the user switches devices.
 
 ## Cross-platform behavior
 

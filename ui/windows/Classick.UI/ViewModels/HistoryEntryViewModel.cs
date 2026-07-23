@@ -10,16 +10,6 @@ namespace Classick_UI.ViewModels;
 /// </summary>
 public partial class HistoryEntryViewModel : ObservableObject
 {
-    public HistoryEntryViewModel(HistoryEntry e)
-    {
-        Timestamp = e.Timestamp;
-        DurationSecs = e.DurationSecs;
-        Trigger = e.Trigger;
-        Outcome = e.Outcome;
-        ErrorMessage = e.ErrorMessage;
-        Summary = e.Summary;
-    }
-
     public HistoryEntryViewModel(WireHistoryEntry entry)
     {
         Timestamp = entry.Timestamp;
@@ -27,18 +17,7 @@ public partial class HistoryEntryViewModel : ObservableObject
         Trigger = entry.Trigger.ToString().ToLowerInvariant();
         Outcome = entry.Outcome.ToString().ToLowerInvariant();
         ErrorMessage = entry.ErrorMessage;
-        Summary = entry.Summary is { } summary
-            ? new SyncSummary(
-                summary.Add,
-                summary.Modify,
-                summary.MetadataOnly,
-                summary.Remove,
-                summary.Unchanged,
-                summary.Skipped,
-                summary.SkippedForSpaceTracks,
-                summary.SkippedForSpaceBytes,
-                summary.ArtworkFailedSources)
-            : null;
+        Summary = entry.Summary;
     }
 
     public string Timestamp { get; }
@@ -46,7 +25,7 @@ public partial class HistoryEntryViewModel : ObservableObject
     public string Trigger { get; }
     public string Outcome { get; }
     public string? ErrorMessage { get; }
-    public SyncSummary? Summary { get; }
+    public HistorySummary? Summary { get; }
 
     public string OutcomeGlyph => Outcome switch
     {

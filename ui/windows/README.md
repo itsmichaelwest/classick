@@ -96,7 +96,6 @@ ui\windows\
 │   ├── ViewModels\
 │   │   ├── PopoverViewModel.cs       Tray popover state (storage, sync caption,
 │   │   │                             ETA, prompt overlay)
-│   │   ├── ReviewViewModel.cs        Action-plan review dialog
 │   │   ├── WizardViewModel.cs        First-run wizard (device → folder →
 │   │   │                             sync settings → done)
 │   │   ├── SettingsViewModel.cs      Settings window VMs (General / History /
@@ -104,11 +103,9 @@ ui\windows\
 │   │   └── HistoryEntryViewModel.cs  Shared sync-history row VM
 │   ├── Views\
 │   │   ├── PopoverWindow.xaml        Always-available tray popover
-│   │   ├── ReviewPage.xaml           Action-plan confirmation
 │   │   ├── WizardWindow.xaml + Wizard*Page.xaml
 │   │   ├── SettingsWindow.xaml + Settings*Page.xaml
-│   │   ├── WindowAnchor.cs           Helpers for popover-near-tray positioning
-│   │   └── DebugPromptScenarios.cs   Manual-test harness for prompt overlays
+│   │   └── WindowAnchor.cs           Helpers for popover-near-tray positioning
 │   ├── Assets\                       App icons, tray icons (state × theme ×
 │   │                                 size), in-app SVGs
 │   ├── Package.appxmanifest          MSIX manifest (debug identity + future
@@ -177,5 +174,4 @@ touches the WinAppSDK module initializer.
 - **Live UI changes need a real device.** Most VM logic is exercised by unit
   tests, but window positioning, tray theming, popover anchoring, and toast
   delivery only show their real behaviour against a running daemon with an
-  iPod connected. The `DebugPromptScenarios` harness covers prompt overlays
-  without needing the apply loop.
+  iPod connected, including typed prompt, form, and review interactions.

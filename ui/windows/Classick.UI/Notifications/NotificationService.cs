@@ -19,13 +19,19 @@ public sealed partial class NotificationService : IDisposable
 {
     private readonly DaemonEventRouter _router;
     private readonly Func<string> _getNotifyOn;
-    private string _previousState = "idle";
+    private readonly Func<DeviceId, string> _resolveDeviceName;
+    private readonly NotificationDecisionTracker _decisions = new();
     private bool _registered;
+    private bool _subscribed;
 
-    public NotificationService(DaemonEventRouter router, Func<string> getNotifyOn)
+    public NotificationService(
+        DaemonEventRouter router,
+        Func<string> getNotifyOn,
+        Func<DeviceId, string> resolveDeviceName)
     {
         _router = router;
         _getNotifyOn = getNotifyOn;
+        _resolveDeviceName = resolveDeviceName;
     }
 
     public void Initialize()
@@ -40,13 +46,16 @@ public sealed partial class NotificationService : IDisposable
             try { AppNotificationManager.Default.Register(); _registered = true; }
             catch (Exception e) { Debug.WriteLine($"notify: register failed (toasts disabled): {e.Message}"); }
         }
-        _router.StatusUpdated += OnStatusUpdated;
+        if (!_subscribed)
+        {
+            _router.EventReceived += OnWireEvent;
+            _subscribed = true;
+        }
     }
 
-    private void OnStatusUpdated(StatusUpdateEvent s)
+    private void OnWireEvent(WireEvent wireEvent)
     {
-        var decision = DecideToast(_previousState, s, _getNotifyOn());
-        _previousState = s.State;
+        var decision = _decisions.Reduce(wireEvent, _resolveDeviceName, _getNotifyOn());
         if (decision is null) return;
         // Skip firing if registration failed — Show() would throw inside
         // the WinAppSDK projection and log a stack trace per transition.
@@ -71,6 +80,10 @@ public sealed partial class NotificationService : IDisposable
 
     public void Dispose()
     {
-        _router.StatusUpdated -= OnStatusUpdated;
+        if (_subscribed)
+        {
+            _router.EventReceived -= OnWireEvent;
+            _subscribed = false;
+        }
     }
 }

@@ -16,14 +16,14 @@ public partial class PopoverViewModel : ObservableObject
     [ObservableProperty] private int progressTotal;
     [ObservableProperty] private bool finishingSync;
     [ObservableProperty] private bool paused;
-    /// <summary>Raw <see cref="TrackStartEvent.Label"/> for the currently
+    /// <summary>Raw <see cref="WireTrackStartEvent.Label"/> for the currently
     /// processing track (e.g. "ADD /Music/Artist/Album/01 Track.flac").
     /// Not rendered as the primary caption — that's a counter — but
     /// exposed as a hover tooltip on the caption so anyone curious can
     /// see exactly which file is being processed.</summary>
     [ObservableProperty] private string currentTrackLabel = "";
     /// <summary>Wall-clock time the apply loop started (first
-    /// <see cref="SummaryEvent"/>). Used to compute <see cref="EtaLabel"/>
+    /// <see cref="SyncSummaryEvent"/>). Used to compute <see cref="EtaLabel"/>
     /// from <see cref="ProgressCurrent"/>/<see cref="ProgressTotal"/>.
     /// Null outside of an active sync.
     ///
@@ -43,7 +43,7 @@ public partial class PopoverViewModel : ObservableObject
     }
     private DateTimeOffset? _syncStartedAt;
 
-    // Prompt overlay state. When the daemon ferries a PromptEvent
+    // Prompt overlay state. When the daemon reports a typed prompt
     // from the sync subprocess (source-change safeguard, retry/skip/
     // abort prompts, etc.), the popover renders an overlay panel
     // with the message and a button per option. The user's click
@@ -64,6 +64,7 @@ public partial class PopoverViewModel : ObservableObject
         // paint over it, which doesn't work cleanly over the acrylic
         // backdrop).
         OnPropertyChanged(nameof(ShowConnectedContent));
+        OnPropertyChanged(nameof(ShowEjectButton));
         OnPropertyChanged(nameof(ShowEmptyState));
         OnPropertyChanged(nameof(ShowFooter));
         OnPropertyChanged(nameof(ShowSyncNowButton));
@@ -94,7 +95,8 @@ public partial class PopoverViewModel : ObservableObject
     /// no Sync Now / Eject buttons. Driven by daemon-reported
     /// connection state. Suppressed when a prompt overlay is active
     /// so the underlying layout doesn't bleed through.</summary>
-    public bool ShowEmptyState => !IpodConnected && !PromptActive && !ShowSourceRecovery;
+    public bool ShowEmptyState => !IpodConnected && !HasMultipleDeviceChoices &&
+        !PromptActive && !ShowSourceRecovery;
     public string EmptyStateTitle => FinishingSync ? "Finishing sync…" : "No iPod connected";
     public string EmptyStateSubtitle => FinishingSync
         ? "iPod disconnected. Finishing safely…"
@@ -106,7 +108,9 @@ public partial class PopoverViewModel : ObservableObject
     /// <summary>The normal connected layout (device row + storage /
     /// sync progress + full footer). Suppressed when a prompt overlay
     /// is active.</summary>
-    public bool ShowConnectedContent => IpodConnected && !PromptActive && !ShowSourceRecovery;
+    public bool ShowConnectedContent => (IpodConnected || HasMultipleDeviceChoices) &&
+        !PromptActive && !ShowSourceRecovery;
+    public bool ShowEjectButton => IpodConnected && ShowConnectedContent;
 
     /// <summary>True when the popover should show the footer row
     /// (Sync now / Stop sync / Eject / Settings). Hidden during a
@@ -119,15 +123,13 @@ public partial class PopoverViewModel : ObservableObject
     public bool ShowSyncNowButton => IpodConnected && !Syncing && !PromptActive &&
         !FinishingSync && !ShowSourceRecovery && DeviceReadyForSync;
     public bool ShowDeviceGuidance => !string.IsNullOrWhiteSpace(DeviceGuidance);
-    public bool CanControlActiveSync => ActiveSyncContext is not null &&
-        IpodConnected && Syncing && !FinishingSync;
     public bool CanControlActiveDeviceSync => ActiveDeviceSession is not null &&
         IpodConnected && Syncing && !FinishingSync;
-    public bool ShowSyncControls => (CanControlActiveSync || CanControlActiveDeviceSync) &&
+    public bool ShowSyncControls => CanControlActiveDeviceSync &&
         !PromptActive && !ShowSourceRecovery;
     public string SyncActionLabel => Paused ? "Resume sync" : "Sync now";
 
-    /// <summary>True between sync start and the first SummaryEvent /
+    /// <summary>True between sync start and the first SyncSummaryEvent /
     /// TrackStart, so the popover's ProgressBar can render as
     /// indeterminate (marquee) until we know the total count.</summary>
     public bool NoProgressYet => Syncing && ProgressTotal <= 0;
@@ -157,6 +159,7 @@ public partial class PopoverViewModel : ObservableObject
     {
         get
         {
+            if (ReportedEtaSeconds is { } reported) return FormatEta(reported);
             if (!Syncing || ProgressTotal <= 0 || SyncStartedAt is null) return "";
             // Use completed-track count (ProgressCurrent is 1-indexed
             // and names the currently-starting track). Wait for ≥3
@@ -212,6 +215,7 @@ public partial class PopoverViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(ShowEmptyState));
         OnPropertyChanged(nameof(ShowConnectedContent));
+        OnPropertyChanged(nameof(ShowEjectButton));
         OnPropertyChanged(nameof(ShowSyncNowButton));
         OnPropertyChanged(nameof(ShowSyncControls));
         OnPropertyChanged(nameof(ShowFooter));
@@ -241,155 +245,20 @@ public partial class PopoverViewModel : ObservableObject
 
     public ObservableCollection<HistoryEntryViewModel> Recent { get; } = new();
 
-    public void Update(StatusUpdateEvent s)
-    {
-        FinishingSync = false;
-        Paused = false;
-        Syncing = s.State == "syncing";
-        IpodConnected = s.IpodConnected;
-        ApplyStorage(s.Storage);
-        if (Syncing)
-        {
-            StatusText = "Syncing iPod…";
-            LastSyncedLabel = "Syncing now";
-            return;
-        }
-        if (!s.IpodConnected)
-        {
-            StatusText = "iPod not connected";
-            LastSyncedLabel = "";
-            return;
-        }
-        // Idle + connected.
-        var last = s.LastSync;
-        if (last is not null && last.Outcome != "ok")
-        {
-            StatusText = $"Last sync failed: {last.ErrorMessage ?? "unknown error"}";
-            LastSyncedLabel = FormatLastSynced(last.Timestamp);
-        }
-        else
-        {
-            StatusText = last is null
-                ? "Up to date · iPod connected"
-                : $"Up to date · last sync {RelativeTime(last.Timestamp)}";
-            LastSyncedLabel = last is null ? "Never synced" : FormatLastSynced(last.Timestamp);
-        }
-    }
-
-    public void Update(DeviceSnapshot device)
-    {
-        ArgumentNullException.ThrowIfNull(device);
-        DisplayedDeviceSerial = device.Identity.Serial;
-        SetDeviceLabel(device.Identity.Name, device.Identity.ModelLabel);
-        Update(new StatusUpdateEvent(
-            State: device.Phase,
-            Configured: device.Configured,
-            IpodConnected: device.Connected,
-            LastSync: device.LatestAttempt ?? device.LatestSuccessfulSync,
-            NextScheduledUnixSecs: null,
-            Storage: device.Storage,
-            SyncedCount: device.SyncedCount,
-            LibraryCount: device.LibraryCount,
-            AcknowledgedRequestId: null));
-        Paused = device.Phase == "paused";
-        FinishingSync = device.SessionId is not null && !device.Connected;
-        if (FinishingSync)
-        {
-            StatusText = "Finishing sync…";
-            LastSyncedLabel = "iPod disconnected";
-        }
-    }
-
-    /// <summary>Set the device label, preferring the iPod's user-set
-    /// firmware name (e.g. "Michael's iPod") over the generic model
-    /// label ("iPod Classic 7G"). Either can be null/empty; falls back
-    /// through name → modelLabel → "iPod".</summary>
-    public void SetDeviceLabel(string? name, string? modelLabel)
-    {
-        if (!string.IsNullOrWhiteSpace(name)) DeviceLabel = name!;
-        else if (!string.IsNullOrWhiteSpace(modelLabel)) DeviceLabel = modelLabel!;
-        else DeviceLabel = "iPod";
-    }
-
-    public void ApplyHistory(HistoryUpdateEvent h)
+    public void ApplyHistory(IReadOnlyList<WireHistoryEntry> entries)
     {
         Recent.Clear();
-        // Newest 5.
-        var start = Math.Max(0, h.Entries.Count - 5);
-        for (int i = h.Entries.Count - 1; i >= start; i--)
+        foreach (var entry in entries.TakeLast(5).Reverse())
+            Recent.Add(new HistoryEntryViewModel(entry));
+        if (!Syncing && IpodConnected)
         {
-            Recent.Add(new HistoryEntryViewModel(h.Entries[i]));
+            LastSyncedLabel = entries.LastOrDefault() is { } latest
+                ? latest.Outcome == SyncOutcome.Ok ? "Last sync completed" : "Last sync failed"
+                : "Never synced";
         }
     }
 
-    public void ApplyIpcProgress(IpcEvent evt)
-    {
-        switch (evt)
-        {
-            case HeaderEvent:
-                // Header arrives before SummaryEvent, but we no longer
-                // narrate it: the popover just shows "Preparing sync…"
-                // until the action plan is built.
-                break;
-            case SummaryEvent s:
-                // Subprocess has built the action plan; flip from
-                // "Preparing sync…" to the determinate counter and
-                // start the wall-clock for ETA. SyncStartedAt is set
-                // here rather than on Syncing→true so the ETA's
-                // per-track average doesn't include the variable
-                // prep-phase time (scan / fingerprint / plan-build).
-                ProgressTotal = s.TotalPlanned;
-                ProgressCurrent = 0;
-                CurrentTrackLabel = "";
-                SyncStartedAt = DateTimeOffset.Now;
-                break;
-            case TrackStartEvent t:
-                ProgressCurrent = t.Current;
-                ProgressTotal = t.Total;
-                CurrentTrackLabel = t.Label;
-                // A TrackStart implies the sync moved past any
-                // pending prompt — defensively clear the overlay so
-                // a stale prompt-active state can't sit on top of
-                // active progress.
-                ClearPrompt();
-                break;
-            case TrackDoneEvent:
-                // Mid-track UI flicker isn't worth fighting; we wait
-                // for the next TrackStart to advance the visible label.
-                break;
-            case LogEvent:
-                // Daemon narration is no longer surfaced in the popover —
-                // the caption is a clean "Syncing N of M tracks" line.
-                // The full log still goes to the daemon's log file for
-                // post-mortem.
-                break;
-            case PromptEvent p:
-                // Daemon ferried a prompt from the sync subprocess
-                // (source-change safeguard, retry/skip/abort, etc.).
-                // Surface the overlay so the user can answer; the
-                // popover's button-click handler sends a
-                // DecidePromptCommand back via the daemon, which
-                // forwards it to the subprocess stdin.
-                PromptId = p.Id;
-                PromptMessage = p.Message;
-                PromptOptions.Clear();
-                foreach (var o in p.Options) PromptOptions.Add(o);
-                PromptActive = true;
-                break;
-            case FinishEvent:
-                // Daemon's subsequent Idle StatusUpdate will swap the
-                // panel back to storage, but reset numbers now so a
-                // re-open during the gap shows clean state.
-                ProgressCurrent = 0;
-                ProgressTotal = 0;
-                CurrentTrackLabel = "";
-                SyncStartedAt = null;
-                ClearPrompt();
-                break;
-        }
-    }
-
-    private void ApplyStorage(StorageInfo? info)
+    private void ApplyStorage(StorageSnapshot? info)
     {
         if (info is null || info.TotalBytes == 0)
         {
@@ -408,11 +277,6 @@ public partial class PopoverViewModel : ObservableObject
         HasStorage = true;
     }
 
-    private void ApplyStorage(StorageSnapshot? info)
-    {
-        ApplyStorage(info is null ? null : new StorageInfo(info.TotalBytes, info.FreeBytes));
-    }
-
     // Format like "120 GB" / "1.4 TB" — units round to the nearest sensible
     // suffix the way Windows Explorer does for drive sizes (binary base).
     private static string FormatBytes(ulong bytes)
@@ -428,30 +292,6 @@ public partial class PopoverViewModel : ObservableObject
         return $"{bytes} B";
     }
 
-    private static string FormatLastSynced(string rfc3339)
-    {
-        if (!DateTimeOffset.TryParse(rfc3339, out var dt)) return "Last synced recently";
-        var local = dt.ToLocalTime();
-        var now = DateTimeOffset.Now;
-        // Same calendar date → "Last synced at 12:30 PM"
-        if (local.Date == now.Date) return $"Last synced at {local:h:mm tt}";
-        // Yesterday → "Last synced yesterday at 12:30 PM"
-        if (local.Date == now.Date.AddDays(-1)) return $"Last synced yesterday at {local:h:mm tt}";
-        // Within a week → "Last synced Tuesday at 12:30 PM"
-        if ((now - local).TotalDays < 7) return $"Last synced {local:dddd 'at' h:mm tt}";
-        // Older → "Last synced 23 May at 12:30 PM"
-        return $"Last synced {local:d MMM 'at' h:mm tt}";
-    }
-
-    private static string RelativeTime(string rfc3339)
-    {
-        if (!DateTimeOffset.TryParse(rfc3339, out var dt)) return "recently";
-        var delta = DateTimeOffset.UtcNow - dt;
-        if (delta.TotalMinutes < 1) return "just now";
-        if (delta.TotalMinutes < 60) return $"{(int)delta.TotalMinutes} min ago";
-        if (delta.TotalHours < 24) return $"{(int)delta.TotalHours} hr ago";
-        return $"{(int)delta.TotalDays} days ago";
-    }
 }
 
 // HistoryEntryViewModel canonicalized in SettingsViewModel.cs (T9).

@@ -1,5 +1,4 @@
 using Classick_UI.Ipc;
-using System.Text.Json;
 
 namespace Classick_UI.Tests;
 
@@ -84,14 +83,14 @@ public class DaemonClientTests
     }
 
     [Fact]
-    public void LegacyCommandSurface_StillSerializesForPendingUiMigration()
+    public void Protocol3HistoryCommand_EncodesThroughTheSharedCodec()
     {
-        DaemonCommand command = new GetHistoryCommand(
+        WireCommand command = new WireGetHistoryCommand(
             "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8808",
             10);
 
         Assert.Equal(
             """{"type":"get_history","request_id":"018f9d7e-2f2b-7b52-9f1d-f78bdb2f8808","limit":10}""",
-            JsonSerializer.Serialize<DaemonCommand>(command));
+            WireCodec.Encode(command));
     }
 }

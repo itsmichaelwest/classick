@@ -146,7 +146,8 @@
 
                 <tk:SettingsCard Header="Device actions"
                                  Description="Sync now or explicitly replace this iPod's library from the selected Classick library">
-                    <StackPanel Orientation="Horizontal" Spacing="8">
+                    <StackPanel Orientation="Horizontal" Spacing="8"
+                                IsEnabled="{x:Bind ViewModel.CanMutateSelectedDevice, Mode=OneWay}">
                         <Button Content="Sync now" Click="OnSyncNow" />
                         <Button Content="Replace library…" Click="OnReplaceLibrary" />
                     </StackPanel>

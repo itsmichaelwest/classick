@@ -50,6 +50,12 @@
                           Visibility="{x:Bind ViewModel.ShowConnectedContent, Mode=OneWay}">
             <StackPanel Padding="16"
                         Spacing="12">
+                <ComboBox ItemsSource="{x:Bind ViewModel.DeviceChoices, Mode=OneWay}"
+                          SelectedItem="{x:Bind ViewModel.SelectedDeviceChoice, Mode=TwoWay}"
+                          DisplayMemberPath="Label"
+                          SelectionChanged="OnDeviceSelectionChanged"
+                          AutomationProperties.Name="Choose iPod"
+                          Visibility="{x:Bind ViewModel.HasMultipleDeviceChoices, Mode=OneWay}" />
                 <StackPanel Orientation="Horizontal" Spacing="12">
                     <Image Width="30"
                            Height="44"
@@ -105,7 +111,7 @@
 
                 <!--
                     Live sync-progress block. Visible during a sync;
-                    driven by IpcEvent forwards from the sync subprocess
+                    driven by typed protocol-3 progress events
                     via the DaemonEventRouter. ProgressBar Maximum binds
                     to total so Value can use raw track index —
                     Indeterminate kicks in before the first TrackStart
@@ -245,10 +251,11 @@
                         Orientation="Horizontal"
                         Spacing="2">
                 <Button Padding="10"
+                        Click="OnEject"
                         ToolTipService.ToolTip="Eject iPod"
                         Style="{StaticResource SubtleButtonStyle}"
                         BorderThickness="0"
-                        Visibility="{x:Bind ViewModel.ShowConnectedContent, Mode=OneWay}">
+                        Visibility="{x:Bind ViewModel.ShowEjectButton, Mode=OneWay}">
                     <FontIcon Glyph="&#xF847;" FontSize="16" />
                 </Button>
                 <Button Padding="10"
@@ -269,8 +276,8 @@
             layouts above are simultaneously hidden via their own
             ShowConnectedContent / ShowEmptyState / ShowFooter binds,
             so the overlay doesn't need an opaque background to mask
-            them out. Rendered by the daemon ferrying a PromptEvent
-            from the sync subprocess (source-change safeguard,
+            them out. Rendered from a typed prompt event
+            (source-change safeguard,
             per-track retry/skip/abort, etc.); button click sends
             DecidePromptCommand back via the daemon.
         -->
@@ -285,9 +292,14 @@
             <ScrollViewer Grid.Row="0"
                           VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled">
-                <TextBlock Text="{x:Bind ViewModel.PromptMessage, Mode=OneWay}"
-                           TextWrapping="Wrap"
-                           Style="{StaticResource CaptionTextBlockStyle}" />
+                <StackPanel Spacing="8">
+                    <TextBlock Text="{x:Bind ViewModel.PromptMessage, Mode=OneWay}"
+                               TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                    <TextBox Text="{x:Bind ViewModel.PromptInput, Mode=TwoWay}"
+                             PlaceholderText="{x:Bind ViewModel.PromptHint, Mode=OneWay}"
+                             Visibility="{x:Bind ViewModel.PromptIsForm, Mode=OneWay}" />
+                </StackPanel>
             </ScrollViewer>
             <ItemsControl Grid.Row="1"
                           Margin="0,8,0,0"
@@ -301,6 +313,7 @@
                     <DataTemplate x:DataType="x:String">
                         <Button HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Left"
+                                IsEnabled="{x:Bind ViewModel.InteractionDecisionEnabled, Mode=OneWay}"
                                 Content="{x:Bind}"
                                 Click="OnPromptOptionClicked" />
                     </DataTemplate>

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Threading.Tasks;
+using Classick_UI.Devices;
 using Classick_UI.Ipc;
 using Classick_UI.Notifications;
 using Classick_UI.Startup;
@@ -89,7 +90,6 @@ public partial class App : Application
         // directly.
         Router = new DaemonEventRouter(Daemon.Events);
         Router.EventReceived += OnWireEvent;
-        Router.SyncEventReceived += OnSyncEvent;
         Router.Start();
 
         // Notification service subscribes to router internally.
@@ -99,7 +99,10 @@ public partial class App : Application
                 NotifyLevel.ErrorsOnly => "errors_only",
                 NotifyLevel.None => "none",
                 _ => "all",
-            });
+            },
+            resolveDeviceName: deviceId => Store.Devices.TryGetValue(deviceId, out var device)
+                ? DevicePresentationFactory.For(device.Inventory).Title
+                : "iPod");
         Notifications.Initialize();
 
         var inventoryReceived = new TaskCompletionSource<DeviceInventoryEvent>(
@@ -190,6 +193,10 @@ public partial class App : Application
         DispatcherQueue.TryEnqueue(() =>
         {
             if (!Store.Reduce(wireEvent)) return;
+            if (wireEvent is CommandFailedEvent failed)
+            {
+                _popoverState.InteractionCommandFailed(failed.RequestId, failed.Message);
+            }
             if (wireEvent is WireSourceAvailabilityEvent availability)
             {
                 _popoverState.ApplySourceAvailability(availability);
@@ -206,6 +213,7 @@ public partial class App : Application
 
     private static void ApplyFocusedDevice()
     {
+        _popoverState.UpdateDeviceChoices(Store.Devices.Values, Store.FocusedDeviceId);
         if (Store.FocusedDeviceId is not { } focusedId ||
             !Store.Devices.TryGetValue(focusedId, out var focused))
         {
@@ -214,40 +222,48 @@ public partial class App : Application
         }
 
         _popoverState.Update(focused.Inventory);
+        _popoverState.ApplyHistory(focused.History);
         if (focused.ActiveSessionId is { } sessionId)
         {
             _popoverState.SetActiveDeviceSession(new DeviceSessionTarget(focusedId, sessionId));
+            _popoverState.ApplySyncPresentation(focused.SyncPresentation);
         }
         else
         {
+            if (focused.SyncPresentation?.Finished is not null)
+            {
+                _popoverState.SetActiveDeviceSession(focused.SyncPresentation.Target);
+                _popoverState.ApplySyncPresentation(focused.SyncPresentation);
+            }
             _popoverState.ClearActiveDeviceSession();
         }
+    }
+
+    public static void RequestPopoverDeviceFocus(DeviceId deviceId)
+    {
+        if (!Store.SelectDevice(deviceId)) return;
+        ApplyFocusedDevice();
     }
 
     private static void UpdateTrayFromStore()
     {
         if (Tray is null) return;
-        if (Store.Devices.Values.Any(device => device.ActiveSessionId is not null))
+        var presentation = DeviceActivityPresentationFactory.For(Store.Devices.Values);
+        var state = presentation.Activity switch
         {
-            Tray.SetState(TrayState.Syncing, "Syncing iPod…");
-            return;
-        }
-        if (Store.Devices.Values.Any(device => device.Inventory.Connected))
-        {
-            Tray.SetState(TrayState.Idle, "iPod connected · idle");
-            return;
-        }
-        Tray.SetState(TrayState.Offline, "iPod not connected");
+            AggregateDeviceActivity.Syncing => TrayState.Syncing,
+            AggregateDeviceActivity.Idle => TrayState.Idle,
+            _ => TrayState.Offline,
+        };
+        Tray.SetState(state, presentation.Tooltip);
     }
 
-    private void OnSyncEvent(RoutedSyncEvent routed)
+    public static async Task RequestEjectAsync(DeviceId deviceId)
     {
-        if (routed.DeviceId is null)
-        {
-            return;
-        }
-
-        DispatcherQueue.TryEnqueue(() => _popoverState.ApplyWireProgress(routed));
+        var target = Store.CaptureMountAction(deviceId);
+        if (target is null || !Store.IsCurrentMountAction(target)) return;
+        try { await WindowsEjectService.EjectAsync(target); }
+        catch (Exception e) { Debug.WriteLine($"app: eject failed: {e}"); }
     }
 
     private void OnPopoverRequested()
@@ -375,7 +391,9 @@ public partial class App : Application
     {
         DispatcherQueue.TryEnqueue(async () =>
         {
-            if (Daemon is null || Store.CaptureFocusedDeviceAction() is not { } target) return;
+            if (Daemon is null ||
+                Store.FocusedDeviceId is not { } deviceId ||
+                Store.CaptureDeviceMutation(deviceId) is not { } target) return;
             try { await Daemon.SendAsync(new WireTriggerSyncCommand(target.DeviceId, NewRequestId(), SyncTrigger.Manual)); }
             catch (Exception e) { Debug.WriteLine($"app: trigger_sync failed: {e}"); }
         });

@@ -5,31 +5,17 @@ namespace Classick_UI.Ipc;
 
 public sealed class DaemonEventRouter : IDisposable
 {
-    private readonly Func<CancellationToken, IAsyncEnumerable<object>> _readEvents;
+    private readonly ChannelReader<WireEvent> _source;
     private readonly Dictionary<DeviceId, ulong> _activeSessions = [];
     private readonly HashSet<DeviceId> _awaitingFinished = [];
     private CancellationTokenSource? _cts;
     private Task? _loop;
     private ulong? _inventoryRevision;
 
-    public DaemonEventRouter(ChannelReader<WireEvent> source) =>
-        _readEvents = cancellationToken => ReadWireEvents(source, cancellationToken);
-
-    public DaemonEventRouter(ChannelReader<object> source) =>
-        _readEvents = cancellationToken => source.ReadAllAsync(cancellationToken);
+    public DaemonEventRouter(ChannelReader<WireEvent> source) => _source = source;
 
     public event Action<WireEvent>? EventReceived;
     public event Action<DeviceInventoryEvent>? DeviceInventoryReceived;
-    public event Action<StatusUpdateEvent>? StatusUpdated;
-    public event Action<ConfigUpdateEvent>? ConfigUpdated;
-    public event Action<HistoryUpdateEvent>? HistoryUpdated;
-    public event Action<DeviceConnectedEvent>? DeviceConnected;
-    public event Action<DeviceDisconnectedEvent>? DeviceDisconnected;
-    public event Action<SyncRejectedEvent>? SyncRejected;
-    public event Action<DeviceInventorySnapshotEvent>? DeviceInventorySnapshotReceived;
-    public event Action<DaemonEvent>? DaemonEventReceived;
-    public event Action<RoutedSyncEvent>? SyncEventReceived;
-    public event Action<SourceAvailabilityEvent>? SourceAvailabilityUpdated;
 
     public void Start()
     {
@@ -68,53 +54,13 @@ public sealed class DaemonEventRouter : IDisposable
     {
         try
         {
-            await foreach (var message in _readEvents(cancellationToken).ConfigureAwait(false))
+            await foreach (var wireEvent in _source.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
-                switch (message)
-                {
-                    case WireEvent wireEvent:
-                        Route(wireEvent);
-                        break;
-                    case DaemonEvent daemonEvent:
-                        RouteLegacy(daemonEvent);
-                        break;
-                }
+                Route(wireEvent);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-        }
-    }
-
-    private void RouteLegacy(DaemonEvent daemonEvent)
-    {
-        DaemonEventReceived?.Invoke(daemonEvent);
-        switch (daemonEvent)
-        {
-            case StatusUpdateEvent status:
-                StatusUpdated?.Invoke(status);
-                break;
-            case ConfigUpdateEvent config:
-                ConfigUpdated?.Invoke(config);
-                break;
-            case HistoryUpdateEvent history:
-                HistoryUpdated?.Invoke(history);
-                break;
-            case DeviceConnectedEvent connected:
-                DeviceConnected?.Invoke(connected);
-                break;
-            case DeviceDisconnectedEvent disconnected:
-                DeviceDisconnected?.Invoke(disconnected);
-                break;
-            case SyncRejectedEvent rejected:
-                SyncRejected?.Invoke(rejected);
-                break;
-            case DeviceInventorySnapshotEvent inventory:
-                DeviceInventorySnapshotReceived?.Invoke(inventory);
-                break;
-            case SourceAvailabilityEvent availability:
-                SourceAvailabilityUpdated?.Invoke(availability);
-                break;
         }
     }
 
@@ -143,7 +89,6 @@ public sealed class DaemonEventRouter : IDisposable
             return;
         }
         EventReceived?.Invoke(wireEvent);
-        SyncEventReceived?.Invoke(new RoutedSyncEvent(routed.DeviceId, routed.SessionId, wireEvent));
         if (wireEvent is SyncPausedEvent or SyncCancelledEvent)
         {
             _awaitingFinished.Add(routed.DeviceId);
@@ -184,16 +129,6 @@ public sealed class DaemonEventRouter : IDisposable
         }
         _awaitingFinished.RemoveWhere(deviceId => !present.Contains(deviceId));
         return true;
-    }
-
-    private static async IAsyncEnumerable<object> ReadWireEvents(
-        ChannelReader<WireEvent> source,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        await foreach (var wireEvent in source.ReadAllAsync(cancellationToken).ConfigureAwait(false))
-        {
-            yield return wireEvent;
-        }
     }
 
     public void Dispose() => Stop();

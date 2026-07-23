@@ -5,56 +5,85 @@ namespace Classick_UI.Notifications;
 
 public enum ToastKind { Started, Complete, Error }
 
-public sealed record ToastDecision(ToastKind Kind, string Title, string Body);
+public sealed record ToastDecision(
+    ToastKind Kind,
+    DeviceId DeviceId,
+    ulong SessionId,
+    string Title,
+    string Body);
 
-/// <summary>
-/// Pure decision logic split out so the test project (plain net10.0,
-/// no WindowsAppSDK reference) can exercise the matrix without dragging
-/// the AppNotificationManager surface into the test runtime. The full
-/// <see cref="NotificationService"/> partial in the sibling file owns
-/// the lifecycle, router subscription, and the actual toast emission.
-/// </summary>
-public sealed partial class NotificationService
+public sealed class NotificationDecisionTracker
 {
-    /// <summary>
-    /// Pure decision function (no AppNotificationManager dependency) so
-    /// tests can exercise the matrix without a packaged-app fixture.
-    /// </summary>
-    public static ToastDecision? DecideToast(
-        string previousState, StatusUpdateEvent newStatus, string notifyOn)
+    private readonly HashSet<(DeviceId DeviceId, ulong SessionId, ToastKind Kind)> _shown = [];
+
+    public ToastDecision? Reduce(
+        WireEvent wireEvent,
+        Func<DeviceId, string> resolveDeviceName,
+        string notifyOn)
     {
-        if (notifyOn == "none") return null;
-        // Only act on transitions, not repeated broadcasts of the same state.
-        if (previousState == newStatus.State) return null;
-
-        // syncing -> idle: completion (ok or error).
-        if (previousState == "syncing" && newStatus.State == "idle")
+        if (wireEvent is SyncErrorEvent)
         {
-            var outcome = newStatus.LastSync?.Outcome ?? "ok";
-            if (outcome == "ok")
-            {
-                if (notifyOn == "errors_only") return null;
-                var summary = newStatus.LastSync?.Summary;
-                var body = summary is null
-                    ? "Sync complete."
-                    : $"Sync complete: +{summary.Add} ~{summary.Modify} -{summary.Remove}"
-                      + (summary.Skipped > 0 ? $", {summary.Skipped} skipped" : "");
-                return new ToastDecision(ToastKind.Complete, AppIdentity.Name, body);
-            }
-            else
-            {
-                var msg = newStatus.LastSync?.ErrorMessage ?? "Sync failed.";
-                return new ToastDecision(ToastKind.Error, $"{AppIdentity.Name} — sync failed", msg);
-            }
+            return null;
         }
 
-        // idle -> syncing: starting.
-        if (previousState == "idle" && newStatus.State == "syncing")
+        ToastDecision? decision = wireEvent switch
         {
-            if (notifyOn == "errors_only") return null;
-            return new ToastDecision(ToastKind.Started, AppIdentity.Name, "Syncing iPod…");
-        }
+            SyncAcceptedEvent accepted when notifyOn is not ("none" or "errors_only") =>
+                Decision(
+                    ToastKind.Started,
+                    accepted.DeviceId,
+                    accepted.SessionId,
+                    AppIdentity.Name,
+                    $"Syncing {SafeName(resolveDeviceName, accepted.DeviceId)}…"),
+            SyncFinishedEvent finished when !finished.Success && notifyOn != "none" =>
+                Decision(
+                    ToastKind.Error,
+                    finished.DeviceId,
+                    finished.SessionId,
+                    $"{AppIdentity.Name} — sync failed",
+                    FailureBody(finished, resolveDeviceName)),
+            SyncFinishedEvent finished when notifyOn is not ("none" or "errors_only") =>
+                Decision(
+                    ToastKind.Complete,
+                    finished.DeviceId,
+                    finished.SessionId,
+                    AppIdentity.Name,
+                    CompletionBody(finished, resolveDeviceName)),
+            _ => null,
+        };
 
-        return null;
+        return decision;
+    }
+
+    private ToastDecision? Decision(
+        ToastKind kind,
+        DeviceId deviceId,
+        ulong sessionId,
+        string title,
+        string body) =>
+        _shown.Add((deviceId, sessionId, kind))
+            ? new ToastDecision(kind, deviceId, sessionId, title, body)
+            : null;
+
+    private string FailureBody(SyncFinishedEvent finished, Func<DeviceId, string> resolveName)
+    {
+        var name = SafeName(resolveName, finished.DeviceId);
+        return $"{name} could not be synced. Open Classick for details.";
+    }
+
+    private static string CompletionBody(
+        SyncFinishedEvent finished,
+        Func<DeviceId, string> resolveName)
+    {
+        var name = SafeName(resolveName, finished.DeviceId);
+        return finished.SkippedForSpace is { Tracks: > 0 } skipped
+            ? $"{name} sync complete. {skipped.Tracks} tracks skipped for space."
+            : $"{name} sync complete.";
+    }
+
+    private static string SafeName(Func<DeviceId, string> resolveName, DeviceId deviceId)
+    {
+        var name = resolveName(deviceId);
+        return string.IsNullOrWhiteSpace(name) || name == deviceId.Value ? "iPod" : name;
     }
 }

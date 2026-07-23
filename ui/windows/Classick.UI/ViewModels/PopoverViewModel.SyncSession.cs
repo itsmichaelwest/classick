@@ -1,40 +1,32 @@
 using System;
 using Classick_UI.Ipc;
+using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace Classick_UI.ViewModels;
 
 public partial class PopoverViewModel
 {
-    public SyncEventContext? ActiveSyncContext { get; private set; }
-    public string? DisplayedDeviceSerial { get; private set; }
     public DeviceSessionTarget? ActiveDeviceSession { get; private set; }
     public DeviceId? DisplayedDeviceId { get; private set; }
-    private SyncEventContext? _promptContext;
-
-    public void SetActiveSyncSession(SyncEventContext context)
+    private SyncInteraction? _wireInteraction;
+    [ObservableProperty] private bool promptIsForm;
+    [ObservableProperty] private string promptInput = "";
+    [ObservableProperty] private string promptHint = "";
+    [ObservableProperty] private bool interactionDecisionEnabled = true;
+    private string? _pendingInteractionRequestId;
+    public ulong? ReportedEtaSeconds
     {
-        ArgumentNullException.ThrowIfNull(context);
-        if (!context.IsDeviceSession)
+        get => _reportedEtaSeconds;
+        private set
         {
-            throw new ArgumentException("A popover sync session must identify a device.", nameof(context));
+            if (_reportedEtaSeconds == value) return;
+            _reportedEtaSeconds = value;
+            OnPropertyChanged(nameof(EtaLabel));
         }
-        if (ActiveSyncContext == context)
-        {
-            return;
-        }
-
-        ResetSyncProgress();
-        ActiveSyncContext = context;
-        DisplayedDeviceSerial = context.Serial;
-        OnPropertyChanged(nameof(ShowSyncControls));
     }
-
-    public void ClearActiveSyncSession()
-    {
-        ResetSyncProgress();
-        ActiveSyncContext = null;
-        OnPropertyChanged(nameof(ShowSyncControls));
-    }
+    private ulong? _reportedEtaSeconds;
+    private DeviceSessionTarget? _appliedPresentationTarget;
+    private ulong _appliedPresentationRevision;
 
     public void SetActiveDeviceSession(DeviceSessionTarget target)
     {
@@ -42,6 +34,7 @@ public partial class PopoverViewModel
         if (ActiveDeviceSession == target) return;
         ResetSyncProgress();
         ActiveDeviceSession = target;
+        _appliedPresentationTarget = null;
         DisplayedDeviceId = target.DeviceId;
         OnPropertyChanged(nameof(ShowSyncControls));
     }
@@ -50,6 +43,7 @@ public partial class PopoverViewModel
     {
         ResetSyncProgress();
         ActiveDeviceSession = null;
+        _appliedPresentationTarget = null;
         OnPropertyChanged(nameof(ShowSyncControls));
     }
 
@@ -72,17 +66,58 @@ public partial class PopoverViewModel
         StatusText = "iPod not connected";
     }
 
-    public void ApplyWireProgress(RoutedSyncEvent routed)
+    public void ApplySyncPresentation(DeviceSyncPresentation? presentation)
     {
-        ArgumentNullException.ThrowIfNull(routed);
-        if (routed.DeviceId is not { } deviceId ||
-            ActiveDeviceSession != new DeviceSessionTarget(deviceId, routed.SessionId))
+        if (presentation is null || ActiveDeviceSession != presentation.Target) return;
+        if (_appliedPresentationTarget == presentation.Target &&
+            _appliedPresentationRevision == presentation.Revision) return;
+        _appliedPresentationTarget = presentation.Target;
+        _appliedPresentationRevision = presentation.Revision;
+        _pendingInteractionRequestId = null;
+        InteractionDecisionEnabled = true;
+
+        Syncing = presentation.Phase is DeviceSyncPhase.Preparing or
+            DeviceSyncPhase.Syncing or
+            DeviceSyncPhase.AwaitingReview or
+            DeviceSyncPhase.AwaitingPrompt or
+            DeviceSyncPhase.Finalizing;
+        FinishingSync = presentation.Phase == DeviceSyncPhase.Finalizing;
+        Paused = presentation.Phase == DeviceSyncPhase.Paused;
+        ProgressCurrent = ToProgressValue(presentation.Current);
+        ProgressTotal = ToProgressValue(presentation.Total);
+        CurrentTrackLabel = presentation.CurrentTrack;
+        ReportedEtaSeconds = presentation.EtaSeconds;
+        SyncStartedAt = presentation.PlanStartedAt;
+
+        if (presentation.Interaction is { } interaction)
         {
-            return;
+            _wireInteraction = interaction;
+            PromptId = interaction.PromptId;
+            PromptMessage = interaction.Message;
+            PromptOptions.Clear();
+            foreach (var option in interaction.Options) PromptOptions.Add(option);
+            PromptIsForm = interaction.Kind == SyncInteractionKind.Form;
+            PromptInput = interaction.Initial;
+            PromptHint = interaction.Hint;
+            PromptActive = true;
+        }
+        else
+        {
+            ClearPrompt();
         }
 
-        // W5 owns presentation reduction. W2 only establishes the typed,
-        // device-and-session routing boundary used by controls and focus.
+        StatusText = presentation.Phase switch
+        {
+            DeviceSyncPhase.Preparing => $"Preparing {DeviceLabel}…",
+            DeviceSyncPhase.Finalizing => "Finalizing safely…",
+            DeviceSyncPhase.Paused => "Sync paused",
+            DeviceSyncPhase.Cancelled => "Sync cancelled",
+            DeviceSyncPhase.Failed => presentation.ErrorMessage is { Length: > 0 } error
+                ? $"Sync failed: {error}"
+                : "Sync failed",
+            DeviceSyncPhase.Finished => BuildFinishedSummary(presentation.Finished),
+            _ => $"Syncing {DeviceLabel}…",
+        };
     }
 
     public WireCancelSyncCommand? CreateWireCancelSyncCommand(string requestId) =>
@@ -95,11 +130,50 @@ public partial class PopoverViewModel
             ? new PauseSyncCommand(target.DeviceId, target.SessionId, requestId)
             : null;
 
-    public PromptDecisionCommand? CreateWirePromptDecisionCommand(int choice, string requestId)
+    public WireCommand? CreateWireInteractionCommand(int choice, string requestId)
     {
-        return CanControlActiveDeviceSync && ActiveDeviceSession is { } target && PromptActive
-            ? new PromptDecisionCommand(target.DeviceId, target.SessionId, requestId, PromptId, checked((uint)choice))
-            : null;
+        if (_wireInteraction is not { } interaction ||
+            ActiveDeviceSession != interaction.Owner || !PromptActive ||
+            _pendingInteractionRequestId is not null)
+        {
+            return null;
+        }
+
+        WireCommand? command = interaction.Kind switch
+        {
+            SyncInteractionKind.Prompt => new PromptDecisionCommand(
+                interaction.Owner.DeviceId,
+                interaction.Owner.SessionId,
+                requestId,
+                interaction.PromptId,
+                checked((uint)choice)),
+            SyncInteractionKind.Form => new FormDecisionCommand(
+                interaction.Owner.DeviceId,
+                interaction.Owner.SessionId,
+                requestId,
+                interaction.PromptId,
+                PromptInput),
+            SyncInteractionKind.Review when choice is 0 or 1 => new ApplyReviewCommand(
+                interaction.Owner.DeviceId,
+                interaction.Owner.SessionId,
+                requestId,
+                choice == 1),
+            SyncInteractionKind.Review when choice == 2 => new DryRunReviewCommand(
+                interaction.Owner.DeviceId,
+                interaction.Owner.SessionId,
+                requestId),
+            SyncInteractionKind.Review => new QuitReviewCommand(
+                interaction.Owner.DeviceId,
+                interaction.Owner.SessionId,
+                requestId),
+            _ => null,
+        };
+        if (command is not null)
+        {
+            _pendingInteractionRequestId = requestId;
+            InteractionDecisionEnabled = false;
+        }
+        return command;
     }
 
     public WireTriggerSyncCommand? CreateWireTriggerSyncCommand(string requestId)
@@ -109,73 +183,40 @@ public partial class PopoverViewModel
             : null;
     }
 
-    public void ApplySyncProgress(RoutedSyncEvent routed)
-    {
-        ArgumentNullException.ThrowIfNull(routed);
-        if (ActiveSyncContext != routed.Context)
-        {
-            return;
-        }
-
-        if (FinishingSync && routed.Event is PromptEvent)
-        {
-            return;
-        }
-
-        if (routed.Event is PromptEvent)
-        {
-            _promptContext = routed.Context;
-        }
-        ApplyIpcProgress(routed.Event);
-    }
-
-    public CancelSyncCommand? CreateCancelSyncCommand(string requestId)
-    {
-        return CanControlActiveSync && ActiveSyncContext?.Serial is { } serial
-            ? new CancelSyncCommand(serial, requestId)
-            : null;
-    }
-
-    public TriggerSyncCommand? CreateTriggerSyncCommand(string? fallbackSerial, string requestId)
-    {
-        if (!ShowSyncNowButton)
-        {
-            return null;
-        }
-
-        var serial = DisplayedDeviceSerial ?? fallbackSerial;
-        return serial is not null
-            ? new TriggerSyncCommand("manual", serial, requestId)
-            : null;
-    }
-
-    public PauseCommand? CreatePauseCommand(string requestId)
-    {
-        return CanControlActiveSync && ActiveSyncContext?.Serial is { } serial
-            ? new PauseCommand(serial, requestId)
-            : null;
-    }
-
-    public DecidePromptCommand? CreatePromptDecisionCommand(int choice, string requestId)
-    {
-        if (!CanControlActiveSync ||
-            _promptContext != ActiveSyncContext ||
-            ActiveSyncContext?.Serial is not { } serial ||
-            !PromptActive)
-        {
-            return null;
-        }
-
-        return new DecidePromptCommand(PromptId, choice, serial, requestId);
-    }
-
     public void ClearPrompt()
     {
-        _promptContext = null;
+        _wireInteraction = null;
         PromptActive = false;
+        PromptIsForm = false;
+        PromptInput = "";
+        PromptHint = "";
         PromptMessage = "";
         PromptId = 0;
         PromptOptions.Clear();
+        _pendingInteractionRequestId = null;
+        InteractionDecisionEnabled = true;
+    }
+
+    public void InteractionCommandFailed(string requestId, string message)
+    {
+        if (!string.Equals(_pendingInteractionRequestId, requestId, StringComparison.Ordinal)) return;
+        _pendingInteractionRequestId = null;
+        InteractionDecisionEnabled = true;
+        StatusText = $"Could not send response: {message}";
+    }
+
+    private static int ToProgressValue(ulong value) =>
+        value > int.MaxValue ? int.MaxValue : (int)value;
+
+    private static string BuildFinishedSummary(SyncFinishedEvent? finished)
+    {
+        if (finished is null) return "Sync complete";
+        if (!finished.Success) return finished.DbRestored
+            ? "Sync failed · iPod database restored"
+            : "Sync failed";
+        if (finished.SkippedForSpace is { Tracks: > 0 } skipped)
+            return $"Sync complete · {skipped.Tracks} tracks skipped for space";
+        return "Sync complete";
     }
 
     private void ResetSyncProgress()
@@ -184,6 +225,7 @@ public partial class PopoverViewModel
         ProgressTotal = 0;
         CurrentTrackLabel = "";
         SyncStartedAt = null;
+        ReportedEtaSeconds = null;
         ClearPrompt();
     }
 }

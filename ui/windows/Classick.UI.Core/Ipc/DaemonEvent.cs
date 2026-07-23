@@ -41,7 +41,7 @@ namespace Classick_UI.Ipc;
 [JsonDerivedType(typeof(SyncErrorEvent), "sync_error")]
 [JsonDerivedType(typeof(SyncFinishedEvent), "sync_finished")]
 [JsonDerivedType(typeof(CommandFailedEvent), "command_failed")]
-public abstract record WireEvent : WireMessage, IpcEvent;
+public abstract record WireEvent : WireMessage;
 
 public sealed record GlobalConfigEvent(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("request_id")] string? RequestId,

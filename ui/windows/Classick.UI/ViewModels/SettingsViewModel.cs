@@ -57,6 +57,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         Chooser.SelectionChanged += deviceId =>
         {
             General.SelectDevice(deviceId);
+            OnPropertyChanged(nameof(CanMutateSelectedDevice));
             if (deviceId is { } id) _ = RequestDeviceConfigAsync(id);
         };
         router.EventReceived += OnWireEvent;
@@ -68,6 +69,8 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
     public SettingsHistoryViewModel History { get; }
     public SettingsAboutViewModel About { get; }
     public IpodChooserViewModel Chooser { get; }
+    public bool CanMutateSelectedDevice => Chooser.Selected is { } selected &&
+        _store.CaptureDeviceMutation(selected.DeviceId) is not null;
 
     public void QueueSave()
     {
@@ -211,16 +214,19 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         }
     }
 
-    public Task SyncSelectedAsync() => Chooser.Selected is { } selected
+    public Task SyncSelectedAsync() => Chooser.Selected is { } selected &&
+        _store.CaptureDeviceMutation(selected.DeviceId) is not null
         ? _daemon.SendAsync(new WireTriggerSyncCommand(selected.DeviceId, NewId(), SyncTrigger.Manual))
         : Task.CompletedTask;
 
-    public Task ReplaceSelectedLibraryAsync() => Chooser.Selected is { } selected
+    public Task ReplaceSelectedLibraryAsync() => Chooser.Selected is { } selected &&
+        _store.CaptureDeviceMutation(selected.DeviceId) is not null
         ? _daemon.SendAsync(new ReplaceLibraryCommand(selected.DeviceId, NewId()))
         : Task.CompletedTask;
 
     private void OnWireEvent(WireEvent wireEvent)
     {
+        App.DispatcherQueue.TryEnqueue(() => OnPropertyChanged(nameof(CanMutateSelectedDevice)));
         if (wireEvent is GlobalConfigEvent global)
         {
             App.DispatcherQueue.TryEnqueue(() =>

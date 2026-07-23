@@ -44,36 +44,6 @@ public partial class PopoverViewModel
         OnPropertyChanged(nameof(SourceRetryAvailable));
     }
 
-    public void ApplySourceAvailability(SourceAvailabilityEvent availability)
-    {
-        ArgumentNullException.ThrowIfNull(availability);
-
-        if (availability.AcknowledgedRequestId is { } requestId &&
-            _pendingSourceRetryRequestId is { } pendingRequestId)
-        {
-            if (!string.Equals(requestId, pendingRequestId, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            ClearPendingSourceRetry();
-        }
-        else if (availability.AcknowledgedRequestId is null &&
-                 availability.State != SourceAvailabilityState.Remounting)
-        {
-            ClearPendingSourceRetry();
-        }
-
-        SourceAttentionVisible = availability.State is
-            SourceAvailabilityState.AuthRequired or SourceAvailabilityState.Unavailable;
-        SourceRemounting = availability.State == SourceAvailabilityState.Remounting;
-
-        if (availability.State == SourceAvailabilityState.Available)
-        {
-            AvailableSourceRoot = availability.SourceRoot;
-        }
-    }
-
     public void ApplySourceAvailability(WireSourceAvailabilityEvent availability)
     {
         ArgumentNullException.ThrowIfNull(availability);
@@ -106,19 +76,6 @@ public partial class PopoverViewModel
         return new WireRetrySourceMountCommand(requestId, AllowUi: true);
     }
 
-    public RetrySourceMountCommand? CreateSourceRetryCommand(string requestId)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
-        if (!SourceAttentionVisible || _pendingSourceRetryRequestId is not null)
-        {
-            return null;
-        }
-
-        _pendingSourceRetryRequestId = requestId;
-        SourceRetryPending = true;
-        return new RetrySourceMountCommand(AllowUi: true, RequestId: requestId);
-    }
-
     public void SourceRetrySendFailed(string requestId)
     {
         if (string.Equals(
@@ -141,6 +98,7 @@ public partial class PopoverViewModel
         OnPropertyChanged(nameof(ShowSourceRecovery));
         OnPropertyChanged(nameof(SourceRetryAvailable));
         OnPropertyChanged(nameof(ShowConnectedContent));
+        OnPropertyChanged(nameof(ShowEjectButton));
         OnPropertyChanged(nameof(ShowEmptyState));
         OnPropertyChanged(nameof(ShowSyncNowButton));
         OnPropertyChanged(nameof(ShowSyncControls));

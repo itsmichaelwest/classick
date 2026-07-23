@@ -172,14 +172,6 @@ public sealed class DaemonClient : IAsyncDisposable
         await _pipe.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task SendAsync(DaemonCommand command, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(command);
-        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize<DaemonCommand>(command) + "\n");
-        await _pipe.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
-        await _pipe.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
-
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;

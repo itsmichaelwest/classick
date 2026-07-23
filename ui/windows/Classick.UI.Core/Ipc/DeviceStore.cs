@@ -11,6 +11,11 @@ public sealed class DeviceClientState
     {
         Inventory = inventory;
         ActiveSessionId = inventory.SessionId;
+        if (inventory.SessionId is { } sessionId)
+        {
+            SyncPresentation = new DeviceSyncPresentation(
+                new DeviceSessionTarget(inventory.DeviceId, sessionId));
+        }
     }
 
     public IdentifiedDeviceSnapshot Inventory { get; internal set; }
@@ -18,6 +23,7 @@ public sealed class DeviceClientState
     public IReadOnlyList<WireHistoryEntry> History { get; internal set; } = [];
     public WireEvent? LastProgress { get; internal set; }
     public ulong? ActiveSessionId { get; internal set; }
+    public DeviceSyncPresentation? SyncPresentation { get; internal set; }
 }
 
 public sealed class DeviceStore
@@ -97,6 +103,9 @@ public sealed class DeviceStore
             case SyncAcceptedEvent accepted when _devices.TryGetValue(accepted.DeviceId, out var acceptedDevice):
                 acceptedDevice.ActiveSessionId = accepted.SessionId;
                 acceptedDevice.LastProgress = accepted;
+                acceptedDevice.SyncPresentation = new DeviceSyncPresentation(
+                    new DeviceSessionTarget(accepted.DeviceId, accepted.SessionId));
+                acceptedDevice.SyncPresentation.Apply(accepted);
                 RefreshFocus();
                 return true;
             case ISessionRoutedMessage routed when wireEvent is WireEvent progress:
@@ -110,6 +119,11 @@ public sealed class DeviceStore
     {
         if (deviceId is not null && !_devices.ContainsKey(deviceId)) return false;
         _explicitSelection = deviceId;
+        if (deviceId is not null)
+        {
+            FocusedDeviceId = deviceId;
+            return true;
+        }
         RefreshFocus();
         return true;
     }
@@ -130,6 +144,36 @@ public sealed class DeviceStore
         return new DeviceSessionTarget(deviceId, sessionId);
     }
 
+    public DeviceMountTarget? CaptureMountAction(DeviceId deviceId)
+    {
+        if (!_devices.TryGetValue(deviceId, out var device) ||
+            !device.Inventory.Connected ||
+            string.IsNullOrWhiteSpace(device.Inventory.MountPath))
+        {
+            return null;
+        }
+
+        return new DeviceMountTarget(deviceId, _inventoryRevision, device.Inventory.MountPath);
+    }
+
+    public bool IsCurrentMountAction(DeviceMountTarget target) =>
+        _inventoryRevision == target.InventoryRevision &&
+        _devices.TryGetValue(target.DeviceId, out var device) &&
+        device.Inventory.Connected &&
+        string.Equals(device.Inventory.MountPath, target.MountPath, StringComparison.OrdinalIgnoreCase);
+
+    public DeviceActionTarget? CaptureDeviceMutation(DeviceId deviceId) =>
+        _devices.TryGetValue(deviceId, out var device) &&
+        device.Inventory is
+        {
+            Connected: true,
+            Readiness: DeviceReadiness.Ready,
+            ProfileStatus: ProfileStatus.Adopted,
+        } &&
+        device.ActiveSessionId is null
+            ? new DeviceActionTarget(deviceId)
+            : null;
+
     private bool ReduceInventory(DeviceInventoryEvent inventory)
     {
         if (_inventoryRevision is not null && inventory.Revision < _inventoryRevision) return false;
@@ -148,6 +192,11 @@ public sealed class DeviceStore
                 if (snapshot.SessionId is { } snapshotSession)
                 {
                     existing.ActiveSessionId = snapshotSession;
+                    if (existing.SyncPresentation?.Target.SessionId != snapshotSession)
+                    {
+                        existing.SyncPresentation = new DeviceSyncPresentation(
+                            new DeviceSessionTarget(snapshot.DeviceId, snapshotSession));
+                    }
                 }
                 else if (existing.LastProgress is not (SyncPausedEvent or SyncCancelledEvent))
                 {
@@ -187,6 +236,9 @@ public sealed class DeviceStore
         }
 
         device.LastProgress = progress;
+        device.SyncPresentation ??= new DeviceSyncPresentation(
+            new DeviceSessionTarget(routed.DeviceId, routed.SessionId));
+        device.SyncPresentation.Apply(progress);
         // Paused/cancelled are intermediate terminal-state notices. The core
         // still publishes the authoritative sync_finished rollup for the same
         // session, so retain the route until that final event arrives.
