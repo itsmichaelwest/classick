@@ -2,15 +2,14 @@ import Foundation
 
 struct LibraryDropEligibility: Equatable {
   static func targetForDevice(_ device: DeviceViewState) -> LibraryDropTarget? {
-    let serial = device.identity.serial.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard device.configured, !serial.isEmpty else { return nil }
+    guard device.configured else { return nil }
     return .device(
-      serial: serial,
+      serial: device.deviceID,
       displayName: device.identity.name ?? device.identity.modelLabel)
   }
 
   static func targetForCard(_ presentation: DeviceRowPresentation) -> LibraryDropTarget? {
-    guard let serial = presentation.serial, !serial.isEmpty else { return nil }
+    guard let serial = presentation.serial else { return nil }
     return .device(serial: serial, displayName: presentation.title)
   }
 
@@ -38,7 +37,7 @@ enum LibraryDropAcceptance {
       }
       combined.append(contentsOf: rules)
     }
-    return DaemonCommand.canonicalAdditiveRules(combined)
+    return WireV3Command.canonicalAdditiveRules(combined)
   }
 }
 
@@ -72,7 +71,7 @@ enum LibraryDropFeedback {
 }
 
 enum LibraryDropTarget: Hashable, Sendable {
-  case device(serial: String, displayName: String)
+  case device(serial: DeviceID, displayName: String)
   case manualPlaylist(slug: String, displayName: String)
 
   fileprivate var identity: LibraryDropTargetIdentity {
@@ -91,9 +90,9 @@ enum LibraryDropTarget: Hashable, Sendable {
 
 enum DropOutcome: Equatable, Sendable {
   case adding(target: LibraryDropTarget)
-  case addedAndSyncing(serial: String)
-  case addedForNextSync(serial: String)
-  case alreadyPresent(serial: String)
+  case addedAndSyncing(serial: DeviceID)
+  case addedForNextSync(serial: DeviceID)
+  case alreadyPresent(serial: DeviceID)
   case appended(slug: String, count: Int)
   case rejected(target: LibraryDropTarget, message: String)
 
@@ -110,7 +109,7 @@ enum DropOutcome: Equatable, Sendable {
 }
 
 private enum LibraryDropTargetIdentity: Hashable, Sendable {
-  case device(serial: String)
+  case device(serial: DeviceID)
   case manualPlaylist(slug: String)
 }
 
@@ -139,7 +138,7 @@ struct LibraryDropState: Sendable {
 
   mutating func completeDevice(
     requestID: String,
-    serial: String,
+    serial: DeviceID,
     delivery: DropDelivery
   ) -> Bool {
     let identity = LibraryDropTargetIdentity.device(serial: serial)
@@ -172,7 +171,8 @@ struct LibraryDropState: Sendable {
     let targetIdentity: LibraryDropTargetIdentity
     switch identity {
     case .deviceSelection(let serial):
-      targetIdentity = .device(serial: serial)
+      guard let deviceID = try? DeviceID(serial) else { return false }
+      targetIdentity = .device(serial: deviceID)
     case .manualPlaylist(let slug):
       targetIdentity = .manualPlaylist(slug: slug)
     }

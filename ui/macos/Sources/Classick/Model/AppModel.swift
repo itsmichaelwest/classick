@@ -3,7 +3,7 @@ import Observation
 
 /// Derived UI phase for the menu-bar surface. `.noDevice`/`.notConfigured`
 /// take precedence over sync state when deriving from `status_update`, but
-/// direct sync progress (`sync_event` lines) always wins once a sync is
+/// direct protocol v3 sync progress always wins once a sync is
 /// actually streaming — see AppModel.apply for the precedence rules.
 enum Phase: Equatable, Sendable {
   case noDevice
@@ -36,9 +36,8 @@ struct ResolvedTracksReply: Equatable, Sendable {
   var tracks: [String]
 }
 
-/// The daemon's last-known persisted configuration, as pushed by
-/// `config_update`. Settings/Setup UI reads this to seed its controls and
-/// writes back via `save_config`; the daemon (not this app) remains the
+/// The daemon's last-known persisted configuration, as reported by
+/// `global_config`. Settings/Setup UI reads this to seed its controls; the daemon remains the
 /// store of record.
 struct AppConfig: Equatable, Sendable {
   var source: String?
@@ -46,7 +45,7 @@ struct AppConfig: Equatable, Sendable {
   var ipod: IpodIdentity?
 }
 
-/// One device's resolved config (protocol v1.6.0's `device_config_update`),
+/// One device's resolved protocol v3 config,
 /// plus its most recently requested `device_preview` (if any). Keyed by
 /// serial in `AppModel.deviceConfigs` so the app can hold config for more
 /// than one iPod this daemon has ever seen, not just the connected one.
@@ -69,16 +68,16 @@ enum DeviceConfigRequestIntent {
 }
 
 private struct PendingDeviceRequest {
-  var serial: DeviceSerial
+  var serial: DeviceID
   var generation: UInt64
   var configIntent: DeviceConfigRequestIntent?
 }
 
 enum DeviceCommandGate {
   static func allows(
-    serial: DeviceSerial,
+    serial: DeviceID,
     hasAuthoritativeInventory: Bool,
-    devices: [DeviceSerial: DeviceViewState]
+    devices: [DeviceID: DeviceViewState]
   ) -> Bool {
     hasAuthoritativeInventory && devices[serial] != nil
   }
@@ -140,7 +139,7 @@ final class AppModel {
   // for immediate post-sync display (Task 17). These are separate from
   // `history`'s own `summary`/`dbRestored` (which the daemon
   // persists and rebroadcasts) because a live `finish` line arrives over
-  // the forwarded sync_event stream before the daemon's own
+  // the routed progress stream before the daemon's own
   // history_update/status_update catches up.
   private(set) var lastRunSkippedForSpace: SkippedForSpace?
   private(set) var lastRunArtwork: ArtworkSummary?
@@ -172,9 +171,10 @@ final class AppModel {
   private(set) var playlistDetail: PlaylistDetail?
   private(set) var configRevision: UInt64 = 0
   private(set) var configAcknowledgedRequestID: String?
-  private(set) var deviceConfigAcknowledgedRequestIDs: [DeviceSerial: String] = [:]
-  private(set) var devices: [DeviceSerial: DeviceViewState] = [:]
-  var deviceConfigs: [String: DeviceConfigState] {
+  private(set) var deviceConfigAcknowledgedRequestIDs: [DeviceID: String] = [:]
+  private(set) var devices: [DeviceID: DeviceViewState] = [:]
+  private(set) var unidentifiedDevices: [ObservationID: UnidentifiedDeviceViewState] = [:]
+  var deviceConfigs: [DeviceID: DeviceConfigState] {
     devices.compactMapValues(\.config)
   }
   /// Sidebar navigation selection. Plain (not `private(set)`) — the
@@ -182,9 +182,9 @@ final class AppModel {
   var selectedDestination: SidebarDestination?
   private var nextDeviceRequestGeneration: UInt64 = 0
   private var deviceConfigRequests: [String: PendingDeviceRequest] = [:]
-  private var latestDeviceConfigGeneration: [DeviceSerial: UInt64] = [:]
+  private var latestDeviceConfigGeneration: [DeviceID: UInt64] = [:]
   private var devicePreviewRequests: [String: PendingDeviceRequest] = [:]
-  private var latestDevicePreviewGeneration: [DeviceSerial: UInt64] = [:]
+  private var latestDevicePreviewGeneration: [DeviceID: UInt64] = [:]
 
   private var lastInventoryRevision: UInt64?
   private var hasAuthoritativeInventory = false
@@ -206,23 +206,23 @@ final class AppModel {
   }
 
   func prepareSourceMountRetry(
-    isApplicationActive: Bool, requestID: String
-  ) -> DaemonCommand? {
+    isApplicationActive: Bool, requestID: UUID
+  ) -> WireV3Command? {
     guard isApplicationActive, sourceNeedsAttention, pendingSourceRetryRequestID == nil else {
       return nil
     }
-    pendingSourceRetryRequestID = requestID
-    return .retrySourceMount(allowUI: true, requestID: requestID)
+    pendingSourceRetryRequestID = requestID.uuidString.lowercased()
+    return .retrySourceMount(requestID: requestID, allowUI: true)
   }
 
-  func canSendDeviceCommand(to serial: DeviceSerial) -> Bool {
+  func canSendDeviceCommand(to serial: DeviceID) -> Bool {
     DeviceCommandGate.allows(
       serial: serial,
       hasAuthoritativeInventory: hasAuthoritativeInventory,
       devices: devices)
   }
 
-  func canControlSync(to serial: DeviceSerial) -> Bool {
+  func canControlSync(to serial: DeviceID) -> Bool {
     canSendDeviceCommand(to: serial) && devices[serial]?.finalization == nil
   }
 
@@ -277,8 +277,8 @@ final class AppModel {
   // unpaired iPod while a paired one's config is still cached would show
   // "Sync Now" instead of "Set Up Classick…".
   //
-  // `configuredSerial`/`hasSeenConfig` come from `config_update` (the
-  // source of truth once we've seen one). Before the first `config_update`
+  // `hasSeenConfig` comes from `global_config`, the source of truth once
+  // we've seen one. Before the first response
   // arrives, `statusConfigured` — the daemon's own device-agnostic
   // `status_update.configured` flag — is used as a fallback so the menu
   // doesn't flash "Set Up Classick…" during the startup handshake.
@@ -292,7 +292,7 @@ final class AppModel {
     // device-agnostic `status_update.configured` flag in that window — this
     // avoids flashing "Set Up Classick…" during the startup handshake AND
     // on every reconnect of an already-configured device (where
-    // `status_update` arrives before `config_update`).
+    // inventory arrives before global configuration).
     guard hasSeenConfig else { return statusConfigured }
     // Config known but the `device_connected` event hasn't arrived yet:
     // fall back to "is anything paired at all".
@@ -307,270 +307,321 @@ final class AppModel {
   /// no music-library source. Stays `false` until the config reply lands, so
   /// first-run auto-presentation waits for the handshake instead of firing
   /// during the startup race. The daemon always answers `get_config` — with
-  /// an empty `config_update` when nothing is persisted — so this reliably
+  /// a `global_config` response when nothing is persisted — so this reliably
   /// flips `true` on a fresh machine.
   var needsFirstRunSetup: Bool {
     hasSeenConfig && (config?.source?.isEmpty ?? true)
   }
 
-  private let decoder = JSONDecoder()
-
-  func apply(_ ev: DaemonEvent) {
-    switch ev {
+  func apply(_ event: WireV3Event) {
+    switch event {
     case .hello:
-      // Correlation and monotonic revisions are scoped to one connection.
-      // A reply left behind by a dead socket must not affect the new epoch.
-      nextDeviceRequestGeneration = 0
-      deviceConfigRequests.removeAll()
-      latestDeviceConfigGeneration.removeAll()
-      devicePreviewRequests.removeAll()
-      latestDevicePreviewGeneration.removeAll()
-      pendingResolveTracks.removeAll()
-      lastInventoryRevision = nil
-      hasAuthoritativeInventory = false
-      globalScanSessionID = nil
-      isScanning = false
-      terminalStateConsumer.reset()
-      devices.removeAll()
-      device = nil
-      phase = .noDevice
-      pendingPrompt = nil
-      storageText = nil
-      config = nil
-      syncedCount = 0
-      libraryCount = nil
-      selectionPreview = nil
-      lastRunSkippedForSpace = nil
-      lastRunArtwork = nil
-      lastRunDbRestored = false
-      deviceStorage = nil
-      isIpodConnected = false
-      configuredSerial = nil
-      hasSeenConfig = false
-      statusConfigured = false
-      sourceAvailability = nil
-      pendingSourceRetryRequestID = nil
-      playlistRevision = 0
-      playlistAcknowledgedRequestID = nil
-      configRevision = 0
-      configAcknowledgedRequestID = nil
-      deviceConfigAcknowledgedRequestIDs.removeAll()
-
-    case .unknown:
-      break
-
-    case .commandFailed:
-      break
-
-    case .historyUpdate(let entries, _):
-      history = entries
-
-    case .libraryUpdate(let info):
-      library = info
-
-    case .sourceAvailability(let info):
-      if let acknowledgedRequestID = info.acknowledgedRequestID {
-        if let pendingSourceRetryRequestID {
-          guard acknowledgedRequestID == pendingSourceRetryRequestID else { break }
-          self.pendingSourceRetryRequestID = nil
-        }
-      } else if info.state != .remounting {
-        pendingSourceRetryRequestID = nil
-      }
-      sourceAvailability = info
-      if case .available = info.state, let sourceRoot = info.sourceRoot {
-        library?.sourceRoot = sourceRoot
-        config?.source = sourceRoot
-      }
-
-    case .selectionUpdate(let mode, let rules, _, _):
-      selection = SelectionState(mode: mode, rules: rules)
-
-    case .selectionPreview(let info):
-      selectionPreview = info
-
-    case .playlistsUpdate(let list, let revision, let acknowledgedRequestID):
-      guard revision >= playlistRevision else { break }
-      playlists = list
-      playlistRevision = revision
-      playlistAcknowledgedRequestID = acknowledgedRequestID
-      playlistsUpdateRevision += 1
-      if let slug = playlistDetail?.slug, !list.contains(where: { $0.slug == slug }) {
-        playlistDetail = nil
-      }
-
-    case .playlistDetail(let detail):
-      guard detail.playlistRevision >= playlistRevision else { break }
-      playlistDetail = detail
-
-    case .deviceConfigUpdate(
-      let serial, let selection, let subscriptions, let settings, let selectionRevision,
-      let settingsRevision, let subscriptionsRevision,
-      let acknowledgedRequestID):
-      guard shouldApplyDeviceConfigResponse(serial: serial, requestID: acknowledgedRequestID) else {
-        break
-      }
-      guard var deviceState = devices[serial] else { break }
-      guard selectionRevision >= deviceState.selectionRevision,
-        settingsRevision >= deviceState.settingsRevision,
-        subscriptionsRevision >= deviceState.subscriptionsRevision
-      else { break }
-      var config = deviceState.config ?? .defaultState
-      config.selection = selection
-      config.subscriptions = subscriptions
-      config.settings = settings
-      deviceState.config = config
-      deviceState.selectionRevision = max(deviceState.selectionRevision, selectionRevision)
-      deviceState.settingsRevision = max(deviceState.settingsRevision, settingsRevision)
-      deviceState.subscriptionsRevision = max(
-        deviceState.subscriptionsRevision, subscriptionsRevision)
-      devices[serial] = deviceState
-      deviceConfigAcknowledgedRequestIDs[serial] = acknowledgedRequestID
-
-    case .devicePreview(let preview):
-      let serial = preview.serial
-      guard
-        shouldApplyDeviceResponse(
-          serial: serial,
-          requestID: preview.acknowledgedRequestID,
-          requests: devicePreviewRequests,
-          latestGeneration: latestDevicePreviewGeneration,
-          allowsUnsolicitedResponse: false)
-      else { break }
-      guard var deviceState = devices[serial] else { break }
-      deviceState.preview = preview
-      if deviceState.config == nil {
-        deviceState.config = .defaultState
-      }
-      deviceState.config?.preview = preview
-      devices[serial] = deviceState
-
-    case .deviceSelectionAdded(let reply):
-      guard var deviceState = devices[reply.serial] else { break }
-      let acceptsRevision = reply.selectionRevision >= deviceState.selectionRevision
-      if acceptsRevision {
-        var config = deviceState.config ?? .defaultState
-        config.selection = reply.selection
-        deviceState.config = config
-        deviceState.selectionRevision = reply.selectionRevision
-        devices[reply.serial] = deviceState
-        deviceConfigAcknowledgedRequestIDs[reply.serial] = reply.acknowledgedRequestID
-        let completed = libraryDropState.completeDevice(
-          requestID: reply.acknowledgedRequestID,
-          serial: reply.serial,
-          delivery: reply.delivery)
-        recordPersistedDropAcknowledgement(reply.acknowledgedRequestID, if: completed)
-      }
-
-    case .playlistSelectionAppended(let reply):
-      let acceptsRevision = reply.playlistRevision >= playlistRevision
-      if acceptsRevision {
-        playlistRevision = reply.playlistRevision
-        playlistAcknowledgedRequestID = reply.acknowledgedRequestID
-        if let index = playlists.firstIndex(where: { $0.slug == reply.slug }) {
-          playlists[index].name = reply.playlist.name
-          playlists[index].tracks = reply.playlist.tracks.count
-          playlists[index].error = nil
-        }
-        playlistDetail = PlaylistDetail(
-          slug: reply.playlist.slug,
-          name: reply.playlist.name,
-          kind: .manual,
-          tracks: reply.playlist.tracks,
-          rules: nil,
-          error: nil,
-          playlistRevision: reply.playlistRevision,
-          acknowledgedRequestID: reply.acknowledgedRequestID)
-        let completed = libraryDropState.completePlaylist(
-          requestID: reply.acknowledgedRequestID,
-          slug: reply.slug,
-          appendedTracks: reply.appendedTracks)
-        recordPersistedDropAcknowledgement(reply.acknowledgedRequestID, if: completed)
-      }
-
-    case .libraryMutationRejected(let rejection):
-      let completed = libraryDropState.reject(
-        requestID: rejection.acknowledgedRequestID,
-        target: rejection.target,
-        message: rejection.message)
-      recordPersistedDropAcknowledgement(rejection.acknowledgedRequestID, if: completed)
-
-    case .configUpdate(let source, let daemon, let ipod, let revision, let acknowledgedRequestID):
-      guard revision >= configRevision else { break }
-      config = AppConfig(source: source, daemon: daemon, ipod: ipod)
-      configRevision = revision
-      configAcknowledgedRequestID = acknowledgedRequestID
-      // The daemon considers itself configured once it has a persisted
-      // iPod identity (daemon: `configured = configured_serial.is_some()`).
-      // It emits `config_update` (not a pushed `status_update`) after a
-      // `save_config`, so derive the flag here too or the menu would stay
-      // stuck on "Set Up…" right after first-run setup. Track the serial
-      // itself (not just presence) so a later device swap is caught by
-      // `isConfiguredForCurrentDevice`.
+      resetForProtocolEpoch()
+    case .globalConfig(let wire):
+      guard wire.revision >= configRevision else { return }
+      config = AppConfig(source: wire.sourceRoot, daemon: wire.settings.appValue, ipod: nil)
+      configRevision = wire.revision
+      configAcknowledgedRequestID = wire.requestID?.uuidString.lowercased()
       hasSeenConfig = true
-      configuredSerial = ipod?.serial
-      phase = computePhase(targetSyncing: phaseIsSyncing)
-
-    case .deviceConnected(let serial, let modelLabel, let drive, let name):
-      device = DeviceState(serial: serial, model: modelLabel, name: name, drive: drive)
-      isIpodConnected = true
-      let storage = storageFor(drive: drive)
-      deviceStorage = storage
-      storageText = Self.formatStorage(storage)
-      phase = computePhase(targetSyncing: phaseIsSyncing)
-
-    case .deviceDisconnected:
-      device = nil
-      isIpodConnected = false
-      storageText = nil
-      deviceStorage = nil
-      phase = computePhase(targetSyncing: false)
-
-    case .statusUpdate(let info):
-      statusConfigured = info.configured
-      isIpodConnected = info.ipodConnected
-      syncedCount = info.syncedCount
-      libraryCount = info.libraryCount
-      let wasScanning = isScanning
-      isScanning = (info.state == .scanning)
-      if !isScanning || !wasScanning {
-        globalScanSessionID = nil
-      }
-      let targetSyncing: Bool
-      switch info.state {
-      case .syncing: targetSyncing = true
-      case .idle, .scanning: targetSyncing = false
-      }
-      if info.state == .scanning {
-        // Preserve in-flight scan progress across status rebroadcasts.
-        if case .scanning = phase {} else { phase = .scanning(current: 0, total: 0) }
-      } else if hasAuthoritativeInventory {
-        refreshFocusedDeviceProjection()
-      } else {
-        phase = computePhase(targetSyncing: targetSyncing)
-      }
-
-    case .syncEvent(let line, let serial, let sessionID):
-      applySyncEvent(line, serial: serial, sessionID: sessionID)
-
-    case .syncRejected(let reason, _, _):
-      phase = .error(Self.humanReadable(rejection: reason))
-
-    case .resolvedTracks(let tracks, _):
-      guard !pendingResolveTracks.isEmpty else { break }
-      let slug = pendingResolveTracks.removeFirst()
-      latestResolvedTracks = ResolvedTracksReply(slug: slug, tracks: tracks)
-      resolvedTracksRevision += 1
-
-    case .deviceInventorySnapshot(let snapshot):
-      guard lastInventoryRevision.map({ snapshot.revision > $0 }) ?? true else { break }
-      lastInventoryRevision = snapshot.revision
+    case .sourceAvailability(let wire):
+      applySourceAvailability(wire)
+    case .inventorySubscriptionChanged:
+      break
+    case .deviceInventory(let inventory):
+      guard lastInventoryRevision.map({ inventory.revision > $0 }) ?? true else { return }
+      lastInventoryRevision = inventory.revision
       hasAuthoritativeInventory = true
       let previous = devices
-      devices = DeviceReducer.reduce(snapshot: snapshot, previous: previous)
+      devices = DeviceReducer.reduce(inventory: inventory, previous: previous)
       terminalStateConsumer.reconcile(devices: &devices, previous: previous)
+      unidentifiedDevices = Dictionary(uniqueKeysWithValues: inventory.unidentified.map {
+        ($0.observationID, UnidentifiedDeviceViewState(
+          observationID: $0.observationID, readiness: $0.readiness, hardware: $0.hardware))
+      })
       refreshFocusedDeviceProjection()
+    case .deviceConfig(let wire):
+      applyDeviceConfig(wire)
+    case .configMutationFailed(let failure):
+      guard failure.stage == "host_acceptance", var state = devices[failure.deviceID] else { return }
+      state.phase = .error(failure.message)
+      devices[failure.deviceID] = state
+      refreshFocusedDeviceProjection()
+    case .deviceForgotten(let forgotten):
+      devices.removeValue(forKey: forgotten.deviceID)
+      deviceConfigAcknowledgedRequestIDs.removeValue(forKey: forgotten.deviceID)
+      refreshFocusedDeviceProjection()
+    case .syncAccepted(let accepted):
+      guard var state = devices[accepted.deviceID] else { return }
+      state.phase = .syncing
+      state.sessionID = accepted.sessionID
+      state.syncProgress = nil
+      state.finalization = nil
+      devices[accepted.deviceID] = state
+      refreshFocusedDeviceProjection()
+    case .syncRejected(let rejected):
+      guard var state = devices[rejected.deviceID] else { return }
+      state.phase = .error(rejected.message)
+      devices[rejected.deviceID] = state
+      refreshFocusedDeviceProjection()
+    case .history(let update):
+      history = update.entries.map(\.appValue)
+      for (deviceID, var state) in devices {
+        let entries = update.entries.filter { $0.deviceID == deviceID }
+        state.latestAttempt = entries.first?.appValue
+        state.latestSuccessfulSync = entries.first(where: { $0.outcome == "ok" })?.appValue
+        devices[deviceID] = state
+      }
+    case .library(let update):
+      library = LibraryInfo(
+        sourceRoot: update.sourceRoot, scannedAtUnixSecs: update.scannedAtUnixSecs,
+        artists: update.artists, genres: update.genres, totalTracks: update.totalTracks,
+        totalBytes: update.totalBytes,
+        acknowledgedRequestID: update.requestID?.uuidString.lowercased())
+    case .libraryScan(let scan):
+      applyLibraryScan(scan)
+    case .selectionPreview(let preview):
+      selectionPreview = SelectionPreviewInfo(
+        selectedTracks: preview.selectedTracks, selectedBytes: preview.selectedBytes,
+        adds: preview.adds, removes: preview.removes, serial: preview.deviceID.rawValue,
+        acknowledgedRequestID: preview.requestID.uuidString.lowercased())
+    case .devicePreview(let preview):
+      applyDevicePreview(preview)
+    case .resolvedTracks(let resolved):
+      guard !pendingResolveTracks.isEmpty else { return }
+      latestResolvedTracks = ResolvedTracksReply(
+        slug: pendingResolveTracks.removeFirst(), tracks: resolved.tracks)
+      resolvedTracksRevision += 1
+    case .playlists(let update):
+      guard update.revision >= playlistRevision else { return }
+      playlists = update.playlists
+      playlistRevision = update.revision
+      playlistAcknowledgedRequestID = update.requestID?.uuidString.lowercased()
+      playlistsUpdateRevision += 1
+      if let slug = playlistDetail?.slug, !playlists.contains(where: { $0.slug == slug }) {
+        playlistDetail = nil
+      }
+    case .playlistDetail(let update):
+      guard update.revision >= playlistRevision else { return }
+      playlistDetail = Self.playlistDetail(from: update)
+    case .playlistSaved(let saved):
+      guard saved.revision >= playlistRevision else { return }
+      playlistRevision = saved.revision
+      playlistAcknowledgedRequestID = saved.requestID.uuidString.lowercased()
+      playlistDetail = Self.playlistDetail(
+        from: saved.playlist, revision: saved.revision, requestID: saved.requestID)
+    case .deviceSelectionAdded(let reply):
+      applyDeviceSelectionAdded(reply)
+    case .playlistSelectionAppended(let reply):
+      applyPlaylistSelectionAppended(reply)
+    case .libraryMutationRejected(let rejection):
+      let requestID = rejection.requestID.uuidString.lowercased()
+      let target: LibraryMutationTarget
+      switch rejection.target {
+      case .deviceSelection(let id): target = .deviceSelection(serial: id.rawValue)
+      case .manualPlaylist(let slug): target = .manualPlaylist(slug: slug)
+      }
+      let completed = libraryDropState.reject(
+        requestID: requestID, target: target, message: rejection.message)
+      recordPersistedDropAcknowledgement(requestID, if: completed)
+    case .daemonShutdownStarted:
+      break
+    case .commandFailed(let failure):
+      if pendingSourceRetryRequestID == failure.requestID.uuidString.lowercased() {
+        pendingSourceRetryRequestID = nil
+      }
+      phase = .error(failure.message)
+    case .progress(let progress):
+      applyProgress(progress)
     }
+  }
+
+  private func applySourceAvailability(_ wire: WireV3SourceAvailabilityEvent) {
+    let requestID = wire.requestID?.uuidString.lowercased()
+    if let requestID, let pendingSourceRetryRequestID {
+      guard requestID == pendingSourceRetryRequestID else { return }
+      self.pendingSourceRetryRequestID = nil
+    } else if wire.requestID == nil, wire.state != .remounting {
+      pendingSourceRetryRequestID = nil
+    }
+    sourceAvailability = SourceAvailabilityInfo(
+      state: wire.state, sourceRoot: wire.sourceRoot, acknowledgedRequestID: requestID)
+    if wire.state == .available, let sourceRoot = wire.sourceRoot {
+      library?.sourceRoot = sourceRoot
+      config?.source = sourceRoot
+    }
+  }
+
+  private func applyDeviceConfig(_ wire: WireV3DeviceConfig) {
+    let requestID = wire.requestID?.uuidString.lowercased()
+    guard shouldApplyProtocol3DeviceConfigResponse(serial: wire.deviceID, requestID: requestID),
+      var state = devices[wire.deviceID],
+      wire.selection.revision >= state.selectionRevision,
+      wire.settings.revision >= state.settingsRevision,
+      wire.subscriptions.revision >= state.subscriptionsRevision
+    else { return }
+    state.config = DeviceConfigState(
+      selection: wire.selection.value, subscriptions: wire.subscriptions.value,
+      settings: wire.settings.value, preview: state.preview)
+    state.configDelivery = DeviceConfigDeliveryState(
+      selection: wire.selection, settings: wire.settings, subscriptions: wire.subscriptions)
+    state.selectionRevision = wire.selection.revision
+    state.settingsRevision = wire.settings.revision
+    state.subscriptionsRevision = wire.subscriptions.revision
+    devices[wire.deviceID] = state
+    if let requestID { deviceConfigAcknowledgedRequestIDs[wire.deviceID] = requestID }
+  }
+
+  private func applyLibraryScan(_ scan: WireV3LibraryScanEvent) {
+    switch scan.kind {
+    case .started:
+      isScanning = true
+      globalScanSessionID = scan.sessionID
+      phase = .scanning(current: 0, total: 0)
+    case .progress:
+      guard isScanning, globalScanSessionID == scan.sessionID else { return }
+      phase = .scanning(
+        current: Int(scan.tracksIndexed ?? 0), total: Int(scan.filesScanned ?? 0))
+    case .finished:
+      guard globalScanSessionID == scan.sessionID else { return }
+      isScanning = false
+      globalScanSessionID = nil
+      phase = computePhase(targetSyncing: false)
+    }
+  }
+
+  private func applyDevicePreview(_ preview: WireV3DevicePreviewEvent) {
+    let requestID = preview.requestID.uuidString.lowercased()
+    guard shouldApplyDeviceResponse(
+      serial: preview.deviceID, requestID: requestID, requests: devicePreviewRequests,
+      latestGeneration: latestDevicePreviewGeneration, allowsUnsolicitedResponse: false),
+      var state = devices[preview.deviceID]
+    else { return }
+    let value = DevicePreview(
+      serial: preview.deviceID.rawValue, selectedTracks: preview.selectedTracks,
+      selectedBytes: preview.selectedBytes, playlistExtraTracks: preview.playlistExtraTracks,
+      playlistExtraBytes: preview.playlistExtraBytes,
+      projectedFreeBytes: preview.projectedFreeBytes,
+      unresolvedSubscriptions: preview.unresolvedSubscriptions,
+      acknowledgedRequestID: requestID)
+    state.preview = value
+    if state.config == nil { state.config = .defaultState }
+    state.config?.preview = value
+    devices[preview.deviceID] = state
+  }
+
+  private func applyDeviceSelectionAdded(_ reply: WireV3DeviceSelectionAddedEvent) {
+    guard var state = devices[reply.deviceID], reply.selectionRevision >= state.selectionRevision
+    else { return }
+    var deviceConfig = state.config ?? .defaultState
+    deviceConfig.selection = reply.selection.value
+    state.config = deviceConfig
+    state.selectionRevision = reply.selectionRevision
+    devices[reply.deviceID] = state
+    let requestID = reply.requestID.uuidString.lowercased()
+    deviceConfigAcknowledgedRequestIDs[reply.deviceID] = requestID
+    let completed = libraryDropState.completeDevice(
+      requestID: requestID, serial: reply.deviceID, delivery: reply.dropDelivery)
+    recordPersistedDropAcknowledgement(requestID, if: completed)
+  }
+
+  private func applyPlaylistSelectionAppended(_ reply: WireV3PlaylistSelectionAppendedEvent) {
+    guard reply.revision >= playlistRevision else { return }
+    playlistRevision = reply.revision
+    let requestID = reply.requestID.uuidString.lowercased()
+    playlistAcknowledgedRequestID = requestID
+    playlistDetail = Self.playlistDetail(
+      from: reply.playlist, revision: reply.revision, requestID: reply.requestID)
+    let completed = libraryDropState.completePlaylist(
+      requestID: requestID, slug: reply.slug, appendedTracks: reply.appendedTracks)
+    recordPersistedDropAcknowledgement(requestID, if: completed)
+  }
+
+  private func applyProgress(_ progress: WireV3ProgressEvent) {
+    guard var state = devices[progress.route.deviceID],
+      state.sessionID == progress.route.sessionID
+    else { return }
+    state = DeviceReducer.reduce(progress: progress, into: state)
+    switch progress.kind {
+    case .prompt:
+      if let id = progress.promptID, let message = progress.message, let options = progress.options {
+        pendingPrompt = PendingPrompt(id: id, message: message, options: options)
+      }
+    case .form:
+      if let id = progress.promptID, let label = progress.label {
+        pendingPrompt = PendingPrompt(
+          id: id, message: progress.hint ?? label,
+          options: progress.initial.map { [$0] } ?? [])
+      }
+    case .syncError:
+      if let message = progress.message { state.phase = .error(message) }
+    case .syncPaused:
+      state.phase = .paused
+    default:
+      break
+    }
+    devices[progress.route.deviceID] = state
+    refreshFocusedDeviceProjection()
+  }
+
+  private func resetForProtocolEpoch() {
+    nextDeviceRequestGeneration = 0
+    deviceConfigRequests.removeAll()
+    latestDeviceConfigGeneration.removeAll()
+    devicePreviewRequests.removeAll()
+    latestDevicePreviewGeneration.removeAll()
+    pendingResolveTracks.removeAll()
+    lastInventoryRevision = nil
+    hasAuthoritativeInventory = false
+    globalScanSessionID = nil
+    isScanning = false
+    terminalStateConsumer.reset()
+    devices.removeAll()
+    unidentifiedDevices.removeAll()
+    device = nil
+    phase = .noDevice
+    pendingPrompt = nil
+    storageText = nil
+    config = nil
+    configuredSerial = nil
+    hasSeenConfig = false
+    statusConfigured = false
+    isIpodConnected = false
+    syncedCount = 0
+    libraryCount = nil
+    selectionPreview = nil
+    lastRunSkippedForSpace = nil
+    lastRunArtwork = nil
+    lastRunDbRestored = false
+    deviceStorage = nil
+    sourceAvailability = nil
+    pendingSourceRetryRequestID = nil
+    playlistRevision = 0
+    playlistAcknowledgedRequestID = nil
+    configRevision = 0
+    configAcknowledgedRequestID = nil
+    deviceConfigAcknowledgedRequestIDs.removeAll()
+  }
+
+  private static func playlistDetail(from event: WireV3PlaylistDetailEvent) -> PlaylistDetail {
+    switch event.result {
+    case .found(let playlist):
+      playlistDetail(from: playlist, revision: event.revision, requestID: event.requestID)
+    case .unavailable(let message):
+      PlaylistDetail(
+        slug: event.slug, name: nil, kind: nil, tracks: nil, rules: nil, error: message,
+        playlistRevision: event.revision,
+        acknowledgedRequestID: event.requestID.uuidString.lowercased())
+    }
+  }
+
+  private static func playlistDetail(
+    from playlist: WireV3StoredPlaylist, revision: UInt64, requestID: UUID
+  ) -> PlaylistDetail {
+    let detail = playlist.detail
+    return PlaylistDetail(
+      slug: detail.slug, name: detail.name, kind: detail.kind, tracks: detail.tracks,
+      rules: detail.rules, error: nil, playlistRevision: revision,
+      acknowledgedRequestID: requestID.uuidString.lowercased())
   }
 
   /// Called once a surfaced `pendingPrompt` has been answered (its
@@ -605,13 +656,13 @@ final class AppModel {
   /// Clears the currently presented failure after the user dismisses Details.
   /// The attempt identity remains suppressed so an unchanged daemon snapshot
   /// cannot immediately resurrect the same error.
-  func dismissTerminalError(for serial: DeviceSerial) {
+  func dismissTerminalError(for serial: DeviceID) {
     terminalStateConsumer.dismiss(serial: serial, devices: &devices)
     refreshFocusedDeviceProjection()
   }
 
   func willRequestDeviceConfig(
-    serial: DeviceSerial, requestID: String, intent: DeviceConfigRequestIntent
+    serial: DeviceID, requestID: String, intent: DeviceConfigRequestIntent
   ) {
     registerDeviceRequest(
       serial: serial,
@@ -621,7 +672,7 @@ final class AppModel {
       latestGeneration: &latestDeviceConfigGeneration)
   }
 
-  func willRequestDevicePreview(serial: DeviceSerial, requestID: String) {
+  func willRequestDevicePreview(serial: DeviceID, requestID: String) {
     registerDeviceRequest(
       serial: serial,
       requestID: requestID,
@@ -638,13 +689,8 @@ final class AppModel {
     pendingResolveTracks.append(slug)
   }
 
-  private var phaseIsSyncing: Bool {
-    if case .syncing = phase { return true }
-    return false
-  }
-
   /// `noDevice`/`notConfigured` precedence used when deriving phase from
-  /// connection/config state. Sync progress events (`sync_event` lines)
+  /// connection/config state. Routed sync progress events
   /// bypass this and set `.syncing`/`.idle` directly.
   private func computePhase(targetSyncing: Bool) -> Phase {
     guard isIpodConnected else { return .noDevice }
@@ -666,130 +712,16 @@ final class AppModel {
     return .syncing(current: 0, total: 0, label: "", etaSecs: nil)
   }
 
-  private func applySyncEvent(_ line: String, serial: String?, sessionID: UInt64) {
-    guard let data = line.data(using: .utf8),
-      let event = try? decoder.decode(SyncEvent.self, from: data)
-    else { return }
-
-    if let serial {
-      guard hasAuthoritativeInventory else { return }
-      guard var state = devices[serial], state.sessionID == sessionID else { return }
-      state = DeviceReducer.reduce(syncEvent: event, into: state)
-      devices[serial] = state
-
-      switch event {
-      case .prompt(let id, let message, let options):
-        pendingPrompt = PendingPrompt(id: id, message: message, options: options)
-      case .form(let id, let label, let initial, let hint):
-        pendingPrompt = PendingPrompt(
-          id: id, message: hint ?? label, options: initial.map { [$0] } ?? [])
-      default:
-        break
-      }
-
-      refreshFocusedDeviceProjection()
-      return
-    }
-
-    guard isScanning else { return }
-    if let globalScanSessionID {
-      guard globalScanSessionID == sessionID else { return }
-    } else {
-      globalScanSessionID = sessionID
-    }
-    applyLegacySyncEvent(event)
-  }
-
-  private func registerDeviceRequest(
-    serial: DeviceSerial,
-    requestID: String,
-    configIntent: DeviceConfigRequestIntent?,
-    requests: inout [String: PendingDeviceRequest],
-    latestGeneration: inout [DeviceSerial: UInt64]
-  ) {
-    nextDeviceRequestGeneration += 1
-    let generation = nextDeviceRequestGeneration
-    requests[requestID] = PendingDeviceRequest(
-      serial: serial, generation: generation, configIntent: configIntent)
-    latestGeneration[serial] = generation
-  }
-
-  private func shouldApplyDeviceResponse(
-    serial: DeviceSerial,
-    requestID: String,
-    requests: [String: PendingDeviceRequest],
-    latestGeneration: [DeviceSerial: UInt64],
-    allowsUnsolicitedResponse: Bool
+  private func shouldApplyProtocol3DeviceConfigResponse(
+    serial: DeviceID, requestID: String?
   ) -> Bool {
-    guard let request = requests[requestID] else { return allowsUnsolicitedResponse }
-    return request.serial == serial && latestGeneration[serial] == request.generation
-  }
-
-  private func shouldApplyDeviceConfigResponse(serial: DeviceSerial, requestID: String?) -> Bool {
-    guard let requestID, let request = deviceConfigRequests[requestID] else {
+    guard let requestID else {
       invalidateLatestDeviceConfigRead(for: serial)
       return true
     }
+    guard let request = deviceConfigRequests[requestID] else { return false }
     return request.serial == serial
       && latestDeviceConfigGeneration[serial] == request.generation
-  }
-
-  private func invalidateLatestDeviceConfigRead(for serial: DeviceSerial) {
-    guard let latestGeneration = latestDeviceConfigGeneration[serial],
-      deviceConfigRequests.values.contains(where: {
-        $0.serial == serial && $0.generation == latestGeneration && $0.configIntent == .read
-      })
-    else { return }
-    nextDeviceRequestGeneration += 1
-    latestDeviceConfigGeneration[serial] = nextDeviceRequestGeneration
-  }
-
-  private func applyLegacySyncEvent(_ event: SyncEvent) {
-    switch event {
-    case .trackStart(let current, let total, let label, let etaSecs):
-      if isScanning {
-        phase = .scanning(current: current, total: total)
-      } else {
-        phase = .syncing(current: current, total: total, label: label, etaSecs: etaSecs)
-      }
-    case .finish(_, let skippedForSpace, let artwork, let dbRestored):
-      if isScanning {
-        // A scan's finish never carries these fields (they're
-        // sync-only) — don't clobber the last real sync's rollup.
-        phase = computePhase(targetSyncing: false)
-      } else {
-        lastRunSkippedForSpace = skippedForSpace
-        lastRunArtwork = artwork
-        lastRunDbRestored = dbRestored
-        phase = .idle
-        // Post-sync truth refresh: `deviceStorage` was statfs'd at
-        // connect time and the preview's `projectedFreeBytes` was a
-        // PRE-sync projection — without this, the capacity bar keeps
-        // showing the old fill plus an orange "will use" overlay for
-        // a sync that already happened.
-        if let device {
-          let storage = storageFor(drive: device.drive)
-          deviceStorage = storage
-          storageText = Self.formatStorage(storage)
-          if var state = devices[device.serial] {
-            state.preview?.projectedFreeBytes = nil
-            state.config?.preview?.projectedFreeBytes = nil
-            devices[device.serial] = state
-          }
-        }
-      }
-    case .prompt(let id, let message, let options):
-      pendingPrompt = PendingPrompt(id: id, message: message, options: options)
-    case .form(let id, let label, let initial, let hint):
-      pendingPrompt = PendingPrompt(
-        id: id, message: hint ?? label, options: initial.map { [$0] } ?? [])
-    case .error(let message, _):
-      phase = .error(message)
-    case .paused:
-      phase = .paused(synced: syncedCount, total: libraryCount)
-    case .hello, .header, .summary, .trackDone, .finalizing, .cancelled, .log, .other:
-      break
-    }
   }
 
   private func refreshFocusedDeviceProjection() {
@@ -802,7 +734,7 @@ final class AppModel {
     }
 
     device = DeviceState(
-      serial: serial,
+      serial: serial.rawValue,
       model: state.identity.modelLabel,
       name: state.identity.name,
       drive: state.mountPath ?? "")
@@ -862,19 +794,40 @@ final class AppModel {
     default: return reason
     }
   }
+
+  private func registerDeviceRequest(
+    serial: DeviceID, requestID: String, configIntent: DeviceConfigRequestIntent?,
+    requests: inout [String: PendingDeviceRequest],
+    latestGeneration: inout [DeviceID: UInt64]
+  ) {
+    nextDeviceRequestGeneration += 1
+    let generation = nextDeviceRequestGeneration
+    requests[requestID] = PendingDeviceRequest(
+      serial: serial, generation: generation, configIntent: configIntent)
+    latestGeneration[serial] = generation
+  }
+
+  private func shouldApplyDeviceResponse(
+    serial: DeviceID, requestID: String, requests: [String: PendingDeviceRequest],
+    latestGeneration: [DeviceID: UInt64], allowsUnsolicitedResponse: Bool
+  ) -> Bool {
+    guard let request = requests[requestID] else { return allowsUnsolicitedResponse }
+    return request.serial == serial && latestGeneration[serial] == request.generation
+  }
+
+  private func invalidateLatestDeviceConfigRead(for serial: DeviceID) {
+    guard let latestGeneration = latestDeviceConfigGeneration[serial],
+      deviceConfigRequests.values.contains(where: {
+        $0.serial == serial && $0.generation == latestGeneration && $0.configIntent == .read
+      })
+    else { return }
+    nextDeviceRequestGeneration += 1
+    latestDeviceConfigGeneration[serial] = nextDeviceRequestGeneration
+  }
 }
 
 #if DEBUG
   extension AppModel {
-    /// Preview-only seam for `deviceStorage`/`storageText`. Every other field
-    /// SwiftUI previews need can be reached through a synthetic `DaemonEvent`
-    /// fed to `apply(_:)` (see `PreviewFixtures.swift`), but a preview has no
-    /// real iPod volume to resolve when exercising the mounted-volume fallback,
-    /// and would otherwise show whichever disk happens to be at a given path
-    /// on the machine running the canvas — not the deterministic, canned
-    /// numbers a design review needs. `#if DEBUG`-gated (compiled out of
-    /// Release entirely) rather than relaxing `deviceStorage`'s
-    /// `private(set)` for the whole module.
     func seedPreviewStorage(free: Int64, total: Int64) {
       deviceStorage = (free, total)
       storageText = Self.formatStorage(deviceStorage)

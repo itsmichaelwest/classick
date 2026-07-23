@@ -9,7 +9,7 @@
   /// real daemon connection.
   ///
   /// State is built the same way production code builds it: a fresh `AppModel`
-  /// fed a sequence of synthetic `DaemonEvent`s through `apply(_:)`, mirroring
+  /// fed a sequence of synthetic `WireV3Event`s through `apply(_:)`, mirroring
   /// the order `AppDelegate` itself would send them in (config → device →
   /// status → library → history → playlists → device config → preview). The
   /// one field with no event-based path (`deviceStorage`/`storageText`) goes
@@ -17,7 +17,7 @@
   /// comment for why.
   @MainActor
   enum PreviewFixtures {
-    private static let requestID = "preview-request"
+    private static let requestID = "00000000-0000-4000-8000-000000000001"
 
     // MARK: - Library (populated)
 
@@ -92,7 +92,7 @@
     // MARK: - Device identity
 
     static let pairedIpod = IpodIdentity(
-      serial: "G0K3N7Q1R2S3", modelLabel: "iPod Classic (6th gen, 160GB)",
+      serial: "000A27002138B0A8", modelLabel: "iPod Classic (6th gen, 160GB)",
       name: "Michael's iPod", customSelection: false)
 
     static let connectedDevice = DeviceState(
@@ -261,13 +261,13 @@
         scheduleMinutes: 360, notifyOn: "all", rockboxCompat: rockboxCompat)
     }
 
-    // MARK: - sync_event line builders
+    // MARK: - Protocol v3 progress builders
 
-    /// `SyncEvent` is wire-`Decodable` only (the app never sends these, only
+    /// Sync progress is received from the daemon (the app never sends it, only
     /// receives them from the subprocess) — so previews that need a phase
-    /// only reachable via `applySyncEvent` (scanning-in-progress, syncing,
+    /// only reachable via typed protocol v3 progress (scanning-in-progress, syncing,
     /// paused, error, finish rollups) hand-write the JSON line, exactly as
-    /// the daemon would emit it on `sync_event.line`.
+    /// the daemon would emit it as flat protocol v3 progress.
     private static func trackStartLine(current: Int, total: Int, label: String, etaSecs: UInt64?)
       -> String
     {
@@ -349,7 +349,7 @@
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
           selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1,
           acknowledgedRequestID: requestID))
-      m.willRequestDevicePreview(serial: pairedIpod.serial, requestID: requestID)
+      m.willRequestDevicePreview(serial: try! DeviceID(pairedIpod.serial), requestID: requestID)
       m.apply(.devicePreview(devicePreviewFits))
       return m
     }
@@ -371,7 +371,7 @@
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
           selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1,
           acknowledgedRequestID: requestID))
-      m.willRequestDevicePreview(serial: pairedIpod.serial, requestID: requestID)
+      m.willRequestDevicePreview(serial: try! DeviceID(pairedIpod.serial), requestID: requestID)
       m.apply(
         .devicePreview(
           DevicePreview(
@@ -416,7 +416,7 @@
           settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
           selectionRevision: 1, settingsRevision: 1, subscriptionsRevision: 1,
           acknowledgedRequestID: requestID))
-      m.willRequestDevicePreview(serial: pairedIpod.serial, requestID: requestID)
+      m.willRequestDevicePreview(serial: try! DeviceID(pairedIpod.serial), requestID: requestID)
       m.apply(.devicePreview(devicePreviewOverfull))
       m.apply(
         .deviceInventorySnapshot(

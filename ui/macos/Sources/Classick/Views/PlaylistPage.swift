@@ -436,7 +436,7 @@ enum PlaylistEditorLogic {
 
     /// Devices whose subscriptions include this slug — the delete
     /// confirmation's "Also unsubscribes N device(s)" count.
-    nonisolated static func subscribedDeviceCount(slug: String, deviceConfigs: [String: DeviceConfigState]) -> Int {
+    nonisolated static func subscribedDeviceCount(slug: String, deviceConfigs: [DeviceID: DeviceConfigState]) -> Int {
         deviceConfigs.values.filter { $0.subscriptions.playlists.contains(slug) }.count
     }
 

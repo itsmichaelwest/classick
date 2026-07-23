@@ -2,13 +2,13 @@ import SwiftUI
 
 struct DeviceRow: View {
   var model: AppModel
-  var selectedSerial: DeviceSerial?
-  var onSyncNow: (DeviceSerial) -> Void
-  var onPause: (DeviceSerial) -> Void
-  var onCancelSync: (DeviceSerial) -> Void
-  var onResume: (DeviceSerial) -> Void
-  var onRetry: (DeviceSerial) -> Void
-  var onSetUp: (DeviceSerial?) -> Void
+  var selectedSerial: DeviceID?
+  var onSyncNow: (DeviceID) -> Void
+  var onPause: (DeviceID) -> Void
+  var onCancelSync: (DeviceID) -> Void
+  var onResume: (DeviceID) -> Void
+  var onRetry: (DeviceID) -> Void
+  var onSetUp: (DeviceID?) -> Void
   var onSubmitLibraryDrop: @MainActor @Sendable (LibraryDropTarget, [SelectionRule], UUID) -> Void = {
     _, _, _ in
   }
@@ -274,7 +274,7 @@ struct DeviceRow: View {
     }
   }
 
-  private func withSerial(_ action: (DeviceSerial) -> Void) {
+  private func withSerial(_ action: (DeviceID) -> Void) {
     guard let serial = presentation.serial else { return }
     action(serial)
   }

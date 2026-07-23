@@ -28,8 +28,9 @@ final class MenuBarLabelLogicTests: XCTestCase {
     XCTAssertEqual(
       MenuBarLabelPresentation.make(
         globalPhase: .syncing(current: 4, total: 12, label: "", etaSecs: nil),
-        device: finalizing)
-        .systemImage,
+        device: finalizing
+      )
+      .systemImage,
       "arrow.triangle.2.circlepath")
   }
 
@@ -57,6 +58,7 @@ final class MenuBarLabelLogicTests: XCTestCase {
 
   private func makeDevice(phase: DevicePhase, finalizing: Bool) -> DeviceViewState {
     DeviceViewState(
+      deviceID: "A",
       identity: .init(serial: "A", modelLabel: "iPod Classic", name: "Michael's iPod"),
       configured: true,
       connected: true,

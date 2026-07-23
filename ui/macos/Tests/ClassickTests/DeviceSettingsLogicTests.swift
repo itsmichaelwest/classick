@@ -13,13 +13,13 @@ final class DeviceSettingsLogicTests: XCTestCase {
 
   func testSaveSettingsCommandTouchesOnlySettings() throws {
     let cmd = DeviceSettingsLogic.saveSettingsCommand(
-      serial: "0xABC",
+      deviceID: DeviceID("0000000000000ABC"),
       settings: DeviceSettingsWire(autoSync: false, rockboxCompat: true),
-      requestID: "request-a")
+      requestID: UUID(), mutationID: UUID())
     let data = try JSONEncoder().encode(cmd)
     let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-    XCTAssertEqual(obj["type"] as? String, "save_device_config")
-    XCTAssertEqual(obj["serial"] as? String, "0xABC")
+    XCTAssertEqual(obj["type"] as? String, "set_settings")
+    XCTAssertEqual(obj["device_id"] as? String, "0000000000000ABC")
     XCTAssertNil(obj["selection"], "a Settings-page edit must never touch selection rules")
     XCTAssertNil(
       obj["subscriptions"], "a Settings-page edit must never touch playlist subscriptions")
@@ -30,9 +30,9 @@ final class DeviceSettingsLogicTests: XCTestCase {
 
   func testSaveSettingsCommandRoundTripsBothFlagsIndependently() throws {
     let cmd = DeviceSettingsLogic.saveSettingsCommand(
-      serial: "0xDEF",
+      deviceID: DeviceID("0000000000000DEF"),
       settings: DeviceSettingsWire(autoSync: true, rockboxCompat: false),
-      requestID: "request-b")
+      requestID: UUID(), mutationID: UUID())
     let data = try JSONEncoder().encode(cmd)
     let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
     let settings = obj["settings"] as! [String: Any]

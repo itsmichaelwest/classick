@@ -245,6 +245,8 @@ final class DeviceRowPresentationTests: XCTestCase {
     sessionID: UInt64? = nil
   ) -> DeviceViewState {
     DeviceViewState(
+      deviceID: try! DeviceID(
+        String(repeating: "0", count: 16 - serial.count) + serial.uppercased()),
       identity: .init(serial: serial, modelLabel: "iPod Classic (160 GB)", name: name),
       configured: configured,
       connected: connected,

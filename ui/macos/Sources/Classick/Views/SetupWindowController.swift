@@ -17,8 +17,8 @@ final class SetupWindowController {
   /// `LSUIElement` accessory app to the front so the window can't open
   /// behind whatever currently has focus.
   func show(
-    model: AppModel, preferredSerial: DeviceSerial?,
-    onDone: @escaping (_ source: String, _ autoSync: Bool, _ serial: DeviceSerial) -> Void
+    model: AppModel, preferredSerial: DeviceID?,
+    onDone: @escaping (_ source: String, _ autoSync: Bool, _ serial: DeviceID) -> Void
   ) {
     NSApp.activate(ignoringOtherApps: true)
 

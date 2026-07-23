@@ -3,28 +3,28 @@ import SwiftUI
 import os
 
 enum DeviceActionCommand {
-  static func sync(serial: DeviceSerial, requestID: String) -> DaemonCommand {
-    .triggerSync(source: .manual, serial: serial, requestID: requestID)
+  static func sync(serial: DeviceID, requestID: UUID) -> WireV3Command {
+    .triggerSync(deviceID: serial, requestID: requestID, trigger: .manual)
   }
 
-  static func cancel(serial: DeviceSerial, requestID: String) -> DaemonCommand {
-    .cancelSync(serial: serial, requestID: requestID)
+  static func cancel(route: WireV3Route, requestID: UUID) -> WireV3Command {
+    .cancelSync(route: route, requestID: requestID)
   }
 
-  static func pause(serial: DeviceSerial, requestID: String) -> DaemonCommand {
-    .pause(serial: serial, requestID: requestID)
+  static func pause(route: WireV3Route, requestID: UUID) -> WireV3Command {
+    .pauseSync(route: route, requestID: requestID)
   }
 
-  static func forget(serial: DeviceSerial, requestID: String) -> DaemonCommand {
-    .forgetIpod(serial: serial, requestID: requestID)
+  static func forget(serial: DeviceID, requestID: UUID) -> WireV3Command {
+    .forgetDevice(deviceID: serial, requestID: requestID)
   }
 
-  static func replaceLibrary(serial: DeviceSerial, requestID: String) -> DaemonCommand {
-    .replaceLibrary(serial: serial, requestID: requestID)
+  static func replaceLibrary(serial: DeviceID, requestID: UUID) -> WireV3Command {
+    .replaceLibrary(deviceID: serial, requestID: requestID)
   }
 
-  static func backfillRockbox(serial: DeviceSerial, requestID: String) -> DaemonCommand {
-    .backfillRockbox(serial: serial, requestID: requestID)
+  static func backfillRockbox(serial: DeviceID, requestID: UUID) -> WireV3Command {
+    .backfillRockbox(deviceID: serial, requestID: requestID)
   }
 }
 
@@ -54,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
   /// First-run setup is auto-presented exactly once per launch, the moment
   /// the daemon confirms the user is unconfigured. This latches that so a
-  /// later `config_update` (or reconnect churn) can't re-open it.
+  /// later `global_config` (or reconnect churn) can't re-open it.
   private var didAutoPresentSetup = false
   #if canImport(Sparkle)
     private let updater = Updater()
@@ -93,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
       await self.daemonClient.start()
       for await event in stream {
         self.model.apply(event)
+        if case .hello = event { self.requestLibraryAndSelection() }
         if let requestID = self.model.persistedDropAcknowledgements.last,
           let outcome = self.model.dropOutcome
         {
@@ -110,9 +111,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // covers both launch and every daemon reconnect; the
         // requests are idempotent reads, so overlapping with the
         // window-appear batch is harmless.
-        if case .hello = event {
-          self.requestLibraryAndSelection()
-        }
         self.postNotifications(for: event)
         self.presentPromptIfNeeded()
         self.autoPresentSetupIfNeeded()
@@ -136,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
   /// Shows first-run setup. Wired to the "Set Up Classick…" menu row and
   /// reused by `autoPresentSetupIfNeeded`.
-  func presentSetup(serial: DeviceSerial? = nil) {
+  func presentSetup(serial: DeviceID? = nil) {
     setupWindowController.show(
       model: model, preferredSerial: serial, onDone: finishSetup)
   }
@@ -148,19 +146,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// `history_update`).
   func requestLibraryAndSelection() {
     Task {
-      await daemonClient.send(.getLibrary(requestID: DaemonCommand.newRequestID()))
-      await daemonClient.send(.getHistory(limit: 50, requestID: DaemonCommand.newRequestID()))
+      await daemonClient.send(.getLibrary(requestID: WireV3Command.newRequestID()))
+      await daemonClient.send(.getHistory(requestID: WireV3Command.newRequestID(), limit: 50))
       // Protocol 1.6.0: the sidebar's Playlists section and the device
       // Music page's subscriptions checklist both read `model.playlists`,
       // populated only by a `playlists_update` reply/broadcast — nothing
       // requests the initial list otherwise.
-      await daemonClient.send(.listPlaylists(requestID: DaemonCommand.newRequestID()))
+      await daemonClient.send(.listPlaylists(requestID: WireV3Command.newRequestID()))
     }
   }
 
   /// "Rescan Library" action for the main window's `LibraryView`.
   func rescan() {
-    Task { await daemonClient.send(.scanLibrary(requestID: DaemonCommand.newRequestID())) }
+    Task { await daemonClient.send(.scanLibrary(requestID: WireV3Command.newRequestID())) }
   }
 
   func connectSource() {
@@ -175,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   }
 
   private func sendSourceMountRetry() {
-    let requestID = DaemonCommand.newRequestID()
+    let requestID = WireV3Command.newRequestID()
     guard
       let command = model.prepareSourceMountRetry(
         isApplicationActive: NSApplication.shared.isActive,
@@ -192,7 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// the sidebar disables eject mid-sync), so the unmount normally
   /// succeeds; when it doesn't (Finder/another app holding files open),
   /// the system's error is surfaced in an alert rather than swallowed.
-  func ejectIpod(serial: DeviceSerial) {
+  func ejectIpod(serial: DeviceID) {
     guard let drive = model.devices[serial]?.mountPath else { return }
     let url = URL(fileURLWithPath: drive)
     do {
@@ -220,36 +218,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// Sends the setup window's `save_config` (folder + auto-sync + the
   /// currently-detected iPod, if any) and clears any error banner from a
   /// prior failed handshake/save.
-  func finishSetup(source: String, autoSync: Bool, serial: DeviceSerial) {
+  func finishSetup(source: String, autoSync: Bool, serial: DeviceID) {
     guard model.canSendDeviceCommand(to: serial) else { return }
     let daemon = Self.setupDaemonSettings(
       autoSync: autoSync,
       preservingRockboxCompat: model.config?.daemon?.rockboxCompat ?? false)
-    // Only preserve `customSelection` when the previously-persisted
-    // identity is for the SAME serial that's connected now — a freshly
-    // paired/swapped-in device has no prior per-device selection choice
-    // to carry over, so it correctly starts at the shared-selection
-    // default.
-    let existingIpod = model.config?.ipod
-    let preserveCustomSelection =
-      existingIpod?.serial == serial
-      ? (existingIpod?.customSelection ?? false)
-      : false
-    let state = model.devices[serial]
-    let ipod = Self.setupIpodIdentity(
-      device: state.map {
-        DeviceState(
-          serial: $0.identity.serial, model: $0.identity.modelLabel,
-          name: $0.identity.name, drive: $0.mountPath ?? "")
-      }, preservingCustomSelection: preserveCustomSelection)
+    let requestID = WireV3Command.newRequestID()
+    let current = model.devices[serial]?.config ?? .defaultState
+    model.willRequestDeviceConfig(
+      serial: serial, requestID: requestID.uuidString.lowercased(), intent: .write)
     sendDeviceCommands(
       serial: serial,
       commands: [
-        .saveConfig(
-          source: source,
-          daemon: daemon,
-          ipod: ipod,
-          requestID: DaemonCommand.newRequestID())
+        .setSourceLocation(requestID: WireV3Command.newRequestID(), sourceRoot: source),
+        .setGlobalSettings(
+          requestID: WireV3Command.newRequestID(), settings: WireV3GlobalSettings(daemon)),
+        .adoptDevice(
+          deviceID: serial, requestID: requestID,
+          selectionMutationID: UUID(), selection: WireV3SelectionValue(current.selection),
+          settingsMutationID: UUID(),
+          settings: WireV3SettingsValue(
+            DeviceSettingsWire(
+              autoSync: autoSync, rockboxCompat: current.settings.rockboxCompat)),
+          subscriptionsMutationID: UUID(),
+          subscriptions: WireV3SubscriptionsValue(current.subscriptions)),
       ])
   }
 
@@ -257,68 +249,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// existing iPod pairing isn't disturbed by unrelated setting changes —
   /// only "Remove this iPod" (`forgetIpod()`) touches that.
   func saveSettings(source: String?, daemon: DaemonSettings) -> String {
-    let requestID = DaemonCommand.newRequestID()
+    let requestID = WireV3Command.newRequestID()
     Task {
-      await daemonClient.send(
-        .saveConfig(
-          source: source,
-          daemon: daemon,
-          ipod: nil,
-          requestID: requestID))
+      await daemonClient.send([
+        .setSourceLocation(requestID: requestID, sourceRoot: source),
+        .setGlobalSettings(
+          requestID: WireV3Command.newRequestID(), settings: WireV3GlobalSettings(daemon)),
+      ])
     }
-    return requestID
+    return requestID.uuidString.lowercased()
   }
 
-  func forgetIpod(serial: DeviceSerial) {
+  func forgetIpod(serial: DeviceID) {
     sendDeviceCommands(
       serial: serial,
       commands: [
-        DeviceActionCommand.forget(serial: serial, requestID: DaemonCommand.newRequestID())
+        DeviceActionCommand.forget(serial: serial, requestID: WireV3Command.newRequestID())
       ])
   }
 
   /// "Replace Library…" confirmation sheet's confirm action. The UI
   /// (`DeviceSettingsPage`) is responsible for obtaining the user's typed
   /// confirmation before calling this — mirrors `replace_library`'s own
-  /// contract on the wire (see `DaemonCommand.replaceLibrary`'s doc
+  /// contract on the wire (see `WireV3Command.replaceLibrary`'s definition
   /// comment): the daemon does not prompt.
-  func replaceLibrary(serial: DeviceSerial) {
+  func replaceLibrary(serial: DeviceID) {
     sendDeviceCommands(
       serial: serial,
       commands: [
         DeviceActionCommand.replaceLibrary(
-          serial: serial, requestID: DaemonCommand.newRequestID())
+          serial: serial, requestID: WireV3Command.newRequestID())
       ])
   }
 
   /// "Update existing library for Rockbox" button in Settings — asks the
   /// daemon to re-embed tags/art into already-synced tracks so an iPod
   /// running Rockbox (which doesn't read the iTunesDB) can display them.
-  func backfillRockbox(serial: DeviceSerial) {
+  func backfillRockbox(serial: DeviceID) {
     sendDeviceCommands(
       serial: serial,
       commands: [
         DeviceActionCommand.backfillRockbox(
-          serial: serial, requestID: DaemonCommand.newRequestID())
+          serial: serial, requestID: WireV3Command.newRequestID())
       ])
   }
 
   /// Surfaces `model.pendingPrompt` (set by the reducer from a relayed
-  /// `sync_event` prompt/form line) as a blocking `NSAlert`, then replies
+  /// protocol v3 prompt/form event) as a blocking `NSAlert`, then replies
   /// with the chosen option and clears it so it isn't re-shown.
   private func presentPromptIfNeeded() {
     guard let prompt = model.pendingPrompt else { return }
-    guard let serial = model.focusedDeviceSerial else { return }
+    guard let serial = model.focusedDeviceSerial,
+      let sessionID = model.devices[serial]?.sessionID
+    else { return }
     let choice = PromptAlert.present(prompt)
     model.clearPendingPrompt()
     sendDeviceCommands(
       serial: serial,
       commands: [
-        .decidePrompt(
-          id: prompt.id,
-          choice: choice,
-          serial: serial,
-          requestID: DaemonCommand.newRequestID())
+        .promptDecision(
+          route: WireV3Route(deviceID: serial, sessionID: sessionID),
+          requestID: WireV3Command.newRequestID(), promptID: prompt.id,
+          choice: UInt32(clamping: choice))
       ])
   }
 
@@ -326,41 +318,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// (actor-isolated socket write); the menu's `Button` actions are sync
   /// closures, so each hop through here spawns a detached-from-the-caller
   /// `Task` to bridge to the actor.
-  func syncNow(serial: DeviceSerial) {
+  func syncNow(serial: DeviceID) {
     sendSyncControlCommands(
       serial: serial,
       commands: [
-        DeviceActionCommand.sync(serial: serial, requestID: DaemonCommand.newRequestID())
+        DeviceActionCommand.sync(serial: serial, requestID: WireV3Command.newRequestID())
       ])
   }
 
-  func cancelSync(serial: DeviceSerial) {
+  func cancelSync(serial: DeviceID) {
+    guard let sessionID = model.devices[serial]?.sessionID else { return }
     sendSyncControlCommands(
       serial: serial,
       commands: [
-        DeviceActionCommand.cancel(serial: serial, requestID: DaemonCommand.newRequestID())
+        DeviceActionCommand.cancel(
+          route: WireV3Route(deviceID: serial, sessionID: sessionID),
+          requestID: WireV3Command.newRequestID())
       ])
   }
 
   /// Pause / Resume menu actions. Pause requests a graceful drain +
   /// checkpoint on the daemon side; resume is just a normal sync trigger —
   /// the sync is diff-based, so it continues where it left off.
-  func pause(serial: DeviceSerial) {
+  func pause(serial: DeviceID) {
+    guard let sessionID = model.devices[serial]?.sessionID else { return }
     sendSyncControlCommands(
       serial: serial,
       commands: [
-        DeviceActionCommand.pause(serial: serial, requestID: DaemonCommand.newRequestID())
+        DeviceActionCommand.pause(
+          route: WireV3Route(deviceID: serial, sessionID: sessionID),
+          requestID: WireV3Command.newRequestID())
       ])
   }
 
-  func resume(serial: DeviceSerial) {
+  func resume(serial: DeviceID) {
     syncNow(serial: serial)
   }
 
   /// "Retry" starts a new sync attempt. Clear only the presented terminal
   /// error first; the daemon's next serial/session snapshot remains the
   /// authority for the new run.
-  func retry(serial: DeviceSerial) {
+  func retry(serial: DeviceID) {
     model.dismissTerminalError(for: serial)
     syncNow(serial: serial)
   }
@@ -370,14 +368,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// which is what `Sidebar`'s `destinationForNewlyCreatedPlaylist` flow
   /// watches for to pick up the newly assigned slug.
   func savePlaylist(_ payload: PlaylistPayload) -> String {
-    let requestID = DaemonCommand.newRequestID()
+    let requestID = WireV3Command.newRequestID()
     Task {
       await daemonClient.send(
-        .savePlaylist(
-          payload,
-          requestID: requestID))
+        .savePlaylist(requestID: requestID, playlist: payload))
     }
-    return requestID
+    return requestID.uuidString.lowercased()
   }
 
   /// Playlist editor pages (Task 7): fetches one playlist's full content
@@ -386,9 +382,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   func getPlaylist(slug: String) {
     Task {
       await daemonClient.send(
-        .getPlaylist(
-          slug: slug,
-          requestID: DaemonCommand.newRequestID()))
+        .getPlaylist(requestID: WireV3Command.newRequestID(), slug: slug))
     }
   }
 
@@ -398,9 +392,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   func deletePlaylist(slug: String) {
     Task {
       await daemonClient.send(
-        .deletePlaylist(
-          slug: slug,
-          requestID: DaemonCommand.newRequestID()))
+        .deletePlaylist(requestID: WireV3Command.newRequestID(), slug: slug))
     }
   }
 
@@ -414,9 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     model.willRequestResolveTracks(slug: slug)
     Task {
       await daemonClient.send(
-        .resolveTracks(
-          rules: rules,
-          requestID: DaemonCommand.newRequestID()))
+        .resolveTracks(requestID: WireV3Command.newRequestID(), rules: rules))
     }
   }
 
@@ -425,84 +415,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
   /// the user navigates to its Music page. Device config isn't part of
   /// `requestLibraryAndSelection`'s window-appear batch since it's scoped
   /// to whichever device page is showing, not global app state.
-  func loadDeviceConfig(serial: String) {
+  func loadDeviceConfig(serial: DeviceID) {
     guard model.canSendDeviceCommand(to: serial) else { return }
-    let configRequestID = DaemonCommand.newRequestID()
-    let previewRequestID = DaemonCommand.newRequestID()
+    let configRequestID = WireV3Command.newRequestID()
+    let previewRequestID = WireV3Command.newRequestID()
     model.willRequestDeviceConfig(
-      serial: serial, requestID: configRequestID, intent: .read)
-    model.willRequestDevicePreview(serial: serial, requestID: previewRequestID)
+      serial: serial, requestID: configRequestID.uuidString.lowercased(), intent: .read)
+    model.willRequestDevicePreview(
+      serial: serial, requestID: previewRequestID.uuidString.lowercased())
     sendDeviceCommands(
       serial: serial,
       commands: [
-        .getDeviceConfig(
-          serial: serial,
-          requestID: configRequestID),
-        .previewDevice(serial: serial, requestID: previewRequestID),
+        .getDeviceConfig(deviceID: serial, requestID: configRequestID),
+        .previewDevice(deviceID: serial, requestID: previewRequestID),
       ])
   }
 
   /// Live capacity/skip preview for a candidate device selection/
   /// subscription edit. Registering the exact request ID lets the reducer
   /// reject an older preview that arrives after a newer request.
-  func previewDevice(serial: String) {
+  func previewDevice(serial: DeviceID) {
     guard model.canSendDeviceCommand(to: serial) else { return }
-    let requestID = DaemonCommand.newRequestID()
-    model.willRequestDevicePreview(serial: serial, requestID: requestID)
+    let requestID = WireV3Command.newRequestID()
+    model.willRequestDevicePreview(
+      serial: serial, requestID: requestID.uuidString.lowercased())
     sendDeviceCommands(
       serial: serial,
       commands: [
-        .previewDevice(
-          serial: serial,
-          requestID: requestID)
+        .previewDevice(deviceID: serial, requestID: requestID)
       ])
   }
 
   /// Device Music edits are one ordered socket batch: the daemon persists
   /// the save before it evaluates the following preview.
   func saveAndPreviewDeviceConfig(
-    serial: String, selection: SelectionState?, subscriptions: SubscriptionsWire?
+    serial: DeviceID, selection: SelectionState?, subscriptions: SubscriptionsWire?
   ) -> String? {
     guard model.canSendDeviceCommand(to: serial) else { return nil }
-    let saveRequestID = DaemonCommand.newRequestID()
-    let previewRequestID = DaemonCommand.newRequestID()
+    let selectionRequestID = selection.map { _ in WireV3Command.newRequestID() }
+    let subscriptionsRequestID = subscriptions.map { _ in WireV3Command.newRequestID() }
+    guard let saveRequestID = subscriptionsRequestID ?? selectionRequestID else { return nil }
+    let previewRequestID = WireV3Command.newRequestID()
     model.willRequestDeviceConfig(
-      serial: serial, requestID: saveRequestID, intent: .write)
-    model.willRequestDevicePreview(serial: serial, requestID: previewRequestID)
+      serial: serial, requestID: saveRequestID.uuidString.lowercased(), intent: .write)
+    model.willRequestDevicePreview(
+      serial: serial, requestID: previewRequestID.uuidString.lowercased())
+    var commands: [WireV3Command] = []
+    if let selection, let requestID = selectionRequestID {
+      commands.append(
+        .setSelection(
+          deviceID: serial, requestID: requestID, mutationID: UUID(),
+          selection: WireV3SelectionValue(selection)))
+    }
+    if let subscriptions, let requestID = subscriptionsRequestID {
+      commands.append(
+        .setSubscriptions(
+          deviceID: serial, requestID: requestID, mutationID: UUID(),
+          subscriptions: WireV3SubscriptionsValue(subscriptions)))
+    }
+    commands.append(.previewDevice(deviceID: serial, requestID: previewRequestID))
     sendDeviceCommands(
       serial: serial,
-      commands: [
-        .saveDeviceConfig(
-          serial: serial,
-          selection: selection,
-          subscriptions: subscriptions,
-          settings: nil,
-          requestID: saveRequestID),
-        .previewDevice(serial: serial, requestID: previewRequestID),
-      ])
-    return saveRequestID
+      commands: commands)
+    return saveRequestID.uuidString.lowercased()
   }
 
   /// Device Settings page's debounced auto-save (Task 6): the mirror image
   /// of `saveDeviceConfig` above — `selection`/`subscriptions` are always
   /// omitted (nil = "don't change") via `DeviceSettingsLogic.saveSettingsCommand`,
   /// so a toggle edit here can never disturb the Music page's sync intent.
-  func saveDeviceSettings(serial: String, settings: DeviceSettingsWire) -> String? {
+  func saveDeviceSettings(serial: DeviceID, settings: DeviceSettingsWire) -> String? {
     guard model.canSendDeviceCommand(to: serial) else { return nil }
-    let requestID = DaemonCommand.newRequestID()
-    model.willRequestDeviceConfig(serial: serial, requestID: requestID, intent: .write)
+    let requestID = WireV3Command.newRequestID()
+    model.willRequestDeviceConfig(
+      serial: serial, requestID: requestID.uuidString.lowercased(), intent: .write)
     sendDeviceCommands(
       serial: serial,
       commands: [
-        DeviceSettingsLogic.saveSettingsCommand(
-          serial: serial,
-          settings: settings,
-          requestID: requestID)
+        .setSettings(
+          deviceID: serial, requestID: requestID, mutationID: UUID(),
+          settings: WireV3SettingsValue(settings))
       ])
-    return requestID
+    return requestID.uuidString.lowercased()
   }
 
-  private func sendDeviceCommands(serial: DeviceSerial, commands: [DaemonCommand]) {
+  private func sendDeviceCommands(serial: DeviceID, commands: [WireV3Command]) {
     guard model.canSendDeviceCommand(to: serial) else { return }
     Task { [weak self] in
       guard let self, self.model.canSendDeviceCommand(to: serial) else { return }
@@ -510,7 +507,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
   }
 
-  private func sendSyncControlCommands(serial: DeviceSerial, commands: [DaemonCommand]) {
+  private func sendSyncControlCommands(serial: DeviceID, commands: [WireV3Command]) {
     guard model.canControlSync(to: serial) else { return }
     Task { [weak self] in
       guard let self, self.model.canControlSync(to: serial) else { return }
@@ -526,7 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     #endif
   }
 
-  private func postNotifications(for event: DaemonEvent) {
+  private func postNotifications(for event: WireV3Event) {
     for notification in syncNotificationCoordinator.consume(event, devices: model.devices) {
       guard
         Notifier.shouldPostSyncFinished(

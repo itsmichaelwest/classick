@@ -12,14 +12,14 @@ enum DevicePage: Hashable, Sendable {
 /// Music child; the chevron alone toggles disclosure.
 enum SidebarDestination: Hashable, Sendable {
     case library
-    case device(serial: String, page: DevicePage)
+    case device(serial: DeviceID, page: DevicePage)
     case playlist(slug: String)
     case history
 
     /// Clicking a device row's label (not its disclosure chevron) selects
     /// that device's Music page — never Settings, and never merely
     /// expanding/collapsing the row.
-    static func destinationForDeviceRowClick(serial: String) -> SidebarDestination {
+    static func destinationForDeviceRowClick(serial: DeviceID) -> SidebarDestination {
         .device(serial: serial, page: .music)
     }
 

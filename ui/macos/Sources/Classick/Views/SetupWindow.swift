@@ -10,8 +10,8 @@ import SwiftUI
 /// `@Environment(\.dismiss)` window to dismiss.
 struct SetupWindow: View {
   var model: AppModel
-  var preferredSerial: DeviceSerial?
-  var onDone: (_ source: String, _ autoSync: Bool, _ serial: DeviceSerial) -> Void
+  var preferredSerial: DeviceID?
+  var onDone: (_ source: String, _ autoSync: Bool, _ serial: DeviceID) -> Void
   var onClose: () -> Void
 
   @State private var pickedPath: String?
@@ -70,8 +70,8 @@ struct SetupWindow: View {
       HStack {
         Spacer()
         Button("Done") {
-          guard let pickedPath, let serial = setupDevice?.identity.serial else { return }
-          onDone(pickedPath, autoSync, serial)
+          guard let pickedPath, let deviceID = setupDevice?.deviceID else { return }
+          onDone(pickedPath, autoSync, deviceID)
           onClose()
         }
         .keyboardShortcut(.defaultAction)
@@ -98,7 +98,7 @@ struct SetupWindow: View {
   #Preview("Device found") {
     SetupWindow(
       model: PreviewFixtures.notConfiguredModel(),
-      preferredSerial: PreviewFixtures.pairedIpod.serial,
+      preferredSerial: try! DeviceID(PreviewFixtures.pairedIpod.serial),
       onDone: { _, _, _ in }, onClose: {})
   }
 

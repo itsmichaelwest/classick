@@ -39,19 +39,19 @@ final class NotifierPolicyTests: XCTestCase {
     let active = snapshot(revision: 1, phase: .syncing, sessionID: 42)
     model.apply(.deviceInventorySnapshot(active))
     XCTAssertEqual(
-      coordinator.consume(.deviceInventorySnapshot(active), devices: model.devices), [])
+      coordinator.consume(inventoryEvent(revision: 1), devices: model.devices), [])
 
-    let summary = DaemonEvent.syncEvent(
+    let summary = WireV3Event.syncEvent(
       line:
         #"{"type":"summary","add":3,"modify":0,"metadata_only":0,"remove":0,"unchanged":7,"total_planned":3}"#,
       serial: "A", sessionID: 42)
     model.apply(summary)
-    XCTAssertEqual(coordinator.consume(summary, devices: model.devices), [])
+    XCTAssertEqual(coordinator.consume(progressEvent("sync_summary"), devices: model.devices), [])
 
-    let finish = DaemonEvent.syncEvent(
+    let finish = WireV3Event.syncEvent(
       line: #"{"type":"finish","success":true}"#, serial: "A", sessionID: 42)
     model.apply(finish)
-    XCTAssertEqual(coordinator.consume(finish, devices: model.devices), [])
+    XCTAssertEqual(coordinator.consume(progressEvent("sync_finished"), devices: model.devices), [])
   }
 
   func testAuthoritativeTerminalSnapshotProducesOneCompletion() {
@@ -59,25 +59,26 @@ final class NotifierPolicyTests: XCTestCase {
     let model = AppModel()
     let active = snapshot(revision: 1, phase: .syncing, sessionID: 42)
     model.apply(.deviceInventorySnapshot(active))
-    _ = coordinator.consume(.deviceInventorySnapshot(active), devices: model.devices)
-    let summary = DaemonEvent.syncEvent(
+    _ = coordinator.consume(inventoryEvent(revision: 1), devices: model.devices)
+    let summary = WireV3Event.syncEvent(
       line:
         #"{"type":"summary","add":3,"modify":0,"metadata_only":0,"remove":0,"unchanged":7,"total_planned":3}"#,
       serial: "A", sessionID: 42)
     model.apply(summary)
-    _ = coordinator.consume(summary, devices: model.devices)
+    _ = coordinator.consume(progressEvent("sync_summary"), devices: model.devices)
 
     let success = history(sessionID: 42, outcome: "ok")
     let terminal = snapshot(
       revision: 2, phase: .idle, sessionID: nil,
       latestSuccessfulSync: success, latestAttempt: success)
     model.apply(.deviceInventorySnapshot(terminal))
+    model.apply(.historyUpdate(entries: [success], acknowledgedRequestID: "terminal"))
 
     XCTAssertEqual(
-      coordinator.consume(.deviceInventorySnapshot(terminal), devices: model.devices),
+      coordinator.consume(inventoryEvent(revision: 2), devices: model.devices),
       [SyncFinishedNotification(serial: "A", sessionID: 42, success: true, added: 3)])
     XCTAssertEqual(
-      coordinator.consume(.deviceInventorySnapshot(terminal), devices: model.devices), [],
+      coordinator.consume(inventoryEvent(revision: 2), devices: model.devices), [],
       "duplicate terminal snapshots must not post twice")
   }
 
@@ -86,20 +87,21 @@ final class NotifierPolicyTests: XCTestCase {
     let model = AppModel()
     let active = snapshot(revision: 1, phase: .syncing, sessionID: 42)
     model.apply(.deviceInventorySnapshot(active))
-    _ = coordinator.consume(.deviceInventorySnapshot(active), devices: model.devices)
+    _ = coordinator.consume(inventoryEvent(revision: 1), devices: model.devices)
 
-    let cancelledEvent = DaemonEvent.syncEvent(
+    let cancelledEvent = WireV3Event.syncEvent(
       line: #"{"type":"cancelled"}"#, serial: "A", sessionID: 42)
     model.apply(cancelledEvent)
-    _ = coordinator.consume(cancelledEvent, devices: model.devices)
+    _ = coordinator.consume(progressEvent("sync_cancelled"), devices: model.devices)
     let cancelled = history(sessionID: 42, outcome: "cancelled")
     let terminal = snapshot(
       revision: 2, phase: .idle, sessionID: nil,
       latestSuccessfulSync: nil, latestAttempt: cancelled)
     model.apply(.deviceInventorySnapshot(terminal))
+    model.apply(.historyUpdate(entries: [cancelled], acknowledgedRequestID: "terminal"))
 
     XCTAssertEqual(
-      coordinator.consume(.deviceInventorySnapshot(terminal), devices: model.devices), [])
+      coordinator.consume(inventoryEvent(revision: 2), devices: model.devices), [])
   }
 
   func testSeriallessScanStreamNeverProducesSyncNotification() {
@@ -110,11 +112,11 @@ final class NotifierPolicyTests: XCTestCase {
         .init(
           state: .scanning, configured: true, ipodConnected: false,
           lastSync: nil, storage: nil)))
-    let finish = DaemonEvent.syncEvent(
+    let finish = WireV3Event.syncEvent(
       line: #"{"type":"finish","success":true}"#, serial: nil, sessionID: 99)
     model.apply(finish)
 
-    XCTAssertEqual(coordinator.consume(finish, devices: model.devices), [])
+    XCTAssertEqual(coordinator.consume(progressEvent("sync_finished", sessionID: 99), devices: model.devices), [])
   }
 
   private func snapshot(
@@ -139,7 +141,32 @@ final class NotifierPolicyTests: XCTestCase {
 
   private func history(sessionID: UInt64, outcome: String) -> HistoryEntry {
     HistoryEntry(
-      serial: "A", sessionID: sessionID, timestamp: "2026-07-19T12:00:00Z",
+      serial: "000000000000000A", sessionID: sessionID, timestamp: "2026-07-19T12:00:00Z",
       durationSecs: 10, trigger: "manual", outcome: outcome)
+  }
+
+  private func inventoryEvent(revision: UInt64) -> WireV3Event {
+    decodeV3(
+      #"{"type":"device_inventory","revision":\#(revision),"devices":[],"unidentified":[]}"#)
+  }
+
+  private func progressEvent(_ type: String, sessionID: UInt64 = 42) -> WireV3Event {
+    let fields: String
+    switch type {
+    case "sync_summary":
+      fields = #", "summary":{"add":3,"modify":0,"metadata_only":0,"remove":0,"unchanged":7,"total_planned":3}"#
+    case "sync_finished": fields = #", "success":true"#
+    default: fields = ""
+    }
+    return decodeV3(
+      #"{"type":"\#(type)","device_id":"000000000000000A","session_id":\#(sessionID)\#(fields)}"#)
+  }
+
+  private func decodeV3(_ json: String) -> WireV3Event {
+    guard
+      case .event(let event) = try! WireV3Codec.decode(
+        Data(json.utf8), direction: .daemonToDesktopEvents)
+    else { preconditionFailure("expected event") }
+    return event
   }
 }

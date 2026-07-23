@@ -9,7 +9,7 @@ import SwiftUI
 /// per-device Settings page (`DeviceSettingsPage`), not here.
 ///
 /// Current config is read from `AppModel.config`, populated by the daemon's
-/// `config_update` event (see `AppModel.apply`) — the daemon stays the store
+/// `global_config` event (see `AppModel.apply`) — the daemon stays the store
 /// of record; this view only mirrors it and writes back via `save_config`.
 struct SettingsView: View {
     var model: AppModel

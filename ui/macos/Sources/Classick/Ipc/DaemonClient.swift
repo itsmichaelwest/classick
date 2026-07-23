@@ -9,9 +9,9 @@ enum SendDisposition: Equatable, Sendable {
 }
 
 struct DurableIntent: Sendable {
-  let key: DurableIntentKey
-  let requestID: String
-  let command: DaemonCommand
+  let key: WireV3DurableIntentKey
+  let requestID: UUID
+  let command: WireV3Command
   let bytes: Data
   fileprivate var lastWrittenConnection: Int?
 }
@@ -19,11 +19,12 @@ struct DurableIntent: Sendable {
 struct DurableIntentOutbox: Sendable {
   private var intents: [DurableIntent] = []
 
-  var requestIDs: [String] { intents.map(\.requestID) }
+  var requestIDs: [String] { intents.map { $0.requestID.uuidString.lowercased() } }
 
-  mutating func upsert(_ command: DaemonCommand) throws {
+  mutating func upsert(_ command: WireV3Command) throws {
     var command = command.normalizedForDurableEncoding()
-    guard let key = command.durableIntentKey, let requestID = command.requestID else { return }
+    guard let key = command.durableIntentKey else { return }
+    let requestID = command.requestID
     guard !intents.contains(where: { $0.requestID == requestID }) else { return }
 
     if let incomingRules = command.additiveRules,
@@ -31,7 +32,7 @@ struct DurableIntentOutbox: Sendable {
       let queuedRules = queued.command.additiveRules
     {
       command = command.replacingAdditiveRules(
-        DaemonCommand.canonicalAdditiveRules(queuedRules + incomingRules))
+        WireV3Command.canonicalAdditiveRules(queuedRules + incomingRules))
     }
     intents.removeAll { $0.key == key && $0.lastWrittenConnection == nil }
     var bytes = try JSONEncoder().encode(command)
@@ -54,18 +55,18 @@ struct DurableIntentOutbox: Sendable {
     return nil
   }
 
-  mutating func markWritten(requestID: String, connectionGeneration: Int) {
+  mutating func markWritten(requestID: UUID, connectionGeneration: Int) {
     guard let index = intents.firstIndex(where: { $0.requestID == requestID }) else { return }
     intents[index].lastWrittenConnection = connectionGeneration
   }
 
-  func wasWritten(requestID: String, connectionGeneration: Int) -> Bool {
+  func wasWritten(requestID: UUID, connectionGeneration: Int) -> Bool {
     intents.first(where: { $0.requestID == requestID })?.lastWrittenConnection
       == connectionGeneration
   }
 
   @discardableResult
-  mutating func acknowledge(_ acknowledgement: DurableAcknowledgement) -> Bool {
+  mutating func acknowledge(_ acknowledgement: WireV3DurableAcknowledgement) -> Bool {
     guard
       let index = intents.firstIndex(where: {
         $0.requestID == acknowledgement.requestID && $0.lastWrittenConnection != nil
@@ -91,7 +92,7 @@ actor DaemonClient {
   private let logger = Logger(subsystem: "com.classick.app", category: "DaemonClient")
   private let socketPath: String
 
-  private var continuation: AsyncStream<DaemonEvent>.Continuation?
+  private var continuation: AsyncStream<WireV3Event>.Continuation?
   private var fd: Int32 = -1
   private var isRunning = false
   private var generation = 0
@@ -108,6 +109,7 @@ actor DaemonClient {
   /// Set once if the daemon's handshake fails the protocol-version check.
   /// Non-nil means the client has permanently stopped (no more reconnects).
   private(set) var lastFatalError: String?
+  private(set) var connectionCompatibility: WireV3ConnectionCompatibility?
 
   init(socketPath: String = NSTemporaryDirectory() + "classick.sock") {
     self.socketPath = socketPath
@@ -115,7 +117,7 @@ actor DaemonClient {
 
   /// The stream of daemon events. Intended to be called once; the
   /// continuation is retained for the lifetime of the client.
-  func events() -> AsyncStream<DaemonEvent> {
+  func events() -> AsyncStream<WireV3Event> {
     AsyncStream { continuation in
       self.continuation = continuation
     }
@@ -171,13 +173,12 @@ actor DaemonClient {
   }
 
   @discardableResult
-  func send(_ command: DaemonCommand) async -> SendDisposition {
+  func send(_ command: WireV3Command) async -> SendDisposition {
     sendCommand(command)
   }
 
-  private func sendCommand(_ command: DaemonCommand) -> SendDisposition {
+  private func sendCommand(_ command: WireV3Command) -> SendDisposition {
     if command.durableIntentKey != nil {
-      guard command.requestID != nil else { return .dropped }
       do {
         try durableOutbox.upsert(command)
       } catch {
@@ -186,7 +187,7 @@ actor DaemonClient {
         return .dropped
       }
       flushDurableIntents()
-      guard let requestID = command.requestID else { return .dropped }
+      let requestID = command.requestID
       return durableOutbox.wasWritten(
         requestID: requestID, connectionGeneration: connectionGeneration)
         ? .sent : .queued
@@ -197,7 +198,7 @@ actor DaemonClient {
         "send(\(String(describing: command), privacy: .public)) dropped — not connected")
       return .dropped
     }
-    guard let bytes = encodedLine(for: command), writeAll(bytes, to: fd) else {
+    guard let bytes = encodedLine(for: command), DaemonSocketIO.writeAll(bytes, to: fd) else {
       closeSocket()
       return .dropped
     }
@@ -205,14 +206,14 @@ actor DaemonClient {
   }
 
   @discardableResult
-  func send(_ commands: [DaemonCommand]) async -> [SendDisposition] {
+  func send(_ commands: [WireV3Command]) async -> [SendDisposition] {
     commands.map(sendCommand)
   }
 
   private func flushDurableIntents() {
     guard fd >= 0, handshakeComplete else { return }
     while let intent = durableOutbox.nextIntent(for: connectionGeneration) {
-      guard writeAll(intent.bytes, to: fd) else {
+      guard DaemonSocketIO.writeAll(intent.bytes, to: fd) else {
         closeSocket()
         return
       }
@@ -228,10 +229,11 @@ actor DaemonClient {
     let maxBackoff: Duration = .seconds(10)
 
     while isRunning && generation == self.generation {
-      if let connectedFd = connectSocket(path: socketPath) {
+      if let connectedFd = DaemonSocketIO.connect(path: socketPath) {
         fd = connectedFd
         connectionGeneration += 1
         handshakeComplete = false
+        connectionCompatibility = nil
         let currentConnectionGeneration = connectionGeneration
         backoff = .milliseconds(250)
         await readUntilDisconnected(
@@ -272,7 +274,7 @@ actor DaemonClient {
     connectionGeneration: Int
   ) async {
     var isFirstLine = true
-    for await line in Self.lineStream(from: connectionFd) {
+    for await line in DaemonSocketIO.lines(from: connectionFd) {
       await handleLine(
         line, isFirstLine: isFirstLine,
         runGeneration: runGeneration,
@@ -281,36 +283,6 @@ actor DaemonClient {
     }
     if shutdownCommandSent, shutdownConnectionGeneration == connectionGeneration {
       completeShutdown(result: true)
-    }
-  }
-
-  nonisolated private static func lineStream(from connectionFd: Int32) -> AsyncStream<Data> {
-    AsyncStream { continuation in
-      let thread = Thread {
-        var buffer = Data()
-        var readBuffer = [UInt8](repeating: 0, count: 4096)
-
-        readLoop: while true {
-          let count: Int = readBuffer.withUnsafeMutableBytes { pointer in
-            while true {
-              let result = Darwin.read(connectionFd, pointer.baseAddress, pointer.count)
-              if result < 0, errno == EINTR { continue }
-              return result
-            }
-          }
-          guard count > 0 else { break readLoop }
-          buffer.append(contentsOf: readBuffer[0..<count])
-
-          while let newlineIndex = buffer.firstIndex(of: 0x0A) {
-            let line = buffer.subdata(in: buffer.startIndex..<newlineIndex)
-            buffer.removeSubrange(buffer.startIndex...newlineIndex)
-            if !line.isEmpty { continuation.yield(line) }
-          }
-        }
-        continuation.finish()
-      }
-      thread.name = "classick.DaemonClient.reader"
-      thread.start()
     }
   }
 
@@ -328,33 +300,12 @@ actor DaemonClient {
         currentConnectionGeneration: self.connectionGeneration)
     else { return }
 
-    let event: DaemonEvent
-    do {
-      event = try JSONDecoder().decode(DaemonEvent.self, from: data)
-    } catch {
-      // Log the FULL DecodingError (names the missing key/type and
-      // coding path — localizedDescription is just "data missing")
-      // plus a truncated raw line, so a wire-shape mismatch names
-      // itself instead of requiring a socket probe to diagnose. A
-      // dropped line here is silent data loss on the UI (the
-      // status_update storage-keys mismatch hid a connected iPod's
-      // entire status stream) — make it loud.
-      let raw = String(data: data.prefix(300), encoding: .utf8) ?? "<non-utf8>"
-      logger.error(
-        "failed to decode daemon line: \(String(describing: error), privacy: .public) line=\(raw, privacy: .public)"
-      )
-      return
-    }
-
-    if shutdownCommandSent, shutdownConnectionGeneration == connectionGeneration {
-      scheduleShutdownInactivityTimeout()
-    }
-
+    let event: WireV3Event
     if isFirstLine {
-      guard case .hello(let protocolVersion, _) = event,
-        Self.supportsDaemonProtocol(protocolVersion)
-      else {
-        let message = "daemon handshake failed: expected hello major version 2, got \(event)"
+      let compatibility = WireV3Codec.admitDaemonHello(data)
+      connectionCompatibility = compatibility
+      guard case .compatible(let hello) = compatibility else {
+        let message = "daemon handshake failed: \(compatibility)"
         logger.fault("\(message, privacy: .public)")
         lastFatalError = message
         isRunning = false
@@ -363,20 +314,38 @@ actor DaemonClient {
         continuation?.finish()
         return
       }
+      event = .hello(hello)
+    } else {
+      do {
+        let decoded = try WireV3Codec.decode(data, direction: .daemonToDesktopEvents)
+        guard case .event(let typedEvent) = decoded else { return }
+        event = typedEvent
+      } catch {
+        let raw = String(data: data.prefix(300), encoding: .utf8) ?? "<non-utf8>"
+        logger.error(
+          "rejected protocol 3 daemon line: \(String(describing: error), privacy: .public) line=\(raw, privacy: .public)"
+        )
+        return
+      }
+    }
+
+    if shutdownCommandSent, shutdownConnectionGeneration == connectionGeneration {
+      scheduleShutdownInactivityTimeout()
+    }
+
+    if isFirstLine {
       handshakeComplete = true
       if sendPendingShutdownIfReady() {
         continuation?.yield(event)
         return
       }
       continuation?.yield(event)
-      await send(.subscribeDeviceEvents)
-      await send(.getStatus(requestID: DaemonCommand.newRequestID()))
+      await send(.subscribeInventory(requestID: WireV3Command.newRequestID()))
+      await send(.getInventory(requestID: WireV3Command.newRequestID()))
       // Explicitly pull config on every (re)connect. The daemon only
-      // *pushes* config_update on a name change or after a save, so
-      // without this the app never learns the persisted iPod identity on
-      // a cached-name plug-in — leaving `configuredSerial` nil, the menu
-      // stuck on "Set Up", and Settings showing defaults.
-      await send(.getConfig(requestID: DaemonCommand.newRequestID()))
+      // Without an explicit query the app may not learn persisted global
+      // settings on a cached-name plug-in, leaving Settings at defaults.
+      await send(.getGlobalConfig(requestID: WireV3Command.newRequestID()))
       flushDurableIntents()
       return
     }
@@ -400,7 +369,7 @@ actor DaemonClient {
   }
 
   nonisolated static func supportsDaemonProtocol(_ version: String) -> Bool {
-    version.split(separator: ".").first == "2"
+    version.split(separator: ".").first == "3"
   }
 
   @discardableResult
@@ -411,7 +380,7 @@ actor DaemonClient {
       handshakeComplete
     else { return false }
 
-    shutdownCommandSent = sendCommand(.shutdown) == .sent
+    shutdownCommandSent = sendCommand(.shutdown(requestID: WireV3Command.newRequestID())) == .sent
     if shutdownCommandSent {
       scheduleShutdownInactivityTimeout()
     }
@@ -455,42 +424,7 @@ actor DaemonClient {
     }
   }
 
-  // MARK: - Raw POSIX socket I/O
-
-  private func connectSocket(path: String) -> Int32? {
-    let newFd = socket(AF_UNIX, SOCK_STREAM, 0)
-    guard newFd >= 0 else { return nil }
-
-    var noSigPipe: Int32 = 1
-    setsockopt(newFd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-
-    var addr = sockaddr_un()
-    addr.sun_family = sa_family_t(AF_UNIX)
-    let pathBytes = Array(path.utf8)
-    guard pathBytes.count < MemoryLayout.size(ofValue: addr.sun_path) else {
-      close(newFd)
-      return nil
-    }
-    withUnsafeMutableBytes(of: &addr.sun_path) { raw in
-      let buf = raw.bindMemory(to: UInt8.self)
-      for (i, byte) in pathBytes.enumerated() { buf[i] = byte }
-      buf[pathBytes.count] = 0
-    }
-
-    let len = socklen_t(MemoryLayout<sockaddr_un>.size)
-    let result = withUnsafePointer(to: &addr) { ptr in
-      ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-        Darwin.connect(newFd, sockPtr, len)
-      }
-    }
-    guard result == 0 else {
-      close(newFd)
-      return nil
-    }
-    return newFd
-  }
-
-  private func encodedLine(for command: DaemonCommand) -> Data? {
+  private func encodedLine(for command: WireV3Command) -> Data? {
     do {
       var data = try JSONEncoder().encode(command)
       data.append(0x0A)
@@ -501,18 +435,4 @@ actor DaemonClient {
     }
   }
 
-  private func writeAll(_ data: Data, to fd: Int32) -> Bool {
-    data.withUnsafeBytes { pointer in
-      guard let baseAddress = pointer.baseAddress else { return true }
-      var offset = 0
-      while offset < pointer.count {
-        let count = Darwin.write(
-          fd, baseAddress.advanced(by: offset), pointer.count - offset)
-        if count < 0, errno == EINTR { continue }
-        guard count > 0 else { return false }
-        offset += count
-      }
-      return true
-    }
-  }
 }

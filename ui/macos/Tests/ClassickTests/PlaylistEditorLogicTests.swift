@@ -116,7 +116,7 @@ final class PlaylistEditorLogicTests: XCTestCase {
     // MARK: - PlaylistEditorLogic.subscribedDeviceCount / deleteConfirmMessage
 
     func testSubscribedDeviceCountCountsOnlyDevicesSubscribedToThisSlug() {
-        let configs: [String: DeviceConfigState] = [
+        let configs: [DeviceID: DeviceConfigState] = [
             "0xA": .init(selection: .init(mode: .all, rules: []), subscriptions: .init(playlists: ["gym"]), settings: .init(autoSync: true, rockboxCompat: false), preview: nil),
             "0xB": .init(selection: .init(mode: .all, rules: []), subscriptions: .init(playlists: ["chill"]), settings: .init(autoSync: true, rockboxCompat: false), preview: nil),
             "0xC": .init(selection: .init(mode: .all, rules: []), subscriptions: .init(playlists: ["gym", "chill"]), settings: .init(autoSync: true, rockboxCompat: false), preview: nil),

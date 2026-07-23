@@ -60,7 +60,7 @@ final class DeviceMusicLogicTests: XCTestCase {
     model.apply(.deviceInventorySnapshot(.init(revision: 2, devices: [a, b])))
 
     let surface = try XCTUnwrap(DeviceSurfaceLogic.state(serial: "A", in: model.devices))
-    XCTAssertEqual(surface.identity.serial, "A")
+    XCTAssertEqual(surface.identity.serial, "000000000000000A")
     XCTAssertEqual(surface.identity.name, "Alpha")
     XCTAssertEqual(model.selectedDestination, .device(serial: "A", page: .music))
   }

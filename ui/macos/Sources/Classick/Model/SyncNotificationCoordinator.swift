@@ -18,8 +18,8 @@ struct TerminalStateConsumer {
     var message: String
   }
 
-  private var retainedErrors: [DeviceSerial: RetainedError] = [:]
-  private var dismissedErrors: [DeviceSerial: Attempt] = [:]
+  private var retainedErrors: [DeviceID: RetainedError] = [:]
+  private var dismissedErrors: [DeviceID: Attempt] = [:]
 
   mutating func reset() {
     retainedErrors.removeAll()
@@ -27,8 +27,8 @@ struct TerminalStateConsumer {
   }
 
   mutating func reconcile(
-    devices: inout [DeviceSerial: DeviceViewState],
-    previous: [DeviceSerial: DeviceViewState]
+    devices: inout [DeviceID: DeviceViewState],
+    previous: [DeviceID: DeviceViewState]
   ) {
     for serial in devices.keys {
       guard var state = devices[serial] else { continue }
@@ -74,8 +74,8 @@ struct TerminalStateConsumer {
   }
 
   mutating func dismiss(
-    serial: DeviceSerial,
-    devices: inout [DeviceSerial: DeviceViewState]
+    serial: DeviceID,
+    devices: inout [DeviceID: DeviceViewState]
   ) {
     guard var state = devices[serial] else { return }
     let attempt = retainedErrors[serial]?.attempt ?? state.latestAttempt.map(Attempt.init)
@@ -98,7 +98,7 @@ struct TerminalStateConsumer {
 }
 
 extension AppModel {
-  func latestSuccessfulSync(for serial: DeviceSerial) -> HistoryEntry? {
+  func latestSuccessfulSync(for serial: DeviceID) -> HistoryEntry? {
     devices[serial]?.latestSuccessfulSync
   }
 
@@ -117,18 +117,19 @@ extension AppModel {
 }
 
 private struct HistorySessionIdentity: Hashable {
-  var serial: DeviceSerial
+  var serial: DeviceID
   var sessionID: UInt64
 
   init?(_ entry: HistoryEntry) {
     guard let sessionID = entry.sessionID else { return nil }
-    serial = entry.serial
+    guard let deviceID = try? DeviceID(entry.serial) else { return nil }
+    serial = deviceID
     self.sessionID = sessionID
   }
 }
 
 struct SyncFinishedNotification: Equatable, Sendable {
-  var serial: DeviceSerial
+  var serial: DeviceID
   var sessionID: UInt64
   var success: Bool
   var added: Int
@@ -140,7 +141,7 @@ struct SyncFinishedNotification: Equatable, Sendable {
 /// user-visible is emitted.
 struct SyncNotificationCoordinator {
   private struct Session: Hashable {
-    var serial: DeviceSerial
+    var serial: DeviceID
     var id: UInt64
   }
 
@@ -148,11 +149,9 @@ struct SyncNotificationCoordinator {
   private var notifiedSessions: Set<Session> = []
   private var cancelledSessions: Set<Session> = []
   private var addedBySession: [Session: Int] = [:]
-  private let decoder = JSONDecoder()
-
   mutating func consume(
-    _ event: DaemonEvent,
-    devices: [DeviceSerial: DeviceViewState]
+    _ event: WireV3Event,
+    devices: [DeviceID: DeviceViewState]
   ) -> [SyncFinishedNotification] {
     switch event {
     case .hello:
@@ -161,27 +160,25 @@ struct SyncNotificationCoordinator {
       cancelledSessions.removeAll()
       addedBySession.removeAll()
 
-    case .syncEvent(let line, let serial, let sessionID):
-      guard let serial else { return [] }
-      guard devices[serial]?.sessionID == sessionID else { return [] }
-      let session = Session(serial: serial, id: sessionID)
+    case .progress(let progress):
+      let deviceID = progress.route.deviceID
+      let sessionID = progress.route.sessionID
+      guard devices[deviceID]?.sessionID == sessionID else { return [] }
+      let session = Session(serial: deviceID, id: sessionID)
       observedSessions.insert(session)
-      guard let data = line.data(using: .utf8),
-        let inner = try? decoder.decode(SyncEvent.self, from: data)
-      else { return [] }
-      switch inner {
-      case .summary(let add, _, _, _, _, _):
-        addedBySession[session] = add
-      case .cancelled:
+      switch progress.kind {
+      case .syncSummary:
+        addedBySession[session] = progress.summary.flatMap { Int(exactly: $0.add) } ?? 0
+      case .syncCancelled:
         cancelledSessions.insert(session)
       default:
         break
       }
 
-    case .deviceInventorySnapshot:
+    case .deviceInventory:
       for state in devices.values {
         if let sessionID = state.sessionID {
-          observedSessions.insert(Session(serial: state.identity.serial, id: sessionID))
+          observedSessions.insert(Session(serial: state.deviceID, id: sessionID))
         }
       }
       return terminalNotifications(in: devices)
@@ -193,7 +190,7 @@ struct SyncNotificationCoordinator {
   }
 
   private mutating func terminalNotifications(
-    in devices: [DeviceSerial: DeviceViewState]
+    in devices: [DeviceID: DeviceViewState]
   ) -> [SyncFinishedNotification] {
     var notifications: [SyncFinishedNotification] = []
     for state in devices.values {
@@ -201,7 +198,7 @@ struct SyncNotificationCoordinator {
         let attempt = state.latestAttempt,
         let sessionID = attempt.sessionID
       else { continue }
-      let session = Session(serial: state.identity.serial, id: sessionID)
+      let session = Session(serial: state.deviceID, id: sessionID)
       guard observedSessions.contains(session), !notifiedSessions.contains(session) else {
         continue
       }

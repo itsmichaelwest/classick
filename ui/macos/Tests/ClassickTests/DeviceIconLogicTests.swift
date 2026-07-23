@@ -90,6 +90,12 @@ final class DeviceIconLogicTests: XCTestCase {
       DeviceIconLogic.cacheKey(serial: "A", drive: "/Volumes/iPod"))
   }
 
+  func testCacheKeyUsesNonIdentityFallbackWhenDeviceIDIsUnavailable() {
+    XCTAssertEqual(
+      DeviceIconLogic.cacheKey(serial: nil, drive: nil),
+      "<unknown>|<disconnected>")
+  }
+
   /// Every icon the table can name must exist in the AMPDevices resources
   /// on this Mac — catches both table typos and an OS release moving the
   /// framework (skips rather than fails when the dir is gone entirely,

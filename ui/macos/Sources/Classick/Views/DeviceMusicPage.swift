@@ -17,21 +17,23 @@ import SwiftUI
 /// Edits a local draft and auto-saves it (debounced), mirroring the retired
 /// LibraryView's `SelectionDraft` pattern: seed once from the daemon's
 /// reply, never re-seed after the user starts editing (so a late/echoed
-/// `device_config_update` can't clobber an in-progress edit).
+/// `device_config` can't clobber an in-progress edit).
 struct DeviceMusicPage: View {
   var model: AppModel
-  var serial: String
-  var onSyncNow: (DeviceSerial) -> Void
-  var onLoadDeviceConfig: (String) -> Void
+  var serial: DeviceID
+  var onSyncNow: (DeviceID) -> Void
+  var onLoadDeviceConfig: (DeviceID) -> Void
   var onSaveAndPreviewDeviceConfig:
-    (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> String?
+    (_ serial: DeviceID, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) ->
+      String?
   // Required (no no-op default) — see `MainWindow`'s doc comment on
   // `onSavePlaylist` for why a defaulted closure here would be exactly
   // how this action could ship silently dead.
   var onScan: () -> Void
-  var onSubmitLibraryDrop: @MainActor @Sendable (LibraryDropTarget, [SelectionRule], UUID) -> Void = {
-    _, _, _ in
-  }
+  var onSubmitLibraryDrop: @MainActor @Sendable (LibraryDropTarget, [SelectionRule], UUID) -> Void =
+    {
+      _, _, _ in
+    }
 
   private struct MusicDraft: Equatable {
     var mode: SelectionMode = .all
@@ -69,7 +71,7 @@ struct DeviceMusicPage: View {
     DeviceSurfaceLogic.phase(for: deviceState, globalPhase: model.phase)
   }
   private var deviceName: String {
-    deviceState?.identity.name ?? deviceState?.identity.modelLabel ?? serial
+    deviceState?.identity.name ?? deviceState?.identity.modelLabel ?? serial.rawValue
   }
 
   var body: some View {
@@ -239,7 +241,8 @@ struct DeviceMusicPage: View {
   private var browserMode: LibraryBrowser.Mode {
     guard canEditDevice, draft.mode != .all else { return .browse }
     return .select(
-      checked: Binding(get: { draft.checked }, set: { value in editSelection { $0.checked = value } }),
+      checked: Binding(
+        get: { draft.checked }, set: { value in editSelection { $0.checked = value } }),
       style: .cascading)
   }
 
@@ -395,10 +398,11 @@ struct DeviceMusicPage: View {
         await DeviceDraftSaveGate.waitUntilReady(
           serial: serial, model: model)
       else { return }
-      guard let requestID = onSaveAndPreviewDeviceConfig(
-        serial,
-        SelectionState(mode: d.mode, rules: Array(d.checked)),
-        SubscriptionsWire(playlists: Array(d.subscriptions).sorted()))
+      guard
+        let requestID = onSaveAndPreviewDeviceConfig(
+          serial,
+          SelectionState(mode: d.mode, rules: Array(d.checked)),
+          SubscriptionsWire(playlists: Array(d.subscriptions).sorted()))
       else { return }
       acknowledgedSelection.markSubmitted(requestID: requestID)
       acknowledgedSubscriptions.markSubmitted(requestID: requestID)
@@ -457,7 +461,7 @@ struct DeviceMusicPage: View {
 enum DeviceDraftSaveGate {
   static func waitUntilReady(
     delay: Duration = .milliseconds(400),
-    serial: DeviceSerial,
+    serial: DeviceID,
     model: AppModel
   ) async -> Bool {
     try? await Task.sleep(for: delay)
@@ -474,7 +478,7 @@ enum DeviceDraftSaveGate {
   private func musicPagePreview(_ model: AppModel) -> some View {
     NavigationStack {
       DeviceMusicPage(
-        model: model, serial: PreviewFixtures.pairedIpod.serial,
+        model: model, serial: try! DeviceID(PreviewFixtures.pairedIpod.serial),
         onSyncNow: { _ in }, onLoadDeviceConfig: { _ in },
         onSaveAndPreviewDeviceConfig: { _, _, _ in "preview" }, onScan: {})
     }

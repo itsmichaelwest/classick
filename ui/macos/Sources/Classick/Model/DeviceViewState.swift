@@ -1,6 +1,5 @@
 import Foundation
 
-typealias DeviceSerial = String
 typealias StorageWire = StatusInfo.Storage
 typealias HistoryEntryWire = HistoryEntry
 
@@ -33,8 +32,27 @@ struct DeviceFinalization: Equatable, Sendable {
   var stagedTracks: Int
 }
 
+struct DeviceConfigDeliveryState: Equatable, Sendable {
+  var selection: WireV3ConfigComponent<SelectionState>
+  var settings: WireV3ConfigComponent<DeviceSettingsWire>
+  var subscriptions: WireV3ConfigComponent<SubscriptionsWire>
+}
+
+struct UnidentifiedDeviceViewState: Equatable, Sendable {
+  var observationID: ObservationID
+  var readiness: String
+  var hardware: WireV3Hardware
+}
+
 struct DeviceViewState: Equatable, Sendable {
+  var deviceID: DeviceID
   var identity: DeviceIdentityWire
+  var readiness: String = "ready"
+  var hardware: WireV3Hardware = .init(
+    family: nil, generation: nil, modelCode: nil, colour: nil, firmware: nil,
+    capacityBytes: nil)
+  var profileStatus: String = "not_adopted"
+  var configDelivery: DeviceConfigDeliveryState?
   var configured: Bool
   var connected: Bool
   var mountPath: String?

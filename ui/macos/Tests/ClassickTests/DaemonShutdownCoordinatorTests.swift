@@ -75,11 +75,19 @@ private func readCommandsUntilShutdown(from fd: Int32, into sink: ShutdownComman
     fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
     socklen_t(MemoryLayout<timeval>.size))
   var buffer = [UInt8](repeating: 0, count: 4096)
-  while !sink.text.contains(#"{"type":"shutdown"}"#) {
+  while shutdownCommandCount(in: sink.text) == 0 {
     let count = Darwin.read(fd, &buffer, buffer.count)
     guard count > 0 else { return }
     sink.append(String(decoding: buffer[0..<count], as: UTF8.self))
   }
+}
+
+private func shutdownCommandCount(in text: String) -> Int {
+  text.split(separator: "\n").filter { line in
+    guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+    else { return false }
+    return object["type"] as? String == "shutdown"
+  }.count
 }
 
 final class DaemonClientShutdownTests: XCTestCase {
@@ -96,7 +104,8 @@ final class DaemonClientShutdownTests: XCTestCase {
       let clientFd = accept(listenFd, nil, nil)
       guard clientFd >= 0 else { return }
       writeShutdownLine(
-        #"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n",
+        #"{"type":"hello","protocol_version":"3.0.0","role":"daemon","software_version":"0.0.1","capabilities":["device_inventory","portable_profile","typed_sync_progress"]}"#
+          + "\n",
         to: clientFd)
       readCommandsUntilShutdown(from: clientFd, into: sink)
       close(clientFd)
@@ -108,10 +117,10 @@ final class DaemonClientShutdownTests: XCTestCase {
     let consumer = Task { for await _ in stream {} }
     await client.start()
     let deadline = Date().addingTimeInterval(1)
-    while !sink.text.contains("get_config"), Date() < deadline {
+    while !sink.text.contains("get_global_config"), Date() < deadline {
       try? await Task.sleep(for: .milliseconds(10))
     }
-    XCTAssertTrue(sink.text.contains("get_config"))
+    XCTAssertTrue(sink.text.contains("get_global_config"))
 
     let detached = await DaemonProcess(socketPath: path).stopForQuit(
       client: client,
@@ -120,7 +129,7 @@ final class DaemonClientShutdownTests: XCTestCase {
     await fulfillment(of: [disconnected], timeout: 1)
     consumer.cancel()
     XCTAssertTrue(detached)
-    XCTAssertFalse(sink.text.contains(#"{"type":"shutdown"}"#))
+    XCTAssertEqual(shutdownCommandCount(in: sink.text), 0)
   }
 
   func testAttachedShutdownRequestedBeforeHelloSendsOnceAndWaitsForEOF() async {
@@ -138,7 +147,8 @@ final class DaemonClientShutdownTests: XCTestCase {
       accepted.fulfill()
       releaseHello.wait()
       writeShutdownLine(
-        #"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n",
+        #"{"type":"hello","protocol_version":"3.0.0","role":"daemon","software_version":"0.0.1","capabilities":["device_inventory","portable_profile","typed_sync_progress"]}"#
+          + "\n",
         to: clientFd)
       readCommandsUntilShutdown(from: clientFd, into: sink)
       close(clientFd)
@@ -159,8 +169,7 @@ final class DaemonClientShutdownTests: XCTestCase {
 
     XCTAssertTrue(cleanExit)
     XCTAssertEqual(
-      sink.text.split(separator: "\n").filter { $0 == #"{"type":"shutdown"}"# }.count,
-      1)
+      shutdownCommandCount(in: sink.text), 1)
   }
 
   func testShutdownAndWaitSendsShutdownToAttachedDaemonAndSucceedsAtEOF() async {
@@ -174,7 +183,8 @@ final class DaemonClientShutdownTests: XCTestCase {
       let clientFd = accept(listenFd, nil, nil)
       guard clientFd >= 0 else { return }
       writeShutdownLine(
-        #"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n",
+        #"{"type":"hello","protocol_version":"3.0.0","role":"daemon","software_version":"0.0.1","capabilities":["device_inventory","portable_profile","typed_sync_progress"]}"#
+          + "\n",
         to: clientFd)
       readCommandsUntilShutdown(from: clientFd, into: sink)
       close(clientFd)
@@ -184,15 +194,14 @@ final class DaemonClientShutdownTests: XCTestCase {
     let stream = await client.events()
     let consumer = Task { for await _ in stream {} }
     await client.start()
-    await waitForText("get_config", in: sink)
+    await waitForText("get_global_config", in: sink)
 
     let cleanExit = await client.shutdownAndWait(timeout: .seconds(1))
     consumer.cancel()
 
     XCTAssertTrue(cleanExit)
     XCTAssertEqual(
-      sink.text.split(separator: "\n").filter { $0 == #"{"type":"shutdown"}"# }.count,
-      1)
+      shutdownCommandCount(in: sink.text), 1)
   }
 
   func testShutdownAndWaitFailsAfterBoundedInactivity() async {
@@ -207,7 +216,8 @@ final class DaemonClientShutdownTests: XCTestCase {
       guard clientFd >= 0 else { return }
       defer { close(clientFd) }
       writeShutdownLine(
-        #"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n",
+        #"{"type":"hello","protocol_version":"3.0.0","role":"daemon","software_version":"0.0.1","capabilities":["device_inventory","portable_profile","typed_sync_progress"]}"#
+          + "\n",
         to: clientFd)
       readCommandsUntilShutdown(from: clientFd, into: sink)
       Thread.sleep(forTimeInterval: 0.4)
@@ -217,7 +227,7 @@ final class DaemonClientShutdownTests: XCTestCase {
     let stream = await client.events()
     let consumer = Task { for await _ in stream {} }
     await client.start()
-    await waitForText("get_config", in: sink)
+    await waitForText("get_global_config", in: sink)
     let clock = ContinuousClock()
     let started = clock.now
 
@@ -288,13 +298,14 @@ final class DaemonClientShutdownTests: XCTestCase {
       let clientFd = accept(listenFd, nil, nil)
       guard clientFd >= 0 else { return }
       writeShutdownLine(
-        #"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n",
+        #"{"type":"hello","protocol_version":"3.0.0","role":"daemon","software_version":"0.0.1","capabilities":["device_inventory","portable_profile","typed_sync_progress"]}"#
+          + "\n",
         to: clientFd)
       readCommandsUntilShutdown(from: clientFd, into: sink)
       for index in 0..<4 {
         Thread.sleep(forTimeInterval: 0.04)
         let line =
-          #"{"type":"sync_event","line":"{\"type\":\"log\",\"message\":\"finalizing \#(index)\"}","serial":"RAW-A","session_id":7}"#
+          #"{"type":"sync_log","device_id":"000A27002138B0A8","session_id":7,"message":"finalizing \#(index)"}"#
         writeShutdownLine(line + "\n", to: clientFd)
       }
       close(clientFd)
@@ -304,7 +315,7 @@ final class DaemonClientShutdownTests: XCTestCase {
     let stream = await client.events()
     let consumer = Task { for await _ in stream {} }
     await client.start()
-    await waitForText("get_config", in: sink)
+    await waitForText("get_global_config", in: sink)
     let clock = ContinuousClock()
     let started = clock.now
 
@@ -343,7 +354,8 @@ final class DaemonShutdownCoordinatorTests: XCTestCase {
       accepted.fulfill()
       releaseHello.wait()
       writeShutdownLine(
-        #"{"type":"hello","protocol_version":"2.0.0","core_version":"2.0.0"}"# + "\n",
+        #"{"type":"hello","protocol_version":"3.0.0","role":"daemon","software_version":"0.0.1","capabilities":["device_inventory","portable_profile","typed_sync_progress"]}"#
+          + "\n",
         to: clientFd)
       readCommandsUntilShutdown(from: clientFd, into: sink)
       close(clientFd)
@@ -372,8 +384,7 @@ final class DaemonShutdownCoordinatorTests: XCTestCase {
     consumer.cancel()
     XCTAssertEqual(fallbacks.count, 0)
     XCTAssertEqual(
-      sink.text.split(separator: "\n").filter { $0 == #"{"type":"shutdown"}"# }.count,
-      1)
+      shutdownCommandCount(in: sink.text), 1)
   }
 
   @MainActor

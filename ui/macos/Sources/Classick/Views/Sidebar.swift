@@ -14,11 +14,12 @@ struct Sidebar: View {
   /// forget-iPod, which lives on the device Settings page. These were
   /// once conflated: the eject glyph used to call `onForgetIpod`, so
   /// clicking it unpaired the device and never touched the volume.
-  var onEjectIpod: (DeviceSerial) -> Void
+  var onEjectIpod: (DeviceID) -> Void
   var onSavePlaylist: (PlaylistPayload) -> Void
-  var onSubmitLibraryDrop: @MainActor @Sendable (LibraryDropTarget, [SelectionRule], UUID) -> Void = {
-    _, _, _ in
-  }
+  var onSubmitLibraryDrop: @MainActor @Sendable (LibraryDropTarget, [SelectionRule], UUID) -> Void =
+    {
+      _, _, _ in
+    }
 
   /// Snapshot of playlist slugs taken the moment "+" is tapped, so the
   /// `onChange` below can recognize the newly assigned slug once the
@@ -35,7 +36,7 @@ struct Sidebar: View {
 
   /// Explicit disclosure choices are keyed by serial so adding or removing
   /// another iPod cannot transfer one row's expansion state to another.
-  @State private var manuallyExpanded: [DeviceSerial: Bool] = [:]
+  @State private var manuallyExpanded: [DeviceID: Bool] = [:]
 
   var body: some View {
     // Native system selection throughout — `List(selection:)` + `.tag`.
@@ -209,7 +210,7 @@ struct Sidebar: View {
       submit: onSubmitLibraryDrop)
   }
 
-  private func libraryDropTarget(for serial: DeviceSerial) -> LibraryDropTarget? {
+  private func libraryDropTarget(for serial: DeviceID) -> LibraryDropTarget? {
     model.devices[serial].flatMap(LibraryDropEligibility.targetForDevice)
   }
 
@@ -220,21 +221,21 @@ struct Sidebar: View {
 }
 
 struct SidebarDeviceRow: Identifiable, Equatable {
-  var serial: DeviceSerial
+  var serial: DeviceID
   var name: String
   var connected: Bool
   var configured: Bool
   var phase: DevicePhase
 
-  var id: DeviceSerial { serial }
+  var id: DeviceID { serial }
 }
 
 enum SidebarInventory {
-  static func rows(from devices: [DeviceSerial: DeviceViewState]) -> [SidebarDeviceRow] {
+  static func rows(from devices: [DeviceID: DeviceViewState]) -> [SidebarDeviceRow] {
     devices.values
       .map { device in
         SidebarDeviceRow(
-          serial: device.identity.serial,
+          serial: device.deviceID,
           name: device.identity.name ?? device.identity.modelLabel,
           connected: device.connected,
           configured: device.configured,
@@ -244,7 +245,7 @@ enum SidebarInventory {
         let lhsName = lhs.name.lowercased()
         let rhsName = rhs.name.lowercased()
         return lhsName == rhsName
-          ? lhs.serial.lowercased() < rhs.serial.lowercased()
+          ? lhs.serial.rawValue < rhs.serial.rawValue
           : lhsName < rhsName
       }
   }

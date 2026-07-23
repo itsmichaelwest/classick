@@ -38,7 +38,7 @@ final class DeviceIdentityLogicTests: XCTestCase {
     /// must never leak onto this page.
     func testDeviceNameUsesPairedIdentityWhenNotConnectedButSerialMatchesPairedIpod() {
         // Paired iPod 0xB isn't plugged in right now (0xA is, or nothing is),
-        // but this page is showing 0xB's cached identity from config_update.
+        // but this page is showing 0xB's cached identity from device inventory.
         let pairedB = IpodIdentity(serial: "0xB", modelLabel: "iPod Classic (5th gen)", name: "Old iPod", customSelection: false)
         XCTAssertEqual(
             DeviceIdentityLogic.deviceName(serial: "0xB", isConnected: false, connectedDevice: connected, pairedIpod: pairedB),

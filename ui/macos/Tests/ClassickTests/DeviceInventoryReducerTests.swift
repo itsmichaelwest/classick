@@ -4,6 +4,98 @@ import XCTest
 
 @MainActor
 final class DeviceInventoryReducerTests: XCTestCase {
+  func testProtocol3InventoryUsesCanonicalIdentityAndSeparatesObservations() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+
+    model.apply(try protocol3Event(lines[0]))
+
+    let deviceID = DeviceID("000A27002138B0A8")
+    XCTAssertEqual(Set(model.devices.keys), [deviceID])
+    XCTAssertEqual(model.devices[deviceID]?.mountPath, "/Volumes/Michael West's iPod")
+    XCTAssertEqual(model.devices[deviceID]?.hardware.family?.value, "classic")
+    XCTAssertEqual(model.unidentifiedDevices.count, 1)
+    XCTAssertEqual(model.unidentifiedDevices.values.first?.readiness, "identity_unavailable")
+  }
+
+  func testProtocol3ReconnectPreservesConfigWhileReplacingConnectionAttributes() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+    let deviceID = DeviceID("000A27002138B0A8")
+
+    model.apply(try protocol3Event(lines[0]))
+    model.apply(try protocol3Event(lines[4]))
+    model.apply(try protocol3Event(lines[1]))
+
+    XCTAssertFalse(model.devices[deviceID]?.connected ?? true)
+    XCTAssertNil(model.devices[deviceID]?.mountPath)
+    XCTAssertEqual(model.devices[deviceID]?.config?.settings.autoSync, false)
+    XCTAssertEqual(
+      model.devices[deviceID]?.configDelivery?.settings.delivery.state, "device_committed")
+    XCTAssertTrue(model.unidentifiedDevices.isEmpty)
+  }
+
+  func testProtocol3ConfigRequiresExactCorrelatedRequest() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+    let deviceID = DeviceID("000A27002138B0A8")
+    let expectedRequestID = "018f9d7e-2f2b-7b52-9f1d-f78bdb2f8765"
+
+    model.apply(try protocol3Event(lines[0]))
+    model.willRequestDeviceConfig(
+      serial: deviceID,
+      requestID: expectedRequestID,
+      intent: .write)
+
+    let wrong = String(decoding: lines[3], as: UTF8.self).replacingOccurrences(
+      of: expectedRequestID, with: "018f9d7e-2f2b-7b52-9f1d-f78bdb2f9999")
+    model.apply(try protocol3Event(Data(wrong.utf8)))
+    XCTAssertNil(model.devices[deviceID]?.config)
+
+    model.apply(try protocol3Event(lines[3]))
+    XCTAssertEqual(model.devices[deviceID]?.config?.settings.autoSync, false)
+    XCTAssertEqual(
+      model.deviceConfigAcknowledgedRequestIDs[deviceID],
+      expectedRequestID)
+  }
+
+  func testProtocol3ProgressRoutesByExactDeviceAndSession() throws {
+    let model = AppModel()
+    model.apply(
+      try protocol3Event(
+        Data(
+          #"{"type":"device_inventory","revision":1,"devices":[{"device_id":"000A27002138B0A8","readiness":"ready","hardware":{},"profile_status":"adopted","connected":true,"mount_path":"/Volumes/A","phase":"syncing","session_id":42,"synced_count":0},{"device_id":"000A27002138B0A9","readiness":"ready","hardware":{},"profile_status":"adopted","connected":true,"mount_path":"/Volumes/B","phase":"syncing","session_id":84,"synced_count":0}],"unidentified":[]}"#
+            .utf8)))
+
+    model.apply(
+      try protocol3Event(
+        Data(
+          #"{"type":"track_start","device_id":"000A27002138B0A8","session_id":42,"current":3,"total":10,"label":"A track"}"#
+            .utf8)))
+    model.apply(
+      try protocol3Event(
+        Data(
+          #"{"type":"track_start","device_id":"000A27002138B0A9","session_id":83,"current":9,"total":10,"label":"Stale B"}"#
+            .utf8)))
+
+    XCTAssertEqual(model.devices["000A27002138B0A8"]?.syncProgress?.current, 3)
+    XCTAssertNil(model.devices["000A27002138B0A9"]?.syncProgress)
+  }
+
+  func testUnknownProtocol3PhasePreservesKnownDevicePhase() throws {
+    let model = AppModel()
+    let lines = try protocol3FixtureLines("device/events.ndjson")
+    let deviceID = DeviceID("000A27002138B0A8")
+    model.apply(try protocol3Event(lines[0]))
+
+    let future = String(decoding: lines[0], as: UTF8.self)
+      .replacingOccurrences(of: "\"revision\":1", with: "\"revision\":2")
+      .replacingOccurrences(of: "\"phase\":\"idle\"", with: "\"phase\":\"verifying\"")
+    model.apply(try protocol3Event(Data(future.utf8)))
+
+    XCTAssertEqual(model.devices[deviceID]?.phase, .idle)
+  }
+
   func testInventorySnapshotKeepsTwoDevicesKeyedBySerial() {
     let model = AppModel()
 
@@ -177,6 +269,8 @@ final class DeviceInventoryReducerTests: XCTestCase {
               "A", phase: .idle, sessionID: nil, latestSuccessfulSync: successful,
               latestAttempt: cancelled)
           ])))
+    model.apply(
+      .historyUpdate(entries: [cancelled, successful], acknowledgedRequestID: "terminal"))
 
     XCTAssertEqual(model.devices["A"]?.latestSuccessfulSync?.timestamp, successful.timestamp)
     XCTAssertEqual(model.devices["A"]?.latestAttempt, cancelled)
@@ -213,6 +307,8 @@ final class DeviceInventoryReducerTests: XCTestCase {
               "A", phase: .error, sessionID: nil, latestSuccessfulSync: successful,
               latestAttempt: interrupted, lastTerminalError: "finalization_stalled")
           ])))
+    model.apply(
+      .historyUpdate(entries: [interrupted, successful], acknowledgedRequestID: "terminal"))
 
     XCTAssertEqual(model.devices["A"]?.phase, .error("finalization_stalled"))
     XCTAssertEqual(model.devices["A"]?.latestSuccessfulSync, successful)
@@ -280,7 +376,7 @@ final class DeviceInventoryReducerTests: XCTestCase {
     model.apply(
       .syncEvent(
         line: #"{"type":"finish","success":true}"#, serial: "A", sessionID: 42))
-    let successful = history(serial: "A", sessionID: 42, outcome: "completed")
+    let successful = history(serial: "A", sessionID: 42, outcome: "ok")
 
     model.apply(
       .deviceInventorySnapshot(
@@ -291,6 +387,7 @@ final class DeviceInventoryReducerTests: XCTestCase {
               "A", phase: .idle, sessionID: nil, syncedCount: 20, libraryCount: 20,
               latestSuccessfulSync: successful, latestAttempt: successful)
           ])))
+    model.apply(.historyUpdate(entries: [successful], acknowledgedRequestID: "terminal"))
 
     let state = model.devices["A"]
     XCTAssertEqual(state?.phase, .idle)
@@ -390,6 +487,23 @@ final class DeviceInventoryReducerTests: XCTestCase {
     DeviceInventorySnapshot(revision: revision, devices: devices)
   }
 
+  private func protocol3Event(_ data: Data) throws -> WireV3Event {
+    guard
+      case .event(let event) = try WireV3Codec.decode(
+        data, direction: .daemonToDesktopEvents)
+    else { throw Protocol3FixtureError.notEvent }
+    return event
+  }
+
+  private func protocol3FixtureLines(_ path: String) throws -> [Data] {
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .appendingPathComponent("../../../../crates/classick/tests/data/wire-v3")
+      .standardizedFileURL
+    return try String(decoding: Data(contentsOf: root.appendingPathComponent(path)), as: UTF8.self)
+      .split(whereSeparator: \.isNewline)
+      .map { Data($0.utf8) }
+  }
+
   private func device(
     _ serial: String,
     configured: Bool = true,
@@ -427,11 +541,18 @@ final class DeviceInventoryReducerTests: XCTestCase {
     timestamp: String = "2026-07-18T12:00:00Z"
   ) -> HistoryEntry {
     HistoryEntry(
-      serial: serial,
+      serial: canonicalFixtureDeviceID(serial).rawValue,
       sessionID: sessionID,
       timestamp: timestamp,
       durationSecs: 10,
       trigger: "manual",
       outcome: outcome)
   }
+
+  private func canonicalFixtureDeviceID(_ value: String) -> DeviceID {
+    if let canonical = try? DeviceID(value) { return canonical }
+    return try! DeviceID(String(repeating: "0", count: 16 - value.count) + value.uppercased())
+  }
 }
+
+private enum Protocol3FixtureError: Error { case notEvent }

@@ -8,10 +8,11 @@ final class LibraryDropSubmissionCoordinator {
     let rules: [SelectionRule]
     let requestID: UUID
 
-    var command: DaemonCommand {
+    var command: WireV3Command {
       switch target {
       case .device(let serial, _):
-        .addSelectionToDevice(requestID: requestID, serial: serial, rules: rules)
+        .addSelectionToDevice(
+          deviceID: serial, requestID: requestID, mutationID: UUID(), rules: rules)
       case .manualPlaylist(let slug, _):
         .appendSelectionToPlaylist(requestID: requestID, slug: slug, rules: rules)
       }
@@ -20,18 +21,18 @@ final class LibraryDropSubmissionCoordinator {
 
   private var pending: [Intent] = []
   private var drainTask: Task<Void, Never>?
-  private let send: @Sendable (DaemonCommand) async -> SendDisposition
+  private let send: @Sendable (WireV3Command) async -> SendDisposition
   private let rejectLocally: @MainActor (UUID, LibraryDropTarget, String) -> Void
 
   init(
-    send: @escaping @Sendable (DaemonCommand) async -> SendDisposition,
+    send: @escaping @Sendable (WireV3Command) async -> SendDisposition,
     rejectLocally: @escaping @MainActor (UUID, LibraryDropTarget, String) -> Void
   ) {
     self.send = send
     self.rejectLocally = rejectLocally
   }
 
-  convenience init(send: @escaping @Sendable (DaemonCommand) async -> SendDisposition) {
+  convenience init(send: @escaping @Sendable (WireV3Command) async -> SendDisposition) {
     self.init(send: send, rejectLocally: { _, _, _ in })
   }
 

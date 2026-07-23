@@ -7,21 +7,21 @@ struct MainWindow: View {
   var model: AppModel
   @State private var columnVisibility: NavigationSplitViewVisibility = .all
   // Action closures injected from AppDelegate (wired in later tasks).
-  var onSyncNow: (DeviceSerial) -> Void
-  var onPause: (DeviceSerial) -> Void
-  var onCancelSync: (DeviceSerial) -> Void
-  var onResume: (DeviceSerial) -> Void
-  var onRetry: (DeviceSerial) -> Void
+  var onSyncNow: (DeviceID) -> Void
+  var onPause: (DeviceID) -> Void
+  var onCancelSync: (DeviceID) -> Void
+  var onResume: (DeviceID) -> Void
+  var onRetry: (DeviceID) -> Void
   var onScan: () -> Void
   var onConnectSource: () -> Void
-  var onForgetIpod: (DeviceSerial) -> Void
+  var onForgetIpod: (DeviceID) -> Void
   /// True disk eject (sidebar's eject glyph) — distinct from
   /// `onForgetIpod` (Settings page's unpair action). Required, no no-op
   /// default — the shipped-silently-dead lesson.
-  var onEjectIpod: (DeviceSerial) -> Void
-  var onBackfill: (DeviceSerial) -> Void
-  var onSetUp: (DeviceSerial?) -> Void
-  var onReplaceLibrary: (DeviceSerial) -> Void = { _ in }
+  var onEjectIpod: (DeviceID) -> Void
+  var onBackfill: (DeviceID) -> Void
+  var onSetUp: (DeviceID?) -> Void
+  var onReplaceLibrary: (DeviceID) -> Void = { _ in }
   var onAppearRequests: () -> Void = {}
   // Required (no no-op default): a defaulted `{ _ in }` here is exactly how
   // the "+" New Playlist button shipped silently dead (review finding #1)
@@ -35,12 +35,13 @@ struct MainWindow: View {
   var onDeletePlaylist: (String) -> Void = { _ in }
   var onResolveTracks: (_ slug: String, _ rules: [SelectionRule]) -> Void = { _, _ in }
   // Device Music page (Task 5).
-  var onLoadDeviceConfig: (String) -> Void = { _ in }
+  var onLoadDeviceConfig: (DeviceID) -> Void = { _ in }
   var onSaveAndPreviewDeviceConfig:
-    (_ serial: String, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) -> String? =
+    (_ serial: DeviceID, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) ->
+      String? =
       { _, _, _ in nil }
   // Device Settings page (Task 6).
-  var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> String? = {
+  var onSaveDeviceSettings: (_ serial: DeviceID, _ settings: DeviceSettingsWire) -> String? = {
     _, _ in nil
   }
 
@@ -48,7 +49,7 @@ struct MainWindow: View {
     Binding(get: { model.selectedDestination }, set: { model.selectedDestination = $0 })
   }
 
-  private var selectedDeviceSerial: DeviceSerial? {
+  private var selectedDeviceSerial: DeviceID? {
     guard case .device(let serial, _) = model.selectedDestination else { return nil }
     return serial
   }

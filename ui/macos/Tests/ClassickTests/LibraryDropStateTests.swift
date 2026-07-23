@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import Classick
 
 final class LibraryDropStateTests: XCTestCase {
@@ -6,13 +7,16 @@ final class LibraryDropStateTests: XCTestCase {
 
   func testConfiguredDeviceMatrixAcceptsConnectedAndRememberedButRejectsUnconfigured() {
     XCTAssertEqual(
-      LibraryDropEligibility.targetForDevice(device(serial: "A", configured: true, connected: true)),
+      LibraryDropEligibility.targetForDevice(
+        device(serial: "A", configured: true, connected: true)),
       .device(serial: "A", displayName: "Michael's iPod"))
     XCTAssertEqual(
-      LibraryDropEligibility.targetForDevice(device(serial: "A", configured: true, connected: false)),
+      LibraryDropEligibility.targetForDevice(
+        device(serial: "A", configured: true, connected: false)),
       .device(serial: "A", displayName: "Michael's iPod"))
     XCTAssertNil(
-      LibraryDropEligibility.targetForDevice(device(serial: "B", configured: false, connected: true)))
+      LibraryDropEligibility.targetForDevice(
+        device(serial: "B", configured: false, connected: true)))
   }
 
   func testOnlyExplicitCardAcceptsDeviceDrop() {
@@ -64,9 +68,12 @@ final class LibraryDropStateTests: XCTestCase {
       "Add Birdy to Favorites")
     XCTAssertEqual(DropOutcome.adding(target: target).accessibleMessage, "Adding…")
     XCTAssertEqual(DropOutcome.addedAndSyncing(serial: "A").accessibleMessage, "Added and syncing")
-    XCTAssertEqual(DropOutcome.addedForNextSync(serial: "A").accessibleMessage, "Added for next sync")
-    XCTAssertEqual(DropOutcome.alreadyPresent(serial: "A").accessibleMessage, "Already on this iPod")
-    XCTAssertEqual(DropOutcome.appended(slug: "favorites", count: 2).accessibleMessage, "Appended 2 songs")
+    XCTAssertEqual(
+      DropOutcome.addedForNextSync(serial: "A").accessibleMessage, "Added for next sync")
+    XCTAssertEqual(
+      DropOutcome.alreadyPresent(serial: "A").accessibleMessage, "Already on this iPod")
+    XCTAssertEqual(
+      DropOutcome.appended(slug: "favorites", count: 2).accessibleMessage, "Appended 2 songs")
   }
 
   @MainActor
@@ -85,7 +92,9 @@ final class LibraryDropStateTests: XCTestCase {
 
     await sender.waitForCount(3)
     let targets = await sender.targets
-    XCTAssertEqual(targets, ["device:A", "playlist:favorites", "device:B"])
+    XCTAssertEqual(
+      targets,
+      ["device:000000000000000A", "playlist:favorites", "device:000000000000000B"])
   }
 
   @MainActor
@@ -132,6 +141,8 @@ final class LibraryDropStateTests: XCTestCase {
 
   private func device(serial: String, configured: Bool, connected: Bool) -> DeviceViewState {
     DeviceViewState(
+      deviceID: try! DeviceID(
+        String(repeating: "0", count: 16 - serial.count) + serial.uppercased()),
       identity: DeviceIdentityWire(serial: serial, modelLabel: "iPod", name: "Michael's iPod"),
       configured: configured, connected: connected, mountPath: connected ? "/Volumes/IPOD" : nil,
       phase: connected ? .idle : .disconnected, sessionID: nil, storage: nil, syncedCount: 0,
@@ -143,7 +154,7 @@ final class LibraryDropStateTests: XCTestCase {
 }
 
 private actor RecordingAsyncSender {
-  private var commands: [DaemonCommand] = []
+  private var commands: [WireV3Command] = []
   private var dispositions: [SendDisposition]
   private var firstContinuation: CheckedContinuation<Void, Never>?
   private let suspendFirstSend: Bool
@@ -153,7 +164,7 @@ private actor RecordingAsyncSender {
     self.dispositions = dispositions
   }
 
-  func send(_ command: DaemonCommand) async -> SendDisposition {
+  func send(_ command: WireV3Command) async -> SendDisposition {
     if suspendFirstSend && commands.isEmpty {
       await withCheckedContinuation { firstContinuation = $0 }
     }
@@ -173,8 +184,8 @@ private actor RecordingAsyncSender {
   var targets: [String] {
     commands.compactMap { command in
       switch command {
-      case .addSelectionToDevice(let serial, _, _): "device:\(serial)"
-      case .appendSelectionToPlaylist(let slug, _, _): "playlist:\(slug)"
+      case .addSelectionToDevice(let deviceID, _, _, _): "device:\(deviceID)"
+      case .appendSelectionToPlaylist(_, let slug, _): "playlist:\(slug)"
       default: nil
       }
     }

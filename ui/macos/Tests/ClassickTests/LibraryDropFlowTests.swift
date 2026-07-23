@@ -52,7 +52,9 @@ final class LibraryDropFlowTests: XCTestCase {
 
     await sender.waitForCount(3)
     let targets = await sender.targets
-    XCTAssertEqual(targets, ["device:A", "playlist:favorites", "device:B"])
+    XCTAssertEqual(
+      targets,
+      ["device:000000000000000A", "playlist:favorites", "device:000000000000000B"])
   }
 
   func testDroppedSendProducesLocalRejectionWithoutPersistedAcknowledgement() async {
@@ -80,8 +82,10 @@ final class LibraryDropFlowTests: XCTestCase {
     var outbox = DurableIntentOutbox()
     try outbox.upsert(
       .addSelectionToDevice(
+        deviceID: "A",
         requestID: UUID(uuidString: "00000000-0000-0000-0000-000000000103")!,
-        serial: "A", rules: [.artist(name: "Birdy")]))
+        mutationID: UUID(uuidString: "00000000-0000-0000-0000-000000000104")!,
+        rules: [.artist(name: "Birdy")]))
 
     let firstWrite = try XCTUnwrap(outbox.nextIntent(for: 1))
     outbox.markWritten(requestID: firstWrite.requestID, connectionGeneration: 1)
@@ -106,14 +110,14 @@ final class LibraryDropFlowTests: XCTestCase {
 }
 
 private actor FlowCommandRecorder {
-  private var commands: [DaemonCommand] = []
+  private var commands: [WireV3Command] = []
   private var dispositions: [SendDisposition]
 
   init(dispositions: [SendDisposition] = []) {
     self.dispositions = dispositions
   }
 
-  func send(_ command: DaemonCommand) -> SendDisposition {
+  func send(_ command: WireV3Command) -> SendDisposition {
     commands.append(command)
     return dispositions.isEmpty ? .sent : dispositions.removeFirst()
   }
@@ -125,8 +129,8 @@ private actor FlowCommandRecorder {
   var targets: [String] {
     commands.compactMap { command in
       switch command {
-      case .addSelectionToDevice(let serial, _, _): "device:\(serial)"
-      case .appendSelectionToPlaylist(let slug, _, _): "playlist:\(slug)"
+      case .addSelectionToDevice(let deviceID, _, _, _): "device:\(deviceID)"
+      case .appendSelectionToPlaylist(_, let slug, _): "playlist:\(slug)"
       default: nil
       }
     }

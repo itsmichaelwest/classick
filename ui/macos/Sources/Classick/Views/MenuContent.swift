@@ -9,17 +9,17 @@ struct MenuContent: View {
   var model: AppModel
   var daemonFatalError: String?
 
-  var onSetUp: (DeviceSerial) -> Void = { _ in print("TODO: open setup window") }
+  var onSetUp: (DeviceID) -> Void = { _ in print("TODO: open setup window") }
   var onOpenMain: () -> Void = { print("TODO: open main window") }
   var onOpenSettings: () -> Void = { print("TODO: open settings window") }
-  var onSyncNow: (DeviceSerial) -> Void = { _ in print("TODO: send(.triggerSync(source: .manual))")
+  var onSyncNow: (DeviceID) -> Void = { _ in print("TODO: send(.triggerSync(source: .manual))")
   }
   var onRescan: () -> Void = { print("TODO: send(.scanLibrary)") }
   var onConnectSource: () -> Void = { print("TODO: send(.retrySourceMount)") }
-  var onCancelSync: (DeviceSerial) -> Void = { _ in print("TODO: send(.cancelSync)") }
-  var onPause: (DeviceSerial) -> Void = { _ in print("TODO: send(.pause)") }
-  var onResume: (DeviceSerial) -> Void = { _ in print("TODO: send(.triggerSync(source: .manual))") }
-  var onRetry: (DeviceSerial) -> Void = { _ in print("TODO: retry after error") }
+  var onCancelSync: (DeviceID) -> Void = { _ in print("TODO: send(.cancelSync)") }
+  var onPause: (DeviceID) -> Void = { _ in print("TODO: send(.pause)") }
+  var onResume: (DeviceID) -> Void = { _ in print("TODO: send(.triggerSync(source: .manual))") }
+  var onRetry: (DeviceID) -> Void = { _ in print("TODO: retry after error") }
   var onCheckForUpdates: () -> Void = { print("TODO: check for updates") }
 
   var body: some View {
@@ -63,7 +63,7 @@ struct MenuContent: View {
   }
 
   @ViewBuilder
-  private func deviceContent(serial: DeviceSerial, state: DeviceViewState) -> some View {
+  private func deviceContent(serial: DeviceID, state: DeviceViewState) -> some View {
     switch DeviceSurfaceLogic.phase(for: state, globalPhase: model.phase) {
     case .noDevice:
       Text("No iPod connected")
@@ -114,8 +114,8 @@ struct MenuContent: View {
 
 enum MenuContentLogic {
   static func actionTarget(
-    focusedSerial: DeviceSerial?, devices: [DeviceSerial: DeviceViewState]
-  ) -> DeviceSerial? {
+    focusedSerial: DeviceID?, devices: [DeviceID: DeviceViewState]
+  ) -> DeviceID? {
     guard let focusedSerial, let state = devices[focusedSerial], state.connected else {
       return nil
     }

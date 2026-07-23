@@ -108,7 +108,7 @@ enum DeviceMusicLogic {
 
 enum DeviceSurfaceLogic {
     static func state(
-        serial: DeviceSerial, in devices: [DeviceSerial: DeviceViewState]
+        serial: DeviceID, in devices: [DeviceID: DeviceViewState]
     ) -> DeviceViewState? {
         devices[serial]
     }

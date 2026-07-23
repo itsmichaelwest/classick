@@ -11,16 +11,16 @@ import SwiftUI
 ///
 /// Edits a local draft and auto-saves it (debounced), mirroring
 /// `DeviceMusicPage`'s pattern: seed the draft once from the daemon's
-/// `device_config_update` reply, never re-seed after the user starts
+/// `device_config` reply, never re-seed after the user starts
 /// editing (so a late/echoed reply can't clobber an in-progress edit).
 struct DeviceSettingsPage: View {
   var model: AppModel
-  var serial: String
-  var onLoadDeviceConfig: (String) -> Void
-  var onSaveDeviceSettings: (_ serial: String, _ settings: DeviceSettingsWire) -> String?
-  var onForgetIpod: (DeviceSerial) -> Void
-  var onBackfill: (DeviceSerial) -> Void
-  var onReplaceLibrary: (DeviceSerial) -> Void
+  var serial: DeviceID
+  var onLoadDeviceConfig: (DeviceID) -> Void
+  var onSaveDeviceSettings: (_ serial: DeviceID, _ settings: DeviceSettingsWire) -> String?
+  var onForgetIpod: (DeviceID) -> Void
+  var onBackfill: (DeviceID) -> Void
+  var onReplaceLibrary: (DeviceID) -> Void
 
   private struct SettingsDraft: Equatable {
     var autoSync = true
@@ -44,7 +44,7 @@ struct DeviceSettingsPage: View {
     DeviceSurfaceLogic.phase(for: deviceState, globalPhase: model.phase)
   }
   private var deviceName: String {
-    deviceState?.identity.name ?? deviceState?.identity.modelLabel ?? serial
+    deviceState?.identity.name ?? deviceState?.identity.modelLabel ?? serial.rawValue
   }
   private var syncedSummary: String {
     if let total = deviceState?.libraryCount {
@@ -194,8 +194,9 @@ struct DeviceSettingsPage: View {
         await DeviceDraftSaveGate.waitUntilReady(
           serial: serial, model: model)
       else { return }
-      guard let requestID = onSaveDeviceSettings(
-        serial, DeviceSettingsWire(autoSync: d.autoSync, rockboxCompat: d.rockboxCompat))
+      guard
+        let requestID = onSaveDeviceSettings(
+          serial, DeviceSettingsWire(autoSync: d.autoSync, rockboxCompat: d.rockboxCompat))
       else { return }
       acknowledgedDraft.markSubmitted(requestID: requestID)
     }
@@ -249,24 +250,16 @@ extension LabeledContentStyle where Self == CenterAlignedLabeledContentStyle {
 /// unit-testable. Follows `DeviceMusicLogic`'s pattern of a plain static-fn
 /// enum alongside its view.
 enum DeviceSettingsLogic {
-  /// THE load-bearing function for this page: builds the
-  /// `save_device_config` command for a toggle edit, touching ONLY
-  /// `settings` — `selection`/`subscriptions` stay `nil` ("don't change"),
-  /// so a Settings-page edit can never disturb the Music page's sync
-  /// intent. Returns the real `DaemonCommand` (not a bespoke struct) so
-  /// tests can assert the exact wire shape via `JSONSerialization`, same
-  /// as `WireCodecTests`.
+  /// Builds the protocol-3 component mutation for a settings edit.
   static func saveSettingsCommand(
-    serial: String,
+    deviceID: DeviceID,
     settings: DeviceSettingsWire,
-    requestID: String
-  ) -> DaemonCommand {
-    .saveDeviceConfig(
-      serial: serial,
-      selection: nil,
-      subscriptions: nil,
-      settings: settings,
-      requestID: requestID)
+    requestID: UUID,
+    mutationID: UUID
+  ) -> WireV3Command {
+    .setSettings(
+      deviceID: deviceID, requestID: requestID, mutationID: mutationID,
+      settings: WireV3SettingsValue(settings))
   }
 
   /// Replace Library's disabled predicate: guards against racing an
@@ -358,7 +351,8 @@ private struct ReplaceLibraryConfirmationSheet: View {
 #if DEBUG
   #Preview("Connected") {
     DeviceSettingsPage(
-      model: PreviewFixtures.connectedSyncedModel(), serial: PreviewFixtures.pairedIpod.serial,
+      model: PreviewFixtures.connectedSyncedModel(),
+      serial: try! DeviceID(PreviewFixtures.pairedIpod.serial),
       onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in "preview" },
       onForgetIpod: { _ in }, onBackfill: { _ in }, onReplaceLibrary: { _ in }
     )
@@ -367,7 +361,8 @@ private struct ReplaceLibraryConfirmationSheet: View {
 
   #Preview("Disconnected") {
     DeviceSettingsPage(
-      model: PreviewFixtures.disconnectedModel(), serial: PreviewFixtures.pairedIpod.serial,
+      model: PreviewFixtures.disconnectedModel(),
+      serial: try! DeviceID(PreviewFixtures.pairedIpod.serial),
       onLoadDeviceConfig: { _ in }, onSaveDeviceSettings: { _, _ in "preview" },
       onForgetIpod: { _ in }, onBackfill: { _ in }, onReplaceLibrary: { _ in }
     )

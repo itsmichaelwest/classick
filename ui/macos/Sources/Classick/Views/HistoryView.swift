@@ -41,8 +41,10 @@ struct HistoryView: View {
     default: return t.capitalized
     }
   }
-  private func deviceName(for serial: DeviceSerial) -> String {
-    guard let state = model.devices[serial] else { return serial }
+  private func deviceName(for rawSerial: String) -> String {
+    guard let serial = try? DeviceID(rawSerial), let state = model.devices[serial] else {
+      return rawSerial
+    }
     return state.identity.name ?? state.identity.modelLabel
   }
   private func duration(_ secs: UInt64) -> String {

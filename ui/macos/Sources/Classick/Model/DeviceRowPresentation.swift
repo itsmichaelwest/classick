@@ -18,7 +18,7 @@ struct DeviceRowPresentation: Equatable {
     case setUp
   }
 
-  var serial: String?
+  var serial: DeviceID?
   var title: String
   var subtitle: String
   var caption: String?
@@ -43,7 +43,7 @@ struct DeviceRowPresentation: Equatable {
 
     if device.finalization != nil {
       return Self(
-        serial: device.identity.serial,
+        serial: device.deviceID,
         title: title,
         subtitle: "Finishing sync…",
         caption: "Keep the iPod connected",
@@ -54,7 +54,7 @@ struct DeviceRowPresentation: Equatable {
 
     if case .scanning(let current, let total) = globalPhase {
       return Self(
-        serial: device.identity.serial,
+        serial: device.deviceID,
         title: title,
         subtitle: "Updating library…",
         caption: nil,
@@ -70,7 +70,7 @@ struct DeviceRowPresentation: Equatable {
     switch device.phase {
     case .disconnected:
       return Self(
-        serial: device.identity.serial,
+        serial: device.deviceID,
         title: title,
         subtitle: "Not connected",
         caption: "Plug it in to sync",
@@ -80,7 +80,7 @@ struct DeviceRowPresentation: Equatable {
 
     case .unconfigured:
       return Self(
-        serial: device.identity.serial,
+        serial: device.deviceID,
         title: title,
         subtitle: "iPod not set up",
         caption: nil,
@@ -90,7 +90,7 @@ struct DeviceRowPresentation: Equatable {
 
     case .idle:
       return Self(
-        serial: device.identity.serial,
+        serial: device.deviceID,
         title: title,
         subtitle: lastSyncedLine(device.latestSuccessfulSync),
         caption: rollupCaption(device),
@@ -101,7 +101,7 @@ struct DeviceRowPresentation: Equatable {
     case .syncing:
       guard let progress = device.syncProgress, progress.total > 0 else {
         return Self(
-          serial: device.identity.serial,
+          serial: device.deviceID,
           title: title,
           subtitle: "Preparing sync…",
           caption: nil,
@@ -110,7 +110,7 @@ struct DeviceRowPresentation: Equatable {
           secondaryAction: .cancel)
       }
       return Self(
-        serial: device.identity.serial,
+        serial: device.deviceID,
         title: title,
         subtitle: "Adding \(progress.total) track\(progress.total == 1 ? "" : "s")",
         caption: nil,
@@ -129,7 +129,7 @@ struct DeviceRowPresentation: Equatable {
         ? "\(device.syncedCount) of \(total) synced"
         : "\(device.syncedCount) synced"
       return Self(
-        serial: device.identity.serial,
+        serial: device.deviceID,
         title: title,
         subtitle: "Sync paused",
         caption: nil,
@@ -143,7 +143,7 @@ struct DeviceRowPresentation: Equatable {
 
     case .error(let message):
       return Self(
-        serial: device.identity.serial,
+        serial: device.deviceID,
         title: title,
         subtitle: "Sync failed",
         caption: message,
@@ -154,8 +154,8 @@ struct DeviceRowPresentation: Equatable {
   }
 
   static func make(
-    devices: [DeviceSerial: DeviceViewState],
-    selectedSerial: DeviceSerial?,
+    devices: [DeviceID: DeviceViewState],
+    selectedSerial: DeviceID?,
     globalPhase: Phase,
     libraryCount: Int?
   ) -> Self {

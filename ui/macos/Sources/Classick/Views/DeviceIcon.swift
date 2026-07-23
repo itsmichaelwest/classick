@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct DeviceIcon: View {
-  var serial: DeviceSerial?
+  var serial: DeviceID?
   var drive: String?
   var size: CGFloat
 
@@ -66,8 +66,8 @@ enum DeviceIconLogic {
     modelNum.flatMap { table[$0] } ?? "iPod11-Silver"
   }
 
-  nonisolated static func cacheKey(serial: DeviceSerial?, drive: String?) -> String {
-    "\(serial ?? "<unknown>")|\(drive ?? "<disconnected>")"
+  nonisolated static func cacheKey(serial: DeviceID?, drive: String?) -> String {
+    "\(serial?.rawValue ?? "<unknown>")|\(drive ?? "<disconnected>")"
   }
 
   nonisolated static var allIconBaseNames: Set<String> { Set(table.values) }
