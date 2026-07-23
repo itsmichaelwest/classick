@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SERIAL: &str = "RawSerial";
+const SERIAL: &str = "000A27002138B0A8";
 
 struct Fixture {
     mount: PathBuf,
@@ -21,6 +21,7 @@ struct Fixture {
     store: ManifestStore,
     cache: ArtworkCache,
     manifest: Manifest,
+    mutation_session: classick::device_coordination::DeviceMutationSession,
 }
 
 fn fixture(label: &str) -> Fixture {
@@ -52,12 +53,18 @@ fn fixture(label: &str) -> Fixture {
     manifest.version = 2;
     manifest.ipod_serial = Some(SERIAL.into());
     manifest.last_source_root = Some(host.join("source"));
+    let mutation_session = classick::device_coordination::DeviceMutationSession::acquire(
+        &mount,
+        classick::device::DeviceId::parse(SERIAL).unwrap(),
+    )
+    .unwrap();
     Fixture {
         mount,
         cache: ArtworkCache::new(host.join("artwork")),
         host,
         store,
         manifest,
+        mutation_session,
     }
 }
 
@@ -81,10 +88,12 @@ fn coordinator<'a>(
     mount: &'a Path,
     store: &'a ManifestStore,
     cache: &ArtworkCache,
+    mutation_session: &'a classick::device_coordination::DeviceMutationSession,
 ) -> CheckpointCoordinator<'a> {
     CheckpointCoordinator {
         mount,
         serial: SERIAL,
+        mutation_session,
         manifest_store: store,
         artwork_cache: cache.clone(),
     }
@@ -94,7 +103,10 @@ fn save_phase(fixture: &Fixture, id: u64, phase: PendingPhase) -> PendingSession
     let store = PendingSessionStore::new(&fixture.mount);
     let mut journal = PendingSession::new(id, SERIAL, Vec::new());
     journal.phase = phase;
+    let generation = fixture.mutation_session.current_generation().unwrap();
+    journal.generation_before = Some(generation.clone());
     if phase >= PendingPhase::DatabaseVerified {
+        journal.verified_generation = Some(generation);
         let mut candidate = fixture.manifest.clone();
         candidate.version = 7;
         journal.candidate_manifest = Some(candidate);
@@ -143,9 +155,14 @@ fn restart_abandons_staging_but_preserves_a_live_db_reference() {
     journal_store.save(&journal).unwrap();
     let (progress, _decisions) = Progress::start(false, false).unwrap();
 
-    coordinator(&fixture.mount, &fixture.store, &fixture.cache)
-        .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
-        .unwrap();
+    coordinator(
+        &fixture.mount,
+        &fixture.store,
+        &fixture.cache,
+        &fixture.mutation_session,
+    )
+    .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
+    .unwrap();
     progress.finish(true).unwrap();
 
     assert!(published.exists());
@@ -160,9 +177,14 @@ fn restart_recovers_ready_to_publish_before_returning() {
     let store = save_phase(&fixture, 102, PendingPhase::ReadyToPublish);
     let (progress, _decisions) = Progress::start(false, false).unwrap();
 
-    let results = coordinator(&fixture.mount, &fixture.store, &fixture.cache)
-        .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
-        .unwrap();
+    let results = coordinator(
+        &fixture.mount,
+        &fixture.store,
+        &fixture.cache,
+        &fixture.mutation_session,
+    )
+    .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
+    .unwrap();
     progress.finish(true).unwrap();
 
     assert_eq!(results.len(), 1);
@@ -176,9 +198,14 @@ fn restart_recovers_database_verified_and_assigns_candidate_after_device_publish
     let store = save_phase(&fixture, 103, PendingPhase::DatabaseVerified);
     let (progress, _decisions) = Progress::start(false, false).unwrap();
 
-    coordinator(&fixture.mount, &fixture.store, &fixture.cache)
-        .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
-        .unwrap();
+    coordinator(
+        &fixture.mount,
+        &fixture.store,
+        &fixture.cache,
+        &fixture.mutation_session,
+    )
+    .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
+    .unwrap();
     progress.finish(true).unwrap();
 
     assert_eq!(fixture.manifest.version, 7);
@@ -199,9 +226,14 @@ fn restart_keeps_loaded_manifest_when_database_verified_publish_fails() {
     );
     let (progress, _decisions) = Progress::start(false, false).unwrap();
 
-    let error = coordinator(&fixture.mount, &failing_manifest_store, &fixture.cache)
-        .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
-        .unwrap_err();
+    let error = coordinator(
+        &fixture.mount,
+        &failing_manifest_store,
+        &fixture.cache,
+        &fixture.mutation_session,
+    )
+    .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
+    .unwrap_err();
     progress.finish(false).unwrap();
 
     assert!(format!("{error:#}").contains("device manifest publication failed"));
@@ -214,14 +246,27 @@ fn restart_finishes_device_manifest_published_cleanup() {
     let mut fixture = fixture("device-manifest");
     let store = save_phase(&fixture, 104, PendingPhase::DeviceManifestPublished);
     fixture
-        .store
-        .publish_runtime(&store.load(104).unwrap().candidate_manifest.unwrap())
+        .mutation_session
+        .publish_verified(|| {
+            fixture
+                .store
+                .publish_runtime(&store.load(104).unwrap().candidate_manifest.unwrap())?;
+            Ok(())
+        })
         .unwrap();
+    let mut published = store.load(104).unwrap();
+    published.verified_generation = Some(fixture.mutation_session.current_generation().unwrap());
+    store.save(&published).unwrap();
     let (progress, _decisions) = Progress::start(false, false).unwrap();
 
-    coordinator(&fixture.mount, &fixture.store, &fixture.cache)
-        .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
-        .unwrap();
+    coordinator(
+        &fixture.mount,
+        &fixture.store,
+        &fixture.cache,
+        &fixture.mutation_session,
+    )
+    .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
+    .unwrap();
     progress.finish(true).unwrap();
 
     assert_eq!(fixture.manifest.version, 7);
@@ -235,9 +280,14 @@ fn restart_removes_cleanup_complete_journal() {
     let store = save_phase(&fixture, 105, PendingPhase::CleanupComplete);
     let (progress, _decisions) = Progress::start(false, false).unwrap();
 
-    coordinator(&fixture.mount, &fixture.store, &fixture.cache)
-        .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
-        .unwrap();
+    coordinator(
+        &fixture.mount,
+        &fixture.store,
+        &fixture.cache,
+        &fixture.mutation_session,
+    )
+    .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
+    .unwrap();
     progress.finish(true).unwrap();
 
     assert!(!store.path(105).exists());
@@ -255,9 +305,14 @@ fn restart_refuses_corrupt_and_foreign_serial_journals_without_mutation() {
     let foreign_bytes = std::fs::read(store.path(107)).unwrap();
     let (progress, _decisions) = Progress::start(false, false).unwrap();
 
-    let error = coordinator(&fixture.mount, &fixture.store, &fixture.cache)
-        .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
-        .unwrap_err();
+    let error = coordinator(
+        &fixture.mount,
+        &fixture.store,
+        &fixture.cache,
+        &fixture.mutation_session,
+    )
+    .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
+    .unwrap_err();
     progress.finish(false).unwrap();
 
     assert!(format!("{error:#}").contains("unsafe pending-session journal"));

@@ -18,7 +18,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-const SERIAL: &str = "SERIAL";
+const SERIAL: &str = "000A27002138B0A8";
 
 #[derive(Clone)]
 pub struct TestPlaylist {
@@ -133,9 +133,15 @@ impl Harness {
         self.next_session += 1;
         self.apple_write_count.fetch_add(1, Ordering::SeqCst);
         let playlist_failure = self.install_failure();
+        let mutation_session = classick::device_coordination::DeviceMutationSession::acquire(
+            &self.mount,
+            classick::device::DeviceId::parse(SERIAL).unwrap(),
+        )
+        .context("acquire test device mutation session")?;
         let coordinator = CheckpointCoordinator {
             mount: &self.mount,
             serial: &self.serial,
+            mutation_session: &mutation_session,
             manifest_store: &self.manifest_store,
             artwork_cache: self.artwork_cache.clone(),
         };
@@ -164,9 +170,15 @@ impl Harness {
     pub fn recover(&mut self) -> Result<SyncResult> {
         let pending = self.journal().context("no pending projection journal")?;
         let desired = self.desired(&self.last_desired);
+        let mutation_session = classick::device_coordination::DeviceMutationSession::acquire(
+            &self.mount,
+            classick::device::DeviceId::parse(SERIAL).unwrap(),
+        )
+        .context("acquire test device mutation session")?;
         let coordinator = CheckpointCoordinator {
             mount: &self.mount,
             serial: &self.serial,
+            mutation_session: &mutation_session,
             manifest_store: &self.manifest_store,
             artwork_cache: self.artwork_cache.clone(),
         };

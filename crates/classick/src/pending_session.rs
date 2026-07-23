@@ -111,6 +111,12 @@ pub struct PendingSession {
     pub session_id: SessionId,
     pub serial: String,
     pub phase: PendingPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_before: Option<crate::device_coordination::DeviceGeneration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_generation: Option<crate::device_coordination::DeviceGeneration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_generation: Option<crate::device_coordination::DeviceGeneration>,
     pub albums: Vec<PendingAlbum>,
     pub staged_files: Vec<StagedFile>,
     pub obsolete_files: Vec<ObsoleteFile>,
@@ -142,6 +148,9 @@ impl PendingSession {
             session_id,
             serial: serial.into(),
             phase: PendingPhase::Staging,
+            generation_before: None,
+            published_generation: None,
+            verified_generation: None,
             albums,
             staged_files: Vec::new(),
             obsolete_files: Vec::new(),
@@ -187,6 +196,20 @@ impl PendingSession {
         }
         if self.serial.trim().is_empty() {
             bail!("pending-session serial is empty");
+        }
+        if self.generation_before.is_none()
+            && (self.published_generation.is_some() || self.verified_generation.is_some())
+        {
+            bail!("pending session has a published generation without its predecessor");
+        }
+        if self.phase < PendingPhase::DatabaseVerified && self.verified_generation.is_some() {
+            bail!("pending session records a verified generation before publication");
+        }
+        if self.generation_before.is_some()
+            && self.phase >= PendingPhase::DatabaseVerified
+            && self.verified_generation.is_none()
+        {
+            bail!("coordinated pending session has no verified published generation");
         }
         let mut ordinals = HashSet::new();
         for album in &self.albums {

@@ -29,6 +29,7 @@ pub struct CheckpointResult {
 pub struct CheckpointCoordinator<'a> {
     pub mount: &'a Path,
     pub serial: &'a str,
+    pub mutation_session: &'a crate::device_coordination::DeviceMutationSession,
     pub manifest_store: &'a crate::manifest_store::ManifestStore,
     pub artwork_cache: crate::artwork_cache::ArtworkCache,
 }
@@ -85,6 +86,21 @@ impl CheckpointCoordinator<'_> {
         progress: &crate::progress::Progress,
         options: PublishOptions<'_>,
     ) -> Result<CheckpointResult> {
+        self.verify_generation_fence()?;
+        let result = self.publish_unfenced_with_options(journal, manifest, progress, options);
+        if result.is_ok() {
+            self.mutation_session.accept_verified_generation()?;
+        }
+        result
+    }
+
+    fn publish_unfenced_with_options(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        manifest: &mut crate::manifest::Manifest,
+        progress: &crate::progress::Progress,
+        options: PublishOptions<'_>,
+    ) -> Result<CheckpointResult> {
         use crate::pending_session::PendingPhase;
 
         self.validate_journal(journal)?;
@@ -95,6 +111,7 @@ impl CheckpointCoordinator<'_> {
             );
         }
         let store = crate::pending_session::PendingSessionStore::new(self.mount);
+        self.prepare_generation_journal(journal)?;
         store.save(journal)?;
 
         if journal.phase == PendingPhase::Staging {
@@ -166,6 +183,8 @@ impl CheckpointCoordinator<'_> {
             }
             drop(reopened);
 
+            self.verify_generation_fence()
+                .context("manifest pre-publication generation fence")?;
             progress.log("Publishing portable device manifest".to_string());
             let outcome = match self.manifest_store.publish_runtime(&candidate) {
                 Ok(outcome) => outcome,
@@ -177,7 +196,7 @@ impl CheckpointCoordinator<'_> {
             *manifest = candidate.clone();
             manifest_cache_warning = outcome.host_cache_warning;
             journal.phase = PendingPhase::DeviceManifestPublished;
-            store.save(journal)?;
+            self.record_verified_generation(journal, &store)?;
             if journal.candidate_playlist_ownership.is_none() {
                 return self.finish_cleanup(journal, &store, manifest_cache_warning, progress);
             }
@@ -194,8 +213,10 @@ impl CheckpointCoordinator<'_> {
                 options.playlist_state_root,
             )?;
             if journal.phase == PendingPhase::DeviceManifestPublished {
+                self.verify_generation_fence()
+                    .context("Rockbox plan pre-publication generation fence")?;
                 let settled = ownership.load_device_read_only()?;
-                rockbox_publication::prepare_playlist_projection(
+                if let Err(error) = rockbox_publication::prepare_playlist_projection(
                     journal,
                     &store,
                     &settled,
@@ -205,24 +226,36 @@ impl CheckpointCoordinator<'_> {
                         self.mount.to_path_buf(),
                     ),
                     options.playlist_failure_point,
-                )?;
+                ) {
+                    self.record_interrupted_generation(journal, &store)?;
+                    return Err(error);
+                }
+                self.record_verified_generation(journal, &store)?;
             }
             if journal.phase == PendingPhase::RockboxProjectionsPrepared {
-                playlist_publication::publish_ownership(
+                self.verify_generation_fence()
+                    .context("playlist ownership pre-publication generation fence")?;
+                if let Err(error) = playlist_publication::publish_ownership(
                     journal,
                     &store,
                     &ownership,
                     options.playlist_failure_point,
-                )?;
+                ) {
+                    self.record_interrupted_generation(journal, &store)?;
+                    return Err(error);
+                }
+                self.record_verified_generation(journal, &store)?;
             }
             if journal.phase == PendingPhase::PlaylistOwnershipPublished {
+                self.verify_generation_fence()
+                    .context("Rockbox projection pre-publication generation fence")?;
                 let verified = journal
                     .verified_playlist_memberships
                     .iter()
                     .cloned()
                     .map(|membership| (membership.slug.clone(), membership))
                     .collect();
-                rockbox_publication::publish_playlist_finalization(
+                if let Err(error) = rockbox_publication::publish_playlist_finalization(
                     &store,
                     journal,
                     &ownership,
@@ -230,7 +263,11 @@ impl CheckpointCoordinator<'_> {
                         self.mount.to_path_buf(),
                     ),
                     &verified,
-                )?;
+                ) {
+                    self.record_interrupted_generation(journal, &store)?;
+                    return Err(error);
+                }
+                self.record_verified_generation(journal, &store)?;
             }
             if journal.phase == PendingPhase::RockboxProjectionsPublished {
                 let warning = playlist_publication::refresh_host_cache(
@@ -255,6 +292,110 @@ impl CheckpointCoordinator<'_> {
             return Ok(self.result(journal, None));
         }
         bail!("unsupported pending phase {:?}", journal.phase)
+    }
+
+    fn verify_generation_fence(&self) -> Result<()> {
+        let device_id = crate::device::DeviceId::parse(self.serial)
+            .context("checkpoint serial is not a canonical device identity")?;
+        self.mutation_session
+            .verify_scope(self.mount, &device_id)
+            .context("checkpoint mutation session scope")?;
+        self.mutation_session
+            .verify_expected_generation()
+            .context("checkpoint generation fence")
+    }
+
+    fn prepare_generation_journal(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+    ) -> Result<()> {
+        let live = self.mutation_session.capture_current_generation()?;
+        match (
+            &journal.generation_before,
+            &journal.published_generation,
+            &journal.verified_generation,
+        ) {
+            (None, None, None)
+                if journal.phase <= crate::pending_session::PendingPhase::ReadyToPublish =>
+            {
+                journal.generation_before = Some(live);
+                Ok(())
+            }
+            (Some(before), None, None)
+                if journal.phase <= crate::pending_session::PendingPhase::ReadyToPublish =>
+            {
+                if &live != before {
+                    bail!(
+                        "external_generation_changed: pending publication predecessor is no longer live"
+                    );
+                }
+                Ok(())
+            }
+            (Some(_), Some(published), None)
+                if journal.phase <= crate::pending_session::PendingPhase::ReadyToPublish =>
+            {
+                if &live != published {
+                    bail!(
+                        "external_generation_changed: pending candidate generation is no longer live"
+                    );
+                }
+                Ok(())
+            }
+            (Some(_), Some(published), Some(_))
+                if journal.phase >= crate::pending_session::PendingPhase::DatabaseVerified =>
+            {
+                if &live != published {
+                    bail!(
+                        "external_generation_changed: interrupted publication generation is no longer live"
+                    );
+                }
+                Ok(())
+            }
+            (Some(_), None, Some(verified))
+                if journal.phase >= crate::pending_session::PendingPhase::DatabaseVerified =>
+            {
+                if &live != verified {
+                    bail!(
+                        "external_generation_changed: pending publication generation is no longer live"
+                    );
+                }
+                Ok(())
+            }
+            _ => {
+                bail!("recovery_required: pending publication predates generation-fenced recovery")
+            }
+        }
+    }
+
+    fn record_verified_generation(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+    ) -> Result<()> {
+        let generation = self.mutation_session.capture_current_generation()?;
+        journal.published_generation = None;
+        journal.verified_generation = Some(generation.clone());
+        store.save(journal)?;
+        self.mutation_session.adopt_verified_generation(generation)
+    }
+
+    fn record_published_generation(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+    ) -> Result<()> {
+        let generation = self.mutation_session.capture_current_generation()?;
+        journal.published_generation = Some(generation.clone());
+        store.save(journal)?;
+        self.mutation_session.adopt_verified_generation(generation)
+    }
+
+    fn record_interrupted_generation(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+    ) -> Result<()> {
+        self.record_published_generation(journal, store)
     }
 
     fn validate_journal(&self, journal: &crate::pending_session::PendingSession) -> Result<()> {
@@ -375,7 +516,7 @@ impl CheckpointCoordinator<'_> {
                 .context("inspect ambiguous live iTunesDB")?;
             if self.verify_candidate(&live, candidate).is_ok() {
                 journal.phase = PendingPhase::DatabaseVerified;
-                store.save(journal)?;
+                self.record_verified_generation(journal, store)?;
                 return Ok(());
             }
             drop(live);
@@ -477,12 +618,15 @@ impl CheckpointCoordinator<'_> {
             bail!("candidate database preparation failed and was restored: {message}");
         }
 
+        self.verify_generation_fence()
+            .context("database pre-publication generation fence")?;
         if let Err(error) = write_coordinated_database(&db) {
             drop(db);
             self.rollback_to_ready(journal, store, snapshot, error)?;
             bail!("database publication failed; database and artwork restored");
         }
         drop(db);
+        self.record_published_generation(journal, store)?;
         let reopened =
             match crate::ipod::db::OwnedDb::open(self.mount).context("reopen candidate iTunesDB") {
                 Ok(db) => db,
@@ -511,7 +655,7 @@ impl CheckpointCoordinator<'_> {
             }
         }
         journal.phase = PendingPhase::DatabaseVerified;
-        store.save(journal)?;
+        self.record_verified_generation(journal, store)?;
         playlist_publication::inject(
             options.playlist_failure_point,
             PlaylistFailurePoint::AfterDatabaseVerified,
@@ -542,6 +686,7 @@ impl CheckpointCoordinator<'_> {
         snapshot: &RollbackSnapshot,
         cause: anyhow::Error,
     ) -> Result<()> {
+        self.require_known_rollback_generation(journal)?;
         snapshot
             .restore(self.mount)
             .with_context(|| format!("restore rollback after {cause:#}"))?;
@@ -549,7 +694,7 @@ impl CheckpointCoordinator<'_> {
         self.restore_device_manifest_preimage(journal)?;
         reset_staged_publication(journal);
         journal.phase = crate::pending_session::PendingPhase::ReadyToPublish;
-        store.save(journal)
+        self.finish_verified_rollback(journal, store)
     }
 
     fn rollback_after_verified_mismatch(
@@ -559,13 +704,57 @@ impl CheckpointCoordinator<'_> {
         snapshot: &RollbackSnapshot,
         cause: anyhow::Error,
     ) -> Result<()> {
+        self.require_known_rollback_generation(journal)?;
         snapshot
             .restore(self.mount)
             .with_context(|| format!("restore rollback after {cause:#}"))?;
         self.cleanup_after_rollback(journal)?;
         self.restore_device_manifest_preimage(journal)?;
         journal.phase = crate::pending_session::PendingPhase::RollbackComplete;
-        store.save(journal)
+        self.finish_verified_rollback(journal, store)
+    }
+
+    fn require_known_rollback_generation(
+        &self,
+        journal: &crate::pending_session::PendingSession,
+    ) -> Result<()> {
+        let live = self.mutation_session.capture_current_generation()?;
+        let known = journal
+            .verified_generation
+            .as_ref()
+            .or(journal.published_generation.as_ref())
+            .or(journal.generation_before.as_ref())
+            .context("recovery_required: pending rollback has no recorded generation")?;
+        if &live != known {
+            bail!(
+                "external_generation_changed: refusing to roll back over an unknown device generation"
+            );
+        }
+        Ok(())
+    }
+
+    fn finish_verified_rollback(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+    ) -> Result<()> {
+        let restored = self.mutation_session.capture_current_generation()?;
+        let expected = journal
+            .generation_before
+            .as_ref()
+            .context("verified rollback has no predecessor generation")?;
+        if &restored != expected {
+            bail!("rollback did not restore the recorded predecessor generation");
+        }
+        journal.published_generation = None;
+        journal.verified_generation =
+            if journal.phase >= crate::pending_session::PendingPhase::DatabaseVerified {
+                Some(restored.clone())
+            } else {
+                None
+            };
+        store.save(journal)?;
+        self.mutation_session.adopt_verified_generation(restored)
     }
 
     fn restore_device_manifest_preimage(
@@ -727,7 +916,16 @@ mod tests {
     use std::ptr;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    const TEST_DEVICE_ID: &str = "000A27002138B0A8";
     static NEXT_TEMP_MOUNT: AtomicU64 = AtomicU64::new(0);
+
+    fn mutation_session(mount: &Path) -> crate::device_coordination::DeviceMutationSession {
+        crate::device_coordination::DeviceMutationSession::acquire(
+            mount,
+            crate::device::DeviceId::parse(TEST_DEVICE_ID).unwrap(),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn publication_phase_order_is_total() {
@@ -839,7 +1037,7 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         let store = ManifestStore::new(
             mount.clone(),
-            "SERIAL".into(),
+            TEST_DEVICE_ID.into(),
             host.join("manifest.json"),
             host.join("legacy.json"),
             AtomicFileWriter::new(),
@@ -847,7 +1045,7 @@ mod tests {
         let cache = crate::artwork_cache::ArtworkCache::new(host.join("artwork"));
         let mut manifest = Manifest::empty();
         manifest.version = 2;
-        manifest.ipod_serial = Some("SERIAL".into());
+        manifest.ipod_serial = Some(TEST_DEVICE_ID.into());
         manifest.last_source_root = Some(source);
         (mount, host, store, cache, manifest)
     }
@@ -881,12 +1079,14 @@ mod tests {
     #[test]
     fn coordinator_publishes_in_order_and_removes_journal_last() {
         let (mount, _host, store, cache, mut manifest) = coordinator_fixture("publish");
-        let mut journal = PendingSession::new(11, "SERIAL", Vec::new());
+        let mut journal = PendingSession::new(11, TEST_DEVICE_ID, Vec::new());
         let journal_store = PendingSessionStore::new(&mount);
         let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+        let mutation_session = mutation_session(&mount);
         let coordinator = CheckpointCoordinator {
             mount: &mount,
-            serial: "SERIAL",
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
             manifest_store: &store,
             artwork_cache: cache,
         };
@@ -909,15 +1109,19 @@ mod tests {
         let journal_store = PendingSessionStore::new(&mount);
         let snapshot = RollbackSnapshot::create(&mount, &journal_store.snapshot_dir(12)).unwrap();
         let original_db = std::fs::read(crate::ipod::layout::itunes_db_path(&mount)).unwrap();
-        let mut journal = PendingSession::new(12, "SERIAL", Vec::new());
+        let mutation_session = mutation_session(&mount);
+        let mut journal = PendingSession::new(12, TEST_DEVICE_ID, Vec::new());
         journal.phase = PendingPhase::DatabaseVerified;
+        let generation = mutation_session.current_generation().unwrap();
+        journal.generation_before = Some(generation.clone());
+        journal.verified_generation = Some(generation);
         journal.candidate_manifest = Some(manifest.clone());
         journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
         journal_store.save(&journal).unwrap();
         let manifest_path = crate::device_state::portable_manifest_path(&mount);
         let store = ManifestStore::new(
             mount.clone(),
-            "SERIAL".into(),
+            TEST_DEVICE_ID.into(),
             host.join("manifest.json"),
             host.join("legacy.json"),
             AtomicFileWriter::failing_before_replace(manifest_path),
@@ -925,7 +1129,8 @@ mod tests {
         let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
         let coordinator = CheckpointCoordinator {
             mount: &mount,
-            serial: "SERIAL",
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
             manifest_store: &store,
             artwork_cache: cache,
         };
@@ -968,7 +1173,7 @@ mod tests {
 
         let mut album = PendingAlbum::new("album", 0);
         album.staged_file_indices.push(0);
-        let mut journal = PendingSession::new(13, "SERIAL", vec![album]);
+        let mut journal = PendingSession::new(13, TEST_DEVICE_ID, vec![album]);
         let mut staged = StagedFile::minimal(source.clone(), pending, None, 0);
         staged.candidate_entry = Some(ManifestEntry {
             source_path: source.clone(),
@@ -988,9 +1193,11 @@ mod tests {
         let desired = vec![("mix".to_string(), "Mix".to_string(), vec![source.clone()])];
         let state_root = host.join("state");
         let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+        let mutation_session = mutation_session(&mount);
         let coordinator = CheckpointCoordinator {
             mount: &mount,
-            serial: "SERIAL",
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
             manifest_store: &store,
             artwork_cache: cache,
         };
@@ -1040,10 +1247,12 @@ mod tests {
         let state_root = host.join("state");
         let desired = vec![("mix".to_string(), "Mix".to_string(), Vec::new())];
         let store = PendingSessionStore::new(&mount);
-        let mut journal = PendingSession::new(15, "SERIAL", Vec::new());
+        let mut journal = PendingSession::new(15, TEST_DEVICE_ID, Vec::new());
+        let mutation_session = mutation_session(&mount);
         let coordinator = CheckpointCoordinator {
             mount: &mount,
-            serial: "SERIAL",
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
             manifest_store: &manifest_store,
             artwork_cache: cache,
         };
@@ -1093,10 +1302,11 @@ mod tests {
         progress.finish(true).unwrap();
 
         assert_eq!(recovered.len(), 1);
-        let ownership = playlist_publication::ownership_store(&mount, "SERIAL", Some(&state_root))
-            .unwrap()
-            .load_device()
-            .unwrap();
+        let ownership =
+            playlist_publication::ownership_store(&mount, TEST_DEVICE_ID, Some(&state_root))
+                .unwrap()
+                .load_device()
+                .unwrap();
         assert_eq!(ownership.playlists["mix"].apple_playlist_id, candidate_id);
         assert_eq!(
             crate::ipod::db::list_playlists(&crate::ipod::db::OwnedDb::open(&mount).unwrap())
@@ -1145,10 +1355,12 @@ mod tests {
             let desired = vec![("mix".to_string(), "Mix".to_string(), Vec::new())];
             let store = PendingSessionStore::new(&mount);
             let session_id = 100 + index as u64;
-            let mut journal = PendingSession::new(session_id, "SERIAL", Vec::new());
+            let mut journal = PendingSession::new(session_id, TEST_DEVICE_ID, Vec::new());
+            let mutation_session = mutation_session(&mount);
             let coordinator = CheckpointCoordinator {
                 mount: &mount,
-                serial: "SERIAL",
+                serial: TEST_DEVICE_ID,
+                mutation_session: &mutation_session,
                 manifest_store: &manifest_store,
                 artwork_cache: cache,
             };
@@ -1198,7 +1410,7 @@ mod tests {
             coordinator_fixture("pre-6b-recorded-projection");
         let ownership = ManagedPlaylistOwnership {
             schema_version: MANAGED_PLAYLIST_OWNERSHIP_VERSION,
-            device_serial: "SERIAL".into(),
+            device_serial: TEST_DEVICE_ID.into(),
             playlists: BTreeMap::from([(
                 "mix".into(),
                 ManagedPlaylistEntry {
@@ -1212,7 +1424,7 @@ mod tests {
             )]),
         };
         let store = PendingSessionStore::new(&mount);
-        let mut journal = PendingSession::new(16, "SERIAL", Vec::new());
+        let mut journal = PendingSession::new(16, TEST_DEVICE_ID, Vec::new());
         journal.phase = PendingPhase::RockboxProjectionsPrepared;
         journal.candidate_playlist_ownership = Some(ownership.clone());
         journal
@@ -1225,17 +1437,18 @@ mod tests {
     }
 
     #[test]
-    fn recovery_playlist_mismatch_restores_the_full_snapshot() {
+    fn recovery_playlist_mismatch_preserves_the_unknown_generation() {
         let (mount, host, manifest_store, cache, mut manifest) =
             coordinator_fixture("playlist-verify-rollback");
-        let original_db = std::fs::read(crate::ipod::layout::itunes_db_path(&mount)).unwrap();
         let state_root = host.join("state");
         let desired = vec![("mix".to_string(), "Mix".to_string(), Vec::new())];
         let store = PendingSessionStore::new(&mount);
-        let mut journal = PendingSession::new(17, "SERIAL", Vec::new());
+        let mut journal = PendingSession::new(17, TEST_DEVICE_ID, Vec::new());
+        let mutation_session = mutation_session(&mount);
         let coordinator = CheckpointCoordinator {
             mount: &mount,
-            serial: "SERIAL",
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
             manifest_store: &manifest_store,
             artwork_cache: cache,
         };
@@ -1267,6 +1480,7 @@ mod tests {
         crate::ipod::db::remove_playlist_by_id(&db, playlist_id).unwrap();
         db.write().unwrap();
         drop(db);
+        let unknown_db = std::fs::read(crate::ipod::layout::itunes_db_path(&mount)).unwrap();
 
         let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
         let error = coordinator
@@ -1284,14 +1498,14 @@ mod tests {
             .unwrap_err();
         progress.finish(false).unwrap();
 
-        assert!(format!("{error:#}").contains("playlist verification failed"));
+        assert!(format!("{error:#}").contains("external_generation_changed"));
         assert_eq!(
             store.load(17).unwrap().phase,
-            PendingPhase::RollbackComplete
+            PendingPhase::DatabaseVerified
         );
         assert_eq!(
             std::fs::read(crate::ipod::layout::itunes_db_path(&mount)).unwrap(),
-            original_db
+            unknown_db
         );
         RollbackSnapshot::open(&store.snapshot_dir(17))
             .unwrap()
@@ -1303,7 +1517,8 @@ mod tests {
     fn playlist_record_is_restored_when_checkpoint_rolls_back() {
         let (mount, host, store, cache, mut manifest) = coordinator_fixture("playlist-rollback");
         let state_root = host.join("state");
-        let record = crate::device_state::managed_playlists_path_in(&state_root, "SERIAL").unwrap();
+        let record =
+            crate::device_state::managed_playlists_path_in(&state_root, TEST_DEVICE_ID).unwrap();
         let original = br#"{
   "names": [
     { "slug": "old", "name": "Old", "id": 123 }
@@ -1313,12 +1528,14 @@ mod tests {
         let manifest_path = crate::device_state::portable_manifest_path(&mount);
         std::fs::create_dir_all(&manifest_path).unwrap();
 
-        let mut journal = PendingSession::new(14, "SERIAL", Vec::new());
+        let mut journal = PendingSession::new(14, TEST_DEVICE_ID, Vec::new());
         let desired = Vec::<DesiredPlaylist>::new();
         let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+        let mutation_session = mutation_session(&mount);
         let coordinator = CheckpointCoordinator {
             mount: &mount,
-            serial: "SERIAL",
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
             manifest_store: &store,
             artwork_cache: cache,
         };

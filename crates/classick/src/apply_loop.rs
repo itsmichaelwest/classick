@@ -240,8 +240,36 @@ pub fn run(
     // must be known before any of that. `identity` is reused as-is below,
     // right before `OwnedDb::open`, instead of re-resolving it.
     let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
-    let serial = device_state::sanitize_serial(&identity.firewire_guid);
+    let device_id = crate::device::DeviceId::parse(&identity.firewire_guid)
+        .context("connected iPod has no portable device identity")?;
+    let serial = device_id.to_string();
+    let mutation_session =
+        crate::device_coordination::DeviceMutationSession::acquire(Path::new(&mount), device_id)
+            .context("acquire device mutation session")?;
 
+    run_connected(
+        config,
+        progress,
+        decision_rx,
+        mount,
+        identity,
+        serial,
+        &mutation_session,
+        refalac_version,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_connected(
+    config: &mut Config,
+    progress: &Progress,
+    decision_rx: &Receiver<Decision>,
+    mount: String,
+    identity: crate::ipod::device::LibgpodIdentity,
+    serial: String,
+    mutation_session: &crate::device_coordination::DeviceMutationSession,
+    refalac_version: Option<String>,
+) -> Result<RunOutcome> {
     // Rockbox-compat is per-device (trust package): `config.rockbox_compat`
     // as merged by `config::resolve` only reflects the CLI flag OR the
     // *global* daemon setting, resolved before the device's serial was even
@@ -383,6 +411,7 @@ pub fn run(
     let recovery = crate::sync_transaction::CheckpointCoordinator {
         mount: Path::new(&mount),
         serial: &identity.firewire_guid,
+        mutation_session,
         manifest_store: &manifest_store,
         artwork_cache: recovery_cache,
     }
@@ -669,6 +698,7 @@ pub fn run(
         decision_rx,
         Path::new(&mount),
         &identity.firewire_guid,
+        mutation_session,
         &identity,
         &manifest_store,
         &mut manifest,
@@ -692,7 +722,14 @@ pub fn run(
         if let (Some(root), Some(subscriptions)) =
             (&playlist_store_root, &device_subscriptions_file)
         {
-            crate::ipod::device_playlists::mirror_to_ipod(Path::new(&mount), root, subscriptions);
+            mutation_session.publish_verified(|| {
+                crate::ipod::device_playlists::mirror_to_ipod(
+                    Path::new(&mount),
+                    root,
+                    subscriptions,
+                );
+                Ok(())
+            })?;
         }
     }
     // save_config is independent of the sync closure: it only runs on success
@@ -734,6 +771,7 @@ fn run_staged_sync(
     decision_rx: &Receiver<Decision>,
     mount: &Path,
     serial: &str,
+    mutation_session: &crate::device_coordination::DeviceMutationSession,
     identity: &crate::ipod::device::LibgpodIdentity,
     manifest_store: &ManifestStore,
     manifest: &mut Manifest,
@@ -746,17 +784,6 @@ fn run_staged_sync(
     deferred: &[DeferredAlbum],
     library_index: &Option<library_index::LibraryIndex>,
 ) -> Result<RunOutcome> {
-    if let Err(error) = crate::ipod::sysinfo_provision::provision(mount, identity) {
-        progress.log(format!(
-            "SysInfoExtended provisioning failed (art may not display): {error:#}"
-        ));
-    }
-    if let Err(error) = crate::ipod::db::backup_itunesdb(mount) {
-        progress.log(format!(
-            "Pre-sync DB backup failed: {error}; sync will proceed without a fresh backup."
-        ));
-    }
-
     let artwork_cache = crate::artwork_cache::ArtworkCache::new(
         config
             .manifest_path
@@ -914,6 +941,7 @@ fn run_staged_sync(
             publish_journal(
                 mount,
                 serial,
+                mutation_session,
                 identity,
                 manifest_store,
                 &artwork_cache,
@@ -943,6 +971,7 @@ fn run_staged_sync(
         publish_journal(
             mount,
             serial,
+            mutation_session,
             identity,
             manifest_store,
             &artwork_cache,
@@ -1181,6 +1210,7 @@ fn device_file_path(mount: &Path, relative: &str) -> PathBuf {
 fn publish_journal(
     mount: &Path,
     serial: &str,
+    mutation_session: &crate::device_coordination::DeviceMutationSession,
     identity: &crate::ipod::device::LibgpodIdentity,
     manifest_store: &ManifestStore,
     artwork_cache: &crate::artwork_cache::ArtworkCache,
@@ -1193,6 +1223,7 @@ fn publish_journal(
     let coordinator = crate::sync_transaction::CheckpointCoordinator {
         mount,
         serial,
+        mutation_session,
         manifest_store,
         artwork_cache: artwork_cache.clone(),
     };
@@ -1274,9 +1305,23 @@ pub fn replace_library(
     decision_rx: &Receiver<Decision>,
 ) -> Result<RunOutcome> {
     preflight::verify_itunes_not_running(progress, decision_rx)?;
+    preflight::verify_ffmpeg(config, progress, decision_rx)?;
+    let refalac_version = if matches!(config.encoder, EncoderChoice::Refalac) {
+        Some(preflight::verify_refalac(config, progress, decision_rx)?)
+    } else {
+        None
+    };
     let mount = preflight::resolve_ipod_mount(config, progress, decision_rx)?;
     let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
-    let serial = device_state::sanitize_serial(&identity.firewire_guid);
+    let device_id = crate::device::DeviceId::parse(&identity.firewire_guid)
+        .context("connected iPod has no portable device identity")?;
+    let serial = device_id.to_string();
+    let mutation_session =
+        crate::device_coordination::DeviceMutationSession::acquire(Path::new(&mount), device_id)
+            .context("acquire device mutation session")?;
+    mutation_session
+        .verify_expected_generation()
+        .context("replace-library generation fence")?;
     let source_location = configured_source_location(config)?;
     let manifest_store = manifest_store(config, Path::new(&mount), &serial)?;
 
@@ -1290,15 +1335,6 @@ pub fn replace_library(
     // the strength of a walk result that's gone stale by the time `run()`
     // gets to it (source unplugged/changed between here and there).
     let _ = preflight_replace(config, progress, decision_rx)?;
-
-    // Defensive backup of the pre-wipe iTunesDB — same helper/order as
-    // `run`'s pre-sync backup (see the doc comment above for why `run`'s own
-    // backup, moments later, ends up overwriting this one).
-    if let Err(e) = crate::ipod::db::backup_itunesdb(Path::new(&mount)) {
-        progress.log(format!(
-            "Pre-wipe DB backup failed: {e}; continuing without a fresh backup."
-        ));
-    }
 
     let db = open_with_auto_restore(Path::new(&mount), || {
         progress.log("Restored iPod database from backup after detecting corruption");
@@ -1325,19 +1361,33 @@ pub fn replace_library(
     }
 
     progress.log(format!("Erasing {track_count} track(s) from the iPod…"));
-    let wiped = crate::ipod::db::wipe_all_tracks(&db)?;
-    progress.log(format!("Erased {wiped} track(s)."));
-    write_replace_library_database(&db)?;
+    let wiped = mutation_session.publish_verified(|| {
+        let wiped = crate::ipod::db::wipe_all_tracks(&db)?;
+        write_replace_library_database(&db)?;
+        Ok(wiped)
+    })?;
     drop(db);
+    progress.log(format!("Erased {wiped} track(s)."));
 
     let mut manifest = Manifest::empty();
-    manifest.ipod_serial = Some(serial);
+    manifest.ipod_serial = Some(serial.clone());
     manifest.last_source_root = Some(config.source.clone());
-    publish_manifest(&manifest_store, &manifest, &source_location, progress)
-        .context("publish reset manifest after wipe")?;
+    mutation_session.publish_verified(|| {
+        publish_manifest(&manifest_store, &manifest, &source_location, progress)
+            .context("publish reset manifest after wipe")
+    })?;
 
     progress.log("Library erased; syncing the current selection…".to_string());
-    run(config, progress, decision_rx)
+    run_connected(
+        config,
+        progress,
+        decision_rx,
+        mount,
+        identity,
+        serial,
+        &mutation_session,
+        refalac_version,
+    )
 }
 
 /// Whether `replace_library`'s confirmation prompt should be skipped —
@@ -1949,7 +1999,15 @@ pub fn backfill_rockbox(
     // manifest, but it must be the same file `run` uses, or a backfill
     // would silently operate on a stale/legacy copy of the track list.
     let identity = device::resolve_libgpod_identity(Path::new(&mount))?;
-    let serial = device_state::sanitize_serial(&identity.firewire_guid);
+    let device_id = crate::device::DeviceId::parse(&identity.firewire_guid)
+        .context("connected iPod has no portable device identity")?;
+    let serial = device_id.to_string();
+    let mutation_session =
+        crate::device_coordination::DeviceMutationSession::acquire(Path::new(&mount), device_id)
+            .context("acquire device mutation session")?;
+    mutation_session
+        .verify_expected_generation()
+        .context("backfill generation fence")?;
     let source_location = configured_source_location(config)?;
     let manifest = manifest_store(config, Path::new(&mount), &serial)?
         .load(&source_location)?
@@ -2008,7 +2066,7 @@ pub fn backfill_rockbox(
     }
 
     // Phase 2: rebuild the Apple ArtworkDB fresh so Apple firmware shows art too.
-    match rebuild_apple_artwork(Path::new(&mount), &refreshed) {
+    match rebuild_apple_artwork(Path::new(&mount), &refreshed, &mutation_session) {
         Ok(()) => progress.log("Apple firmware artwork rebuilt.".to_string()),
         Err(e) => progress.log(format!(
             "Apple artwork not rebuilt ({e:#}); Rockbox files still updated."
@@ -2031,10 +2089,9 @@ pub fn backfill_rockbox(
 fn rebuild_apple_artwork(
     mount: &Path,
     refreshed: &[(u64, crate::ipod::db::Tags, Option<Vec<u8>>)],
+    mutation_session: &crate::device_coordination::DeviceMutationSession,
 ) -> Result<()> {
     let identity = device::resolve_libgpod_identity(mount)?;
-    // Provision so the artwork format list (incl. F1069) is correct for the write.
-    crate::ipod::sysinfo_provision::provision(mount, &identity).ok();
     let db = OwnedDb::open(mount)?;
     unsafe {
         let device_ptr = (*db.as_ptr()).device;
@@ -2066,19 +2123,20 @@ fn rebuild_apple_artwork(
     // Force libgpod's fresh-BUILD path: delete the stale ArtworkDB + ithmb so
     // itdb_write rebuilds them from the in-memory thumbnails (preserving F1069)
     // instead of taking the destructive rewrite path.
-    let art_dir = mount.join("iPod_Control").join("Artwork");
-    if let Ok(rd) = std::fs::read_dir(&art_dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if let Some(n) = p.file_name().and_then(|s| s.to_str()) {
-                if n.ends_with(".ithmb") || n == "ArtworkDB" {
-                    let _ = std::fs::remove_file(&p);
+    mutation_session.publish_verified(|| {
+        let art_dir = mount.join("iPod_Control").join("Artwork");
+        if let Ok(rd) = std::fs::read_dir(&art_dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if let Some(n) = p.file_name().and_then(|s| s.to_str()) {
+                    if n.ends_with(".ithmb") || n == "ArtworkDB" {
+                        let _ = std::fs::remove_file(&p);
+                    }
                 }
             }
         }
-    }
-    write_rebuilt_artwork_database(&db)?;
-    Ok(())
+        write_rebuilt_artwork_database(&db)
+    })
 }
 
 pub fn write_rebuilt_artwork_database(db: &OwnedDb) -> Result<()> {

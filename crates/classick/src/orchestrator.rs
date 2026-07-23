@@ -74,7 +74,16 @@ pub fn orchestrate(
     }
     if config.restore_db_backup {
         let mount = crate::preflight::resolve_ipod_mount(&config, progress, decision_rx)?;
-        crate::ipod::db::restore_itunesdb_from_backup(std::path::Path::new(&mount))?;
+        let identity = crate::ipod::device::resolve_libgpod_identity(std::path::Path::new(&mount))?;
+        let device_id = crate::device::DeviceId::parse(&identity.firewire_guid)
+            .map_err(|error| anyhow!("connected iPod has no portable device identity: {error}"))?;
+        let mutation_session = crate::device_coordination::DeviceMutationSession::acquire(
+            std::path::Path::new(&mount),
+            device_id,
+        )?;
+        mutation_session.publish_verified(|| {
+            crate::ipod::db::restore_itunesdb_from_backup(std::path::Path::new(&mount))
+        })?;
         progress.log("iTunesDB restored from session backup.".to_string());
         return Ok(RunOutcome::Completed);
     }

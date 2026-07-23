@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SERIAL: &str = "SERIAL";
+const SERIAL: &str = "000A27002138B0A8";
 
 struct Fixture {
     mount: PathBuf,
@@ -28,6 +28,7 @@ struct Fixture {
     manifest_store: ManifestStore,
     cache: ArtworkCache,
     manifest: Manifest,
+    mutation_session: classick::device_coordination::DeviceMutationSession,
 }
 
 fn fixture(label: &str) -> Fixture {
@@ -58,12 +59,18 @@ fn fixture(label: &str) -> Fixture {
     let mut manifest = Manifest::empty();
     manifest.ipod_serial = Some(SERIAL.into());
     manifest.last_source_root = Some(host.join("source"));
+    let mutation_session = classick::device_coordination::DeviceMutationSession::acquire(
+        &mount,
+        classick::device::DeviceId::parse(SERIAL).unwrap(),
+    )
+    .unwrap();
     Fixture {
         mount,
         cache: ArtworkCache::new(host.join("artwork")),
         host,
         manifest_store,
         manifest,
+        mutation_session,
     }
 }
 
@@ -91,6 +98,14 @@ fn empty_ownership() -> ManagedPlaylistOwnership {
     }
 }
 
+fn bind_live_generation(fixture: &Fixture, journal: &mut PendingSession) {
+    let generation = fixture.mutation_session.current_generation().unwrap();
+    journal.generation_before = Some(generation.clone());
+    if journal.phase >= PendingPhase::DatabaseVerified {
+        journal.verified_generation = Some(generation);
+    }
+}
+
 #[test]
 fn device_manifest_published_future_ops_remain_byte_exact_when_recovery_rejects_them() {
     let mut fixture = fixture("future-ops");
@@ -107,6 +122,7 @@ fn device_manifest_published_future_ops_remain_byte_exact_when_recovery_rejects_
             desired: None,
         },
     );
+    bind_live_generation(&fixture, &mut journal);
     store.save(&journal).unwrap();
     RollbackSnapshot::create(&fixture.mount, &store.snapshot_dir(1)).unwrap();
     let before = std::fs::read(store.path(1)).unwrap();
@@ -116,6 +132,7 @@ fn device_manifest_published_future_ops_remain_byte_exact_when_recovery_rejects_
     let coordinator = CheckpointCoordinator {
         mount: &fixture.mount,
         serial: SERIAL,
+        mutation_session: &fixture.mutation_session,
         manifest_store: &fixture.manifest_store,
         artwork_cache: fixture.cache.clone(),
     };
@@ -185,6 +202,7 @@ fn database_verified_mismatch_blocks_reconcile_on_every_restart() {
         ordered_dbids: Vec::new(),
         ordered_ipod_paths: Vec::new(),
     }];
+    bind_live_generation(&fixture, &mut journal);
     let expected_candidate = journal.candidate_manifest.clone();
     let expected_ownership = journal.candidate_playlist_ownership.clone();
     let expected_desired = journal.desired_playlist_memberships.clone();
@@ -204,6 +222,7 @@ fn database_verified_mismatch_blocks_reconcile_on_every_restart() {
     let coordinator = CheckpointCoordinator {
         mount: &fixture.mount,
         serial: SERIAL,
+        mutation_session: &fixture.mutation_session,
         manifest_store: &fixture.manifest_store,
         artwork_cache: fixture.cache.clone(),
     };
@@ -229,6 +248,7 @@ fn database_verified_mismatch_blocks_reconcile_on_every_restart() {
     let restarted_coordinator = CheckpointCoordinator {
         mount: &fixture.mount,
         serial: SERIAL,
+        mutation_session: &fixture.mutation_session,
         manifest_store: &fixture.manifest_store,
         artwork_cache: fixture.cache.clone(),
     };
@@ -287,24 +307,31 @@ fn database_verified_mismatch_blocks_reconcile_on_every_restart() {
 }
 
 #[test]
-fn published_mismatch_restores_exact_preexisting_device_manifest_on_every_restart() {
-    assert_published_mismatch_restores_manifest("manifest-present", Some(b"exact old manifest\n"));
+fn external_change_preserves_published_state_and_preexisting_manifest_snapshot() {
+    assert_external_change_preserves_unknown_generation(
+        "manifest-present",
+        Some(b"exact old manifest\n"),
+    );
 }
 
 #[test]
-fn published_mismatch_restores_originally_absent_device_manifest_on_every_restart() {
-    assert_published_mismatch_restores_manifest("manifest-absent", None);
+fn external_change_preserves_published_state_when_manifest_was_initially_absent() {
+    assert_external_change_preserves_unknown_generation("manifest-absent", None);
 }
 
-fn assert_published_mismatch_restores_manifest(label: &str, previous: Option<&[u8]>) {
+fn assert_external_change_preserves_unknown_generation(label: &str, previous: Option<&[u8]>) {
     let mut fixture = fixture(label);
     let manifest_path = classick::device_state::portable_manifest_path(&fixture.mount);
     if let Some(bytes) = previous {
-        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
-        std::fs::write(&manifest_path, bytes).unwrap();
+        fixture
+            .mutation_session
+            .publish_verified(|| {
+                std::fs::create_dir_all(manifest_path.parent().unwrap())?;
+                std::fs::write(&manifest_path, bytes)?;
+                Ok(())
+            })
+            .unwrap();
     }
-    let original_db =
-        std::fs::read(classick::ipod::layout::itunes_db_path(&fixture.mount)).unwrap();
     let desired = vec![("mix".to_string(), "Mix".to_string(), Vec::new())];
     let state_root = fixture.host.join("state");
     let store = PendingSessionStore::new(&fixture.mount);
@@ -312,6 +339,7 @@ fn assert_published_mismatch_restores_manifest(label: &str, previous: Option<&[u
     let coordinator = CheckpointCoordinator {
         mount: &fixture.mount,
         serial: SERIAL,
+        mutation_session: &fixture.mutation_session,
         manifest_store: &fixture.manifest_store,
         artwork_cache: fixture.cache.clone(),
     };
@@ -357,6 +385,9 @@ fn assert_published_mismatch_restores_manifest(label: &str, previous: Option<&[u
     classick::ipod::db::remove_playlist_by_id(&db, candidate_id).unwrap();
     db.write().unwrap();
     drop(db);
+    let unknown_database =
+        std::fs::read(classick::ipod::layout::itunes_db_path(&fixture.mount)).unwrap();
+    let published_manifest = std::fs::read(&manifest_path).unwrap();
 
     for _restart in 0..2 {
         let (progress, _decisions) = Progress::start(false, false).unwrap();
@@ -372,9 +403,10 @@ fn assert_published_mismatch_restores_manifest(label: &str, previous: Option<&[u
             },
         );
         progress.finish(result.is_ok()).unwrap();
-        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(format!("{error:#}").contains("external_generation_changed"));
         let retained = store.load(3).unwrap();
-        assert_eq!(retained.phase, PendingPhase::RollbackComplete);
+        assert_eq!(retained.phase, PendingPhase::DeviceManifestPublished);
         assert_eq!(
             retained
                 .candidate_playlist_ownership
@@ -386,12 +418,9 @@ fn assert_published_mismatch_restores_manifest(label: &str, previous: Option<&[u
         );
         assert_eq!(
             std::fs::read(classick::ipod::layout::itunes_db_path(&fixture.mount)).unwrap(),
-            original_db
+            unknown_database
         );
-        match previous {
-            Some(bytes) => assert_eq!(std::fs::read(&manifest_path).unwrap(), bytes),
-            None => assert!(!manifest_path.exists()),
-        }
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), published_manifest);
     }
 }
 
@@ -404,6 +433,7 @@ fn database_verified_recovery_is_database_byte_stable_when_verification_succeeds
     journal.phase = PendingPhase::DatabaseVerified;
     journal.candidate_manifest = Some(fixture.manifest.clone());
     journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
+    bind_live_generation(&fixture, &mut journal);
     store.save(&journal).unwrap();
     let database = classick::ipod::layout::itunes_db_path(&fixture.mount);
     let before = std::fs::read(&database).unwrap();
@@ -411,6 +441,7 @@ fn database_verified_recovery_is_database_byte_stable_when_verification_succeeds
     let coordinator = CheckpointCoordinator {
         mount: &fixture.mount,
         serial: SERIAL,
+        mutation_session: &fixture.mutation_session,
         manifest_store: &fixture.manifest_store,
         artwork_cache: fixture.cache.clone(),
     };
@@ -431,6 +462,7 @@ fn legacy_verified_journal_without_manifest_preimage_fails_closed_unchanged() {
     let mut journal = PendingSession::new(5, SERIAL, Vec::new());
     journal.phase = PendingPhase::DatabaseVerified;
     journal.candidate_manifest = Some(fixture.manifest.clone());
+    bind_live_generation(&fixture, &mut journal);
     store.save(&journal).unwrap();
     let journal_before = std::fs::read(store.path(5)).unwrap();
     let database = classick::ipod::layout::itunes_db_path(&fixture.mount);
@@ -439,6 +471,7 @@ fn legacy_verified_journal_without_manifest_preimage_fails_closed_unchanged() {
     let coordinator = CheckpointCoordinator {
         mount: &fixture.mount,
         serial: SERIAL,
+        mutation_session: &fixture.mutation_session,
         manifest_store: &fixture.manifest_store,
         artwork_cache: fixture.cache.clone(),
     };
