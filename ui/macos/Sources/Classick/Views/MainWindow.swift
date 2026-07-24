@@ -109,7 +109,7 @@ struct MainWindow: View {
         LibraryView(model: model, onScan: onScan, onConnectSource: onConnectSource)
       case .device(let serial, .music):
         DeviceMusicPage(
-          model: model, serial: serial, onSyncNow: onSyncNow,
+          model: model, serial: serial,
           onLoadDeviceConfig: onLoadDeviceConfig,
           onSaveAndPreviewDeviceConfig: onSaveAndPreviewDeviceConfig, onScan: onScan,
           onSubmitLibraryDrop: onSubmitLibraryDrop

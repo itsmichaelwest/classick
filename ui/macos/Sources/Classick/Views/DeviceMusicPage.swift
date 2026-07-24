@@ -21,7 +21,6 @@ import SwiftUI
 struct DeviceMusicPage: View {
   var model: AppModel
   var serial: DeviceID
-  var onSyncNow: (DeviceID) -> Void
   var onLoadDeviceConfig: (DeviceID) -> Void
   var onSaveAndPreviewDeviceConfig:
     (_ serial: DeviceID, _ selection: SelectionState?, _ subscriptions: SubscriptionsWire?) ->
@@ -85,20 +84,31 @@ struct DeviceMusicPage: View {
 
   var body: some View {
     seededContent
-      .facetBarBelowToolbar { facetBar }
-      // Title/subtitle/actions live in the WINDOW chrome, not the page
+      .hardTopScrollEdge()
+      // Title/subtitle/controls live in the WINDOW chrome, not the page
       // body: `navigationTitle` + the macOS-only `navigationSubtitle` put
-      // the device name and last-synced line in the titlebar, and the
-      // `.primaryAction` toolbar group puts the Sync mode picker + Sync
-      // Now in the trailing corner (design frame 3:3773). This page is
-      // the NavigationSplitView detail, so these land in the unified
-      // toolbar; on macOS 26+ the items pick up the glass capsule
-      // treatment automatically.
+      // the device name and last-synced line in the titlebar, the
+      // centered `.principal` slot holds the facet picker (same slot the
+      // Library page uses, so it doesn't move between pages), and
+      // `.primaryAction` holds the Sync mode picker. This page is the
+      // NavigationSplitView detail, so these land in the unified toolbar;
+      // on macOS 26+ the items pick up the glass capsule treatment
+      // automatically.
+      //
+      // There is deliberately NO Sync Now here. The app-wide device bar
+      // at the bottom of the window shows Sync Now for the selected
+      // device — which, on this page, is always this device — so a
+      // toolbar copy was the same action twice, ~120pt apart, with two
+      // different disabled rules. The bar's copy wins: it is the one
+      // that's present on every page.
       .navigationTitle(deviceName)
       .navigationSubtitle(lastSyncedSubtitle)
       .toolbar {
-        ToolbarItemGroup(placement: .primaryAction) {
-          if readinessGuidance == nil {
+        if readinessGuidance == nil {
+          ToolbarItem(placement: .principal) {
+            FacetPicker(facet: $facet, facets: LibraryBrowser.Facet.allCases)
+          }
+          ToolbarItem(placement: .primaryAction) {
             Picker(selection: Binding(get: { draft.mode }, set: setMode)) {
               Text("Entire library").tag(SelectionMode.all)
               Text("Selected items").tag(SelectionMode.include)
@@ -108,27 +118,14 @@ struct DeviceMusicPage: View {
             }
             .pickerStyle(.menu)
             .help("What syncs to this iPod")
-          // Disabled until the persisted config seeds the draft
-          // (sweep finding #1): before that this picker shows the
-          // compiled-in `.all` default — and worse, touching it in
-          // that window ran the seeding fn against an EMPTY draft,
-          // latched `userEdited`, blocked the real config from ever
-          // seeding, and debounced-saved the wrong selection over
-          // the persisted one.
+            // Disabled until the persisted config seeds the draft
+            // (sweep finding #1): before that this picker shows the
+            // compiled-in `.all` default — and worse, touching it in
+            // that window ran the seeding fn against an EMPTY draft,
+            // latched `userEdited`, blocked the real config from ever
+            // seeding, and debounced-saved the wrong selection over
+            // the persisted one.
             .disabled(!hasCanonicalDraft || !canEditDevice)
-          // HIDDEN (not disabled) while disconnected: a permanently
-          // washed-out prominent capsule reads as broken chrome, and
-          // the bottom device bar already explains "<name> not
-          // connected". Disabled is reserved for transient busy
-          // states (sync/scan in flight) where the button will
-          // shortly work again.
-            if isConnected {
-              Button("Sync Now") { onSyncNow(serial) }
-                .buttonStyle(.borderedProminent)
-                .disabled(
-                  DeviceMusicLogic.isSyncNowDisabled(
-                    phase: surfacePhase, isConnected: isConnected))
-            }
           }
         }
       }
@@ -173,25 +170,10 @@ struct DeviceMusicPage: View {
     return model.dropOutcome?.accessibleMessage
   }
 
-  // MARK: - Facet bar (below the toolbar, scroll-edge-aware)
-  // (Title/subtitle and the Sync controls are toolbar chrome — see body.
-  // The search field and the caption line were removed per design; the
-  // caption copy survives in `DeviceMusicLogic.caption` + its tests
-  // should a home for it return.)
-
-  private var facetBar: some View {
-    Group {
-      if readinessGuidance == nil {
-        Picker("", selection: $facet) {
-          ForEach(LibraryBrowser.Facet.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-        }
-        .pickerStyle(.segmented)
-        .frame(width: 320)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity)
-      }
-    }
-  }
+  // (Title/subtitle, the facet picker and the Sync mode picker are all
+  // toolbar chrome — see body. The search field and the caption line were
+  // removed per design; the caption copy survives in
+  // `DeviceMusicLogic.caption` + its tests should a home for it return.)
 
   private var lastSyncedSubtitle: String {
     // Shown for the KNOWN (paired) device even while disconnected —
@@ -222,13 +204,7 @@ struct DeviceMusicPage: View {
         content
       }
     } else {
-      VStack(spacing: 8) {
-        Spacer()
-        ProgressView().controlSize(.small)
-        Text("Loading…").foregroundStyle(.secondary)
-        Spacer()
-      }
-      .frame(maxWidth: .infinity)
+      LibraryStateView.loading()
     }
   }
 
@@ -242,13 +218,17 @@ struct DeviceMusicPage: View {
         mode: draft.mode, isConnected: isConnected, syncedCount: deviceState?.syncedCount ?? 0)
       {
       case .needsScan:
-        needsScanState
+        LibraryStateView.needsScan(onScan: onScan)
       case .scanning(let current, let total):
-        scanningState(current: current, total: total)
+        LibraryStateView.scanning(current: current, total: total)
       case .libraryEmpty(let path):
-        libraryEmptyState(path: path)
+        LibraryStateView.libraryEmpty(path: path, onScan: onScan)
       case .deviceEmpty:
-        deviceEmptyState
+        // Only reachable in Entire-library mode (see
+        // `DeviceMusicLogic.contentState`) — in Selected/Except modes the
+        // browser IS the primary interactive UI whether or not a first
+        // sync has happened, so it must keep rendering there.
+        LibraryStateView.deviceEmpty
       case .browser:
         if let library = model.library {
           LibraryBrowser(
@@ -269,59 +249,6 @@ struct DeviceMusicPage: View {
       checked: Binding(
         get: { draft.checked }, set: { value in editSelection { $0.checked = value } }),
       style: .cascading)
-  }
-
-  private var needsScanState: some View {
-    VStack(spacing: 12) {
-      Spacer()
-      Text("Classick needs to read your library's tags once").font(.headline)
-      Button("Scan Library", action: onScan)
-        .keyboardShortcut(.defaultAction)
-      Spacer()
-    }
-    .frame(maxWidth: .infinity)
-  }
-
-  private func scanningState(current: Int, total: Int) -> some View {
-    VStack(spacing: 12) {
-      Spacer()
-      ProgressView(value: total > 0 ? Double(current) / Double(total) : 0)
-        .frame(maxWidth: 260)
-      Text("Scanning… \(current) of \(total)").font(.caption).foregroundStyle(.secondary)
-      Spacer()
-    }
-    .frame(maxWidth: .infinity)
-  }
-
-  /// Global Constraints: "library empty → 'No audio files found in
-  /// <path>'". Shared copy/behavior with `LibraryView`'s equivalent state
-  /// via `LibraryContentLogic`.
-  private func libraryEmptyState(path: String) -> some View {
-    VStack(spacing: 12) {
-      Spacer()
-      Text("No audio files found in \(path)")
-        .font(.headline)
-        .multilineTextAlignment(.center)
-        .padding(.horizontal, 24)
-      Button("Rescan Library", action: onScan)
-      Spacer()
-    }
-    .frame(maxWidth: .infinity)
-  }
-
-  /// Global Constraints: "device empty → 'Nothing synced yet — press Sync
-  /// Now.'". Only reachable in Entire-library mode (see
-  /// `DeviceMusicLogic.contentState`) — in Selected/Except modes the
-  /// browser IS the primary interactive UI regardless of whether a first
-  /// sync has happened yet, so it must keep rendering there. No duplicate
-  /// button here: "press Sync Now" refers to the toolbar's existing button.
-  private var deviceEmptyState: some View {
-    VStack(spacing: 12) {
-      Spacer()
-      Text("Nothing synced yet — press Sync Now.").font(.headline)
-      Spacer()
-    }
-    .frame(maxWidth: .infinity)
   }
 
   /// Same table pattern as the Artists/Albums/Genres facets: checkbox +
@@ -507,7 +434,7 @@ enum DeviceDraftSaveGate {
     NavigationStack {
       DeviceMusicPage(
         model: model, serial: try! DeviceID(PreviewFixtures.pairedIpod.serial),
-        onSyncNow: { _ in }, onLoadDeviceConfig: { _ in },
+        onLoadDeviceConfig: { _ in },
         onSaveAndPreviewDeviceConfig: { _, _, _ in .init() }, onScan: {})
     }
     .frame(width: 760, height: 560)

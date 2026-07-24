@@ -31,37 +31,54 @@ struct AddSongsPicker: View {
             header
             Divider()
             content
+            Divider()
+            footer
         }
         .frame(minWidth: 480, minHeight: 420)
     }
 
+    /// Title above, facet picker centered below it — the same vertical
+    /// order the Library and device Music pages use for their titlebar +
+    /// facet bar, so the sheet reads as the same kind of surface.
     private var header: some View {
         VStack(spacing: 10) {
-            HStack {
+            HStack(spacing: 12) {
                 Text("Add Songs").font(.headline)
-                Spacer()
-                // Cancel must NEVER be disabled: with it gated on
-                // `isResolving`, a lost `resolve_tracks` reply (daemon
-                // restart, dropped send) left BOTH buttons dead and the
-                // user sealed in the sheet until app quit (sweep finding
-                // #4). Escape is always available; the caller resets its
-                // in-flight flag.
-                Button("Cancel", action: onCancel)
-                    .keyboardShortcut(.cancelAction)
-                Button(isResolving ? "Adding…" : "Add") { onAdd(checked) }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(checked.isEmpty || isResolving)
-            }
-            HStack {
-                Picker("", selection: $facet) {
-                    ForEach(pickerFacets, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 270)
+                Spacer(minLength: 12)
                 TextField("Search", text: $search)
                     .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 200)
             }
+            FacetPicker(facet: $facet, facets: pickerFacets)
+                .frame(maxWidth: .infinity)
+        }
+        .padding(12)
+    }
+
+    /// Cancel then default action, bottom-trailing: the macOS sheet
+    /// convention, and what this app's other sheet
+    /// (`ReplaceLibraryConfirmationSheet`) already does. These buttons used
+    /// to sit in the top-right corner, which is the iOS/toolbar idiom, not
+    /// this platform's.
+    private var footer: some View {
+        HStack(spacing: 10) {
+            if isResolving {
+                ProgressView().controlSize(.small)
+                Text("Resolving tracks…").foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            // Cancel must NEVER be disabled: with it gated on
+            // `isResolving`, a lost `resolve_tracks` reply (daemon
+            // restart, dropped send) left BOTH buttons dead and the
+            // user sealed in the sheet until app quit (sweep finding
+            // #4). Escape is always available; the caller resets its
+            // in-flight flag.
+            Button("Cancel", action: onCancel)
+                .keyboardShortcut(.cancelAction)
+            Button(isResolving ? "Adding…" : "Add") { onAdd(checked) }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(checked.isEmpty || isResolving)
         }
         .padding(12)
     }
@@ -69,7 +86,7 @@ struct AddSongsPicker: View {
     /// `.playlists` isn't a library facet at all (it's the device Music
     /// page's subscriptions checklist) — never offered here, same as
     /// `LibraryView.browsableFacets`.
-    private var pickerFacets: [LibraryBrowser.Facet] { [.artists, .albums, .genres] }
+    private var pickerFacets: [LibraryBrowser.Facet] { LibraryBrowser.Facet.browsable }
 
     @ViewBuilder
     private var content: some View {

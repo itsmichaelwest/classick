@@ -46,7 +46,9 @@ struct SmartRulesEditor: View {
     VStack(spacing: 0) {
       Form {
         Section("Match") {
-          Picker("", selection: Binding(get: { draft.matching }, set: { value in edit { $0.matching = value } })) {
+          // Labelled for VoiceOver, hidden visually — the Section header
+          // ("Match") carries the label on screen.
+          Picker("Match", selection: Binding(get: { draft.matching }, set: { value in edit { $0.matching = value } })) {
             Text("All of the following").tag(SmartMatching.all)
             Text("Any of the following").tag(SmartMatching.any)
           }

@@ -719,6 +719,10 @@ struct ClassickApp: App {
         }
       )
     }
+    // Without this the window opens at `MainWindow`'s 860×560 minimum on
+    // first launch — enough to be legal, not enough to browse a library
+    // beside a sidebar.
+    .defaultSize(width: 1040, height: 680)
     .windowResizability(.contentMinSize)
 
     // `isInserted: false` in previews — the preview host runs this App

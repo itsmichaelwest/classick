@@ -61,14 +61,6 @@ enum DeviceMusicLogic {
         }
     }
 
-    static func isSyncNowDisabled(phase: Phase, isConnected: Bool) -> Bool {
-        guard isConnected else { return true }
-        switch phase {
-        case .syncing, .scanning, .noDevice: return true
-        default: return false
-        }
-    }
-
     /// Preserves remembered per-mode rules and makes a first Entire-to-
     /// Selected transition zero-diff by snapshotting the known albums.
     static func seededSelection(

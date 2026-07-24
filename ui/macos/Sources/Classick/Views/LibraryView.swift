@@ -27,30 +27,37 @@ struct LibraryView: View {
       }
       content
     }
-    // Window still knows its name (app switcher, accessibility) but
-    // the toolbar doesn't render it — the centered facet control IS
-    // this page's chrome. `.principal` is the system's centered
-    // toolbar slot; `.toolbar(removing: .title)` (macOS 14+) is the
-    // supported way to suppress the visible title.
+    // `.principal` is the system's centered toolbar slot and the stock
+    // macOS home for a view switcher (Calendar's D/W/M/Y). The device
+    // Music page puts its own facet picker in the same slot, so the
+    // control doesn't move when you switch pages in the sidebar.
+    //
+    // The title stays visible: `.principal` sits centered while the title
+    // renders leading, so suppressing it (which this page used to do) was
+    // never the price of the centered control — it just made Library the
+    // one detail page that couldn't tell you where you were.
     .navigationTitle("Library")
-    .toolbar(removing: .title)
     .toolbar {
       ToolbarItem(placement: .principal) {
-        Picker("", selection: $facet) {
-          ForEach(browsableFacets, id: \.self) { Text($0.rawValue).tag($0) }
-        }
-        .pickerStyle(.segmented)
+        FacetPicker(facet: $facet, facets: browsableFacets)
       }
     }
+    .hardTopScrollEdge()
   }
 
   private var sourceAttention: some View {
     HStack(spacing: 12) {
-      Label(
-        SourceRecoveryPresentation.attentionTitle,
-        systemImage: "exclamationmark.triangle.fill"
-      )
-      .foregroundStyle(.secondary)
+      // The whole Label used to be `.secondary`, which drained the one
+      // warning symbol in the window down to the same gray as ordinary
+      // metadata. Tint the symbol, keep the text at full contrast: this
+      // strip is the only thing telling the user their music folder is
+      // gone.
+      Label {
+        Text(SourceRecoveryPresentation.attentionTitle)
+      } icon: {
+        Image(systemName: "exclamationmark.triangle.fill")
+          .foregroundStyle(.orange)
+      }
       Spacer()
       Button("Connect", action: onConnectSource)
         .disabled(model.sourceRetryPending)
@@ -65,7 +72,7 @@ struct LibraryView: View {
   /// offered here, which is what keeps `.playlists` structurally
   /// unreachable from this browse-only page.
   private var browsableFacets: [LibraryBrowser.Facet] {
-    [.artists, .albums, .genres]
+    LibraryBrowser.Facet.browsable
   }
 
   @ViewBuilder
@@ -74,11 +81,11 @@ struct LibraryView: View {
       library: model.library, phase: model.phase, configuredSource: model.config?.source)
     {
     case .needsScan:
-      needsScanState
+      LibraryStateView.needsScan(onScan: onScan)
     case .scanning(let current, let total):
-      scanningState(current: current, total: total)
+      LibraryStateView.scanning(current: current, total: total)
     case .libraryEmpty(let path):
-      libraryEmptyState(path: path)
+      LibraryStateView.libraryEmpty(path: path, onScan: onScan)
     case .browse:
       if let library = model.library {
         LibraryBrowser(
@@ -89,46 +96,6 @@ struct LibraryView: View {
     }
   }
 
-  private var needsScanState: some View {
-    VStack(spacing: 12) {
-      Spacer()
-      Text("Classick needs to read your library's tags once")
-        .font(.headline)
-      Button("Scan Library", action: onScan)
-        .keyboardShortcut(.defaultAction)
-      Spacer()
-    }
-    .frame(maxWidth: .infinity)
-  }
-
-  private func scanningState(current: Int, total: Int) -> some View {
-    VStack(spacing: 12) {
-      Spacer()
-      ProgressView(value: total > 0 ? Double(current) / Double(total) : 0)
-        .frame(maxWidth: 260)
-      Text("Scanning… \(current) of \(total)")
-        .font(.caption).foregroundStyle(.secondary)
-      Spacer()
-    }
-    .frame(maxWidth: .infinity)
-  }
-
-  /// Global Constraints' "library empty" state, verbatim copy: "No audio
-  /// files found in <path>". Paired with a Rescan action so a user who
-  /// just dropped files into the folder can recover without leaving the
-  /// page (mirrors `needsScanState`'s "Scan Library" action).
-  private func libraryEmptyState(path: String) -> some View {
-    VStack(spacing: 12) {
-      Spacer()
-      Text("No audio files found in \(path)")
-        .font(.headline)
-        .multilineTextAlignment(.center)
-        .padding(.horizontal, 24)
-      Button("Rescan Library", action: onScan)
-      Spacer()
-    }
-    .frame(maxWidth: .infinity)
-  }
 }
 
 /// Shared pure logic for deciding which content state a library-backed

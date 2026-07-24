@@ -33,14 +33,14 @@ struct DeviceRow: View {
       header
       if presentation.showsMeter {
         meter
+          .transition(.opacity)
       }
     }
+    .motion(Motion.chrome, value: presentation.showsMeter)
     .padding(.horizontal, DeviceRowLayout.horizontalPadding)
     .padding(.vertical, DeviceRowLayout.verticalPadding)
     .frame(maxWidth: .infinity)
-    .floatingBarBackground()
-    .padding(.horizontal, DeviceRowLayout.outerInset)
-    .padding(.bottom, DeviceRowLayout.outerInset)
+    .deviceBarChrome()
     .libraryDropDestination(
       target: libraryDropTarget,
       launchNonce: model.libraryDragLaunchNonce,
@@ -80,6 +80,10 @@ struct DeviceRow: View {
             .foregroundStyle(subtitleStyle)
             .lineLimit(DeviceRowLayout.subtitleLineLimit)
             .truncationMode(.tail)
+            // Phase changes ("Syncing…" → "Up to date") cross-fade rather
+            // than hard-cutting; this line is the row's status voice.
+            .contentTransition(.opacity)
+            .motion(Motion.chrome, value: presentation.subtitle)
         }
         .layoutPriority(1)
       }
@@ -100,12 +104,18 @@ struct DeviceRow: View {
     HStack(spacing: 8) {
       if let action = presentation.secondaryAction {
         actionButton(action, prominent: false)
+          .transition(.opacity)
       }
       if let action = presentation.primaryAction {
         actionButton(action, prominent: true)
+          .transition(.opacity)
       }
     }
     .fixedSize()
+    // Sync Now → Pause + Cancel and back is the row's most visible
+    // structural change; without this the buttons pop in and the header
+    // relayouts in one frame.
+    .motion(Motion.chrome, value: [presentation.secondaryAction, presentation.primaryAction])
   }
 
   @ViewBuilder
@@ -151,17 +161,23 @@ struct DeviceRow: View {
             Capsule()
               .fill(.orange.opacity(0.55))
               .frame(width: proxy.size.width * projectedFraction)
+              .transition(.opacity)
           }
           Capsule()
             .fill(Color.accentColor)
             .frame(width: proxy.size.width * usedFraction)
         }
+        // Keyed on the fractions, not the frame: a live window resize
+        // must still track the pointer 1:1, only value changes spring.
+        .motion(Motion.meter, value: [usedFraction, projectedFraction ?? -1])
       }
 
     case .progress(let current, let total, _, _):
-      ProgressView(value: progressValue(current: current, total: total))
+      let value = progressValue(current: current, total: total)
+      ProgressView(value: value)
         .progressViewStyle(.linear)
         .tint(.accentColor)
+        .motion(Motion.meter, value: value)
 
     case .indeterminate:
       ProgressView()
@@ -180,6 +196,8 @@ struct DeviceRow: View {
         Text(capacityCaption(used: used))
           .lineLimit(DeviceRowLayout.captionLineLimit)
           .truncationMode(.middle)
+          .contentTransition(.numericText())
+          .motion(Motion.meter, value: used)
         Spacer(minLength: 8)
         Text("\(formatBytes(total)) total")
           .fixedSize()
@@ -189,13 +207,19 @@ struct DeviceRow: View {
 
     case .progress(let current, let total, let label, let etaSeconds):
       HStack(spacing: 8) {
+        // Both counters roll their digits instead of hard-swapping —
+        // these tick once per track for the length of a whole sync.
         Text(progressCaption(current: current, total: total, label: label))
           .lineLimit(DeviceRowLayout.captionLineLimit)
           .truncationMode(.middle)
+          .contentTransition(.numericText())
+          .motion(Motion.meter, value: current)
         Spacer(minLength: 8)
         if let etaSeconds {
           Text("~\(formatEta(etaSeconds)) left")
             .fixedSize()
+            .contentTransition(.numericText(countsDown: true))
+            .motion(Motion.meter, value: etaSeconds)
         }
       }
       .font(.callout)
@@ -297,29 +321,29 @@ struct DeviceRow: View {
 }
 
 extension View {
+  /// macOS 26 floats the row as an inset glass capsule. Earlier releases
+  /// have no Liquid Glass, where the same inset card reads as a stray
+  /// floating panel over the detail pane — there the row is a flush,
+  /// edge-to-edge bar with a hairline top separator (the pre-26 system
+  /// bottom-bar idiom).
   @ViewBuilder
-  fileprivate func floatingBarBackground() -> some View {
+  fileprivate func deviceBarChrome() -> some View {
     if #available(macOS 26.0, *) {
       glassEffect(
         .regular,
         in: RoundedRectangle(
           cornerRadius: DeviceRowLayout.cornerRadius,
-          style: .continuous))
-    } else {
-      background(
-        .regularMaterial,
-        in: RoundedRectangle(
-          cornerRadius: DeviceRowLayout.cornerRadius,
           style: .continuous)
       )
-      .overlay(
-        RoundedRectangle(
-          cornerRadius: DeviceRowLayout.cornerRadius,
-          style: .continuous
-        )
-        .strokeBorder(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1)
-      )
-      .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
+      .padding(.horizontal, DeviceRowLayout.outerInset)
+      .padding(.bottom, DeviceRowLayout.outerInset)
+    } else {
+      background(.regularMaterial)
+        .overlay(alignment: .top) {
+          Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(height: 1)
+        }
     }
   }
 }

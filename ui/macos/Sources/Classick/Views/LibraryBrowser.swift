@@ -139,7 +139,7 @@ struct LibraryBrowser: View {
         // its scroll-edge background and rows bled through the chrome above
         // the pinned headers. Declaring the edge effect explicitly engages
         // it — the hard style, per the design's own annotation.
-        .modifier(HardTopScrollEdgeIfAvailable())
+        .hardTopScrollEdge()
     }
 
     private var albumsTableContent: some View {
@@ -454,15 +454,3 @@ private struct LibraryBrowserSelectPreviewHost: View {
         .frame(width: 420, height: 500)
 }
 #endif
-
-/// Explicitly declares the hard top scroll-edge effect (macOS 26+). No-op on
-/// macOS 15, where the toolbar manages its own on-scroll background.
-private struct HardTopScrollEdgeIfAvailable: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.scrollEdgeEffectStyle(.hard, for: .top)
-        } else {
-            content
-        }
-    }
-}

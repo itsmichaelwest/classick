@@ -8,8 +8,8 @@ import Foundation
 /// in right now, keyed by nothing — with a DIFFERENT iPod connected than the
 /// device page being viewed, showing them unconditionally puts one device's
 /// name/capacity/synced-count/last-synced on another device's page, and
-/// (per `DeviceMusicLogic.isSyncNowDisabled`/`DeviceSettingsLogic.isReplaceLibraryDisabled`)
-/// can let a destructive action target the wrong iPod entirely.
+/// (per `DeviceSettingsLogic.isReplaceLibraryDisabled`) can let a destructive
+/// action target the wrong iPod entirely.
 enum DeviceIdentityLogic {
     /// Shown in place of a singleton field's real value when the page's
     /// device isn't the connected one — there's no live reading for a
