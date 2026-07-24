@@ -1268,18 +1268,12 @@ fn prepare_retained_artwork(
     ffmpeg: &Path,
     decision_rx: &Receiver<Decision>,
 ) -> Result<Option<crate::progress::StopReason>> {
-    let obsolete = actions
-        .iter()
-        .filter_map(|action| match action {
-            Action::Remove(entry) | Action::Modify(_, entry) => Some(entry.ipod_dbid),
-            _ => None,
-        })
-        .collect::<std::collections::HashSet<_>>();
+    let removed = removed_track_ids(actions);
     for entry in manifest.tracks.iter().filter(|entry| entry.source_known) {
         if let Some(reason) = poll_stop(decision_rx) {
             return Ok(Some(reason));
         }
-        if obsolete.contains(&entry.ipod_dbid) {
+        if removed.contains(&entry.ipod_dbid) {
             continue;
         }
         let (_, art) = source_tags_and_art(&entry.source_path, ffmpeg)
@@ -1292,6 +1286,16 @@ fn prepare_retained_artwork(
         }
     }
     Ok(None)
+}
+
+fn removed_track_ids(actions: &[Action]) -> std::collections::HashSet<u64> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Remove(entry) => Some(entry.ipod_dbid),
+            _ => None,
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3131,6 +3135,36 @@ mod tests {
 
         assert!(matches!(result, Ok(None)));
         std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn retained_artwork_preparation_keeps_entries_pending_replacement() {
+        let source_path = PathBuf::from("replacement.flac");
+        let entry = ManifestEntry {
+            source_path: source_path.clone(),
+            source_mtime: 1,
+            source_size: 9,
+            source_fingerprint: "old".into(),
+            ipod_dbid: 42,
+            ipod_relpath: "iPod_Control/Music/F00/track.m4a".into(),
+            source_known: true,
+            audio_fingerprint: "audio".into(),
+            encoder: "afconvert".into(),
+            encoder_version: "system".into(),
+            source_format: "flac".into(),
+            transcode_profile: Some(TranscodeProfile::Alac),
+        };
+
+        let removed = removed_track_ids(&[Action::Modify(
+            SourceEntry {
+                path: source_path,
+                mtime: 2,
+                size: 9,
+            },
+            entry,
+        )]);
+
+        assert!(!removed.contains(&42));
     }
 
     #[test]
