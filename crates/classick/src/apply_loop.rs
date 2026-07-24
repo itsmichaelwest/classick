@@ -1012,6 +1012,13 @@ fn run_staged_sync(
         );
 
         for (index, action) in batch.actions.into_iter().enumerate() {
+            // Per-track, not just per-album: albums run to 20+ tracks and a
+            // single staged copy can take 20s+, so an album-boundary-only check
+            // left a cancel unanswered for minutes.
+            if let Some(reason) = poll_stop(decision_rx) {
+                stop_reason = Some(reason);
+                break;
+            }
             match action {
                 Action::Unchanged(_) => {}
                 Action::Remove(_) if no_delete => {}
@@ -1039,7 +1046,7 @@ fn run_staged_sync(
                         total_planned,
                         format!("ADD {}", display_path(&source.path)),
                     );
-                    let applied = stage_transcoded_result(
+                    let outcome = stage_transcoded_result(
                         &transcoder,
                         index,
                         source,
@@ -1051,9 +1058,15 @@ fn run_staged_sync(
                         &mut bytes_written,
                         &mut artwork_counts,
                         progress,
+                        decision_rx,
                     )?;
+                    if let StageOutcome::Stopped(reason) = outcome {
+                        progress.track_skipped();
+                        stop_reason = Some(reason);
+                        break;
+                    }
                     checkpoint.record_track();
-                    if applied {
+                    if matches!(outcome, StageOutcome::Applied) {
                         progress.track_done();
                     } else {
                         progress.track_skipped();
@@ -1066,7 +1079,7 @@ fn run_staged_sync(
                         total_planned,
                         format!("REPLACE {}", display_path(&source.path)),
                     );
-                    let applied = stage_transcoded_result(
+                    let outcome = stage_transcoded_result(
                         &transcoder,
                         index,
                         source,
@@ -1078,9 +1091,15 @@ fn run_staged_sync(
                         &mut bytes_written,
                         &mut artwork_counts,
                         progress,
+                        decision_rx,
                     )?;
+                    if let StageOutcome::Stopped(reason) = outcome {
+                        progress.track_skipped();
+                        stop_reason = Some(reason);
+                        break;
+                    }
                     checkpoint.record_track();
-                    if applied {
+                    if matches!(outcome, StageOutcome::Applied) {
                         progress.track_done();
                     } else {
                         progress.track_skipped();
@@ -1114,6 +1133,13 @@ fn run_staged_sync(
         }
         transcoder.finish()?;
         crate::pending_session::PendingSessionStore::new(mount).save(&journal)?;
+
+        // `poll_stop` consumed the decision, so the album-boundary check below
+        // would not see it — without this the run would continue into the next
+        // album after an in-album cancel. Finalization publishes what staged.
+        if stop_reason.is_some() {
+            break;
+        }
 
         if checkpoint.album_boundary(Instant::now()) {
             publish_journal(
@@ -1295,6 +1321,73 @@ fn prepare_retained_artwork(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Bytes staged to the device between stop checks. A whole-file `fs::copy` is
+/// uninterruptible, and this path sustains only ~200 KB/s on the iPod's FSKit
+/// FAT volume, so a single track copy can block for 20s+ — long enough that a
+/// cancel appears to do nothing. Chunking bounds cancel latency to roughly a
+/// second there without writes small enough to cost throughput.
+const STAGE_COPY_CHUNK: usize = 256 * 1024;
+
+pub(crate) enum CopyOutcome {
+    Completed,
+    Stopped(crate::progress::StopReason),
+}
+
+/// Copy `src` → `dst`, polling `poll` between chunks. On stop the partial
+/// target is removed, so an interrupted copy never leaves an orphan behind for
+/// recovery to trip over.
+fn copy_with_stop_checks(
+    src: &Path,
+    dst: &Path,
+    mut poll: impl FnMut() -> Option<crate::progress::StopReason>,
+) -> Result<CopyOutcome> {
+    use std::io::{Read, Write};
+
+    let mut reader = std::fs::File::open(src)
+        .with_context(|| format!("open staged source {}", src.display()))?;
+    let mut writer = std::fs::File::create(dst)
+        .with_context(|| format!("create staged target {}", dst.display()))?;
+    let mut buf = vec![0u8; STAGE_COPY_CHUNK];
+
+    let outcome = loop {
+        if let Some(reason) = poll() {
+            break CopyOutcome::Stopped(reason);
+        }
+        let read = match reader.read(&mut buf) {
+            Ok(0) => break CopyOutcome::Completed,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("read staged source {}", src.display()));
+            }
+        };
+        if let Err(error) = writer.write_all(&buf[..read]) {
+            return Err(error).with_context(|| format!("write staged target {}", dst.display()));
+        }
+    };
+
+    match outcome {
+        CopyOutcome::Completed => {
+            writer
+                .flush()
+                .with_context(|| format!("flush staged target {}", dst.display()))?;
+            Ok(CopyOutcome::Completed)
+        }
+        CopyOutcome::Stopped(reason) => {
+            drop(writer);
+            let _ = std::fs::remove_file(dst);
+            Ok(CopyOutcome::Stopped(reason))
+        }
+    }
+}
+
+pub(crate) enum StageOutcome {
+    Applied,
+    Skipped,
+    Stopped(crate::progress::StopReason),
+}
+
+#[allow(clippy::too_many_arguments)]
 fn stage_transcoded_result(
     transcoder: &OrderedTranscoder<Transcoded>,
     index: usize,
@@ -1307,7 +1400,8 @@ fn stage_transcoded_result(
     bytes_written: &mut u64,
     artwork_counts: &mut ArtworkCounts,
     progress: &Progress,
-) -> Result<bool> {
+    decision_rx: &Receiver<Decision>,
+) -> Result<StageOutcome> {
     let transcoded = match transcoder.take(index) {
         Ok(transcoded) => transcoded,
         Err(error) => {
@@ -1315,7 +1409,7 @@ fn stage_transcoded_result(
                 "Transcode failed for {}: {error:#}",
                 source.path.display()
             ));
-            return Ok(false);
+            return Ok(StageOutcome::Skipped);
         }
     };
     let pending_dir = crate::device_state::pending_sessions_dir(mount)
@@ -1350,6 +1444,7 @@ fn stage_transcoded_result(
         source_format: transcoded.source_format,
         transcode_profile: transcoded.transcode_profile,
     };
+    let staged_obsolete = old.is_some();
     if let Some(old) = old {
         journal
             .obsolete_files
@@ -1375,13 +1470,31 @@ fn stage_transcoded_result(
         .push(staged_index);
     crate::pending_session::PendingSessionStore::new(mount).save(journal)?;
 
-    let copy_result = std::fs::copy(&transcoded.temp, &partial)
-        .with_context(|| format!("stage {}", source.path.display()))
-        .and_then(|_| {
-            std::fs::rename(&partial, &pending_path)
-                .with_context(|| format!("publish staged file {}", pending_path.display()))
-        });
-    if let Err(error) = copy_result {
+    let copy_result = copy_with_stop_checks(&transcoded.temp, &partial, || poll_stop(decision_rx))
+        .with_context(|| format!("stage {}", source.path.display()));
+    let outcome = match copy_result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = std::fs::remove_file(&partial);
+            return Err(error);
+        }
+    };
+    // A cancel mid-copy must leave the journal exactly as it was: this track
+    // never landed, so its staged/obsolete records would otherwise describe a
+    // file the device does not have.
+    if let CopyOutcome::Stopped(reason) = outcome {
+        journal.albums[album_index].staged_file_indices.pop();
+        journal.staged_files.pop();
+        if staged_obsolete {
+            journal.obsolete_files.pop();
+        }
+        crate::pending_session::PendingSessionStore::new(mount).save(journal)?;
+        let _ = std::fs::remove_file(&transcoded.temp);
+        return Ok(StageOutcome::Stopped(reason));
+    }
+    if let Err(error) = std::fs::rename(&partial, &pending_path)
+        .with_context(|| format!("publish staged file {}", pending_path.display()))
+    {
         let _ = std::fs::remove_file(&partial);
         return Err(error);
     }
@@ -1391,7 +1504,7 @@ fn stage_transcoded_result(
     let _ = std::fs::remove_file(&transcoded.temp);
     *bytes_written += size;
     artwork_counts.record(transcoded.art_outcome);
-    Ok(true)
+    Ok(StageOutcome::Applied)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1917,6 +2030,11 @@ pub fn retry_deferred(
 
     for (idx, action) in retry_outcome.kept.into_iter().enumerate() {
         let Action::Add(src) = action else { continue };
+        // Same gap as the main apply loop: without this the deferred-album
+        // retry ignores a cancel until every kept album has been committed.
+        if poll_stop(decision_rx).is_some() {
+            break;
+        }
         progress.track_start(
             idx + 1,
             total,
@@ -2779,6 +2897,163 @@ impl ArtworkCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn copy_test_dir(name: &str) -> std::path::PathBuf {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-tmp")
+            .join(format!("stage-copy-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn staged_copy_completes_when_no_stop_is_requested() {
+        let dir = copy_test_dir("complete");
+        let src = dir.join("src.m4a");
+        let dst = dir.join("dst.m4a.partial");
+        let payload = vec![7u8; STAGE_COPY_CHUNK * 2 + 11];
+        std::fs::write(&src, &payload).unwrap();
+
+        let outcome = copy_with_stop_checks(&src, &dst, || None).unwrap();
+
+        assert!(matches!(outcome, CopyOutcome::Completed));
+        assert_eq!(std::fs::read(&dst).unwrap(), payload);
+    }
+
+    #[test]
+    fn staged_copy_stops_mid_file_without_leaving_a_partial() {
+        let dir = copy_test_dir("stopped");
+        let src = dir.join("src.m4a");
+        let dst = dir.join("dst.m4a.partial");
+        // Big enough that a stop on the second chunk lands mid-file.
+        std::fs::write(&src, vec![7u8; STAGE_COPY_CHUNK * 8]).unwrap();
+
+        let mut chunks = 0;
+        let outcome = copy_with_stop_checks(&src, &dst, || {
+            chunks += 1;
+            (chunks > 2).then_some(crate::progress::StopReason::Cancelled)
+        })
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            CopyOutcome::Stopped(crate::progress::StopReason::Cancelled)
+        ));
+        assert!(
+            !dst.exists(),
+            "an interrupted staged copy must not leave a .partial behind"
+        );
+    }
+
+    #[test]
+    fn staged_copy_honours_a_stop_requested_before_the_first_chunk() {
+        let dir = copy_test_dir("immediate");
+        let src = dir.join("src.m4a");
+        let dst = dir.join("dst.m4a.partial");
+        std::fs::write(&src, vec![7u8; STAGE_COPY_CHUNK]).unwrap();
+
+        let outcome =
+            copy_with_stop_checks(&src, &dst, || Some(crate::progress::StopReason::Paused))
+                .unwrap();
+
+        assert!(matches!(
+            outcome,
+            CopyOutcome::Stopped(crate::progress::StopReason::Paused)
+        ));
+        assert!(!dst.exists());
+    }
+
+    #[test]
+    fn cancel_mid_stage_rolls_the_journal_back_to_a_valid_state() {
+        let root = copy_test_dir("rollback");
+        let mount = root.join("mount");
+        let temp = root.join("track.m4a");
+        std::fs::create_dir_all(&mount).unwrap();
+        std::fs::write(&temp, vec![3u8; STAGE_COPY_CHUNK * 4]).unwrap();
+
+        let session_id = 4242;
+        let mut journal = crate::pending_session::PendingSession::new(session_id, "SERIAL", vec![]);
+        journal
+            .albums
+            .push(crate::pending_session::PendingAlbum::new("album", 0));
+
+        let source = SourceEntry {
+            path: root.join("track.flac"),
+            mtime: 0,
+            size: 1,
+        };
+        let transcoded_temp = temp.clone();
+        let transcoder = OrderedTranscoder::start(
+            vec![(0usize, source.clone())],
+            1,
+            1,
+            move |_: &SourceEntry| {
+                Ok(Transcoded {
+                    temp: transcoded_temp.clone(),
+                    tags: Default::default(),
+                    art: None,
+                    encoder: "afconvert".into(),
+                    encoder_version: String::new(),
+                    source_format: "flac".into(),
+                    transcode_profile: None,
+                    fingerprint: "blake3:f".into(),
+                    audio_fingerprint: "blake3:a".into(),
+                    art_outcome: ArtOutcome::NoArt,
+                })
+            },
+        );
+
+        // A cancel already queued before the copy starts.
+        let (tx, decision_rx) = std::sync::mpsc::channel::<Decision>();
+        tx.send(Decision::Review(ReviewDecision::Quit)).unwrap();
+        let (progress, _decisions) = Progress::start(false, false).unwrap();
+        let artwork_cache = crate::artwork_cache::ArtworkCache::new(root.join("art"));
+        let mut bytes_written = 0u64;
+        let mut artwork_counts = ArtworkCounts::default();
+
+        let outcome = stage_transcoded_result(
+            &transcoder,
+            0,
+            source,
+            None,
+            &mount,
+            &mut journal,
+            0,
+            &artwork_cache,
+            &mut bytes_written,
+            &mut artwork_counts,
+            &progress,
+            &decision_rx,
+        )
+        .expect("a cancelled stage is not an error");
+
+        assert!(matches!(
+            outcome,
+            StageOutcome::Stopped(crate::progress::StopReason::Cancelled)
+        ));
+        assert!(
+            journal.staged_files.is_empty(),
+            "the un-copied track must not stay in the journal"
+        );
+        assert!(journal.albums[0].staged_file_indices.is_empty());
+        assert_eq!(bytes_written, 0);
+        journal
+            .validate()
+            .expect("rolled-back journal must still validate");
+        // Recovery reads the persisted journal, not this in-memory copy.
+        let persisted = crate::pending_session::PendingSessionStore::new(&mount)
+            .load(session_id)
+            .expect("rolled-back journal must be persisted and loadable");
+        assert!(persisted.staged_files.is_empty());
+
+        let staged_dir =
+            crate::device_state::pending_sessions_dir(&mount).join(format!("{session_id}.staged"));
+        let leftovers = std::fs::read_dir(&staged_dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0, "no .partial may survive a cancelled stage");
+    }
 
     #[test]
     fn live_manifest_presence_requires_matching_database_record_and_regular_media() {
