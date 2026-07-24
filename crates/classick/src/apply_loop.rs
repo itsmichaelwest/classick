@@ -1347,6 +1347,17 @@ fn copy_with_stop_checks(
         .with_context(|| format!("open staged source {}", src.display()))?;
     let mut writer = std::fs::File::create(dst)
         .with_context(|| format!("create staged target {}", dst.display()))?;
+
+    // Preallocate the whole file: growing it write-by-write extends the FAT
+    // chain a cluster at a time, which on the iPod's FSKit volume measured 1.48x
+    // slower than one up-front allocation (6080ms vs 4110ms for a 4MB track).
+    // Best-effort — a filesystem that refuses this just copies as before.
+    let expected = reader.metadata().map(|metadata| metadata.len()).ok();
+    if let Some(len) = expected {
+        let _ = writer.set_len(len);
+    }
+
+    let mut written = 0u64;
     let mut buf = vec![0u8; STAGE_COPY_CHUNK];
 
     let outcome = loop {
@@ -1364,10 +1375,18 @@ fn copy_with_stop_checks(
         if let Err(error) = writer.write_all(&buf[..read]) {
             return Err(error).with_context(|| format!("write staged target {}", dst.display()));
         }
+        written += read as u64;
     };
 
     match outcome {
         CopyOutcome::Completed => {
+            // Preallocation zero-fills; if the source read short, that padding
+            // would otherwise be left on the end of a "complete" track.
+            if expected != Some(written) {
+                writer.set_len(written).with_context(|| {
+                    format!("truncate staged target {} to copied length", dst.display())
+                })?;
+            }
             writer
                 .flush()
                 .with_context(|| format!("flush staged target {}", dst.display()))?;
