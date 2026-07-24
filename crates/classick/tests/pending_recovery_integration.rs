@@ -179,6 +179,7 @@ fn restart_abandons_staging_but_preserves_a_live_db_reference() {
         Some(published.clone()),
         handle.dbid,
     ));
+    journal.generation_before = Some(fixture.mutation_session.current_generation().unwrap());
     let journal_store = PendingSessionStore::new(&fixture.mount);
     journal_store.save(&journal).unwrap();
     let (progress, _decisions) = Progress::start(false, false).unwrap();

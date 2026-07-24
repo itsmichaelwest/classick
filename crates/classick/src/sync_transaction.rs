@@ -553,8 +553,6 @@ impl CheckpointCoordinator<'_> {
             .into_iter()
             .collect::<crate::pending_session::ReferencedPaths>();
         crate::pending_session::cleanup_unreferenced_staged_files(journal, &referenced)?;
-        journal.phase = crate::pending_session::PendingPhase::CleanupComplete;
-        store.save(journal)?;
         let result = self.result(journal, None);
         remove_empty_dir_if_present(&store.staged_dir(journal.session_id))?;
         remove_validated_snapshot_if_present(&store.snapshot_dir(journal.session_id))?;
