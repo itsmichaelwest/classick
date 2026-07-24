@@ -56,6 +56,52 @@ fn appledouble_sidecars_are_not_sync_transaction_material() {
     assert!(has_sync_transaction_material(&mount).unwrap());
 }
 
+/// The gate that decides "is there pending work?" and the discovery that acts
+/// on it must agree about what counts. Anything the gate counts but discovery
+/// cannot load wedges every future sync on "pending sync transaction material
+/// could not be recovered".
+#[test]
+fn only_loadable_journals_count_as_sync_transaction_material() {
+    let mount = tempdir("gate");
+    let pending = crate::device_state::pending_sessions_dir(&mount);
+    std::fs::create_dir_all(&pending).unwrap();
+
+    // Debris discovery skips: an AtomicFileWriter temp orphaned by a hard kill,
+    // an AppleDouble sidecar, and a leftover staged directory.
+    std::fs::write(pending.join("41.json.tmp-23375-278"), b"interrupted").unwrap();
+    std::fs::write(pending.join("._41.json"), b"AppleDouble metadata").unwrap();
+    std::fs::create_dir_all(pending.join("41.staged")).unwrap();
+    std::fs::create_dir_all(pending.join("portable-config")).unwrap();
+
+    assert!(!has_sync_transaction_material(&mount).unwrap());
+
+    PendingSessionStore::new(&mount)
+        .save(&PendingSession::new(41, "SERIAL", Vec::new()))
+        .unwrap();
+
+    assert!(has_sync_transaction_material(&mount).unwrap());
+}
+
+#[test]
+fn removing_a_journal_clears_its_interrupted_write_temporaries() {
+    let mount = tempdir("remove-temps");
+    let store = PendingSessionStore::new(&mount);
+    store
+        .save(&PendingSession::new(41, "SERIAL", Vec::new()))
+        .unwrap();
+    let pending = crate::device_state::pending_sessions_dir(&mount);
+    let stale = pending.join("41.json.tmp-23375-278");
+    let other = pending.join("42.json.tmp-1-0");
+    std::fs::write(&stale, b"interrupted").unwrap();
+    std::fs::write(&other, b"another session's").unwrap();
+
+    store.remove(41).unwrap();
+
+    assert!(!store.path(41).exists());
+    assert!(!stale.exists(), "this session's write temp must be cleared");
+    assert!(other.exists(), "another session's files must be left alone");
+}
+
 #[test]
 fn recovery_deletes_only_unreferenced_journal_files() {
     let mount = tempdir("foreign");

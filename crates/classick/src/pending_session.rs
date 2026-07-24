@@ -310,6 +310,16 @@ pub struct RejectedPendingSession {
     pub reason: String,
 }
 
+/// Whether recovery has anything to act on.
+///
+/// This MUST stay in agreement with [`PendingSessionStore::discover`], which is
+/// why both sides ask [`is_session_journal`]. Recovery can only ever act on a
+/// journal, so anything else in the directory — an AppleDouble sidecar, an
+/// `AtomicFileWriter` temp orphaned by a hard kill, a staged directory whose
+/// journal is already gone, `portable-config` — is debris. Counting debris here
+/// wedges *every* future sync on "pending sync transaction material could not
+/// be recovered", because the caller demands that recovery resolve material
+/// discovery cannot even see.
 pub fn has_sync_transaction_material(mount: &Path) -> Result<bool> {
     let root = crate::device_state::pending_sessions_dir(mount);
     let entries = match std::fs::read_dir(&root) {
@@ -322,19 +332,23 @@ pub fn has_sync_transaction_material(mount: &Path) -> Result<bool> {
     };
     for entry in entries {
         let entry = entry.with_context(|| format!("read entry in {}", root.display()))?;
-        let name = entry.file_name();
-        if name == "portable-config" || is_appledouble_sidecar(Path::new(&name)) {
-            continue;
+        if is_session_journal(&entry.path()) {
+            return Ok(true);
         }
-        return Ok(true);
     }
     Ok(false)
 }
 
+/// The single definition of "a pending-session journal recovery can load".
+fn is_session_journal(path: &Path) -> bool {
+    !is_appledouble_sidecar(path)
+        && path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+}
+
 /// macOS writes AppleDouble sidecars beside anything it touches on the iPod's
-/// FAT volume, including directories Classick never rewrites. They are never
-/// transaction material, so every pending-material check must skip them or a
-/// sync wedges on journal-less material that recovery cannot resolve.
+/// FAT volume, including directories Classick never rewrites.
 fn is_appledouble_sidecar(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -400,13 +414,7 @@ impl PendingSessionStore {
             let path = entry
                 .with_context(|| format!("read entry in {}", self.root.display()))?
                 .path();
-            if is_appledouble_sidecar(&path) {
-                continue;
-            }
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "json")
-            {
+            if is_session_journal(&path) {
                 journal_paths.push(path);
             }
         }
@@ -501,7 +509,34 @@ impl PendingSessionStore {
         remove_file_if_present(&path)
             .with_context(|| format!("remove journal {}", path.display()))?;
         remove_file_if_present(&appledouble_sibling(&path))
-            .with_context(|| format!("remove journal metadata {}", path.display()))
+            .with_context(|| format!("remove journal metadata {}", path.display()))?;
+        self.remove_write_temporaries(session_id)
+    }
+
+    /// `AtomicFileWriter` cleans up its own temp on failure, but a hard kill
+    /// between write and rename strands one. Clear this session's on the way
+    /// out so the pending directory does not accumulate debris.
+    fn remove_write_temporaries(&self, session_id: SessionId) -> Result<()> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read pending-session dir {}", self.root.display()));
+            }
+        };
+        let prefix = format!("{session_id}.json.tmp-");
+        for entry in entries {
+            let entry = entry.with_context(|| format!("read entry in {}", self.root.display()))?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with(&prefix) || name.starts_with(&format!("._{prefix}")) {
+                let path = entry.path();
+                remove_file_if_present(&path)
+                    .with_context(|| format!("remove stale write temp {}", path.display()))?;
+            }
+        }
+        Ok(())
     }
 }
 
