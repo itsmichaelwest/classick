@@ -322,11 +322,23 @@ pub fn has_sync_transaction_material(mount: &Path) -> Result<bool> {
     };
     for entry in entries {
         let entry = entry.with_context(|| format!("read entry in {}", root.display()))?;
-        if entry.file_name() != "portable-config" {
-            return Ok(true);
+        let name = entry.file_name();
+        if name == "portable-config" || is_appledouble_sidecar(Path::new(&name)) {
+            continue;
         }
+        return Ok(true);
     }
     Ok(false)
+}
+
+/// macOS writes AppleDouble sidecars beside anything it touches on the iPod's
+/// FAT volume, including directories Classick never rewrites. They are never
+/// transaction material, so every pending-material check must skip them or a
+/// sync wedges on journal-less material that recovery cannot resolve.
+fn is_appledouble_sidecar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("._"))
 }
 
 impl PendingSessionStore {
@@ -388,11 +400,7 @@ impl PendingSessionStore {
             let path = entry
                 .with_context(|| format!("read entry in {}", self.root.display()))?
                 .path();
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("._"))
-            {
+            if is_appledouble_sidecar(&path) {
                 continue;
             }
             if path

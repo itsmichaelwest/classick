@@ -41,6 +41,22 @@ fn discovery_ignores_macos_appledouble_sidecars() {
 }
 
 #[test]
+fn appledouble_sidecars_are_not_sync_transaction_material() {
+    let mount = tempdir("material");
+    let pending = crate::device_state::pending_sessions_dir(&mount);
+    std::fs::create_dir_all(pending.join("portable-config")).unwrap();
+    std::fs::write(pending.join("._portable-config"), b"AppleDouble metadata").unwrap();
+
+    assert!(!has_sync_transaction_material(&mount).unwrap());
+
+    PendingSessionStore::new(&mount)
+        .save(&PendingSession::new(41, "SERIAL", Vec::new()))
+        .unwrap();
+
+    assert!(has_sync_transaction_material(&mount).unwrap());
+}
+
+#[test]
 fn recovery_deletes_only_unreferenced_journal_files() {
     let mount = tempdir("foreign");
     let pending = mount.join("pending.m4a");
