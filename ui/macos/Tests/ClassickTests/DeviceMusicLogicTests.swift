@@ -11,6 +11,21 @@ import XCTest
 /// picker). Every cell of the 3x3 `SelectionMode` transition truth table is
 /// covered explicitly below, per the plan's mandate.
 final class DeviceMusicLogicTests: XCTestCase {
+  func testProjectedAACBytesUseDurationAndContainerAllowance() {
+    XCTAssertEqual(
+      DeviceMusicLogic.projectedBytes(
+        sourceBytes: 20_000_000, durationMS: 240_000, profile: .aac128),
+      3_916_800)
+    XCTAssertEqual(
+      DeviceMusicLogic.projectedBytes(
+        sourceBytes: 20_000_000, durationMS: 0, profile: .aac128),
+      20_000_000)
+    XCTAssertEqual(
+      DeviceMusicLogic.projectedBytes(
+        sourceBytes: 20_000_000, durationMS: 240_000, profile: .alac),
+      20_000_000)
+  }
+
   func testMusicStatusShowsPendingDeliveryAcrossEitherComponent() {
     XCTAssertEqual(
       DeviceConfigStatusLogic.mostImportant([.saved, .waitingForDevice]), .waitingForDevice)

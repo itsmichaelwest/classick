@@ -73,8 +73,13 @@ impl CheckpointCoordinator<'_> {
                 "Recovering interrupted sync session {} from {:?}",
                 journal.session_id, journal.phase
             ));
+            self.resume_interrupted_verified_rollback(&mut journal, &store)?;
             let result = if journal.phase == crate::pending_session::PendingPhase::Staging {
                 self.abandon_interrupted_staging(&mut journal, &store)?
+            } else if let Some(result) =
+                self.abandon_firmware_normalized_artwork(&mut journal, &store, progress)?
+            {
+                result
             } else if let Some(result) =
                 self.abandon_lost_prepublication_inputs(&journal, &store)?
             {
@@ -85,6 +90,102 @@ impl CheckpointCoordinator<'_> {
             recovered.push(result);
         }
         Ok(recovered)
+    }
+
+    fn resume_interrupted_verified_rollback(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+    ) -> Result<bool> {
+        use crate::pending_session::PendingPhase;
+
+        if journal.phase != PendingPhase::DatabaseVerified {
+            return Ok(false);
+        }
+        self.validate_journal(journal)?;
+        let has_recoverable_media = !journal.staged_files.is_empty()
+            && journal.staged_files.iter().all(|staged| {
+                is_regular_file(&staged.pending_path)
+                    || staged
+                        .final_ipod_path
+                        .as_deref()
+                        .is_some_and(is_regular_file)
+            });
+        if !has_recoverable_media {
+            return Ok(false);
+        }
+        let predecessor = journal
+            .generation_before
+            .as_ref()
+            .context("database-verified recovery has no predecessor generation")?;
+        let live = self.mutation_session.capture_current_generation()?;
+        if !generation_matches_baseline_plus_runtime(predecessor, &live, &live) {
+            return Ok(false);
+        }
+
+        self.cleanup_after_rollback(journal, RollbackCleanup::PreservePending)?;
+        reset_staged_publication(journal);
+        journal.phase = PendingPhase::ReadyToPublish;
+        journal.published_generation = None;
+        journal.verified_generation = None;
+        store.save(journal)?;
+        self.mutation_session.adopt_verified_generation(live)?;
+        Ok(true)
+    }
+
+    fn abandon_firmware_normalized_artwork(
+        &self,
+        journal: &mut crate::pending_session::PendingSession,
+        store: &crate::pending_session::PendingSessionStore,
+        progress: &crate::progress::Progress,
+    ) -> Result<Option<CheckpointResult>> {
+        use crate::pending_session::PendingPhase;
+
+        if journal.phase != PendingPhase::DatabaseVerified {
+            return Ok(None);
+        }
+        self.validate_journal(journal)?;
+        let expected = journal
+            .verified_generation
+            .as_ref()
+            .context("database-verified recovery has no verified generation")?;
+        let live = self.mutation_session.capture_current_generation()?;
+        if !firmware_removed_only_ithmb_outputs(expected, &live) {
+            return Ok(None);
+        }
+
+        progress.log(format!(
+            "Abandoning interrupted sync {} after the iPod firmware removed generated artwork",
+            journal.session_id
+        ));
+        let snapshot = RollbackSnapshot::open(&store.snapshot_dir(journal.session_id))
+            .context("validate rollback snapshot after firmware artwork normalization")?;
+        snapshot
+            .restore(self.mount)
+            .context("restore pre-sync database after firmware artwork normalization")?;
+        self.cleanup_after_rollback(journal, RollbackCleanup::RemovePending)?;
+        self.restore_device_manifest_preimage(journal)?;
+
+        let restored = self.mutation_session.capture_current_generation()?;
+        let generation_before = journal
+            .generation_before
+            .as_ref()
+            .context("firmware-normalized recovery has no predecessor generation")?;
+        if !generation_matches_baseline_plus_runtime(generation_before, &restored, &live) {
+            bail!(
+                "external_generation_changed: firmware-normalized rollback did not restore its recorded predecessor"
+            );
+        }
+        journal.phase = PendingPhase::RollbackComplete;
+        journal.published_generation = None;
+        journal.verified_generation = Some(restored.clone());
+        store.save(journal)?;
+        self.mutation_session.adopt_verified_generation(restored)?;
+
+        remove_empty_dir_if_present(&store.staged_dir(journal.session_id))?;
+        remove_validated_snapshot_if_present(&store.snapshot_dir(journal.session_id))?;
+        store.remove(journal.session_id)?;
+        Ok(Some(CheckpointResult::default()))
     }
 
     pub fn publish_with_options(
@@ -201,8 +302,11 @@ impl CheckpointCoordinator<'_> {
             let outcome = match self.manifest_store.publish_runtime(&candidate) {
                 Ok(outcome) => outcome,
                 Err(error) => {
+                    let message = format!("{error:#}");
                     self.rollback_to_ready(journal, &store, &snapshot, error)?;
-                    bail!("device manifest publication failed; database and artwork restored");
+                    bail!(
+                        "device manifest publication failed; database and artwork restored: {message}"
+                    );
                 }
             };
             *manifest = candidate.clone();
@@ -348,7 +452,9 @@ impl CheckpointCoordinator<'_> {
             (Some(before), None, None)
                 if journal.phase <= crate::pending_session::PendingPhase::ReadyToPublish =>
             {
-                if &live != before {
+                if &live != before
+                    && !generation_matches_baseline_plus_runtime(before, &live, &live)
+                {
                     bail!(
                         "external_generation_changed: pending publication predecessor is no longer live"
                     );
@@ -695,13 +801,25 @@ impl CheckpointCoordinator<'_> {
         }
 
         for index in journal.publication_indices()? {
-            let staged = &journal.staged_files[index];
-            let art = match staged.artwork_hash.as_deref() {
+            let pending_path = journal.staged_files[index].pending_path.clone();
+            let tags = journal.staged_files[index].tags.clone();
+            let artwork_hash = journal.staged_files[index].artwork_hash.clone();
+            let source = journal.staged_files[index].source.clone();
+            let art = match artwork_hash.as_deref() {
                 Some(hash) => Some(self.artwork_cache.load_hash(hash)?),
-                None => self.artwork_cache.load_for_source(&staged.source)?,
+                None => self.artwork_cache.load_for_source(&source)?,
             };
-            let handle =
-                db.add_track_with_file_strict(&staged.pending_path, &staged.tags, art.as_deref())?;
+            let handle = db.add_track_with_staged_file_strict(
+                &pending_path,
+                &tags,
+                art.as_deref(),
+                |final_path| {
+                    journal.staged_files[index].final_ipod_path = Some(final_path.to_path_buf());
+                    store
+                        .save(journal)
+                        .context("journal reserved iPod path before moving staged media")
+                },
+            )?;
             let final_path = self.mount.join(
                 handle
                     .ipod_relpath
@@ -940,7 +1058,7 @@ impl CheckpointCoordinator<'_> {
             .or(journal.published_generation.as_ref())
             .or(journal.generation_before.as_ref())
             .context("recovery_required: pending rollback has no recorded generation")?;
-        if &live != known {
+        if &live != known && !generation_matches_baseline_plus_runtime(known, &live, &live) {
             bail!(
                 "external_generation_changed: refusing to roll back over an unknown device generation"
             );
@@ -958,7 +1076,9 @@ impl CheckpointCoordinator<'_> {
             .generation_before
             .as_ref()
             .context("verified rollback has no predecessor generation")?;
-        if &restored != expected {
+        if &restored != expected
+            && !generation_matches_baseline_plus_runtime(expected, &restored, &restored)
+        {
             bail!("rollback did not restore the recorded predecessor generation");
         }
         journal.published_generation = None;
@@ -1007,7 +1127,17 @@ impl CheckpointCoordinator<'_> {
                 for staged in &journal.staged_files {
                     if let Some(path) = &staged.final_ipod_path {
                         if !referenced.contains(path) {
-                            remove_file_if_present(path)?;
+                            if staged.pending_path.exists() {
+                                remove_file_if_present(path)?;
+                            } else if path.exists() {
+                                std::fs::rename(path, &staged.pending_path).with_context(|| {
+                                    format!(
+                                        "restore moved staged media {} to {}",
+                                        path.display(),
+                                        staged.pending_path.display()
+                                    )
+                                })?;
+                            }
                         }
                     }
                 }
@@ -1106,6 +1236,100 @@ fn remove_stale_artwork_outputs(mount: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn firmware_removed_only_ithmb_outputs(
+    expected: &crate::device_coordination::DeviceGeneration,
+    live: &crate::device_coordination::DeviceGeneration,
+) -> bool {
+    let expected = expected
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let live = live
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    if live.iter().any(|(path, entry)| {
+        !is_firmware_runtime_generation_path(path)
+            && expected
+                .get(path)
+                .is_none_or(|expected| *expected != *entry)
+    }) {
+        return false;
+    }
+
+    let missing = expected
+        .keys()
+        .filter(|path| !is_firmware_runtime_generation_path(path) && !live.contains_key(*path))
+        .copied()
+        .collect::<Vec<_>>();
+    !missing.is_empty() && missing.into_iter().all(is_ithmb_generation_path)
+}
+
+fn generation_matches_baseline_plus_runtime(
+    baseline: &crate::device_coordination::DeviceGeneration,
+    restored: &crate::device_coordination::DeviceGeneration,
+    runtime_source: &crate::device_coordination::DeviceGeneration,
+) -> bool {
+    let without_runtime = |generation: &crate::device_coordination::DeviceGeneration| {
+        generation
+            .entries
+            .iter()
+            .filter(|entry| !is_firmware_runtime_generation_path(&entry.path))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let runtime = |generation: &crate::device_coordination::DeviceGeneration| {
+        generation
+            .entries
+            .iter()
+            .filter(|entry| is_firmware_runtime_generation_path(&entry.path))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    without_runtime(baseline) == without_runtime(restored)
+        && runtime(restored) == runtime(runtime_source)
+}
+
+fn is_firmware_runtime_generation_path(path: &str) -> bool {
+    matches!(
+        path,
+        "iPod_Control/iTunes/Play Counts" | "iPod_Control/iTunes/Play Counts.bak"
+    )
+}
+
+fn is_ithmb_generation_path(path: &str) -> bool {
+    let path = Path::new(path);
+    if path.parent() != Some(Path::new("iPod_Control/Artwork")) {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(stem) = name
+        .strip_prefix('F')
+        .and_then(|name| name.strip_suffix(".ithmb"))
+    else {
+        return false;
+    };
+    let mut parts = stem.split('_');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(format), Some(index), None)
+            if !format.is_empty()
+                && !index.is_empty()
+                && format.bytes().all(|byte| byte.is_ascii_digit())
+                && index.bytes().all(|byte| byte.is_ascii_digit())
+    )
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
 fn remove_file_if_present(path: &Path) -> Result<()> {
@@ -1261,6 +1485,50 @@ mod tests {
         );
         assert!(PendingPhase::RockboxProjectionsPublished < PendingPhase::CleanupComplete);
         assert!(PendingPhase::DeviceManifestPublished < PendingPhase::CleanupComplete);
+    }
+
+    #[test]
+    fn detects_only_firmware_removed_ithmb_outputs() {
+        use crate::device_coordination::{DeviceGeneration, GenerationEntry};
+
+        let entry = |path: &str, length: u64, hash: &str| GenerationEntry {
+            path: path.to_owned(),
+            length,
+            blake3: hash.to_owned(),
+        };
+        let expected = DeviceGeneration {
+            entries: vec![
+                entry("iPod_Control/Artwork/ArtworkDB", 3000, "artwork-db"),
+                entry("iPod_Control/Artwork/F1027_1.ithmb", 100_000, "full"),
+                entry("iPod_Control/Artwork/F1031_1.ithmb", 17_640, "thumb"),
+                entry("iPod_Control/iTunes/iTunesDB", 14_406, "itunes-db"),
+            ],
+        };
+        let live = DeviceGeneration {
+            entries: vec![
+                entry("iPod_Control/Artwork/ArtworkDB", 3000, "artwork-db"),
+                entry("iPod_Control/Artwork/F1031_1.ithmb", 17_640, "thumb"),
+                entry("iPod_Control/iTunes/Play Counts", 156, "play-counts"),
+                entry(
+                    "iPod_Control/iTunes/Play Counts.bak",
+                    156,
+                    "play-counts-backup",
+                ),
+                entry("iPod_Control/iTunes/iTunesDB", 14_406, "itunes-db"),
+            ],
+        };
+
+        assert!(firmware_removed_only_ithmb_outputs(&expected, &live));
+
+        let changed_db = DeviceGeneration {
+            entries: vec![
+                entry("iPod_Control/Artwork/ArtworkDB", 3000, "artwork-db"),
+                entry("iPod_Control/Artwork/F1031_1.ithmb", 17_640, "thumb"),
+                entry("iPod_Control/iTunes/iTunesDB", 14_407, "changed"),
+            ],
+        };
+        assert!(!firmware_removed_only_ithmb_outputs(&expected, &changed_db));
+        assert!(!firmware_removed_only_ithmb_outputs(&expected, &expected));
     }
 
     #[test]
@@ -1592,6 +1860,62 @@ mod tests {
     }
 
     #[test]
+    fn database_verified_journal_at_predecessor_resumes_ready_to_publish() {
+        let (mount, _host, manifest_store, cache, _manifest) =
+            coordinator_fixture("resume-interrupted-rollback");
+        let journal_store = PendingSessionStore::new(&mount);
+        let pending = journal_store
+            .path(33)
+            .with_file_name("33.staged")
+            .join("track.m4a");
+        std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+        std::fs::write(&pending, b"pending transcode").unwrap();
+        let play_counts = mount.join("iPod_Control/iTunes/Play Counts");
+        let play_counts_backup = mount.join("iPod_Control/iTunes/Play Counts.bak");
+        std::fs::write(&play_counts, b"firmware runtime").unwrap();
+
+        let mutation_session = mutation_session(&mount);
+        let generation = mutation_session.current_generation().unwrap();
+        let mut album = PendingAlbum::new("album", 0);
+        album.staged_file_indices.push(0);
+        let mut journal = PendingSession::new(33, TEST_DEVICE_ID, vec![album]);
+        journal.phase = PendingPhase::DatabaseVerified;
+        journal.generation_before = Some(generation.clone());
+        journal.published_generation = Some(generation.clone());
+        journal.verified_generation = Some(generation);
+        journal.staged_files.push(StagedFile::minimal(
+            PathBuf::from("source.flac"),
+            pending,
+            Some(mount.join("iPod_Control/Music/F00/candidate.m4a")),
+            41,
+        ));
+        journal.candidate_manifest = Some(Manifest::empty());
+        journal_store.save(&journal).unwrap();
+        std::fs::rename(&play_counts, &play_counts_backup).unwrap();
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
+            manifest_store: &manifest_store,
+            artwork_cache: cache,
+        };
+
+        assert!(coordinator
+            .resume_interrupted_verified_rollback(&mut journal, &journal_store)
+            .unwrap());
+        assert_eq!(journal.phase, PendingPhase::ReadyToPublish);
+        assert!(journal.published_generation.is_none());
+        assert!(journal.verified_generation.is_none());
+        assert!(journal.candidate_manifest.is_none());
+        assert_eq!(journal.staged_files[0].dbid, 0);
+        assert!(journal.staged_files[0].final_ipod_path.is_none());
+        assert_eq!(journal_store.load(33).unwrap(), journal);
+        coordinator
+            .prepare_generation_journal(&mut journal)
+            .unwrap();
+    }
+
+    #[test]
     fn device_manifest_failure_restores_snapshot_and_keeps_ready_journal() {
         let (mount, host, _store, cache, mut manifest) = coordinator_fixture("rollback");
         let journal_store = PendingSessionStore::new(&mount);
@@ -1623,11 +1947,15 @@ mod tests {
             artwork_cache: cache,
         };
 
-        assert!(coordinator
+        let error = coordinator
             .publish(&mut journal, &mut manifest, &progress)
-            .is_err());
+            .unwrap_err();
         progress.finish(false).unwrap();
 
+        assert!(
+            format!("{error:#}").contains("injected failure before atomic replace"),
+            "{error:#}"
+        );
         assert_eq!(journal.phase, PendingPhase::ReadyToPublish);
         assert!(journal_store.path(12).exists());
         assert_eq!(
@@ -1730,6 +2058,76 @@ mod tests {
         assert!(journal.pending_rockbox_ops.is_empty());
         assert!(journal.rockbox_projection_plan_version.is_none());
         assert_eq!(journal_store.load(18).unwrap(), journal);
+    }
+
+    #[test]
+    fn verified_rollback_moves_published_media_back_to_staging() {
+        let (mount, _host, manifest_store, cache, _manifest) =
+            coordinator_fixture("rollback-restores-moved-staging");
+        let journal_store = PendingSessionStore::new(&mount);
+        let snapshot = RollbackSnapshot::create(&mount, &journal_store.snapshot_dir(19)).unwrap();
+        let pending = journal_store
+            .path(19)
+            .with_file_name("19.staged")
+            .join("track.m4a");
+        let published = mount.join("iPod_Control/Music/F00/published.m4a");
+        let play_counts = mount.join("iPod_Control/iTunes/Play Counts");
+        let play_counts_backup = mount.join("iPod_Control/iTunes/Play Counts.bak");
+        std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+        std::fs::write(&published, b"moved transcode").unwrap();
+        let play_counts_bytes = b"firmware runtime";
+        std::fs::write(&play_counts, play_counts_bytes).unwrap();
+
+        let mutation_session = mutation_session(&mount);
+        let mut legacy_generation = mutation_session.current_generation().unwrap();
+        legacy_generation
+            .entries
+            .push(crate::device_coordination::GenerationEntry {
+                path: "iPod_Control/iTunes/Play Counts".to_owned(),
+                length: play_counts_bytes.len() as u64,
+                blake3: blake3::hash(play_counts_bytes).to_hex().to_string(),
+            });
+        legacy_generation
+            .entries
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        let mut album = PendingAlbum::new("album", 0);
+        album.staged_file_indices.push(0);
+        let mut journal = PendingSession::new(19, TEST_DEVICE_ID, vec![album]);
+        journal.phase = PendingPhase::DatabaseVerified;
+        journal.generation_before = Some(legacy_generation.clone());
+        journal.verified_generation = Some(legacy_generation);
+        journal.staged_files.push(StagedFile::minimal(
+            PathBuf::from("source.flac"),
+            pending.clone(),
+            Some(published.clone()),
+            41,
+        ));
+        journal.candidate_manifest = Some(Manifest::empty());
+        journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
+            manifest_store: &manifest_store,
+            artwork_cache: cache,
+        };
+        std::fs::rename(&play_counts, &play_counts_backup).unwrap();
+
+        coordinator
+            .rollback_to_ready(
+                &mut journal,
+                &journal_store,
+                &snapshot,
+                anyhow::anyhow!("injected verification failure"),
+            )
+            .unwrap();
+
+        assert_eq!(std::fs::read(&pending).unwrap(), b"moved transcode");
+        assert!(!published.exists());
+        assert_eq!(journal.phase, PendingPhase::ReadyToPublish);
+        assert_eq!(journal.staged_files[0].dbid, 0);
+        assert!(journal.staged_files[0].final_ipod_path.is_none());
+        assert_eq!(journal_store.load(19).unwrap(), journal);
     }
 
     #[test]
@@ -1851,6 +2249,71 @@ mod tests {
         assert!(!published.exists());
         assert_eq!(journal.phase, PendingPhase::RollbackComplete);
         assert_eq!(journal_store.load(19).unwrap(), journal);
+    }
+
+    #[test]
+    fn recovery_abandons_candidate_when_firmware_removed_only_an_ithmb_output() {
+        let (mount, _host, manifest_store, cache, mut manifest) =
+            coordinator_fixture("firmware-artwork-normalization");
+        let journal_store = PendingSessionStore::new(&mount);
+        let baseline_session = mutation_session(&mount);
+        let generation_before = baseline_session.current_generation().unwrap();
+        drop(baseline_session);
+        RollbackSnapshot::create(&mount, &journal_store.snapshot_dir(33)).unwrap();
+
+        let artwork = mount.join("iPod_Control/Artwork");
+        std::fs::create_dir_all(&artwork).unwrap();
+        std::fs::write(artwork.join("ArtworkDB"), b"candidate artwork database").unwrap();
+        std::fs::write(artwork.join("F1027_1.ithmb"), b"full artwork").unwrap();
+        std::fs::write(artwork.join("F1031_1.ithmb"), b"thumbnail artwork").unwrap();
+        let staged_dir = journal_store.staged_dir(33);
+        std::fs::create_dir_all(&staged_dir).unwrap();
+
+        let published_session = mutation_session(&mount);
+        let verified_generation = published_session.current_generation().unwrap();
+        drop(published_session);
+        let mut journal = PendingSession::new(33, TEST_DEVICE_ID, Vec::new());
+        journal.phase = PendingPhase::DatabaseVerified;
+        journal.generation_before = Some(generation_before.clone());
+        journal.verified_generation = Some(verified_generation);
+        journal.candidate_manifest = Some(manifest.clone());
+        journal.device_manifest_preimage = Some(DeviceManifestPreimage { contents: None });
+        journal_store.save(&journal).unwrap();
+
+        std::fs::remove_file(artwork.join("F1027_1.ithmb")).unwrap();
+        let play_counts = mount.join("iPod_Control/iTunes/Play Counts");
+        std::fs::write(&play_counts, b"firmware playback state").unwrap();
+        let mutation_session = mutation_session(&mount);
+        let coordinator = CheckpointCoordinator {
+            mount: &mount,
+            serial: TEST_DEVICE_ID,
+            mutation_session: &mutation_session,
+            manifest_store: &manifest_store,
+            artwork_cache: cache,
+        };
+        let (progress, _decisions) = crate::progress::Progress::start(false, false).unwrap();
+
+        let recovered = coordinator
+            .recover_pending_with_options(&mut manifest, &progress, PublishOptions::default())
+            .unwrap();
+        progress.finish(true).unwrap();
+
+        assert_eq!(recovered.len(), 1);
+        assert!(!journal_store.path(33).exists());
+        assert!(!journal_store.snapshot_dir(33).exists());
+        assert!(!staged_dir.exists());
+        assert!(!artwork.join("ArtworkDB").exists());
+        assert!(!artwork.join("F1031_1.ithmb").exists());
+        assert_eq!(
+            std::fs::read(&play_counts).unwrap(),
+            b"firmware playback state"
+        );
+        let restored = mutation_session.current_generation().unwrap();
+        assert!(generation_matches_baseline_plus_runtime(
+            &generation_before,
+            &restored,
+            &restored,
+        ));
     }
 
     #[test]

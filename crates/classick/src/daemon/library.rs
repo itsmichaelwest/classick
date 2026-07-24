@@ -12,6 +12,7 @@ use crate::ipc_daemon::{
 use crate::library_index::{self, LibraryIndex};
 use crate::manifest::Manifest;
 use crate::playlist::{Playlist, PlaylistStore};
+use crate::portable::profile::TranscodeProfile;
 use crate::selection::{self, Selection, SelectionMode, SelectionRule};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -27,9 +28,10 @@ pub fn aggregate(index: &LibraryIndex) -> (Vec<LibraryArtist>, Vec<LibraryGenre>
         genre_counts: BTreeMap<String, usize>,
         tracks: usize,
         bytes: u64,
+        duration_ms: u64,
     }
     let mut albums: BTreeMap<(String, String), AlbumAgg> = BTreeMap::new();
-    let mut genres: BTreeMap<String, (String, usize, u64)> = BTreeMap::new();
+    let mut genres: BTreeMap<String, (String, usize, u64, u64)> = BTreeMap::new();
     let mut total_tracks = 0usize;
     let mut total_bytes = 0u64;
 
@@ -46,16 +48,19 @@ pub fn aggregate(index: &LibraryIndex) -> (Vec<LibraryArtist>, Vec<LibraryGenre>
             genre_counts: BTreeMap::new(),
             tracks: 0,
             bytes: 0,
+            duration_ms: 0,
         });
         agg.tracks += 1;
         agg.bytes += rec.size;
+        agg.duration_ms += rec.duration_ms;
         *agg.genre_counts.entry(rec.genre.clone()).or_insert(0) += 1;
 
         let g = genres
             .entry(rec.genre.to_lowercase())
-            .or_insert_with(|| (rec.genre.clone(), 0, 0));
+            .or_insert_with(|| (rec.genre.clone(), 0, 0, 0));
         g.1 += 1;
         g.2 += rec.size;
+        g.3 += rec.duration_ms;
     }
 
     let mut by_artist: BTreeMap<String, LibraryArtist> = BTreeMap::new();
@@ -72,15 +77,17 @@ pub fn aggregate(index: &LibraryIndex) -> (Vec<LibraryArtist>, Vec<LibraryGenre>
             genre: display_genre,
             tracks: agg.tracks,
             bytes: agg.bytes,
+            duration_ms: agg.duration_ms,
         });
     }
     let artists: Vec<LibraryArtist> = by_artist.into_values().collect();
     let genres: Vec<LibraryGenre> = genres
         .into_values()
-        .map(|(name, tracks, bytes)| LibraryGenre {
+        .map(|(name, tracks, bytes, duration_ms)| LibraryGenre {
             name,
             tracks,
             bytes,
+            duration_ms,
         })
         .collect();
     (artists, genres, total_tracks, total_bytes)
@@ -243,20 +250,24 @@ pub(crate) fn resolve_playlist_against_index(
     }
 }
 
-/// Track count + summed byte size of a playlist's resolved members, per
-/// `resolve_playlist_against_index`.
-pub(crate) fn playlist_tracks_and_bytes(playlist: &Playlist, index: &LibraryIndex) -> (usize, u64) {
+/// Track count, source bytes, and duration of a playlist's resolved members,
+/// per `resolve_playlist_against_index`.
+pub(crate) fn playlist_tracks_bytes_duration(
+    playlist: &Playlist,
+    index: &LibraryIndex,
+) -> (usize, u64, u64) {
     let paths = resolve_playlist_against_index(playlist, index);
-    let bytes = paths
+    let (bytes, duration_ms) = paths
         .iter()
         .filter_map(|p| index.files.get(p))
-        .map(|t| t.size)
-        .sum();
-    (paths.len(), bytes)
+        .fold((0u64, 0u64), |(bytes, duration), track| {
+            (bytes + track.size, duration + track.duration_ms)
+        });
+    (paths.len(), bytes, duration_ms)
 }
 
 fn summarize_playlist(playlist: &Playlist, index: &LibraryIndex) -> PlaylistSummary {
-    let (tracks, bytes) = playlist_tracks_and_bytes(playlist, index);
+    let (tracks, bytes, duration_ms) = playlist_tracks_bytes_duration(playlist, index);
     let kind = match playlist {
         Playlist::Manual(_) => PlaylistKind::Manual,
         Playlist::Smart(_) => PlaylistKind::Smart,
@@ -267,6 +278,7 @@ fn summarize_playlist(playlist: &Playlist, index: &LibraryIndex) -> PlaylistSumm
         kind,
         tracks,
         bytes,
+        duration_ms,
         error: None,
     }
 }
@@ -313,6 +325,7 @@ pub(crate) fn build_playlist_summaries(
                 kind,
                 tracks: 0,
                 bytes: 0,
+                duration_ms: 0,
                 error: Some(message),
             });
         }
@@ -325,7 +338,8 @@ pub(crate) fn build_playlist_summaries(
 /// filesystem walk, only the cached library index plus this device's
 /// selection/subscriptions/playlist-store state.
 ///
-/// `selected_*` mirrors `preview()`'s selection-scope math above.
+/// `selected_*` mirrors `preview()`'s selection-scope math above, with bytes
+/// projected for the selected transcode profile.
 /// `playlist_extra_*` is subscribed-playlist members NOT already in that
 /// scope — the same union-delta idea as `sync_set::compute`, sized from the
 /// index rather than a live walk; an unresolvable subscription (unknown
@@ -340,12 +354,14 @@ pub(crate) fn build_playlist_summaries(
 /// `Option` so a playlist-store-open failure degrades to "no playlist
 /// extras" rather than failing the whole preview. `projected_free_bytes`
 /// subtracts a "net-new" estimate from `current_free_bytes`: the source
-/// bytes of selected + playlist-extra tracks NOT already on the device per
+/// estimated on-device bytes of selected + playlist-extra tracks NOT already
+/// on the device per
 /// `already_synced` (the device manifest's source paths). A fully-synced
 /// selection therefore projects no change — without this, the capacity bar
 /// showed a phantom "pending" band for bytes that were already on disk.
-/// Still an estimate (source FLAC size stands in for on-device ALAC size,
-/// and removes aren't credited back); `None` in, `None` out.
+/// AAC estimates use indexed duration and target bitrate plus a small
+/// container/tag allowance. ALAC and missing-duration records retain the
+/// source-size estimate. Removes aren't credited back; `None` in, `None` out.
 pub(crate) fn compute_device_preview(
     index: &LibraryIndex,
     selection: &Selection,
@@ -353,6 +369,7 @@ pub(crate) fn compute_device_preview(
     store: Option<&PlaylistStore>,
     current_free_bytes: Option<u64>,
     already_synced: &HashSet<PathBuf>,
+    transcode_profile: TranscodeProfile,
     serial: &str,
     acknowledged_request_id: String,
 ) -> DaemonEvent {
@@ -362,7 +379,8 @@ pub(crate) fn compute_device_preview(
     for (path, rec) in &index.files {
         if selection.wants(&rec.facts()) {
             selected_tracks += 1;
-            selected_bytes += rec.size;
+            selected_bytes +=
+                estimated_on_device_bytes(rec.size, rec.duration_ms, transcode_profile);
             selected_paths.insert(path.as_path());
         }
     }
@@ -393,7 +411,7 @@ pub(crate) fn compute_device_preview(
     let playlist_extra_bytes: u64 = extra_paths
         .iter()
         .filter_map(|p| index.files.get(p))
-        .map(|t| t.size)
+        .map(|t| estimated_on_device_bytes(t.size, t.duration_ms, transcode_profile))
         .sum();
 
     let net_new: u64 = selected_paths
@@ -401,13 +419,13 @@ pub(crate) fn compute_device_preview(
         .copied()
         .filter(|p| !already_synced.contains(*p))
         .filter_map(|p| index.files.get(p))
-        .map(|t| t.size)
+        .map(|t| estimated_on_device_bytes(t.size, t.duration_ms, transcode_profile))
         .chain(
             extra_paths
                 .iter()
                 .filter(|p| !already_synced.contains(p.as_path()))
                 .filter_map(|p| index.files.get(p))
-                .map(|t| t.size),
+                .map(|t| estimated_on_device_bytes(t.size, t.duration_ms, transcode_profile)),
         )
         .sum();
     let projected_free_bytes = current_free_bytes.map(|free| free.saturating_sub(net_new));
@@ -422,6 +440,22 @@ pub(crate) fn compute_device_preview(
         unresolved_subscriptions,
         acknowledged_request_id,
     }
+}
+
+pub(crate) fn estimated_on_device_bytes(
+    source_bytes: u64,
+    duration_ms: u64,
+    transcode_profile: TranscodeProfile,
+) -> u64 {
+    let Some(kbps) = transcode_profile.aac_bitrate_kbps() else {
+        return source_bytes;
+    };
+    if duration_ms == 0 {
+        return source_bytes;
+    }
+    let audio_bytes = u128::from(duration_ms) * u128::from(kbps) / 8;
+    let with_container_allowance = audio_bytes.saturating_mul(102).div_ceil(100);
+    u64::try_from(with_container_allowance).unwrap_or(source_bytes)
 }
 
 /// Expand `rules` into concrete source-relative track paths against the
@@ -754,6 +788,7 @@ mod tests {
             Some(&store),
             Some(10_000),
             &HashSet::new(),
+            TranscodeProfile::Alac,
             "serial-a",
             "request-a".into(),
         );
@@ -784,6 +819,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn aac_size_estimate_uses_duration_and_keeps_a_small_container_allowance() {
+        use crate::portable::profile::TranscodeProfile;
+
+        assert_eq!(
+            estimated_on_device_bytes(20_000_000, 240_000, TranscodeProfile::Aac128),
+            3_916_800
+        );
+        assert_eq!(
+            estimated_on_device_bytes(20_000_000, 240_000, TranscodeProfile::Aac256),
+            7_833_600
+        );
+        assert_eq!(
+            estimated_on_device_bytes(20_000_000, 240_000, TranscodeProfile::Alac),
+            20_000_000
+        );
+        assert_eq!(
+            estimated_on_device_bytes(20_000_000, 0, TranscodeProfile::Aac128),
+            20_000_000,
+            "a missing duration falls back to the source size"
+        );
+    }
+
+    #[test]
+    fn device_preview_uses_the_selected_transcode_profile() {
+        let mut source = track("X", "", "Album", "G", 20_000_000);
+        source.duration_ms = 240_000;
+        let idx = index_with(vec![("/m/a.flac", source)]);
+
+        match compute_device_preview(
+            &idx,
+            &Selection::all(),
+            &Subscriptions::default(),
+            None,
+            Some(10_000_000),
+            &HashSet::new(),
+            TranscodeProfile::Aac128,
+            "serial-a",
+            "request-a".into(),
+        ) {
+            DaemonEvent::DevicePreview {
+                selected_bytes,
+                projected_free_bytes,
+                ..
+            } => {
+                assert_eq!(selected_bytes, 3_916_800);
+                assert_eq!(projected_free_bytes, Some(6_083_200));
+            }
+            other => panic!("expected DevicePreview, got {other:?}"),
+        }
+    }
+
     /// Regression (2026-07-18): the projection used to assume "syncing from
     /// empty", so a fully-synced selection still showed a phantom pending
     /// band on the capacity bar. Tracks already in the device manifest must
@@ -807,6 +894,7 @@ mod tests {
             None,
             Some(10_000),
             &all_synced,
+            TranscodeProfile::Alac,
             "serial-a",
             "request-a".into(),
         ) {
@@ -836,6 +924,7 @@ mod tests {
             None,
             Some(10_000),
             &partial,
+            TranscodeProfile::Alac,
             "serial-a",
             "request-a".into(),
         ) {
@@ -866,6 +955,7 @@ mod tests {
             None,
             None,
             &HashSet::new(),
+            TranscodeProfile::Alac,
             "serial-a",
             "request-a".into(),
         );
@@ -902,6 +992,7 @@ mod tests {
             Some(&store),
             None,
             &HashSet::new(),
+            TranscodeProfile::Alac,
             "serial-a",
             "request-a".into(),
         );
@@ -952,6 +1043,7 @@ mod tests {
             Some(&store),
             None,
             &HashSet::new(),
+            TranscodeProfile::Alac,
             "serial-a",
             "request-a".into(),
         );
@@ -984,6 +1076,7 @@ mod tests {
             None,
             None,
             &HashSet::new(),
+            TranscodeProfile::Alac,
             "serial-a",
             "request-a".into(),
         );

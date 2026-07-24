@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "fixture": "nano-1g-v1.json",
+  "source": "vendored CC0 first-generation iPod nano SysInfoExtended capture",
+  "source_fixture": "../sysinfo-extended/nano-1g.plist",
+  "retained_keys": [
+    "AlbumArt",
+    "ChapterImageSpecs",
+    "FamilyID",
+    "ImageSpecifications"
+  ],
+  "derived_fields": [
+    {
+      "fixture_field": "db_version",
+      "source_key": "DBVersion",
+      "value": 0,
+      "basis": "absent in the source capture and defaults to zero in the pinned libgpod parser"
+    },
+    {
+      "fixture_field": "supports_sparse_artwork",
+      "source_key": "SupportsSparseArtwork",
+      "value": false,
+      "basis": "absent in the source capture and defaults to false in the pinned libgpod parser"
+    },
+    {
+      "fixture_field": "sqlite_db",
+      "source_key": "SQLiteDB",
+      "value": false,
+      "basis": "absent in the source capture and defaults to false in the pinned libgpod parser"
+    },
+    {
+      "fixture_field": "associated_format",
+      "source_key": "AssociatedFormat",
+      "value": 0,
+      "basis": "absent in each source image format and defaults to zero in the pinned libgpod parser"
+    }
+  ],
+  "validation_authorities": [
+    {
+      "kind": "vendored_cc0_capture",
+      "location": "crates/classick/data/sysinfo-extended/nano-1g.plist"
+    },
+    {
+      "kind": "pinned_libgpod_parser",
+      "revision": "4a8a33ef4bc58eee1baca6793618365f75a5c3fa",
+      "location": "src/itdb_sysinfo_extended_parser.c"
+    },
+    {
+      "kind": "pinned_libgpod_model_table",
+      "revision": "4a8a33ef4bc58eee1baca6793618365f75a5c3fa",
+      "location": "src/itdb_device.c"
+    }
+  ]
+}

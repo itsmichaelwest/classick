@@ -128,6 +128,18 @@ fn plan(
     if outbox.mutations.is_empty() {
         let profile =
             profile.context("portable profile is absent and no host adoption is pending")?;
+        if publication.capability_profile_id.is_some()
+            && (profile.capability_profile_id != publication.capability_profile_id
+                || profile.generated_sysinfo_extended_hash
+                    != publication.generated_sysinfo_extended_hash)
+        {
+            return Ok(PortableReconciliationPlan::PublishPending {
+                publication: PlannedPortablePublication {
+                    candidate_profile: apply_pending(profile, outbox, publication)?,
+                    retained_outbox: outbox.clone(),
+                },
+            });
+        }
         return Ok(PortableReconciliationPlan::ImportDevice {
             cache: HostCache::new(device_id.clone(), Some(profile.clone()))?,
         });
@@ -151,8 +163,11 @@ fn apply_pending(
     publication: &ProfilePublicationContext,
 ) -> Result<PortableProfile> {
     let mut candidate = current.clone();
-    candidate.capability_profile_id = publication.capability_profile_id.clone();
-    candidate.generated_sysinfo_extended_hash = publication.generated_sysinfo_extended_hash.clone();
+    if publication.capability_profile_id.is_some() {
+        candidate.capability_profile_id = publication.capability_profile_id.clone();
+        candidate.generated_sysinfo_extended_hash =
+            publication.generated_sysinfo_extended_hash.clone();
+    }
     let mut subscriptions_changed = false;
     for mutation in &outbox.mutations {
         match mutation {

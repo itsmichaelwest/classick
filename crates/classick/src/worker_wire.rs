@@ -320,13 +320,16 @@ fn device_event(
                 message,
             }
         }
-        ProgressEvent::Error(message) => {
+        ProgressEvent::Error {
+            message,
+            recovery_hints,
+        } => {
             let (device_id, session_id) = route();
             WireEvent::SyncError {
                 device_id,
                 session_id,
                 message,
-                recovery_hints: Vec::new(),
+                recovery_hints,
             }
         }
         ProgressEvent::Finish {
@@ -384,7 +387,7 @@ fn run_scan(rx: Receiver<ProgressEvent>, session_id: SessionId) -> Result<()> {
                     tracks_indexed,
                 })
             }
-            ProgressEvent::Error(message) => {
+            ProgressEvent::Error { message, .. } => {
                 failure = Some(message);
                 None
             }

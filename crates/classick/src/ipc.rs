@@ -286,9 +286,12 @@ impl IpcEvent {
             },
             PE::Cancelled => IpcEvent::Cancelled,
             PE::Log(m) => IpcEvent::Log { message: m.clone() },
-            PE::Error(m) => IpcEvent::Error {
-                message: m.clone(),
-                recovery_hints: Vec::new(),
+            PE::Error {
+                message,
+                recovery_hints,
+            } => IpcEvent::Error {
+                message: message.clone(),
+                recovery_hints: recovery_hints.clone(),
             },
             // ProgressEvent::Finish now carries the orchestrator's outcome
             // (Ok → true, Err → false). main.rs is responsible for passing
@@ -392,6 +395,28 @@ mod tests {
         let wire = IpcEvent::from_progress(&event).unwrap();
         let json = serde_json::to_string(&wire).unwrap();
         assert!(json.contains(r#""metadata_only":7"#), "got: {json}");
+    }
+
+    #[test]
+    fn error_event_carries_recovery_hints_through() {
+        let event = crate::progress::ProgressEvent::Error {
+            message: "Sync failed: device write failed".to_string(),
+            recovery_hints: vec!["Reconnect the iPod and retry.".to_string()],
+        };
+        let wire = IpcEvent::from_progress(&event).unwrap();
+        match wire {
+            IpcEvent::Error {
+                message,
+                recovery_hints,
+            } => {
+                assert_eq!(message, "Sync failed: device write failed");
+                assert_eq!(recovery_hints, ["Reconnect the iPod and retry."]);
+            }
+            other => panic!(
+                "expected error event, got {}",
+                serde_json::to_string(&other).unwrap()
+            ),
+        }
     }
 
     #[test]

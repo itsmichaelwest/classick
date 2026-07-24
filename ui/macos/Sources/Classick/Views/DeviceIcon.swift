@@ -20,14 +20,16 @@ struct DeviceIcon: View {
 
   var body: some View {
     Group {
-      if case .exact(let resourceName) = resolvedArtwork,
-        let icon = NSImage(
-          contentsOfFile: "\(DeviceIconLogic.ampResourcesDir)/\(resourceName).icns")
-      {
+      if let icon = DeviceIconLogic.image(for: resolvedArtwork) {
         Image(nsImage: icon)
           .resizable()
           .interpolation(.high)
           .scaledToFit()
+      } else {
+        Image(systemName: "ipod")
+          .resizable()
+          .scaledToFit()
+          .foregroundStyle(.secondary)
       }
     }
     .frame(width: size, height: size)
@@ -48,7 +50,7 @@ struct DeviceIcon: View {
 }
 
 struct DeviceArtworkCache {
-  private static let storageKey = "deviceArtworkResources.v1"
+  private static let storageKey = "deviceArtworkResources.v2"
   private let defaults: UserDefaults
 
   init(defaults: UserDefaults = .standard) {
@@ -94,17 +96,34 @@ enum GenericDeviceArtwork: Equatable, Sendable {
 }
 
 enum DeviceIconLogic {
+  nonisolated static let ampFrameworkPath =
+    "/System/Library/PrivateFrameworks/AMPDevices.framework"
   nonisolated static let ampResourcesDir =
     "/System/Library/PrivateFrameworks/AMPDevices.framework/Versions/A/Resources"
+
+  nonisolated static func frameworkImage(named resourceName: String) -> NSImage? {
+    Bundle(path: ampFrameworkPath)?.image(forResource: NSImage.Name(resourceName))
+  }
+
+  nonisolated static func image(for artwork: DeviceArtwork) -> NSImage? {
+    let requestedName: String? = switch artwork {
+    case .exact(let resourceName): resourceName
+    case .generic: nil
+    }
+    return requestedName.flatMap(frameworkImage(named:))
+      ?? frameworkImage(named: genericResourceName)
+  }
 
   /// Exact Finder-style artwork is allowed only when the daemon supplied a
   /// certain model code and independently decoded its colour. Swift never
   /// guesses colour from capacity, names, mount paths, or persisted settings.
   nonisolated static func artwork(for hardware: WireV3Hardware) -> DeviceArtwork {
     guard let family = hardware.family,
-      family.value.lowercased() == "classic",
       family.source == "decoded",
       family.confidence == "certain",
+      let generation = hardware.generation,
+      generation.source == "decoded",
+      generation.confidence == "certain",
       let model = hardware.modelCode,
       model.confidence == "certain",
       model.source == "reported" || model.source == "decoded",
@@ -113,17 +132,28 @@ enum DeviceIconLogic {
       colour.source == "decoded"
     else { return .generic(genericArtwork(for: hardware)) }
 
-    let key = "\(model.value.uppercased())|\(colour.value.lowercased())"
-    switch key {
-    case "MB029|silver", "MB145|silver", "MB562|silver", "MC293|silver":
-      return .exact(resourceName: "iPod11-Silver")
-    case "MB147|black", "MB150|black", "MB565|black":
-      return .exact(resourceName: "iPod11-Black")
-    case "MC297|black":
-      return .exact(resourceName: "iPod11B-Black")
-    default:
+    let colourName = frameworkColourName(colour.value)
+    let resourceName: String? = switch (family.value.lowercased(), generation.value) {
+    case ("ipod", "1"), ("ipod", "2"): "iPod1"
+    case ("ipod", "3"): "iPod2"
+    case ("ipod", "4"): colourName.map { "iPod4-\($0)" }
+    case ("photo", _): colourName.map { "iPod5-\($0)" }
+    case ("mini", "1"): colourName.map { "iPod3-\($0)" }
+    case ("mini", "2") where colourName == "Silver": "iPod3-Silver"
+    case ("mini", "2"): colourName.map { "iPod3B-\($0)" }
+    case ("video", "5"), ("video", "5.5"): colourName.map { "iPodM25-\($0)" }
+    case ("nano", "1"): colourName.map { "iPodM26-\($0)" }
+    case ("nano", "2"): colourName.map { "iPod9-\($0)" }
+    case ("nano", "3"): colourName.map { "iPod12-\($0)" }
+    case ("nano", "4"): colourName.map { "iPod15-\($0)" }
+    case ("classic", "1"), ("classic", "2"): colourName.map { "iPodN25-\($0)" }
+    case ("classic", "3"): colourName.map { "iPodN25B-\($0)" }
+    default: nil
+    }
+    guard let resourceName, allExactResourceNames.contains(resourceName) else {
       return .generic(genericArtwork(for: hardware))
     }
+    return .exact(resourceName: resourceName)
   }
 
   nonisolated static func resolvedArtwork(
@@ -171,8 +201,39 @@ enum DeviceIconLogic {
     return value
   }
 
+  private nonisolated static func frameworkColourName(_ value: String) -> String? {
+    switch value.lowercased() {
+    case "silver": "Silver"
+    case "black": "Black"
+    case "black_red": "BlackRed"
+    case "white": "White"
+    case "blue": "Blue"
+    case "green": "Green"
+    case "pink": "Pink"
+    case "red": "Red"
+    case "yellow": "Yellow"
+    case "purple": "Purple"
+    case "orange": "Orange"
+    case "gold": "Gold"
+    default: nil
+    }
+  }
+
   nonisolated static let allExactResourceNames: Set<String> = [
-    "iPod11-Silver", "iPod11-Black", "iPod11B-Black",
+    "iPod1", "iPod2",
+    "iPod3-Silver", "iPod3-Blue", "iPod3-Green", "iPod3-Pink", "iPod3-Gold",
+    "iPod3B-Blue", "iPod3B-Green", "iPod3B-Pink",
+    "iPod4-White", "iPod4-BlackRed",
+    "iPod5-White", "iPod5-BlackRed",
+    "iPodM25-White", "iPodM25-Black", "iPodM25-BlackRed",
+    "iPodM26-White", "iPodM26-Black",
+    "iPod9-Silver", "iPod9-Black", "iPod9-Blue", "iPod9-Green", "iPod9-Pink", "iPod9-Red",
+    "iPod12-Silver", "iPod12-Black", "iPod12-Blue", "iPod12-Green", "iPod12-Pink",
+    "iPod12-Red",
+    "iPod15-Silver", "iPod15-Black", "iPod15-Blue", "iPod15-Green", "iPod15-Pink",
+    "iPod15-Red", "iPod15-Yellow", "iPod15-Purple", "iPod15-Orange",
+    "iPodN25-Silver", "iPodN25-Black",
+    "iPodN25B-Silver", "iPodN25B-Black",
   ]
   nonisolated static let genericResourceName = "iPodGeneric"
 }

@@ -142,6 +142,23 @@ fn exact_reported_model_facts_take_precedence_over_ambiguous_usb_facts() {
 }
 
 #[test]
+fn first_generation_nano_sysinfo_model_drives_exact_hardware_facts() {
+    let mut input = reported("/Volumes/Nano", 1, Some(DEVICE_ID));
+    input.usb_product_id = Some(0x120A);
+    input.reported_model_code = Some("MA005".to_owned());
+    input.capacity_bytes = Some(4_013_481_472);
+
+    let observation = assemble_device_observation(input, |_| Some(DeviceReadiness::Ready)).unwrap();
+    let facts = observation.hardware_facts();
+
+    assert_eq!(facts.family, Some(Fact::decoded(IpodFamily::Nano)));
+    assert_eq!(facts.generation, Some(Fact::decoded("1".to_owned())));
+    assert_eq!(facts.model_code, Some(Fact::reported("MA005".to_owned())));
+    assert_eq!(facts.colour, Some(Fact::decoded(IpodColour::White)));
+    assert_eq!(facts.capacity_bytes, Some(Fact::reported(4_013_481_472)));
+}
+
+#[test]
 fn ambiguous_classic_usb_facts_never_invent_an_exact_model_or_colour() {
     let mut input = reported("/Volumes/iPod", 1, Some(DEVICE_ID));
     input.usb_product_id = Some(0x1261);

@@ -334,6 +334,7 @@ pub struct PlaylistSummary {
     pub kind: PlaylistKind,
     pub tracks: usize,
     pub bytes: u64,
+    pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -410,6 +411,7 @@ pub struct LibraryAlbum {
     pub genre: Option<String>,
     pub tracks: usize,
     pub bytes: u64,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -423,6 +425,7 @@ pub struct LibraryGenre {
     pub name: String,
     pub tracks: usize,
     pub bytes: u64,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -855,12 +858,14 @@ mod tests {
                     genre: Some("IDM".into()),
                     tracks: 30,
                     bytes: 900,
+                    duration_ms: 1_000,
                 }],
             }],
             genres: vec![LibraryGenre {
                 name: "IDM".into(),
                 tracks: 30,
                 bytes: 900,
+                duration_ms: 1_000,
             }],
             total_tracks: 30,
             total_bytes: 900,
@@ -1214,6 +1219,7 @@ mod tests {
                     kind: PlaylistKind::Manual,
                     tracks: 12,
                     bytes: 900,
+                    duration_ms: 1_000,
                     error: None,
                 },
                 PlaylistSummary {
@@ -1222,6 +1228,7 @@ mod tests {
                     kind: PlaylistKind::Smart,
                     tracks: 0,
                     bytes: 0,
+                    duration_ms: 0,
                     error: Some("parse failed".into()),
                 },
             ],
@@ -1231,7 +1238,7 @@ mod tests {
         let json = serde_json::to_string(&evt).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"playlists_update","playlists":[{"slug":"gym","name":"Gym","kind":"manual","tracks":12,"bytes":900},{"slug":"broken","name":"broken","kind":"smart","tracks":0,"bytes":0,"error":"parse failed"}],"playlist_revision":9,"acknowledged_request_id":"request-a"}"#,
+            r#"{"type":"playlists_update","playlists":[{"slug":"gym","name":"Gym","kind":"manual","tracks":12,"bytes":900,"duration_ms":1000},{"slug":"broken","name":"broken","kind":"smart","tracks":0,"bytes":0,"duration_ms":0,"error":"parse failed"}],"playlist_revision":9,"acknowledged_request_id":"request-a"}"#,
             "got: {json}"
         );
     }

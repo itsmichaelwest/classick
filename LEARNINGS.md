@@ -26,6 +26,17 @@ incidents and completed gate reports are archived in
   reported model, or a genuine serial when available. Exact model codes map
   reliably to colour; otherwise use generic client artwork. Do not create an
   appearance setting or surface a default silver SKU as reported hardware.
+- Keep normal-mode USB PIDs separate from DFU/WTF recovery PIDs: first-
+  generation nano is `0x120A`, while `0x1240` is second-generation nano WTF
+  mode. libgpod stores abbreviated model keys (`A005`, `9829`), but an
+  on-device `ModelNumStr` must include the stripped leading letter (`MA005`,
+  `M9829`). Test every fallback against the pinned libgpod table.
+- Finder-style iPod product renders are not consistently represented by the
+  standalone `iPod*.icns` files in AMPDevices; some of those files have a
+  prohibited or sync glyph baked into the screen. Load the framework bundle by
+  resource name so clean `Assets.car` variants such as `iPodM25`, `iPodM26`,
+  `iPodN25`, and `iPodN25B` win where Apple supplies them, and select the name
+  only from exact decoded generation and colour facts.
 - Consecutive live `SysInfoExtended` inquiries changed `RentalClockBias` and
   opaque `rbsync` bytes. Never persist a raw inquiry or a donor plist with only
   its GUID replaced. Generate a typed stable capability projection, and include
@@ -78,6 +89,12 @@ incidents and completed gate reports are archived in
 - libgpod may drop loaded artwork thumbnails when rewriting a parsed DB. A
   writing path must preserve the artwork snapshot or re-thumbnail every track
   and force the fresh artwork-build path.
+- First-generation nano firmware removes an unadvertised full-size `.ithmb`
+  after leaving disk mode. Publish the hash-pinned model capability projection
+  before opening libgpod so both `F1031` (42 px) and `F1027` (100 px) persist.
+  Recovery may treat missing `.ithmb` files as firmware normalization only
+  when every remaining generation entry is byte-identical; any other change
+  still fails closed.
 - Successful or terminal transaction cleanup removes the empty session staging
   directory and rollback snapshot before removing the journal. Keeping the
   journal last makes a cleanup failure retryable and avoids orphaned
@@ -182,6 +199,15 @@ incidents and completed gate reports are archived in
   XAML resource. Use the library's second-window context-menu mode.
 - macOS uses `afconvert`, not ffmpeg. Convert through 16-bit PCM; `afconvert`
   rejects some higher-bit-depth FLAC inputs when asked for ALAC directly.
+- Device-facing AAC size estimates use indexed duration at the selected
+  bitrate plus a small MP4/tag allowance. Keep source bytes in the wire
+  summaries as the fallback for missing duration and for the ALAC profile.
+- Worker `sync_error` events are diagnostics, not a per-track failure counter:
+  recovery guidance can produce several events for one fatal error. Count
+  failed tracks from `track_done.result == "skipped"` and retain the first
+  root `Sync failed:` detail for history.
+- `NSWorkspace.unmountAndEjectDevice(at:)` is synchronous. Run it away from
+  the main actor so a slow or busy volume cannot freeze the whole macOS UI.
 - macOS tests use committed FLAC fixtures and must not synthesize them with
   ffmpeg.
 - Adding or removing a Swift source requires `xcodegen generate`; SwiftPM tests

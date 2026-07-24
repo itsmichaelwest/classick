@@ -115,6 +115,13 @@ transcoding remain passthrough to avoid a lossy-to-lossy conversion. The
 host-local `encoder` choice is separate: it selects the ALAC backend (`ffmpeg`
 or `refalac`) and does not restrict the portable profile.
 
+Library album, genre, and playlist summaries carry both source `bytes` and
+aggregate `duration_ms`. Device-facing clients project AAC size as
+`duration_ms × bitrate / 8`, plus a two-percent allowance for the MP4
+container and tags. Missing duration falls back to source bytes. The daemon
+uses the same estimate for `device_preview` and projected free space; ALAC
+continues to use source bytes as its quick estimate.
+
 ## Compatibility
 
 Protocol compatibility is major-version based and there is no production

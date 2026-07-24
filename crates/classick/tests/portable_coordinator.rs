@@ -117,6 +117,71 @@ fn adoption_commits_profile_and_validated_sysinfo_then_clears_host_intent() {
 }
 
 #[test]
+fn nano_1g_adoption_publishes_both_firmware_artwork_formats() {
+    let (mount, host) = fixture("nano-1g-generate");
+    accept_adoption(&host);
+    let session = DeviceMutationSession::acquire(&mount, device_id()).unwrap();
+
+    let outcome =
+        reconcile_connected(&host, &session, DeviceReadiness::Ready, Some("MA005")).unwrap();
+
+    assert!(matches!(
+        outcome,
+        ConnectedReconciliation::DeviceCommitted(_)
+    ));
+    let OwnedDeviceProfile::Valid(profile) = read_profile(&mount).unwrap() else {
+        panic!("profile should be valid");
+    };
+    assert_eq!(
+        profile.capability_profile_id.unwrap().as_str(),
+        "nano-1g-v1"
+    );
+    assert!(profile.generated_sysinfo_extended_hash.is_some());
+
+    let bytes = std::fs::read(mount.join("iPod_Control/Device/SysInfoExtended")).unwrap();
+    let root = plist::from_bytes::<plist::Value>(&bytes).unwrap();
+    let album_art = root
+        .as_dictionary()
+        .and_then(|dictionary| dictionary.get("AlbumArt"))
+        .and_then(plist::Value::as_array)
+        .unwrap();
+    let format_ids = album_art
+        .iter()
+        .filter_map(plist::Value::as_dictionary)
+        .filter_map(|format| format.get("FormatId"))
+        .filter_map(plist::Value::as_signed_integer)
+        .collect::<Vec<_>>();
+    assert_eq!(format_ids, [1031, 1027]);
+}
+
+#[test]
+fn resolved_nano_profile_is_added_to_an_existing_portable_profile() {
+    let (mount, host) = fixture("nano-1g-existing-profile");
+    accept_adoption(&host);
+    let session = DeviceMutationSession::acquire(&mount, device_id()).unwrap();
+    reconcile_connected(&host, &session, DeviceReadiness::Ready, None).unwrap();
+    let OwnedDeviceProfile::Valid(before) = read_profile(&mount).unwrap() else {
+        panic!("initial profile should be valid");
+    };
+    assert!(before.capability_profile_id.is_none());
+    assert!(!mount.join("iPod_Control/Device/SysInfoExtended").exists());
+
+    let outcome =
+        reconcile_connected(&host, &session, DeviceReadiness::Ready, Some("MA005")).unwrap();
+
+    assert!(matches!(
+        outcome,
+        ConnectedReconciliation::DeviceCommitted(_)
+    ));
+    let OwnedDeviceProfile::Valid(after) = read_profile(&mount).unwrap() else {
+        panic!("updated profile should be valid");
+    };
+    assert_eq!(after.capability_profile_id.unwrap().as_str(), "nano-1g-v1");
+    assert!(after.generated_sysinfo_extended_hash.is_some());
+    assert!(mount.join("iPod_Control/Device/SysInfoExtended").exists());
+}
+
+#[test]
 fn preexisting_unowned_sysinfo_is_preserved_byte_for_byte() {
     let (mount, host) = fixture("foreign");
     accept_adoption(&host);

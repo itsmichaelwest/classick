@@ -253,6 +253,7 @@ struct DeviceMusicPage: View {
         if let library = model.library {
           LibraryBrowser(
             library: library, facet: facet, mode: browserMode, search: "",
+            projectedProfile: config?.settings.transcodeProfile,
             expandedDisclosures: $expandedDisclosures)
         }
       }
@@ -358,7 +359,11 @@ struct DeviceMusicPage: View {
             .foregroundStyle(.secondary)
             .monospacedDigit()
             .frame(minWidth: 84, alignment: .trailing)
-          Text(formatBytes(playlist.bytes))
+          Text(
+            formatBytes(
+              DeviceMusicLogic.projectedBytes(
+                sourceBytes: playlist.bytes, durationMS: playlist.durationMS,
+                profile: config?.settings.transcodeProfile ?? .alac)))
             .foregroundStyle(.secondary)
             .monospacedDigit()
             .frame(minWidth: 84, alignment: .trailing)

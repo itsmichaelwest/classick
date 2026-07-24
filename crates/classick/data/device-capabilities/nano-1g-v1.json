@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "profile_id": "nano-1g-v1",
+  "family_id": 7,
+  "db_version": 0,
+  "supports_sparse_artwork": false,
+  "sqlite_db": false,
+  "album_art": [
+    {
+      "format_id": 1031,
+      "render_width": 42,
+      "render_height": 42,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "back_color": "FFFFFFFF",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    },
+    {
+      "format_id": 1027,
+      "render_width": 100,
+      "render_height": 100,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "back_color": "FFFFFFFF",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    }
+  ],
+  "image_specifications": [
+    {
+      "format_id": 1023,
+      "render_width": 176,
+      "render_height": 132,
+      "pixel_format": "42353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "rotation": 0,
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    },
+    {
+      "format_id": 1032,
+      "render_width": 41,
+      "render_height": 37,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": true,
+      "align_row_bytes": true,
+      "back_color": "00000000",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    }
+  ],
+  "chapter_image_specs": [
+    {
+      "format_id": 1031,
+      "render_width": 42,
+      "render_height": 42,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "back_color": "FFFFFFFF",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    },
+    {
+      "format_id": 1027,
+      "render_width": 100,
+      "render_height": 100,
+      "pixel_format": "4C353635",
+      "interlaced": false,
+      "crop": false,
+      "align_row_bytes": true,
+      "back_color": "FFFFFFFF",
+      "color_adjustment": 0,
+      "gamma_adjustment": 2.2,
+      "associated_format": 0
+    }
+  ]
+}

@@ -177,7 +177,10 @@ pub enum ProgressEvent {
     },
     Cancelled,
     Log(String),
-    Error(String),
+    Error {
+        message: String,
+        recovery_hints: Vec<String>,
+    },
     /// Terminal event. `success` reflects whether the orchestrator returned
     /// `Ok` (true) or `Err` (false). Used by the IPC backend to populate
     /// `finish.success`, and by the process exit code in main (anyhow's
@@ -346,7 +349,20 @@ impl Progress {
         let _ = self.sender.send(ProgressEvent::Log(msg.into()));
     }
     pub fn error(&self, msg: impl Into<String>) {
-        let _ = self.sender.send(ProgressEvent::Error(msg.into()));
+        let _ = self.sender.send(ProgressEvent::Error {
+            message: msg.into(),
+            recovery_hints: Vec::new(),
+        });
+    }
+    pub fn error_with_recovery(
+        &self,
+        msg: impl Into<String>,
+        recovery_hints: impl IntoIterator<Item = impl Into<String>>,
+    ) {
+        let _ = self.sender.send(ProgressEvent::Error {
+            message: msg.into(),
+            recovery_hints: recovery_hints.into_iter().map(Into::into).collect(),
+        });
     }
     /// Sends the terminal `Paused` event. Caller (main.rs) sends this before
     /// `finish(true)` so the wire/plain output carries the pause outcome.
@@ -516,7 +532,15 @@ fn run_plain(rx: Receiver<ProgressEvent>, decision_tx: Sender<Decision>) {
             ),
             ProgressEvent::Cancelled => println!("Cancelled. Completed albums were saved."),
             ProgressEvent::Log(s) => println!("{s}"),
-            ProgressEvent::Error(s) => eprintln!("ERROR: {s}"),
+            ProgressEvent::Error {
+                message,
+                recovery_hints,
+            } => {
+                eprintln!("ERROR: {message}");
+                for hint in recovery_hints {
+                    eprintln!("  {hint}");
+                }
+            }
             // success bool is ignored in plain mode (the process exit code
             // conveys it; we don't print a banner either way). db_restored
             // is skipped too — the on_restore closure already logged it.
@@ -862,7 +886,15 @@ fn apply_event(state: &mut TuiState, event: ProgressEvent, finished: &mut bool) 
         )),
         ProgressEvent::Cancelled => state.push_log("Cancelled".to_string()),
         ProgressEvent::Log(s) => state.push_log(s),
-        ProgressEvent::Error(s) => state.push_log(format!("ERROR: {s}")),
+        ProgressEvent::Error {
+            message,
+            recovery_hints,
+        } => {
+            state.push_log(format!("ERROR: {message}"));
+            for hint in recovery_hints {
+                state.push_log(format!("  {hint}"));
+            }
+        }
         // TUI doesn't surface success/failure directly here — the process
         // exit code carries it. We just tear down the draw loop. One more
         // `terminal.draw` runs after this (see `run_tui`'s loop body) before

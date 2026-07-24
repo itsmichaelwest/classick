@@ -42,28 +42,7 @@ fn supported_ipod_added_identity(usb_serial: &str, pid: u16) -> Option<String> {
         || !serial
             .chars()
             .all(|character| character.is_ascii_hexdigit())
-        || !matches!(
-            pid,
-            0x1201
-                | 0x1202
-                | 0x1203
-                | 0x1204
-                | 0x1205
-                | 0x1206
-                | 0x1209
-                | 0x1240
-                | 0x1260
-                | 0x1261
-                | 0x1262
-                | 0x1263
-                | 0x1265
-                | 0x1266
-                | 0x1267
-                | 0x1300
-                | 0x1301
-                | 0x1302
-                | 0x1303
-        )
+        || !crate::device::catalogue::is_known_ipod_usb_product_id(pid)
     {
         return None;
     }
@@ -373,10 +352,19 @@ mod tests {
             supported_ipod_added_identity(" 000a27002138b0a8 ", 0x1261),
             Some("0x000A27002138B0A8".to_string())
         );
+        assert_eq!(
+            supported_ipod_added_identity("000a270012cfeab5", 0x120A),
+            Some("0x000A270012CFEAB5".to_string())
+        );
         assert_eq!(supported_ipod_added_identity("not-a-guid", 0x1261), None);
         assert_eq!(
             supported_ipod_added_identity("000a27002138b0a8", 0x12AB),
             None
+        );
+        assert_eq!(
+            supported_ipod_added_identity("000a27002138b0a8", 0x1240),
+            None,
+            "recovery-mode PIDs must not be treated as mounted iPods"
         );
     }
 

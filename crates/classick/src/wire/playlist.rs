@@ -109,6 +109,7 @@ pub struct PlaylistSummary {
     pub kind: PlaylistKind,
     pub tracks: u64,
     pub bytes: u64,
+    pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

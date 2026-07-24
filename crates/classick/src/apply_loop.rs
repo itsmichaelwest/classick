@@ -182,6 +182,20 @@ pub fn source_change_requires_confirmation(
     }
 }
 
+fn prepare_missing_manifest_for_pending_recovery(
+    loaded: &mut LoadedManifest,
+    current: &SourceLocation,
+    pending_sync_at_entry: bool,
+) {
+    if pending_sync_at_entry
+        && loaded.needs_device_publish
+        && loaded.manifest.tracks.is_empty()
+        && loaded.manifest.last_source_root.is_none()
+    {
+        loaded.manifest.last_source_root = Some(current.resolved_path.clone());
+    }
+}
+
 pub(crate) fn configured_source_location(config: &Config) -> Result<SourceLocation> {
     let config_path = config
         .manifest_path
@@ -510,6 +524,11 @@ fn run_connected(
     } else {
         manifest_store.load(&source_location)?
     };
+    prepare_missing_manifest_for_pending_recovery(
+        &mut loaded,
+        &source_location,
+        pending_sync_at_entry,
+    );
     let recovery_cache = crate::artwork_cache::ArtworkCache::new(
         config
             .manifest_path
@@ -858,10 +877,10 @@ fn run_connected(
     );
 
     if let Err(error) = &sync_result {
-        progress.error(format!("Sync failed: {error:#}"));
-        for line in RECOVERY_HINT_LINES {
-            progress.error((*line).to_string());
-        }
+        progress.error_with_recovery(
+            format!("Sync failed: {error:#}"),
+            RECOVERY_HINT_LINES.iter().copied(),
+        );
     }
     if sync_result.is_ok() {
         if let (Some(root), Some(subscriptions)) =
@@ -2882,6 +2901,39 @@ mod tests {
         let loaded = loaded_with_identity(None, "/Volumes/data/media/music");
 
         assert!(source_change_requires_confirmation(&loaded, &current));
+    }
+
+    #[test]
+    fn pending_first_sync_stamps_the_missing_manifest_with_its_resolved_source() {
+        let current = smb_source("/Volumes/data/media/music", "data");
+        let mut loaded = crate::manifest_store::LoadedManifest {
+            manifest: Manifest::empty(),
+            origin: crate::manifest_store::ManifestOrigin::Missing,
+            needs_device_publish: true,
+            source_identity: None,
+        };
+
+        prepare_missing_manifest_for_pending_recovery(&mut loaded, &current, true);
+
+        assert_eq!(
+            loaded.manifest.last_source_root.as_deref(),
+            Some(current.resolved_path.as_path())
+        );
+    }
+
+    #[test]
+    fn ordinary_missing_manifest_is_not_stamped_before_source_safeguards() {
+        let current = smb_source("/Volumes/data/media/music", "data");
+        let mut loaded = crate::manifest_store::LoadedManifest {
+            manifest: Manifest::empty(),
+            origin: crate::manifest_store::ManifestOrigin::Missing,
+            needs_device_publish: true,
+            source_identity: None,
+        };
+
+        prepare_missing_manifest_for_pending_recovery(&mut loaded, &current, false);
+
+        assert!(loaded.manifest.last_source_root.is_none());
     }
 
     #[test]

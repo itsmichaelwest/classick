@@ -4,6 +4,28 @@ import XCTest
 
 @MainActor
 final class AppModelReducerTests: XCTestCase {
+  func testDeviceEjectOperationRunsAwayFromTheMainThread() async throws {
+    final class ThreadObservation: @unchecked Sendable {
+      private let lock = NSLock()
+      private var value = true
+
+      func record(_ newValue: Bool) {
+        lock.withLock { value = newValue }
+      }
+
+      func read() -> Bool {
+        lock.withLock { value }
+      }
+    }
+
+    let observation = ThreadObservation()
+    try await DeviceEjectAction.perform(
+      at: URL(fileURLWithPath: "/Volumes/Test iPod"),
+      unmount: { _ in observation.record(Thread.isMainThread) })
+
+    XCTAssertFalse(observation.read())
+  }
+
   func testSyncBatchFlushesPendingDeviceConfigBeforeTriggeringSync() throws {
     let deviceID: DeviceID = "A"
     let selectionRequestID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!

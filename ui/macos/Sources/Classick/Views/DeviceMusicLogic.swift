@@ -1,4 +1,25 @@
 enum DeviceMusicLogic {
+    nonisolated static func projectedBytes(
+        sourceBytes: UInt64,
+        durationMS: UInt64?,
+        profile: TranscodeProfile
+    ) -> UInt64 {
+        let kbps: UInt64? = switch profile {
+        case .alac: nil
+        case .aac256: 256
+        case .aac192: 192
+        case .aac128: 128
+        }
+        guard let kbps, let durationMS, durationMS > 0 else { return sourceBytes }
+        let (product, overflow) = durationMS.multipliedReportingOverflow(by: kbps)
+        guard !overflow else { return sourceBytes }
+        let audioBytes = product / 8
+        let (withAllowance, allowanceOverflow) =
+            audioBytes.multipliedReportingOverflow(by: 102)
+        guard !allowanceOverflow else { return sourceBytes }
+        return withAllowance / 100 + (withAllowance % 100 == 0 ? 0 : 1)
+    }
+
     enum MusicPageContentState: Equatable {
         case needsScan
         case scanning(current: Int, total: Int)

@@ -12,7 +12,7 @@ use crate::progress::StopReason;
 use crate::wire::{
     decode_admitted_message, decode_initial_hello, validate_peer_hello, AdmittedStream,
     CapabilityName, DecodedWireMessage, EndpointRole, OwnedSessionRoute,
-    SessionId as WireSessionId, WireEvent, WireMessage,
+    SessionId as WireSessionId, TrackResult as WireTrackResult, WireEvent, WireMessage,
 };
 use anyhow::{Context, Result};
 #[cfg(test)]
@@ -535,21 +535,40 @@ async fn drive_child_with_stall_grace(
                         tracker.total_planned = summary.total_planned as usize;
                         last_summary = Some(summary_from_wire(summary));
                     }
-                    WireEvent::TrackDone { .. } => { tracker.tracks_completed += 1; }
-                    WireEvent::SyncError { message, .. } => {
+                    WireEvent::TrackDone { result, .. } => {
+                        tracker.tracks_completed += 1;
+                        if *result == WireTrackResult::Skipped {
+                            tracker.tracks_errored += 1;
+                            if tracker.should_bail() && stop_disposition.is_none() {
+                                write_stop_command(
+                                    &mut stdin,
+                                    StopReason::Cancelled,
+                                    &event_context,
+                                )
+                                .await;
+                                stop_disposition = Some(StopDisposition::Aborted(format!(
+                                    "too_many_failures: {} of {} tracks failed",
+                                    tracker.tracks_errored, tracker.total_planned
+                                )));
+                                watchdog.begin(StopReason::Cancelled);
+                            }
+                        }
+                    }
+                    WireEvent::SyncError {
+                        message,
+                        recovery_hints,
+                        ..
+                    } => {
+                        tracing::warn!(
+                            session_id = event_context.session_id,
+                            error = %message,
+                            recovery_hints = ?recovery_hints,
+                            "sync worker reported an error"
+                        );
                         if let Some(detail) = message.strip_prefix("Sync failed: ") {
                             last_sync_error = Some(detail.to_string());
                         } else if last_sync_error.is_none() {
                             last_sync_error = Some(message.clone());
-                        }
-                        tracker.tracks_errored += 1;
-                        if tracker.should_bail() && stop_disposition.is_none() {
-                            write_stop_command(&mut stdin, StopReason::Cancelled, &event_context).await;
-                            stop_disposition = Some(StopDisposition::Aborted(format!(
-                                "too_many_failures: {} of {} tracks failed",
-                                tracker.tracks_errored, tracker.total_planned
-                                )));
-                            watchdog.begin(StopReason::Cancelled);
                         }
                     }
                     WireEvent::Finalizing { reason, .. } => {
@@ -1133,6 +1152,85 @@ mod tests {
             outcome,
             OrchestratorOutcome::Aborted { reason, .. }
                 if reason == "checkpoint generation fence: external device state changed"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn diagnostic_error_lines_do_not_count_as_failed_tracks() {
+        let command = scripted_command(
+            r#"
+                printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
+                printf '%s\n' '{"type":"sync_summary","device_id":"000A27002138B0A8","session_id":41,"summary":{"add":5,"modify":0,"metadata_only":0,"remove":0,"unchanged":0,"total_planned":5}}'
+                printf '%s\n' '{"type":"sync_error","device_id":"000A27002138B0A8","session_id":41,"message":"Sync failed: publish staged file: input/output error"}'
+                printf '%s\n' '{"type":"sync_error","device_id":"000A27002138B0A8","session_id":41,"message":"The iPod may now contain orphan track files."}'
+                printf '%s\n' '{"type":"sync_error","device_id":"000A27002138B0A8","session_id":41,"message":"To recover: re-run with --rebuild-manifest."}'
+                printf '%s\n' '{"type":"sync_finished","device_id":"000A27002138B0A8","session_id":41,"success":false}'
+            "#,
+        );
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let (_pause_tx, pause_rx) = oneshot::channel();
+        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, _) = broadcast::channel(8);
+
+        let outcome = drive_child_with_stall_grace(
+            PathBuf::from("/bin/sh"),
+            command,
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+            event_tx,
+            event_context(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            OrchestratorOutcome::Aborted { reason, .. }
+                if reason == "publish staged file: input/output error"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skipped_track_results_count_toward_the_failure_threshold() {
+        let command = scripted_command(
+            r#"
+                printf '%s\n' '{"type":"hello","protocol_version":"3.0.0","role":"worker","software_version":"0.0.1","capabilities":["typed_sync_progress"]}'
+                printf '%s\n' '{"type":"sync_summary","device_id":"000A27002138B0A8","session_id":41,"summary":{"add":5,"modify":0,"metadata_only":0,"remove":0,"unchanged":0,"total_planned":5}}'
+                printf '%s\n' '{"type":"track_done","device_id":"000A27002138B0A8","session_id":41,"result":"skipped"}'
+                printf '%s\n' '{"type":"track_done","device_id":"000A27002138B0A8","session_id":41,"result":"skipped"}'
+                printf '%s\n' '{"type":"track_done","device_id":"000A27002138B0A8","session_id":41,"result":"skipped"}'
+                IFS= read -r line
+                printf '%s\n' '{"type":"finalizing","device_id":"000A27002138B0A8","session_id":41,"reason":"cancelled","staged_albums":0,"staged_tracks":0}'
+                printf '%s\n' '{"type":"sync_cancelled","device_id":"000A27002138B0A8","session_id":41}'
+                printf '%s\n' '{"type":"sync_finished","device_id":"000A27002138B0A8","session_id":41,"success":true}'
+            "#,
+        );
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let (_pause_tx, pause_rx) = oneshot::channel();
+        let (_prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, _) = broadcast::channel(8);
+
+        let outcome = drive_child_with_stall_grace(
+            PathBuf::from("/bin/sh"),
+            command,
+            cancel_rx,
+            pause_rx,
+            prompt_rx,
+            event_tx,
+            event_context(),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            OrchestratorOutcome::Aborted { reason, .. }
+                if reason == "too_many_failures: 3 of 5 tracks failed"
         ));
     }
 

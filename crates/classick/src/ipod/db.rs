@@ -295,6 +295,113 @@ impl OwnedDb {
         Ok(handle)
     }
 
+    /// Add a track whose staged media already lives on the iPod.
+    ///
+    /// libgpod's normal helper copies the source bytes even when source and
+    /// destination are on the same mounted device. This variant reserves the
+    /// libgpod destination, lets the caller journal it, atomically renames the
+    /// staged file into place, and then asks libgpod to finalize the track
+    /// metadata.
+    pub fn add_track_with_staged_file_strict(
+        &self,
+        staged_file: &Path,
+        tags: &Tags,
+        art: Option<&[u8]>,
+        before_move: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<TrackHandle> {
+        let staged_c = path_to_cstring(staged_file)?;
+        unsafe {
+            let track = ffi::itdb_track_new();
+            if track.is_null() {
+                return Err(anyhow!("itdb_track_new returned NULL"));
+            }
+            apply_tags(track, tags);
+
+            if let Some(bytes) = art {
+                if ffi::itdb_track_set_thumbnails_from_data(track, bytes.as_ptr(), bytes.len() as _)
+                    == 0
+                {
+                    ffi::itdb_track_free(track);
+                    return Err(anyhow!("artwork thumbnail preparation failed"));
+                }
+            }
+
+            ffi::itdb_track_add(self.0, track, -1);
+            let dbid = (*track).dbid as u64;
+            if art.is_some() && !self.track_has_artwork(dbid) {
+                ffi::itdb_track_unlink(track);
+                ffi::itdb_track_free(track);
+                return Err(anyhow!(
+                    "artwork thumbnail preparation failed for dbid {dbid}"
+                ));
+            }
+
+            let master = ffi::itdb_playlist_mpl(self.0);
+            if master.is_null() {
+                ffi::itdb_track_unlink(track);
+                ffi::itdb_track_free(track);
+                return Err(anyhow!(
+                    "master playlist missing on this iPod (corrupt DB?)"
+                ));
+            }
+
+            let mut error: *mut ffi::GError = ptr::null_mut();
+            let destination_c =
+                ffi::itdb_cp_get_dest_filename(track, ptr::null(), staged_c.as_ptr(), &mut error);
+            if destination_c.is_null() {
+                ffi::itdb_track_unlink(track);
+                ffi::itdb_track_free(track);
+                return Err(gerror_to_anyhow("itdb_cp_get_dest_filename", error));
+            }
+            let destination =
+                PathBuf::from(CStr::from_ptr(destination_c).to_string_lossy().as_ref());
+
+            if let Err(error) = before_move(&destination) {
+                ffi::g_free(destination_c.cast());
+                ffi::itdb_track_unlink(track);
+                ffi::itdb_track_free(track);
+                return Err(error).context("journal staged-file destination before move");
+            }
+            if let Err(error) = std::fs::rename(staged_file, &destination) {
+                ffi::g_free(destination_c.cast());
+                ffi::itdb_track_unlink(track);
+                ffi::itdb_track_free(track);
+                return Err(error).with_context(|| {
+                    format!(
+                        "move staged media {} to {}",
+                        staged_file.display(),
+                        destination.display()
+                    )
+                });
+            }
+
+            let mut finalize_error: *mut ffi::GError = ptr::null_mut();
+            let finalized =
+                ffi::itdb_cp_finalize(track, ptr::null(), destination_c, &mut finalize_error);
+            ffi::g_free(destination_c.cast());
+            if finalized.is_null() {
+                let failure = gerror_to_anyhow("itdb_cp_finalize", finalize_error);
+                let restore = std::fs::rename(&destination, staged_file);
+                ffi::itdb_track_unlink(track);
+                ffi::itdb_track_free(track);
+                if let Err(restore) = restore {
+                    return Err(failure).context(format!(
+                        "also failed to restore {} to {}: {restore}",
+                        destination.display(),
+                        staged_file.display()
+                    ));
+                }
+                return Err(failure);
+            }
+
+            ffi::itdb_playlist_add_track(master, track, -1);
+            Ok(TrackHandle {
+                dbid,
+                ipod_relpath: read_ipod_relpath(track),
+            })
+        }
+    }
+
     unsafe fn unlink_track_from_all_playlists(&self, track: *mut ffi::Itdb_Track) -> Result<usize> {
         if track.is_null() {
             return Err(anyhow!("cannot unlink a null track"));
@@ -1442,5 +1549,40 @@ mod tests {
         assert!(signals.has_thumbnail);
         assert!(signals.has_thumbnails);
         assert!(signals.decoded_thumbnail);
+    }
+
+    #[test]
+    fn staged_add_journals_destination_before_moving_media() {
+        let mount = artwork_mount("move-staged-media");
+        let staged = mount.join("iPod_Control/classick/pending/7.staged/0.m4a");
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bare.m4a"),
+            &staged,
+        )
+        .unwrap();
+
+        let db = OwnedDb::open(&mount).unwrap();
+        let mut journaled_destination = None;
+        let handle = db
+            .add_track_with_staged_file_strict(&staged, &Tags::default(), None, |destination| {
+                assert!(staged.exists());
+                assert!(!destination.exists());
+                journaled_destination = Some(destination.to_path_buf());
+                Ok(())
+            })
+            .unwrap();
+
+        let destination = journaled_destination.unwrap();
+        assert!(!staged.exists());
+        assert!(destination.exists());
+        assert_eq!(
+            destination,
+            mount.join(
+                handle
+                    .ipod_relpath
+                    .replace('\\', std::path::MAIN_SEPARATOR_STR)
+            )
+        );
     }
 }

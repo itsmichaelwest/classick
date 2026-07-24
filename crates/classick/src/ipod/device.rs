@@ -89,12 +89,103 @@ fn legacy_firewire_guid(raw_usb_iserial: &str) -> Option<String> {
 }
 
 fn trusted_sysinfo_model_for_usb(model_num: &str, usb_product_id: Option<u16>) -> Option<String> {
-    if usb_product_id.is_some_and(|product_id| product_id != 0x1261) {
+    let (canonical, generation, _) = libgpod_model(model_num)?;
+    match usb_product_id {
+        Some(product_id) => {
+            let kind = crate::device::catalogue::usb_ipod_kind(product_id)?;
+            compatible_generation(kind, generation).then_some(canonical)
+        }
+        None => original_database_generation(generation).then_some(canonical),
+    }
+}
+
+pub(crate) fn libgpod_model(
+    model_num: &str,
+) -> Option<(String, ffi::Itdb_IpodGeneration, ffi::Itdb_IpodModel)> {
+    if model_num.is_empty() || model_num.trim() != model_num || !model_num.is_ascii() {
         return None;
     }
-    crate::device::hardware_facts_from_reported_model_code(model_num)?
-        .model_code
-        .map(|fact| fact.value)
+    let candidate = model_num.to_ascii_uppercase();
+    // libgpod owns this process-lifetime table and terminates it with a null model number.
+    let table = unsafe { ffi::itdb_info_get_ipod_info_table() };
+    if table.is_null() {
+        return None;
+    }
+    for index in 0..512 {
+        let info = unsafe { &*table.add(index) };
+        if info.model_number.is_null() {
+            return None;
+        }
+        let abbreviated = unsafe { CStr::from_ptr(info.model_number) }.to_str().ok()?;
+        let canonical = format!("M{abbreviated}");
+        if candidate == abbreviated || candidate == canonical {
+            return Some((canonical, info.ipod_generation, info.ipod_model));
+        }
+    }
+    None
+}
+
+fn compatible_generation(
+    kind: crate::device::catalogue::UsbIpodKind,
+    generation: ffi::Itdb_IpodGeneration,
+) -> bool {
+    use crate::device::catalogue::UsbIpodKind;
+    match kind {
+        UsbIpodKind::Ipod2 => generation == ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_SECOND,
+        UsbIpodKind::Ipod3 => generation == ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_THIRD,
+        UsbIpodKind::Ipod4 => generation == ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_FOURTH,
+        UsbIpodKind::Photo => generation == ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_PHOTO,
+        UsbIpodKind::Mini => matches!(
+            generation,
+            ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_MINI_1
+                | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_MINI_2
+        ),
+        UsbIpodKind::Video => matches!(
+            generation,
+            ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_VIDEO_1
+                | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_VIDEO_2
+        ),
+        UsbIpodKind::Nano1 => generation == ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_1,
+        UsbIpodKind::Nano2 => generation == ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_2,
+        UsbIpodKind::Nano3 => generation == ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_3,
+        UsbIpodKind::Nano4 => generation == ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_4,
+        UsbIpodKind::Classic => matches!(
+            generation,
+            ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_CLASSIC_1
+                | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_CLASSIC_2
+                | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_CLASSIC_3
+        ),
+        UsbIpodKind::Unclassified => original_database_generation(generation),
+        UsbIpodKind::Nano5
+        | UsbIpodKind::Nano6
+        | UsbIpodKind::Nano7
+        | UsbIpodKind::Shuffle1
+        | UsbIpodKind::Shuffle2
+        | UsbIpodKind::Shuffle3
+        | UsbIpodKind::Shuffle4 => false,
+    }
+}
+
+fn original_database_generation(generation: ffi::Itdb_IpodGeneration) -> bool {
+    matches!(
+        generation,
+        ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_FIRST
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_SECOND
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_THIRD
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_FOURTH
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_PHOTO
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_MINI_1
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_MINI_2
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_1
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_2
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_3
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_4
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_VIDEO_1
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_VIDEO_2
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_CLASSIC_1
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_CLASSIC_2
+            | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_CLASSIC_3
+    )
 }
 
 /// Resolve the identity libgpod needs to sign the iTunesDB from ordinary USB
@@ -123,14 +214,14 @@ fn resolve_libgpod_identity_with_probe(
         .ok_or_else(|| anyhow!("USB identity unavailable for {}", ipod_mount.display()))?;
     let firewire_guid = legacy_firewire_guid(&raw_usb_iserial)
         .ok_or_else(|| anyhow!("USB identity unavailable for {}", ipod_mount.display()))?;
-    let model_num_str = recovered
-        .usb_product_id
-        .and_then(|pid| identify_ipod(pid, recovered.capacity_bytes))
-        .map(|identity| identity.model_num.to_owned())
+    let model_num_str = disk_model
+        .as_deref()
+        .and_then(|model_num| trusted_sysinfo_model_for_usb(model_num, recovered.usb_product_id))
         .or_else(|| {
-            disk_model.as_deref().and_then(|model_num| {
-                trusted_sysinfo_model_for_usb(model_num, recovered.usb_product_id)
-            })
+            recovered
+                .usb_product_id
+                .and_then(|pid| identify_ipod(pid, recovered.capacity_bytes))
+                .map(|identity| identity.model_num_str.to_owned())
         })
         .ok_or_else(|| {
             anyhow!(
@@ -234,8 +325,8 @@ fn scan_drive_for_ipod_with_probe(
     );
     if model_num.is_empty() {
         if let Some(identity) = identity {
-            model_num = identity.model_num.to_string();
-            model_label_override = Some(identity.label.to_string());
+            model_num = identity.model_num_str.to_string();
+            model_label_override = Some(identity.label);
         } else if let Some(pid) = recovered.usb_product_id {
             model_num = format!("xPID_{pid:04X}");
         }
@@ -379,24 +470,6 @@ fn drive_letter(drive: &std::path::Path) -> Option<char> {
     } else {
         None
     }
-}
-
-/// `(ModelNumStr, friendly-label)` pair for a detected iPod. The
-/// `model_num` MUST be a value libgpod's `ipod_info_table` in
-/// `src/itdb_device.c` recognises — otherwise the hash58 codepath
-/// silently degrades to `ITDB_CHECKSUM_NONE` and iTunes refuses the
-/// resulting iTunesDB. `label` is the user-facing string.
-///
-/// `#[allow(dead_code)]` because the only consumer (`identify_ipod`, reached
-/// from signing and the one-drive compatibility helper) may be platform-gated. The
-/// struct + its consumer still want to live in platform-neutral test
-/// territory — `identify_ipod`'s PID-disambiguation tests cover real
-/// product logic that's worth running on Linux/macOS CI too.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct IpodIdentity {
-    model_num: &'static str,
-    label: &'static str,
 }
 
 /// Collect the ordinary OS facts associated with one mounted volume.
@@ -1029,190 +1102,14 @@ fn ordinary_facts_from_apple_usb_parent(
     })
 }
 
-/// Resolve `(ModelNumStr, friendly label)` for a detected iPod from
-/// its USB Product ID + raw disk capacity in bytes.
-///
-/// # Policy
-///
-/// **`model_num` is always a real Apple value that libgpod's
-/// `ipod_info_table` recognises** (cross-checked against
-/// `src/itdb_device.c` in github.com/gtkpod/libgpod). If we'd have to
-/// invent one — e.g. iPod Nano 7G, which Apple shipped in 2012 and
-/// libgpod never added support for — this function returns `None` so
-/// the caller falls back to the legacy `xPID_XXXX` marker rather than
-/// writing a value that looks real but trips libgpod's UNKNOWN path.
-///
-/// **`label` only claims what USB actually tells us.** We can know
-/// the device family (Classic/Nano/Mini/Shuffle/Video/Photo) from the
-/// USB PID. We can sometimes know the capacity from the raw disk
-/// size. We *cannot* know color or exact SKU. The label reflects only
-/// what's truly determined; ambiguous cases get the more general
-/// label, not a confident-sounding guess.
-///
-/// **Capacity-based disambiguation runs only where it changes the
-/// answer.** Within an iPod Classic, capacity tells 80GB-1G from
-/// 120GB-2G; 160GB stays ambiguous between 1G-thick (2007) and
-/// 3G-thin (2009) — we pick the 3G ModelNumStr (MC293) as a hash-
-/// neutral default (both 1G and 3G map to `ITDB_CHECKSUM_HASH58` in
-/// libgpod) and label it just "iPod Classic (160GB)" without claiming
-/// a generation. For Nano/Shuffle/etc., the USB PID already gives the
-/// generation and capacity doesn't change the hash path within a
-/// generation, so we don't bother capacity-disambiguating those (the
-/// label stays generation-only — accurate, not presumptuous about
-/// capacity or color).
-///
-/// # ModelNumStr "default SKU" convention
-///
-/// For each (PID, capacity) bucket we pick ONE specific ModelNumStr
-/// from libgpod's table. We default to the silver / white / smallest-
-/// capacity SKU because:
-/// - libgpod groups by generation for hash computation — all SKUs in
-///   a generation produce the same hash path (HASH58 vs HASH72 vs
-///   HASHAB vs none), so the specific choice within a generation is
-///   functionally irrelevant for signing.
-/// - The label we surface to the user doesn't claim color anyway.
-/// - iTunes (if it cross-checks ModelNumStr against any USB descriptor
-///   field) may care about capacity-bucket accuracy. We address that
-///   via capacity-based disambiguation where applicable.
-///
-/// Capacity tolerance bands: Apple's marketed sizes map to raw disk
-/// reports of ~size×10⁹ bytes. We use generous bands so a slightly-
-/// under-spec drive (formatting overhead, firmware partition, retired
-/// block remapping) still classifies correctly.
-#[allow(dead_code)] // See IpodIdentity — only consumed from Windows but the PID
-                    // disambiguation logic is platform-neutral and unit-tested.
-fn identify_ipod(pid: u16, capacity_bytes: Option<u64>) -> Option<IpodIdentity> {
-    let gb = capacity_bytes.map(|b| b / 1_000_000_000); // marketed decimal GB
-
-    match pid {
-        // === iPod Classic family (PID shared across all three gens) ===
-        // libgpod CLASSIC_1/2/3 all map to ITDB_CHECKSUM_HASH58, so a
-        // wrong-within-Classic SKU still produces a valid hash. The
-        // capacity tells us 1G vs 2G unambiguously; 160GB stays
-        // ambiguous between thick 1G and thin 3G and the label
-        // reflects that.
-        0x1261 => Some(match gb {
-            Some(g) if g < 100 => IpodIdentity {
-                model_num: "MB029", // CLASSIC_1 80GB silver
-                label: "iPod Classic (1st gen, 80GB)",
-            },
-            Some(g) if g < 140 => IpodIdentity {
-                model_num: "MB562", // CLASSIC_2 120GB silver
-                label: "iPod Classic (2nd gen, 120GB)",
-            },
-            Some(_) => IpodIdentity {
-                model_num: "MC293", // CLASSIC_3 160GB silver — hash-neutral
-                // pick (CLASSIC_1 thick 160GB also valid)
-                label: "iPod Classic (160GB)", // no gen claim — ambiguous
-            },
-            None => return None, // No capacity → can't safely pick a
-                                 // SKU; fall back to legacy xPID marker
-        }),
-
-        // === iPod Nano family ===
-        // PID identifies the generation unambiguously, so we don't
-        // need capacity to pick the right hash path. ModelNumStr is
-        // the silver SKU (smallest-capacity variant) from libgpod's
-        // table; the label stays generation-only, not claiming a
-        // capacity or color we can't determine from USB.
-        // libgpod hash support: NANO_3/4 use hash58 (supported here);
-        // NANO_5 uses hash72 and NANO_6 uses hashAB (libgpod can't
-        // sign these correctly — iTunes will reject the resulting DB
-        // regardless of what we put in SysInfo, but we still set a
-        // real ModelNumStr so the UI is honest).
-        0x1240 => Some(IpodIdentity {
-            model_num: "A350",
-            label: "iPod Nano (1st gen)",
-        }),
-        0x1260 => Some(IpodIdentity {
-            model_num: "A477",
-            label: "iPod Nano (2nd gen)",
-        }),
-        0x1262 => Some(IpodIdentity {
-            model_num: "A978",
-            label: "iPod Nano (3rd gen)",
-        }),
-        0x1263 => Some(IpodIdentity {
-            model_num: "B480",
-            label: "iPod Nano (4th gen)",
-        }),
-        0x1265 => Some(IpodIdentity {
-            model_num: "C027",
-            label: "iPod Nano (5th gen)",
-        }),
-        0x1266 => Some(IpodIdentity {
-            model_num: "C525",
-            label: "iPod Nano (6th gen)",
-        }),
-        // Nano 7G (PID 0x1267, 2012-2017): Apple ModelNumStrs are
-        // D376/D744/etc., NONE of which appear in libgpod's table.
-        // Returning a fake ModelNumStr would be worse than returning
-        // None — at least None lets the caller fall back to xPID_1267
-        // which describe_model can still render as "iPod Nano (7th
-        // gen)" via the legacy path. The functional outcome is the
-        // same (libgpod can't sign for Nano 7G either way), but the
-        // honest fallback doesn't pollute SysInfo with a value Apple
-        // never assigned.
-
-        // === iPod Mini / Shuffle / Video / Photo / Original ===
-        // All use hash type "none" in libgpod (these older iPods
-        // don't sign the iTunesDB at all). The ModelNumStr affects
-        // only libgpod's model metadata + the UI label — never the
-        // hash path — so the silver/smallest-capacity SKU pick is
-        // safe.
-        0x1205 => Some(IpodIdentity {
-            model_num: "9160",  // MINI_1 4GB silver (PID also serves MINI_2)
-            label: "iPod Mini", // no gen claim — PID shared 1G/2G
-        }),
-        0x1209 => Some(IpodIdentity {
-            model_num: "A002", // VIDEO_1 30GB white
-            label: "iPod Video (5th gen)",
-        }),
-        0x1206 => Some(IpodIdentity {
-            model_num: "A444", // VIDEO_2 30GB white
-            label: "iPod Video (5.5 gen)",
-        }),
-        0x1204 => Some(IpodIdentity {
-            model_num: "9829", // PHOTO 30GB
-            label: "iPod Photo",
-        }),
-        // PID 0x1202 covers iPod 1G + 2G (no in-USB distinguisher).
-        // PID 0x1201 = iPod 3G. PID 0x1203 = iPod 4G. We pick a 1G
-        // ModelNumStr as the catch-all (8513 = 1G 5GB) — none of
-        // these generations sign the DB so the choice is cosmetic.
-        // Caller's xPID fallback covers the rare case where we want
-        // more precision later.
-        0x1202 => Some(IpodIdentity {
-            model_num: "8513", // FIRST 5GB (PID shared 1G/2G)
-            label: "iPod (1st/2nd gen)",
-        }),
-        0x1201 => Some(IpodIdentity {
-            model_num: "8976", // THIRD 10GB
-            label: "iPod (3rd gen)",
-        }),
-        0x1203 => Some(IpodIdentity {
-            model_num: "9282", // FOURTH 20GB
-            label: "iPod (4th gen)",
-        }),
-        0x1300 => Some(IpodIdentity {
-            model_num: "9724", // SHUFFLE_1 512MB
-            label: "iPod Shuffle (1st gen)",
-        }),
-        0x1301 => Some(IpodIdentity {
-            model_num: "A546", // SHUFFLE_2 1GB silver
-            label: "iPod Shuffle (2nd gen)",
-        }),
-        0x1302 => Some(IpodIdentity {
-            model_num: "C306", // SHUFFLE_3 2GB silver
-            label: "iPod Shuffle (3rd gen)",
-        }),
-        0x1303 => Some(IpodIdentity {
-            model_num: "C584", // SHUFFLE_4 2GB silver
-            label: "iPod Shuffle (4th gen)",
-        }),
-
-        _ => None,
-    }
+/// Resolve the safe fallback model for an original-database iPod from the
+/// ordinary USB PID and raw capacity. The returned value is a complete Apple
+/// `ModelNumStr`, not libgpod's abbreviated table key.
+fn identify_ipod(
+    pid: u16,
+    capacity_bytes: Option<u64>,
+) -> Option<crate::device::catalogue::CompatibleIpodIdentity> {
+    crate::device::catalogue::compatible_identity_from_usb(pid, capacity_bytes)
 }
 
 /// Find a 16-hex-digit run inside a Windows USB device path and
@@ -1298,28 +1195,7 @@ fn describe_model(model_num: &str) -> String {
 /// iPod Mini 1G/2G) it returns the family name without a generation
 /// number.
 fn family_label_for_pid(pid: u16) -> Option<&'static str> {
-    match pid {
-        0x1261 => Some("iPod Classic"),
-        0x1240 => Some("iPod Nano (1st gen)"),
-        0x1260 => Some("iPod Nano (2nd gen)"),
-        0x1262 => Some("iPod Nano (3rd gen)"),
-        0x1263 => Some("iPod Nano (4th gen)"),
-        0x1265 => Some("iPod Nano (5th gen)"),
-        0x1266 => Some("iPod Nano (6th gen)"),
-        0x1267 => Some("iPod Nano (7th gen)"),
-        0x1205 => Some("iPod Mini"),
-        0x1209 => Some("iPod Video (5th gen)"),
-        0x1206 => Some("iPod Video (5.5 gen)"),
-        0x1204 => Some("iPod Photo"),
-        0x1202 => Some("iPod (1st/2nd gen)"),
-        0x1201 => Some("iPod (3rd gen)"),
-        0x1203 => Some("iPod (4th gen)"),
-        0x1300 => Some("iPod Shuffle (1st gen)"),
-        0x1301 => Some("iPod Shuffle (2nd gen)"),
-        0x1302 => Some("iPod Shuffle (3rd gen)"),
-        0x1303 => Some("iPod Shuffle (4th gen)"),
-        _ => None,
-    }
+    crate::device::catalogue::family_label_for_usb(pid)
 }
 
 /// Find every mounted volume that looks like an iPod and return the
@@ -1664,6 +1540,28 @@ mod tests {
     }
 
     #[test]
+    fn resolve_identity_maps_the_live_four_gb_first_generation_nano() {
+        let dir =
+            std::env::temp_dir().join(format!("classick-nano-1g-identity-{}", std::process::id()));
+        let device_dir = dir.join("iPod_Control").join("Device");
+        std::fs::create_dir_all(&device_dir).unwrap();
+        std::fs::write(device_dir.join("SysInfo"), "").unwrap();
+
+        let identity = resolve_libgpod_identity_with_probe(&dir, |_| {
+            Some(OrdinaryUsbFacts {
+                raw_usb_iserial: Some("000A270012CFEAB5".to_owned()),
+                usb_product_id: Some(0x120A),
+                capacity_bytes: Some(4_013_481_472),
+            })
+        })
+        .expect("the mounted first-generation nano should resolve");
+
+        assert_eq!(identity.firewire_guid, "0x000A270012CFEAB5");
+        assert_eq!(identity.model_num_str, "MA005");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn resolve_identity_replaces_unknown_sysinfo_model_with_usb_backed_model() {
         let dir = std::env::temp_dir().join(format!(
             "classick-unknown-model-safe-usb-{}",
@@ -1992,16 +1890,16 @@ mod tests {
     #[test]
     fn classic_pid_disambiguates_by_capacity() {
         let id_80 = identify_ipod(0x1261, Some(80 * 1_000_000_000)).unwrap();
-        assert_eq!(id_80.model_num, "MB029");
+        assert_eq!(id_80.model_num_str, "MB029");
         assert_eq!(id_80.label, "iPod Classic (1st gen, 80GB)");
 
         let id_120 = identify_ipod(0x1261, Some(120 * 1_000_000_000)).unwrap();
-        assert_eq!(id_120.model_num, "MB562");
+        assert_eq!(id_120.model_num_str, "MB562");
         assert_eq!(id_120.label, "iPod Classic (2nd gen, 120GB)");
 
         let id_160 = identify_ipod(0x1261, Some(160 * 1_000_000_000)).unwrap();
         assert_eq!(
-            id_160.model_num, "MC293",
+            id_160.model_num_str, "MC293",
             "160GB defaults to 3G ModelNumStr (hash-neutral with 1G thick)"
         );
         assert_eq!(
@@ -2019,17 +1917,12 @@ mod tests {
         assert!(identify_ipod(0x1261, None).is_none());
     }
 
-    /// PID disambiguation for the Nano family — fixes a previous bug
-    /// where 0x1263 and 0x1265 were mislabeled as Classic SKUs. PID
-    /// gives the generation; we don't have a way to know capacity or
-    /// color per SKU, so the label is generation-only (honest).
-    /// 0x1263 = Nano 4G (hash58, fully supported), 0x1265 = Nano 5G
-    /// (hash72, not supported by libgpod's free codepath but still
-    /// gets the right UI label).
+    /// Nano 1G-4G use the original database profile. Later generations
+    /// remain discoverable hardware but do not receive a signing identity.
     #[test]
     fn nano_pids_resolve_to_correct_family() {
         assert_eq!(
-            identify_ipod(0x1240, None).unwrap().label,
+            identify_ipod(0x120A, Some(4_000_000_000)).unwrap().label,
             "iPod Nano (1st gen)"
         );
         assert_eq!(
@@ -2044,14 +1937,143 @@ mod tests {
             identify_ipod(0x1263, None).unwrap().label,
             "iPod Nano (4th gen)"
         );
-        assert_eq!(
-            identify_ipod(0x1265, None).unwrap().label,
-            "iPod Nano (5th gen)"
-        );
-        assert_eq!(
-            identify_ipod(0x1266, None).unwrap().label,
-            "iPod Nano (6th gen)"
-        );
+        assert!(identify_ipod(0x1265, None).is_none());
+        assert!(identify_ipod(0x1266, None).is_none());
+    }
+
+    #[test]
+    fn every_original_database_usb_fallback_is_a_real_full_libgpod_model() {
+        let cases = [
+            (0x1202, 10, "M8737"),
+            (0x1202, 20, "M8738"),
+            (0x1201, 10, "M8976"),
+            (0x1201, 15, "M8946"),
+            (0x1201, 20, "M9244"),
+            (0x1201, 30, "M8948"),
+            (0x1201, 40, "M9245"),
+            (0x1203, 20, "M9282"),
+            (0x1203, 25, "M9787"),
+            (0x1203, 40, "M9268"),
+            (0x1204, 20, "MA079"),
+            (0x1204, 30, "M9829"),
+            (0x1204, 40, "M9585"),
+            (0x1204, 60, "M9830"),
+            (0x1205, 4, "M9800"),
+            (0x1205, 6, "M9801"),
+            (0x1209, 30, "MA444"),
+            (0x1209, 60, "MA003"),
+            (0x1209, 80, "MA448"),
+            (0x120A, 1, "MA350"),
+            (0x120A, 2, "MA004"),
+            (0x120A, 4, "MA005"),
+            (0x1260, 2, "MA477"),
+            (0x1260, 4, "MA426"),
+            (0x1260, 8, "MA497"),
+            (0x1262, 4, "MA978"),
+            (0x1262, 8, "MA980"),
+            (0x1263, 4, "MB480"),
+            (0x1263, 8, "MB598"),
+            (0x1263, 16, "MB903"),
+            (0x1261, 80, "MB029"),
+            (0x1261, 120, "MB562"),
+            (0x1261, 160, "MC293"),
+        ];
+
+        for (pid, capacity_gb, expected_model) in cases {
+            let identity =
+                identify_ipod(pid, Some(capacity_gb * 1_000_000_000)).expect("supported model");
+            assert_eq!(
+                identity.model_num_str, expected_model,
+                "PID {pid:#06x}, {capacity_gb}GB"
+            );
+            assert!(
+                identity.model_num_str.starts_with('M'),
+                "fallback must be a complete on-device ModelNumStr"
+            );
+            let (canonical, generation, _) =
+                libgpod_model(identity.model_num_str).expect("model must exist in pinned libgpod");
+            assert_eq!(canonical, identity.model_num_str);
+            let kind = crate::device::catalogue::usb_ipod_kind(pid).unwrap();
+            assert!(
+                compatible_generation(kind, generation),
+                "model generation must match PID {pid:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_pinned_libgpod_original_database_sku_is_accepted_for_its_usb_family() {
+        let table = unsafe { ffi::itdb_info_get_ipod_info_table() };
+        assert!(!table.is_null());
+        let mut accepted = 0;
+
+        for index in 0..512 {
+            let info = unsafe { &*table.add(index) };
+            if info.model_number.is_null() {
+                break;
+            }
+            let pid = match info.ipod_generation {
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_FIRST => None,
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_SECOND => Some(0x1202),
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_THIRD => Some(0x1201),
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_FOURTH => Some(0x1203),
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_PHOTO => Some(0x1204),
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_MINI_1
+                | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_MINI_2 => Some(0x1205),
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_1 => Some(0x120A),
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_2 => Some(0x1260),
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_3 => Some(0x1262),
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_NANO_4 => Some(0x1263),
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_VIDEO_1
+                | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_VIDEO_2 => Some(0x1209),
+                ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_CLASSIC_1
+                | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_CLASSIC_2
+                | ffi::Itdb_IpodGeneration_ITDB_IPOD_GENERATION_CLASSIC_3 => Some(0x1261),
+                _ => continue,
+            };
+            let abbreviated = unsafe { CStr::from_ptr(info.model_number) }
+                .to_str()
+                .unwrap();
+            let canonical = format!("M{abbreviated}");
+
+            assert_eq!(
+                trusted_sysinfo_model_for_usb(&canonical, pid),
+                Some(canonical.clone()),
+                "model {canonical}, generation {}",
+                info.ipod_generation
+            );
+            let facts = crate::device::hardware_facts_from_reported_model_code(&canonical)
+                .unwrap_or_else(|| panic!("missing display facts for supported model {canonical}"));
+            assert!(facts.family.is_some(), "{canonical}");
+            assert!(facts.generation.is_some(), "{canonical}");
+            assert!(facts.colour.is_some(), "{canonical}");
+            accepted += 1;
+        }
+
+        assert!(accepted >= 80, "unexpectedly small compatible model set");
+    }
+
+    #[test]
+    fn every_supported_display_ipod_fallback_has_an_artwork_capability_template() {
+        let cases = [
+            (0x1204, 60),
+            (0x1209, 80),
+            (0x120A, 4),
+            (0x1260, 8),
+            (0x1262, 8),
+            (0x1263, 16),
+            (0x1261, 160),
+        ];
+
+        for (pid, capacity_gb) in cases {
+            let identity = identify_ipod(pid, Some(capacity_gb * 1_000_000_000)).unwrap();
+            assert!(
+                crate::ipod::sysinfo_provision::template_for_model(identity.model_num_str)
+                    .is_some(),
+                "missing artwork template for {}",
+                identity.model_num_str
+            );
+        }
     }
 
     /// Nano 7G (PID 0x1267, 2012) is intentionally absent from the

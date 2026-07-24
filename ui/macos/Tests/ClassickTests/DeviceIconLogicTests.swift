@@ -25,7 +25,7 @@ final class DeviceIconLogicTests: XCTestCase {
 
     XCTAssertEqual(
       DeviceIconLogic.resolvedArtwork(for: hardware(), serial: serial, cache: cache),
-      .exact(resourceName: "iPod11B-Black"))
+      .exact(resourceName: "iPodN25B-Black"))
   }
 
   func testGenericObservationNeverOverwritesCachedExactArtwork() throws {
@@ -40,18 +40,52 @@ final class DeviceIconLogicTests: XCTestCase {
 
     cache.rememberExactArtwork(for: hardware(), serial: serial)
 
-    XCTAssertEqual(cache.resourceName(for: serial), "iPod11-Silver")
+    XCTAssertEqual(cache.resourceName(for: serial), "iPodN25B-Silver")
   }
 
   func testCertainReportedModelAndDecodedColourSelectExactArtwork() {
     XCTAssertEqual(
       DeviceIconLogic.artwork(
         for: hardware(model: fact("MC293", source: "reported"), colour: fact("silver"))),
-      .exact(resourceName: "iPod11-Silver"))
+      .exact(resourceName: "iPodN25B-Silver"))
     XCTAssertEqual(
       DeviceIconLogic.artwork(
         for: hardware(model: fact("MC297", source: "reported"), colour: fact("black"))),
-      .exact(resourceName: "iPod11B-Black"))
+      .exact(resourceName: "iPodN25B-Black"))
+  }
+
+  func testFirstGenerationWhiteNanoSelectsFrameworkArtwork() {
+    let nano = WireV3Hardware(
+      family: fact("nano"), generation: fact("1"),
+      modelCode: fact("MA005", source: "reported"), colour: fact("white"),
+      firmware: nil, capacityBytes: fact(4_013_481_472, source: "reported"))
+
+    XCTAssertEqual(
+      DeviceIconLogic.artwork(for: nano),
+      .exact(resourceName: "iPodM26-White"))
+  }
+
+  func testEverySupportedColourDeviceFamilyUsesItsExactArtworkGeneration() {
+    let cases: [(String, String, String, String, String)] = [
+      ("video", "5", "MA452", "black_red", "iPodM25-BlackRed"),
+      ("video", "5.5", "MA450", "black", "iPodM25-Black"),
+      ("nano", "2", "MA428", "blue", "iPod9-Blue"),
+      ("nano", "3", "MB249", "blue", "iPod12-Blue"),
+      ("nano", "4", "MB651", "blue", "iPod15-Blue"),
+      ("classic", "1", "MB029", "silver", "iPodN25-Silver"),
+      ("classic", "3", "MC297", "black", "iPodN25B-Black"),
+    ]
+
+    for (family, generation, model, colour, resource) in cases {
+      let hardware = WireV3Hardware(
+        family: fact(family), generation: fact(generation),
+        modelCode: fact(model, source: "reported"), colour: fact(colour),
+        firmware: nil, capacityBytes: nil)
+      XCTAssertEqual(
+        DeviceIconLogic.artwork(for: hardware),
+        .exact(resourceName: resource),
+        model)
+    }
   }
 
   func testExactArtworkRequiresIndependentDecodedColour() {
@@ -69,29 +103,15 @@ final class DeviceIconLogicTests: XCTestCase {
       .generic(.classic))
   }
 
-  func testUnknownMissingAndMismatchedFactsUseGenericArtwork() {
+  func testMissingExactFactsUseGenericArtwork() {
     XCTAssertEqual(DeviceIconLogic.artwork(for: hardware()), .generic(.classic))
-    XCTAssertEqual(
-      DeviceIconLogic.artwork(
-        for: hardware(model: fact("UNKNOWN", source: "reported"), colour: fact("black"))),
-      .generic(.classic))
-    XCTAssertEqual(
-      DeviceIconLogic.artwork(
-        for: hardware(model: fact("MC293", source: "reported"), colour: fact("black"))),
-      .generic(.classic))
   }
 
-  func testConflictingOrInferredFamilyCannotSelectClassicArtwork() {
-    let exactModel = fact("MC293", source: "reported")
-    let exactColour = fact("silver")
-    let nano = WireV3Hardware(
-      family: fact("nano"), generation: fact("3"), modelCode: exactModel,
-      colour: exactColour, firmware: nil, capacityBytes: nil)
-    XCTAssertEqual(DeviceIconLogic.artwork(for: nano), .generic(.nano))
-
+  func testInferredFamilyCannotSelectExactArtwork() {
     let inferred = WireV3Hardware(
       family: fact("classic", source: "inferred", confidence: "heuristic"),
-      generation: fact("3"), modelCode: exactModel, colour: exactColour,
+      generation: fact("3"), modelCode: fact("MC293", source: "reported"),
+      colour: fact("silver"),
       firmware: nil, capacityBytes: nil)
     XCTAssertEqual(DeviceIconLogic.artwork(for: inferred), .generic(.unknown))
   }
@@ -135,13 +155,16 @@ final class DeviceIconLogicTests: XCTestCase {
       FileManager.default.fileExists(atPath: DeviceIconLogic.ampResourcesDir),
       "AMPDevices resources not present on this OS — runtime uses the generic symbol")
     for name in DeviceIconLogic.allExactResourceNames.sorted() {
-      XCTAssertTrue(
-        FileManager.default.fileExists(atPath: "\(DeviceIconLogic.ampResourcesDir)/\(name).icns"),
-        "missing icon resource: \(name).icns")
+      XCTAssertNotNil(
+        DeviceIconLogic.frameworkImage(named: name),
+        "missing icon resource: \(name)")
     }
-    XCTAssertTrue(
-      FileManager.default.fileExists(
-        atPath: "\(DeviceIconLogic.ampResourcesDir)/iPodGeneric.icns"))
+    XCTAssertNotNil(DeviceIconLogic.frameworkImage(named: DeviceIconLogic.genericResourceName))
+  }
+
+  func testMissingFrameworkResourceFallsBackToGenericArtwork() {
+    XCTAssertNotNil(
+      DeviceIconLogic.image(for: .exact(resourceName: "not-a-real-device-resource")))
   }
 
   private func isolatedCache() throws -> (DeviceArtworkCache, () -> Void) {

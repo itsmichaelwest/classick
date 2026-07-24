@@ -114,7 +114,8 @@ public sealed record LibraryAlbum(
     [property: JsonRequired, JsonPropertyName("name")] string Name,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("genre")] string? Genre,
     [property: JsonRequired, JsonPropertyName("tracks")] ulong Tracks,
-    [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes);
+    [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes,
+    [property: JsonRequired, JsonPropertyName("duration_ms")] ulong DurationMs = 0);
 
 public sealed record LibraryArtist(
     [property: JsonRequired, JsonPropertyName("name")] string Name,
@@ -123,7 +124,8 @@ public sealed record LibraryArtist(
 public sealed record LibraryGenre(
     [property: JsonRequired, JsonPropertyName("name")] string Name,
     [property: JsonRequired, JsonPropertyName("tracks")] ulong Tracks,
-    [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes);
+    [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes,
+    [property: JsonRequired, JsonPropertyName("duration_ms")] ulong DurationMs = 0);
 
 [JsonConverter(typeof(StrictStringEnumConverter<PlaylistKind>))]
 public enum PlaylistKind
@@ -233,7 +235,8 @@ public sealed record PlaylistSummary(
     [property: JsonRequired, JsonPropertyName("kind")] PlaylistKind Kind,
     [property: JsonRequired, JsonPropertyName("tracks")] ulong Tracks,
     [property: JsonRequired, JsonPropertyName("bytes")] ulong Bytes,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("error")] string? Error = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull), JsonPropertyName("error")] string? Error = null,
+    [property: JsonRequired, JsonPropertyName("duration_ms")] ulong DurationMs = 0);
 
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "state")]
 [JsonDerivedType(typeof(FoundPlaylistDetail), "found")]

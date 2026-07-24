@@ -37,6 +37,7 @@ struct LibraryBrowser: View {
     var facet: Facet
     var mode: Mode
     var search: String = ""
+    var projectedProfile: TranscodeProfile? = nil
     var launchNonce: UUID? = nil
     var expandedDisclosures: Binding<Set<DisclosureKey>>? = nil
     @State private var localExpandedDisclosures: Set<DisclosureKey> = []
@@ -179,7 +180,9 @@ struct LibraryBrowser: View {
     @ViewBuilder
     private func artistRow(_ artist: LibraryArtist) -> some View {
         let title = artist.name.isEmpty ? "Unknown Artist" : artist.name
-        let totalBytes = artist.albums.reduce(UInt64(0)) { $0 + $1.bytes }
+        let totalBytes = artist.albums.reduce(UInt64(0)) {
+            $0 + displayBytes(sourceBytes: $1.bytes, durationMS: $1.durationMS)
+        }
         let columns = ["\(artist.albums.count) album\(artist.albums.count == 1 ? "" : "s")", formatBytes(totalBytes)]
         let disclosureKey = DisclosureKey.artist(artist.name)
         DisclosureGroup(isExpanded: disclosureBinding(for: disclosureKey)) {
@@ -211,7 +214,10 @@ struct LibraryBrowser: View {
     @ViewBuilder
     private func albumRow(artist: LibraryArtist, album: LibraryAlbum) -> some View {
         let title = album.name.isEmpty ? "Unknown Album" : album.name
-        let columns = [trackCountText(album.tracks), formatBytes(album.bytes)]
+        let columns = [
+            trackCountText(album.tracks),
+            formatBytes(displayBytes(sourceBytes: album.bytes, durationMS: album.durationMS))
+        ]
         switch mode {
         case .browse:
             rowLabel(title: title, columns: columns, isChecked: false, onToggle: nil)
@@ -238,7 +244,10 @@ struct LibraryBrowser: View {
     @ViewBuilder
     private func genreRow(_ genre: LibraryGenre) -> some View {
         let title = genre.name.isEmpty ? "No Genre" : genre.name
-        let columns = [trackCountText(genre.tracks), formatBytes(genre.bytes)]
+        let columns = [
+            trackCountText(genre.tracks),
+            formatBytes(displayBytes(sourceBytes: genre.bytes, durationMS: genre.durationMS))
+        ]
         let entries = Self.albums(inGenre: genre.name, of: library.artists)
         let disclosureKey = DisclosureKey.genre(genre.name)
         DisclosureGroup(isExpanded: disclosureBinding(for: disclosureKey)) {
@@ -271,7 +280,12 @@ struct LibraryBrowser: View {
     private func genreAlbumRow(entry: GenreAlbumEntry, genre: String, genreEntries: [GenreAlbumEntry]) -> some View {
         let title = entry.album.name.isEmpty ? "Unknown Album" : entry.album.name
         let subtitleArtist = entry.artistName.isEmpty ? "Unknown Artist" : entry.artistName
-        let columns = [trackCountText(entry.album.tracks), formatBytes(entry.album.bytes)]
+        let columns = [
+            trackCountText(entry.album.tracks),
+            formatBytes(
+                displayBytes(
+                    sourceBytes: entry.album.bytes, durationMS: entry.album.durationMS))
+        ]
         switch mode {
         case .browse:
             rowLabel(title: "\(title) — \(subtitleArtist)", columns: columns, isChecked: false, onToggle: nil)
@@ -295,6 +309,12 @@ struct LibraryBrowser: View {
 
     private func trackCountText(_ n: Int) -> String {
         "\(n) track\(n == 1 ? "" : "s")"
+    }
+
+    private func displayBytes(sourceBytes: UInt64, durationMS: UInt64?) -> UInt64 {
+        guard let projectedProfile else { return sourceBytes }
+        return DeviceMusicLogic.projectedBytes(
+            sourceBytes: sourceBytes, durationMS: durationMS, profile: projectedProfile)
     }
 
     private func payload(for rule: SelectionRule, summary: String) -> LibraryDragPayload? {

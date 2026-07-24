@@ -166,9 +166,15 @@ impl RollbackSnapshot {
             for entry in std::fs::read_dir(&artwork_dir)? {
                 let path = entry?.path();
                 if is_managed_artwork_output(&path) {
-                    std::fs::remove_file(&path).with_context(|| {
-                        format!("remove failed artwork output {}", path.display())
-                    })?;
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error).with_context(|| {
+                                format!("remove failed artwork output {}", path.display())
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -373,6 +379,9 @@ pub(crate) fn is_managed_artwork_output(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
+    if name.starts_with("._") {
+        return false;
+    }
     name == "ArtworkDB" || name.ends_with(".ithmb")
 }
 
@@ -394,6 +403,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn appledouble_sidecars_are_not_managed_artwork_outputs() {
+        assert!(is_managed_artwork_output(Path::new("ArtworkDB")));
+        assert!(is_managed_artwork_output(Path::new("F1031_1.ithmb")));
+        assert!(!is_managed_artwork_output(Path::new("._ArtworkDB")));
+        assert!(!is_managed_artwork_output(Path::new("._F1031_1.ithmb")));
     }
 
     fn save_index(root: &Path, entries: Vec<SnapshotEntry>) {

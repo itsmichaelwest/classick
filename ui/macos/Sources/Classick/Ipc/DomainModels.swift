@@ -83,6 +83,12 @@ struct LibraryAlbum: Codable, Equatable, Sendable {
   var genre: String?
   var tracks: Int
   var bytes: UInt64
+  var durationMS: UInt64? = nil
+
+  enum CodingKeys: String, CodingKey {
+    case name, genre, tracks, bytes
+    case durationMS = "duration_ms"
+  }
 }
 
 struct LibraryArtist: Codable, Equatable, Sendable {
@@ -94,6 +100,12 @@ struct LibraryGenre: Codable, Equatable, Sendable {
   var name: String
   var tracks: Int
   var bytes: UInt64
+  var durationMS: UInt64? = nil
+
+  enum CodingKeys: String, CodingKey {
+    case name, tracks, bytes
+    case durationMS = "duration_ms"
+  }
 }
 
 struct LibraryInfo: Equatable, Sendable {
@@ -131,6 +143,12 @@ struct PlaylistSummary: Codable, Equatable, Sendable {
   var tracks: Int
   var bytes: UInt64
   var error: String?
+  var durationMS: UInt64? = nil
+
+  enum CodingKeys: String, CodingKey {
+    case slug, name, kind, tracks, bytes, error
+    case durationMS = "duration_ms"
+  }
 }
 
 enum SmartMatching: String, Codable, Equatable, Sendable { case all, any }

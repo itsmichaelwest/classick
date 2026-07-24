@@ -10,6 +10,11 @@ const LATE_2009_PROFILE_HASH: &str =
     "2f60c2fb1643be186c49a767f9b4c4b4e3e9087284f9405f915ee3a64f9f22dd";
 const LATE_2009_PROFILE_ASSET: &[u8] =
     include_bytes!("../../data/device-capabilities/classic-late-2009-v1.json");
+const NANO_1G_PROFILE_ID: &str = "nano-1g-v1";
+const NANO_1G_PROFILE_HASH: &str =
+    "51cf54da6ab0c403b8278dc2605eb55e07386f8a69e5c5424cbddb27b8121de7";
+const NANO_1G_PROFILE_ASSET: &[u8] =
+    include_bytes!("../../data/device-capabilities/nano-1g-v1.json");
 
 const ID_REQUIREMENT: &str =
     "capability profile ID must be lowercase ASCII letters or digits separated by single hyphens";
@@ -111,7 +116,7 @@ impl ValidatedCapabilityProfile {
     }
 }
 
-/// Resolve the sole independently validated capability catalogue entry.
+/// Resolve an independently validated capability catalogue entry.
 ///
 /// Unknown IDs return `None`. If the embedded asset no longer matches its
 /// reviewed bytes or typed schema, resolution fails rather than granting it
@@ -119,25 +124,32 @@ impl ValidatedCapabilityProfile {
 pub fn resolve_validated_capability_profile(
     profile_id: &CapabilityProfileId,
 ) -> Result<Option<ValidatedCapabilityProfile>, CapabilityProfileError> {
-    if profile_id.as_str() != LATE_2009_PROFILE_ID {
-        return Ok(None);
-    }
-
-    validate_catalogue_asset(LATE_2009_PROFILE_ASSET).map(Some)
+    let (asset, expected_hash) = match profile_id.as_str() {
+        LATE_2009_PROFILE_ID => (LATE_2009_PROFILE_ASSET, LATE_2009_PROFILE_HASH),
+        NANO_1G_PROFILE_ID => (NANO_1G_PROFILE_ASSET, NANO_1G_PROFILE_HASH),
+        _ => return Ok(None),
+    };
+    validate_catalogue_asset(asset, profile_id.as_str(), expected_hash).map(Some)
 }
 
 pub fn validated_capability_profile_id_for_model(model_code: &str) -> Option<CapabilityProfileId> {
-    matches!(model_code, "MC293" | "MC297")
-        .then(|| CapabilityProfileId::parse(LATE_2009_PROFILE_ID).expect("catalogue ID is valid"))
+    let profile_id = match model_code {
+        "MC293" | "MC297" => LATE_2009_PROFILE_ID,
+        "MA350" | "MA352" | "MA004" | "MA099" | "MA005" | "MA107" => NANO_1G_PROFILE_ID,
+        _ => return None,
+    };
+    Some(CapabilityProfileId::parse(profile_id).expect("catalogue ID is valid"))
 }
 
 fn validate_catalogue_asset(
     asset: &[u8],
+    expected_profile_id: &str,
+    expected_hash: &str,
 ) -> Result<ValidatedCapabilityProfile, CapabilityProfileError> {
     let actual_hash = blake3::hash(asset).to_hex();
-    if actual_hash.as_str() != LATE_2009_PROFILE_HASH {
+    if actual_hash.as_str() != expected_hash {
         return Err(CapabilityProfileError::Invalid(format!(
-            "validated capability asset hash mismatch: expected {LATE_2009_PROFILE_HASH}, got {actual_hash}"
+            "validated capability asset hash mismatch: expected {expected_hash}, got {actual_hash}"
         )));
     }
 
@@ -145,7 +157,7 @@ fn validate_catalogue_asset(
         CapabilityProfileError::Invalid(format!("validated capability asset is not UTF-8: {error}"))
     })?;
     let profile = CapabilityProfile::from_json(json)?;
-    if profile.profile_id.as_str() != LATE_2009_PROFILE_ID {
+    if profile.profile_id.as_str() != expected_profile_id {
         return Err(CapabilityProfileError::Invalid(format!(
             "validated capability asset declares unexpected profile ID {}",
             profile.profile_id
@@ -337,7 +349,31 @@ mod validated_catalogue_tests {
         for changed in cases {
             let json = serde_json::to_string(&changed).unwrap();
             CapabilityProfile::from_json(&json).expect("case remains structurally valid");
-            assert!(validate_catalogue_asset(json.as_bytes()).is_err());
+            assert!(validate_catalogue_asset(
+                json.as_bytes(),
+                LATE_2009_PROFILE_ID,
+                LATE_2009_PROFILE_HASH,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn nano_1g_models_resolve_the_complete_firmware_artwork_profile() {
+        for model in ["MA350", "MA352", "MA004", "MA099", "MA005", "MA107"] {
+            let profile_id = validated_capability_profile_id_for_model(model)
+                .unwrap_or_else(|| panic!("{model} must resolve a capability profile"));
+            assert_eq!(profile_id.as_str(), "nano-1g-v1");
+            let validated = resolve_validated_capability_profile(&profile_id)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{model} capability profile must be validated"));
+            let format_ids = validated
+                .profile()
+                .album_art
+                .iter()
+                .map(|format| format.format_id)
+                .collect::<Vec<_>>();
+            assert_eq!(format_ids, [1031, 1027]);
         }
     }
 }

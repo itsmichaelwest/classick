@@ -77,6 +77,7 @@ pub enum IpodFamily {
 pub enum IpodColour {
     Silver,
     Black,
+    BlackRed,
     White,
     Blue,
     Green,

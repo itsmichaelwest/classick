@@ -6,7 +6,7 @@ use super::{
 
 #[test]
 fn catalogue_has_stable_version() {
-    assert_eq!(HARDWARE_CATALOGUE_VERSION, 1);
+    assert_eq!(HARDWARE_CATALOGUE_VERSION, 3);
 }
 
 #[test]
@@ -56,6 +56,45 @@ fn classic_model_codes_are_ascii_case_insensitive() {
     let facts = hardware_facts_from_reported_model_code("mC293").unwrap();
 
     assert_eq!(facts.model_code, Some(Fact::reported("MC293".to_owned())));
+}
+
+#[test]
+fn first_generation_nano_model_decodes_exact_family_generation_and_colour() {
+    let facts = hardware_facts_from_reported_model_code("MA005").unwrap();
+
+    assert_eq!(facts.family, Some(Fact::decoded(IpodFamily::Nano)));
+    assert_eq!(facts.generation, Some(Fact::decoded("1".to_owned())));
+    assert_eq!(facts.model_code, Some(Fact::reported("MA005".to_owned())));
+    assert_eq!(facts.colour, Some(Fact::decoded(IpodColour::White)));
+}
+
+#[test]
+fn every_supported_family_decodes_from_the_pinned_libgpod_catalogue() {
+    let cases = [
+        ("M8737", IpodFamily::Ipod, "2", IpodColour::White),
+        ("M8976", IpodFamily::Ipod, "3", IpodColour::White),
+        ("M9282", IpodFamily::Ipod, "4", IpodColour::White),
+        ("MA079", IpodFamily::Photo, "1", IpodColour::White),
+        ("M9436", IpodFamily::Mini, "1", IpodColour::Blue),
+        ("M9804", IpodFamily::Mini, "2", IpodColour::Pink),
+        ("MA452", IpodFamily::Video, "5", IpodColour::BlackRed),
+        ("MA450", IpodFamily::Video, "5.5", IpodColour::Black),
+        ("MA428", IpodFamily::Nano, "2", IpodColour::Blue),
+        ("MB249", IpodFamily::Nano, "3", IpodColour::Blue),
+        ("MB651", IpodFamily::Nano, "4", IpodColour::Blue),
+    ];
+
+    for (model, family, generation, colour) in cases {
+        let facts = hardware_facts_from_reported_model_code(model)
+            .unwrap_or_else(|| panic!("missing pinned libgpod model {model}"));
+        assert_eq!(facts.family, Some(Fact::decoded(family)), "{model}");
+        assert_eq!(
+            facts.generation,
+            Some(Fact::decoded(generation.to_owned())),
+            "{model}"
+        );
+        assert_eq!(facts.colour, Some(Fact::decoded(colour)), "{model}");
+    }
 }
 
 #[test]
@@ -140,16 +179,15 @@ fn classic_usb_capacity_thresholds_use_decimal_gigabytes() {
 #[test]
 fn usb_catalogue_decodes_every_unambiguous_family_and_generation() {
     let cases = [
-        (0x1240, IpodFamily::Nano, "1"),
+        (0x120A, IpodFamily::Nano, "1"),
         (0x1260, IpodFamily::Nano, "2"),
         (0x1262, IpodFamily::Nano, "3"),
         (0x1263, IpodFamily::Nano, "4"),
         (0x1265, IpodFamily::Nano, "5"),
         (0x1266, IpodFamily::Nano, "6"),
         (0x1267, IpodFamily::Nano, "7"),
-        (0x1209, IpodFamily::Video, "5"),
-        (0x1206, IpodFamily::Video, "5.5"),
         (0x1201, IpodFamily::Ipod, "3"),
+        (0x1202, IpodFamily::Ipod, "2"),
         (0x1203, IpodFamily::Ipod, "4"),
         (0x1300, IpodFamily::Shuffle, "1"),
         (0x1301, IpodFamily::Shuffle, "2"),
@@ -175,7 +213,10 @@ fn usb_catalogue_keeps_shared_or_unnumbered_generations_absent() {
     let cases = [
         (0x1205, IpodFamily::Mini),
         (0x1204, IpodFamily::Photo),
-        (0x1202, IpodFamily::Ipod),
+        (0x1209, IpodFamily::Video),
+        (0x1206, IpodFamily::Ipod),
+        (0x1207, IpodFamily::Ipod),
+        (0x1208, IpodFamily::Ipod),
     ];
 
     for (pid, family) in cases {

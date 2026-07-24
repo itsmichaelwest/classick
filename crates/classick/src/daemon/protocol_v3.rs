@@ -217,6 +217,7 @@ pub(crate) fn event_to_wire(event: &DaemonEvent) -> Result<Option<WireEvent>> {
                                 genre: album.genre.clone(),
                                 tracks: album.tracks as u64,
                                 bytes: album.bytes,
+                                duration_ms: album.duration_ms,
                             })
                             .collect(),
                     })
@@ -227,6 +228,7 @@ pub(crate) fn event_to_wire(event: &DaemonEvent) -> Result<Option<WireEvent>> {
                         name: genre.name.clone(),
                         tracks: genre.tracks as u64,
                         bytes: genre.bytes,
+                        duration_ms: genre.duration_ms,
                     })
                     .collect(),
                 total_tracks: *total_tracks as u64,
@@ -273,6 +275,7 @@ pub(crate) fn event_to_wire(event: &DaemonEvent) -> Result<Option<WireEvent>> {
                         },
                         tracks: playlist.tracks as u64,
                         bytes: playlist.bytes,
+                        duration_ms: playlist.duration_ms,
                         error: playlist.error.clone(),
                     })
                 })

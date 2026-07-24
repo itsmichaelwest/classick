@@ -35,7 +35,7 @@ pub(super) fn capture(mount: &Path) -> Result<DeviceGeneration> {
     collect_tree(
         mount,
         &mount.join("iPod_Control/iTunes"),
-        TreePolicy::All,
+        TreePolicy::ITunes,
         &mut files,
     )?;
     collect_tree(
@@ -90,6 +90,7 @@ pub(super) fn capture(mount: &Path) -> Result<DeviceGeneration> {
 enum TreePolicy {
     All,
     Classick,
+    ITunes,
 }
 
 fn collect_tree(
@@ -131,6 +132,9 @@ fn collect_tree(
         if matches!(policy, TreePolicy::Classick) && excluded_classick(relative_to_root) {
             continue;
         }
+        if matches!(policy, TreePolicy::ITunes) && excluded_itunes(relative_to_root) {
+            continue;
+        }
         let metadata =
             fs::symlink_metadata(&path).with_context(|| format!("inspect {}", path.display()))?;
         if metadata.file_type().is_symlink() {
@@ -155,6 +159,10 @@ fn excluded_classick(relative: &Path) -> bool {
         let component = component.as_os_str();
         component == "pending" || component == "device.lock"
     })
+}
+
+fn excluded_itunes(relative: &Path) -> bool {
+    matches!(relative.to_str(), Some("Play Counts" | "Play Counts.bak"))
 }
 
 fn is_appledouble_path(path: &str) -> bool {
@@ -210,4 +218,30 @@ fn hash_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn capture_excludes_firmware_play_count_runtime_files() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let mount = std::env::temp_dir().join(format!(
+            "classick-generation-runtime-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let itunes = mount.join("iPod_Control/iTunes");
+        std::fs::create_dir_all(&itunes).unwrap();
+        std::fs::write(itunes.join("iTunesDB"), b"database").unwrap();
+        std::fs::write(itunes.join("Play Counts"), b"runtime").unwrap();
+        std::fs::write(itunes.join("Play Counts.bak"), b"runtime backup").unwrap();
+
+        let generation = capture(&mount).unwrap();
+
+        assert_eq!(generation.entries.len(), 1);
+        assert_eq!(generation.entries[0].path, "iPod_Control/iTunes/iTunesDB");
+    }
 }

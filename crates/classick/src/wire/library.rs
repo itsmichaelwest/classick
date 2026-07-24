@@ -11,6 +11,7 @@ pub struct LibraryAlbum {
     pub genre: Option<String>,
     pub tracks: u64,
     pub bytes: u64,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +27,7 @@ pub struct LibraryGenre {
     pub name: String,
     pub tracks: u64,
     pub bytes: u64,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

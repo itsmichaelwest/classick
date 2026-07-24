@@ -73,6 +73,19 @@ enum DeviceActionCommand {
   }
 }
 
+enum DeviceEjectAction {
+  static func perform(
+    at url: URL,
+    unmount: @escaping @Sendable (URL) throws -> Void = {
+      try NSWorkspace.shared.unmountAndEjectDevice(at: $0)
+    }
+  ) async throws {
+    try await Task.detached(priority: .userInitiated) {
+      try unmount(url)
+    }.value
+  }
+}
+
 /// Owns the pieces that must persist for the whole app lifetime and outlive
 /// any individual SwiftUI scene: the daemon connection, the daemon
 /// subprocess, and the reducer that turns daemon events into UI state.
@@ -240,15 +253,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
       model.isCurrentMountAction(target)
     else { return }
     let url = URL(fileURLWithPath: target.mountPath)
-    do {
-      try NSWorkspace.shared.unmountAndEjectDevice(at: url)
-      model.completeMountAction(target)
-    } catch {
-      let alert = NSAlert()
-      alert.messageText = "Couldn't Eject iPod"
-      alert.informativeText = error.localizedDescription
-      alert.alertStyle = .warning
-      alert.runModal()
+    Task {
+      do {
+        try await DeviceEjectAction.perform(at: url)
+        model.completeMountAction(target)
+      } catch {
+        let alert = NSAlert()
+        alert.messageText = "Couldn't Eject iPod"
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        alert.runModal()
+      }
     }
   }
 
@@ -567,14 +582,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     guard model.canSendDeviceCommand(to: serial) else { return nil }
     let requestID = WireV3Command.newRequestID()
     let mutationID = UUID()
+    let previewRequestID = WireV3Command.newRequestID()
     model.willRequestDeviceConfig(
       serial: serial, requestID: requestID.uuidString.lowercased(), intent: .write)
+    model.willRequestDevicePreview(
+      serial: serial, requestID: previewRequestID.uuidString.lowercased())
     sendDeviceCommands(
       serial: serial,
       commands: [
         .setSettings(
           deviceID: serial, requestID: requestID, mutationID: mutationID,
-          settings: WireV3SettingsValue(settings))
+          settings: WireV3SettingsValue(settings)),
+        .previewDevice(deviceID: serial, requestID: previewRequestID),
       ])
     return .init(
       requestID: requestID.uuidString.lowercased(),

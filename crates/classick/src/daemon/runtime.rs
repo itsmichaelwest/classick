@@ -4897,6 +4897,7 @@ fn build_device_preview(
     .into_iter()
     .map(|track| track.source_path)
     .collect();
+    let transcode_profile = effective_device_settings(config_path, serial).transcode_profile;
     crate::daemon::library::compute_device_preview(
         &index,
         &selection,
@@ -4904,6 +4905,7 @@ fn build_device_preview(
         store.as_ref().ok(),
         current_free_bytes,
         &already_synced,
+        transcode_profile,
         serial,
         acknowledged_request_id,
     )
