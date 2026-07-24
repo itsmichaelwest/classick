@@ -1115,7 +1115,6 @@ fn run_staged_sync(
                     let applied = stage_metadata_update(
                         source,
                         entry,
-                        mount,
                         &mut journal,
                         &config.ffmpeg,
                         &artwork_cache,
@@ -1487,7 +1486,10 @@ fn stage_transcoded_result(
     journal.albums[album_index]
         .staged_file_indices
         .push(staged_index);
-    crate::pending_session::PendingSessionStore::new(mount).save(journal)?;
+    // Deliberately NOT persisted per track: rewriting the journal costs ~2.5-3.3s
+    // on the iPod's flash, dwarfing the audio write itself. The batch loop saves
+    // once per album, and recovery clears the whole session-owned staged
+    // directory, so audio staged since the last save is cleaned up regardless.
 
     let copy_result = copy_with_stop_checks(&transcoded.temp, &partial, || poll_stop(decision_rx))
         .with_context(|| format!("stage {}", source.path.display()));
@@ -1507,7 +1509,6 @@ fn stage_transcoded_result(
         if staged_obsolete {
             journal.obsolete_files.pop();
         }
-        crate::pending_session::PendingSessionStore::new(mount).save(journal)?;
         let _ = std::fs::remove_file(&transcoded.temp);
         return Ok(StageOutcome::Stopped(reason));
     }
@@ -1530,7 +1531,6 @@ fn stage_transcoded_result(
 fn stage_metadata_update(
     source: SourceEntry,
     entry: ManifestEntry,
-    mount: &Path,
     journal: &mut crate::pending_session::PendingSession,
     ffmpeg: &Path,
     artwork_cache: &crate::artwork_cache::ArtworkCache,
@@ -1584,7 +1584,7 @@ fn stage_metadata_update(
                 transcode_profile: entry.transcode_profile,
             },
         });
-    crate::pending_session::PendingSessionStore::new(mount).save(journal)?;
+    // Batched with the rest of the album — see stage_transcoded_result.
     artwork_counts.record(art_outcome);
     Ok(true)
 }
@@ -3060,11 +3060,14 @@ mod tests {
         journal
             .validate()
             .expect("rolled-back journal must still validate");
-        // Recovery reads the persisted journal, not this in-memory copy.
-        let persisted = crate::pending_session::PendingSessionStore::new(&mount)
-            .load(session_id)
-            .expect("rolled-back journal must be persisted and loadable");
-        assert!(persisted.staged_files.is_empty());
+        // Journal writes are batched per album, so staging a track persists
+        // nothing on its own — and a cancelled track must not be the exception.
+        assert!(
+            !crate::pending_session::PendingSessionStore::new(&mount)
+                .path(session_id)
+                .exists(),
+            "staging a track must not write the journal to the device"
+        );
 
         let staged_dir =
             crate::device_state::pending_sessions_dir(&mount).join(format!("{session_id}.staged"));
@@ -3471,7 +3474,6 @@ mod tests {
         let applied = stage_metadata_update(
             source,
             entry,
-            &temp,
             &mut journal,
             Path::new("ffmpeg"),
             &cache,

@@ -199,6 +199,60 @@ fn restart_abandons_staging_but_preserves_a_live_db_reference() {
     assert!(!journal_store.path(101).exists());
 }
 
+/// The apply loop batches its journal writes (one per album, not one per
+/// track), so a crash mid-album leaves staged audio the journal never recorded.
+/// Abandoning a staging session must clear the whole session-owned staged
+/// directory, not just the files it happens to know about.
+#[test]
+fn restart_abandons_staging_with_audio_the_journal_never_recorded() {
+    let mut fixture = fixture("staging-orphans");
+    let staged_dir = fixture
+        .mount
+        .join("iPod_Control/classick/pending/109.staged");
+    std::fs::create_dir_all(&staged_dir).unwrap();
+
+    let recorded = staged_dir.join("0.m4a");
+    std::fs::write(&recorded, b"recorded in the journal").unwrap();
+    // Written to the device after the last journal save: a crash here leaves
+    // these behind with nothing referencing them.
+    let orphan = staged_dir.join("1.m4a");
+    let orphan_partial = staged_dir.join("2.m4a.partial");
+    let orphan_sidecar = staged_dir.join("._1.m4a");
+    std::fs::write(&orphan, b"never journalled").unwrap();
+    std::fs::write(&orphan_partial, b"interrupted copy").unwrap();
+    std::fs::write(&orphan_sidecar, b"AppleDouble metadata").unwrap();
+
+    let mut album = PendingAlbum::new("album", 0);
+    album.staged_file_indices.push(0);
+    let mut journal = PendingSession::new(109, SERIAL, vec![album]);
+    journal.staged_files.push(StagedFile::minimal(
+        fixture.host.join("source/track.flac"),
+        recorded.clone(),
+        None,
+        0,
+    ));
+    let journal_store = PendingSessionStore::new(&fixture.mount);
+    journal_store.save(&journal).unwrap();
+    let (progress, _decisions) = Progress::start(false, false).unwrap();
+
+    coordinator(
+        &fixture.mount,
+        &fixture.store,
+        &fixture.cache,
+        &fixture.mutation_session,
+    )
+    .recover_pending_with_options(&mut fixture.manifest, &progress, PublishOptions::default())
+    .expect("staging recovery must not trip over unrecorded staged audio");
+    progress.finish(true).unwrap();
+
+    assert!(!recorded.exists());
+    assert!(!orphan.exists(), "unrecorded staged audio must be cleared");
+    assert!(!orphan_partial.exists());
+    assert!(!orphan_sidecar.exists());
+    assert!(!staged_dir.exists(), "the staged directory must be removed");
+    assert!(!journal_store.path(109).exists());
+}
+
 #[test]
 fn restart_recovers_ready_to_publish_before_returning() {
     let mut fixture = fixture("ready");

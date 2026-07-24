@@ -556,7 +556,8 @@ impl CheckpointCoordinator<'_> {
         journal.phase = crate::pending_session::PendingPhase::CleanupComplete;
         store.save(journal)?;
         let result = self.result(journal, None);
-        remove_empty_dir_if_present(&store.staged_dir(journal.session_id))?;
+        let (staged_dir, _, _) = self.validate_abandonment_owned_paths(journal, store)?;
+        remove_staged_dir_recursively(&staged_dir)?;
         remove_validated_snapshot_if_present(&store.snapshot_dir(journal.session_id))?;
         store.remove(journal.session_id)?;
         Ok(result)
@@ -1348,6 +1349,23 @@ fn remove_validated_snapshot_if_present(path: &Path) -> Result<()> {
             Err(error).with_context(|| format!("inspect rollback snapshot {}", path.display()))
         }
     }
+}
+
+/// Remove an abandoned staging session's own `<id>.staged` directory outright.
+///
+/// The apply loop journals once per album rather than once per track, so a
+/// crash mid-album leaves staged audio no journal entry names. Requiring the
+/// directory to be empty here would wedge recovery on exactly that debris.
+/// Safe to take wholesale: a Staging-phase session has published nothing, so
+/// the directory holds only this session's pending copies, and the caller has
+/// already validated it is a real, session-owned path.
+fn remove_staged_dir_recursively(path: &Path) -> Result<()> {
+    if !require_owned_directory_if_present(path, "staged transaction")? {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(path)
+        .with_context(|| format!("remove staged transaction {}", path.display()))?;
+    remove_file_if_present(&appledouble_sibling(path))
 }
 
 fn remove_empty_dir_if_present(path: &Path) -> Result<()> {
